@@ -97,7 +97,10 @@ fn compress_impl(text: &str) -> String {
 }
 
 fn frame_run_len(lines: &[&str], start: usize) -> usize {
-    lines[start..].iter().take_while(|l| is_stack_frame(l)).count()
+    lines[start..]
+        .iter()
+        .take_while(|l| is_stack_frame(l))
+        .count()
 }
 
 fn is_stack_frame(line: &str) -> bool {
@@ -115,12 +118,13 @@ fn is_stack_frame(line: &str) -> bool {
     }
     // Rust numbered frames: "0: std::panicking::begin_panic"
     //   or "  at src/lib.rs:42" (continuation lines in Rust backtraces)
-    if let Some(first) = t.chars().next() {
-        if first.is_ascii_digit() && t.contains(": ") {
-            let rest = &t[t.find(": ").map(|p| p + 2).unwrap_or(0)..];
-            if rest.contains("::") || rest.starts_with('/') {
-                return true;
-            }
+    if let Some(first) = t.chars().next()
+        && first.is_ascii_digit()
+        && t.contains(": ")
+    {
+        let rest = &t[t.find(": ").map(|p| p + 2).unwrap_or(0)..];
+        if rest.contains("::") || rest.starts_with('/') {
+            return true;
         }
     }
     false

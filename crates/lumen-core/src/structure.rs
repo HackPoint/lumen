@@ -93,7 +93,7 @@ fn to_item(node: &Node, src: &str, lang: &Lang) -> Option<CodeItem> {
     })
 }
 
-fn classify<'a>(node: &Node, src: &str, lang: &Lang) -> Option<(&'static str, Option<String>)> {
+fn classify(node: &Node, src: &str, lang: &Lang) -> Option<(&'static str, Option<String>)> {
     match lang {
         Lang::Rust => classify_rust(node, src),
         Lang::Python => classify_python(node, src),
@@ -147,10 +147,10 @@ fn classify_ts(node: &Node, src: &str) -> Option<(&'static str, Option<String>)>
         "import_statement" => Some(("import", None)),
         "export_statement" => {
             // Prefer the inner declaration's kind/name when present
-            if let Some(decl) = node.child_by_field_name("declaration") {
-                if let Some(result) = classify_ts(&decl, src) {
-                    return Some(result);
-                }
+            if let Some(decl) = node.child_by_field_name("declaration")
+                && let Some(result) = classify_ts(&decl, src)
+            {
+                return Some(result);
             }
             Some(("export", None))
         }
@@ -305,7 +305,10 @@ def another():
         assert!(names.contains(&Some("Greeter")), "missing class name");
         assert!(names.contains(&Some("another")), "missing function name");
         // decorated function should also appear
-        assert!(names.contains(&Some("standalone")), "missing decorated fn name");
+        assert!(
+            names.contains(&Some("standalone")),
+            "missing decorated fn name"
+        );
 
         for item in &items {
             assert!(item.start_line >= 1);
@@ -354,7 +357,10 @@ const MAX_SIZE = 100;
         assert!(names.contains(&Some("Circle")), "missing class name");
         assert!(names.contains(&Some("greet")), "missing function name");
         // exported function should appear as "function" with name "exported"
-        assert!(names.contains(&Some("exported")), "missing exported fn name");
+        assert!(
+            names.contains(&Some("exported")),
+            "missing exported fn name"
+        );
 
         for item in &items {
             assert!(item.start_line >= 1);
@@ -380,8 +386,10 @@ export default App;
         let items = outline(src, Lang::Tsx);
         let kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
         assert!(kinds.contains(&"import"), "missing import in tsx");
-        assert!(kinds.contains(&"interface") || kinds.contains(&"function"),
-            "tsx should find interface or function, got: {kinds:?}");
+        assert!(
+            kinds.contains(&"interface") || kinds.contains(&"function"),
+            "tsx should find interface or function, got: {kinds:?}"
+        );
     }
 
     #[test]
@@ -401,7 +409,12 @@ export default App;
         let items = outline(src, Lang::Rust);
         for item in &items {
             assert!(item.start_line >= 1);
-            assert!(item.end_line <= total_lines, "end_line {} > total {}", item.end_line, total_lines);
+            assert!(
+                item.end_line <= total_lines,
+                "end_line {} > total {}",
+                item.end_line,
+                total_lines
+            );
             assert!(item.end_byte <= src.len());
         }
     }
