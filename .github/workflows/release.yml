@@ -23,9 +23,12 @@ jobs:
     name: Build (macOS Apple Silicon)
     runs-on: macos-14          # M1 runner — aarch64 native
 
+    permissions:
+      contents: write           # required to create a GitHub Release
+
     outputs:
       version:      ${{ steps.meta.outputs.version }}
-      dmg_name:     ${{ steps.meta.outputs.dmg_name }}
+      dmg_name:     ${{ steps.checksums.outputs.dmg_name }}
       tarball_name: ${{ steps.meta.outputs.tarball_name }}
       dmg_sha256:     ${{ steps.checksums.outputs.dmg_sha256 }}
       tarball_sha256: ${{ steps.checksums.outputs.tarball_sha256 }}
@@ -117,17 +120,22 @@ jobs:
       - name: Compute checksums
         id: checksums
         run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          DMG="target/release/bundle/dmg/Lumen_${VERSION}_aarch64.dmg"
+          # Tauri names the DMG from tauri.conf.json version, not the git tag.
+          # Discover the actual file rather than constructing the path from the tag.
+          DMG=$(find target/release/bundle/dmg -name "Lumen_*_aarch64.dmg" | head -1)
+          [[ -z "$DMG" ]] && { echo "ERROR: DMG not found in target/release/bundle/dmg"; exit 1; }
+          DMG_FILENAME=$(basename "$DMG")
           TARBALL="${{ steps.cli.outputs.tarball }}"
 
           DMG_SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
           TAR_SHA=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
 
-          echo "dmg_sha256=${DMG_SHA}"     >> "$GITHUB_OUTPUT"
-          echo "tarball_sha256=${TAR_SHA}" >> "$GITHUB_OUTPUT"
-          echo "dmg_path=${DMG}"           >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=${DMG_SHA}"         >> "$GITHUB_OUTPUT"
+          echo "tarball_sha256=${TAR_SHA}"     >> "$GITHUB_OUTPUT"
+          echo "dmg_path=${DMG}"              >> "$GITHUB_OUTPUT"
+          echo "dmg_name=${DMG_FILENAME}"     >> "$GITHUB_OUTPUT"
 
+          echo "DMG:            $DMG"
           echo "DMG sha256:     $DMG_SHA"
           echo "Tarball sha256: $TAR_SHA"
 
@@ -140,24 +148,30 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           DMG_PATH="${{ steps.checksums.outputs.dmg_path }}"
           TARBALL="${{ steps.cli.outputs.tarball }}"
-          DMG_NAME="${{ steps.meta.outputs.dmg_name }}"
+          DMG_NAME="${{ steps.checksums.outputs.dmg_name }}"
           TARBALL_NAME="${{ steps.meta.outputs.tarball_name }}"
 
           # Use CHANGELOG.md entry for this version as release notes, if present
-          NOTES_FILE=""
+          NOTES_OPT=""
           if [[ -f CHANGELOG.md ]]; then
             # Extract just this version's block (between its header and the next one)
             awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found" \
               CHANGELOG.md > /tmp/release_notes.md
-            [[ -s /tmp/release_notes.md ]] && NOTES_FILE="--notes-file /tmp/release_notes.md"
+            [[ -s /tmp/release_notes.md ]] && NOTES_OPT="--notes-file /tmp/release_notes.md"
           fi
-          [[ -z "$NOTES_FILE" ]] && NOTES_FILE="--notes-file RELEASE_NOTES.md"
+          if [[ -z "$NOTES_OPT" ]]; then
+            if [[ -f RELEASE_NOTES.md ]]; then
+              NOTES_OPT="--notes-file RELEASE_NOTES.md"
+            else
+              NOTES_OPT="--generate-notes"
+            fi
+          fi
 
           gh release create "$TAG" \
             "${DMG_PATH}#${DMG_NAME}" \
             "${TARBALL}#${TARBALL_NAME}" \
             --title "Lumen ${TAG}" \
-            $NOTES_FILE
+            $NOTES_OPT
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 2: Update the Homebrew tap (runs after build succeeds)
