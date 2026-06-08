@@ -4,7 +4,7 @@
 
 See the whole truth about your Claude Code tokens — context fill, real cost, and verifiable optimization.
 
-[![Download](https://img.shields.io/github/v/release/speedata/lumen?label=download&color=3fb950)](../../releases/latest)
+[![Download](https://img.shields.io/github/v/release/HackPoint/lumen?label=download&color=3fb950)](../../releases/latest)
 ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -122,7 +122,7 @@ hooks fire only in the Claude Code CLI, not the VS Code extension.
 **Via Homebrew (recommended):**
 
 ```bash
-brew tap speedata/tap && brew install lumen
+brew tap HackPoint/tap && brew install lumen
 ```
 
 **Via the app:**
@@ -470,7 +470,7 @@ rm -f ~/.lumen_db_path
 **Prerequisites:** Rust (stable), Node 20+, pnpm
 
 ```bash
-git clone https://github.com/speedata/lumen.git
+git clone https://github.com/HackPoint/lumen.git
 cd lumen/lumenator
 
 # Build the three helper binaries and stage them for Tauri
