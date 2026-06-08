@@ -40,3 +40,17 @@ Each `lumen:smart_read` on a large file saves **3000–4500 tokens** vs. Read. T
 tools report exact savings in `_meta.saved_tokens` — no estimates, only measured
 differences. A typical session working on a 500-line Rust file uses ~10% of the
 context that reading-the-whole-thing would cost.
+
+## Authorship rule (ENFORCE — no exceptions)
+
+**HackPoint is the sole author and contributor of this project.**
+
+- Do NOT add Claude, Anthropic, or any AI tool as an author, contributor, or
+  co-author anywhere: commits (`Co-Authored-By:`), code comments, docs, metadata
+  (`authors` in Cargo.toml / package.json), footers, or generated files.
+- Do NOT add `🤖 Generated with Claude Code` footers or similar attribution lines.
+- Do NOT add `Signed-off-by:` lines for any non-human entity.
+- **Allowed:** product references to "Claude Code" (the tool Lumen monitors),
+  model name strings (`claude-sonnet-4-6` etc.), and `~/.claude/` path references
+  — these describe the third-party tool, not authorship of Lumen.
+- Git identity for all commits: `HackPoint <6758579+HackPoint@users.noreply.github.com>`.

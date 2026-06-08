@@ -1,10 +1,10 @@
 [package]
 name = "Lumen"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["hackp0!int"]
-license = ""
-repository = ""
+description = "macOS menu-bar app for Claude Code — live context gauge, cost, and optimizer"
+authors = ["HackPoint"]
+license = "MIT"
+repository = "https://github.com/HackPoint/lumen"
 edition = "2021"
 rust-version = "1.77.2"
 
