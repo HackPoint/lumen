@@ -19,7 +19,11 @@ mod data;
 mod ui;
 
 #[derive(Parser)]
-#[command(name = "lumen", version, about = "Live Claude Code context + cost monitor")]
+#[command(
+    name = "lumen",
+    version,
+    about = "Live Claude Code context + cost monitor"
+)]
 struct Cli {
     /// Disable pulse-ring animation
     #[arg(long)]
@@ -72,14 +76,14 @@ fn run_loop<B: ratatui::backend::Backend>(
 
         terminal.draw(|f| ui::render(f, &state.lock().unwrap(), no_anim))?;
 
-        if event::poll(Duration::from_millis(400))? {
-            if let Event::Key(key) = event::read()? {
-                let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL));
-                if quit {
-                    return Ok(());
-                }
+        if event::poll(Duration::from_millis(400))?
+            && let Event::Key(key) = event::read()?
+        {
+            let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if quit {
+                return Ok(());
             }
         }
     }
@@ -88,7 +92,7 @@ fn run_loop<B: ratatui::backend::Backend>(
 fn oneshot_print() {
     match data::read_db_oneshot() {
         Some(d) => {
-            let pct = if d.window > 0 { d.fill * 100 / d.window } else { 0 };
+            let pct = (d.fill * 100).checked_div(d.window).unwrap_or(0);
             println!("fill={}% ({}/{}) model={}", pct, d.fill, d.window, d.model);
         }
         None => println!("no data"),

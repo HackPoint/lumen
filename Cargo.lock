@@ -2688,6 +2688,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tiktoken-rs",
  "tree-sitter",
  "tree-sitter-python",
@@ -2706,6 +2707,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
 ]

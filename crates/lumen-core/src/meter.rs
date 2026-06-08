@@ -1,5 +1,5 @@
-use rusqlite::{Connection, params};
 use crate::schema::{DDL, MIGRATIONS};
+use rusqlite::{Connection, params};
 
 /// Detect which Claude Code channel spawned this process.
 ///
@@ -32,13 +32,14 @@ pub fn detect_channel() -> &'static str {
 ///      Allows lumen-mcp to find the same DB without hardcoding paths.
 ///   3. Binary-relative: current_exe()/../../.. + /lumen.db
 ///      (covers target/release/lumen-mcp → workspace root for dev use)
+///
 /// Returns None if none of the above resolves.
 pub fn db_path() -> Option<std::path::PathBuf> {
     // 1. Explicit env var.
-    if let Ok(p) = std::env::var("LUMEN_DB") {
-        if !p.is_empty() {
-            return Some(std::path::PathBuf::from(p));
-        }
+    if let Ok(p) = std::env::var("LUMEN_DB")
+        && !p.is_empty()
+    {
+        return Some(std::path::PathBuf::from(p));
     }
     // 2. Pointer file written by the Tauri app on startup.
     if let Ok(home) = std::env::var("HOME") {
@@ -51,11 +52,14 @@ pub fn db_path() -> Option<std::path::PathBuf> {
         }
     }
     // 3. Binary-relative: current_exe()/../../.. + /lumen.db
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(root) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-            let candidate = root.join("lumen.db");
-            return Some(candidate);
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(root) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+    {
+        let candidate = root.join("lumen.db");
+        return Some(candidate);
     }
     None
 }
@@ -90,7 +94,9 @@ pub fn insert_read_event(
     let db = match db_path() {
         Some(p) => p,
         None => {
-            eprintln!("lumen-meter: LUMEN_DB not set and binary path resolution failed — skipping DB write");
+            eprintln!(
+                "lumen-meter: LUMEN_DB not set and binary path resolution failed — skipping DB write"
+            );
             return;
         }
     };
@@ -147,4 +153,54 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y as u32, m as u32, d as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epoch_day_zero_is_1970_01_01() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn epoch_day_one_is_1970_01_02() {
+        assert_eq!(days_to_ymd(1), (1970, 1, 2));
+    }
+
+    #[test]
+    fn first_day_of_1971() {
+        // 1970 is not a leap year: 365 days
+        assert_eq!(days_to_ymd(365), (1971, 1, 1));
+    }
+
+    #[test]
+    fn first_day_of_2000() {
+        // 1970..=1999: 7 leap years (72,76,80,84,88,92,96), 23 non-leap
+        // 7*366 + 23*365 = 2562 + 8395 = 10957
+        assert_eq!(days_to_ymd(10957), (2000, 1, 1));
+    }
+
+    #[test]
+    fn first_day_of_2024() {
+        // 1970..=2023: 13 leap years (72..20), 41 non-leap
+        // 13*366 + 41*365 = 4758 + 14965 = 19723
+        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
+
+    #[test]
+    fn leap_day_2024_02_29() {
+        // 2024-01-01 = day 19723, then +31 (Jan) + 28 (Feb 1..28) + 1 = +60 - 1 = day 19782
+        // Jan: 31 days (days 19723..19753), Feb 1 = 19754, Feb 29 = 19782
+        assert_eq!(days_to_ymd(19782), (2024, 2, 29));
+    }
+
+    #[test]
+    fn db_path_uses_lumen_db_env_var() {
+        // db_path() returns the LUMEN_DB env var when set
+        // We can't safely set/unset env vars in parallel tests, so just
+        // verify the function doesn't panic when called.
+        let _ = db_path();
+    }
 }

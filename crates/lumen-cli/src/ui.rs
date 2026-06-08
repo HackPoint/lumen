@@ -37,13 +37,7 @@ fn ring_frame(tick: u64, no_anim: bool) -> &'static str {
         return "·○◌◉◌○·";
     }
     // 5-frame pulse: expand → full → contract → core → expand. 2 ticks per frame ≈ 4 s cycle.
-    const FRAMES: &[&str] = &[
-        "·○◌◉◌○·",
-        "·○◌◉◌○·",
-        " ·○◉○· ",
-        "  ·◉·  ",
-        " ·○◉○· ",
-    ];
+    const FRAMES: &[&str] = &["·○◌◉◌○·", "·○◌◉◌○·", " ·○◉○· ", "  ·◉·  ", " ·○◉○· "];
     FRAMES[(tick as usize / 2) % FRAMES.len()]
 }
 
@@ -66,9 +60,17 @@ fn render_header(f: &mut Frame, area: Rect, state: &AppState, no_anim: bool) {
     let color = fill_color(state.fill, state.window);
 
     let line = Line::from(vec![
-        Span::styled(ring, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            ring,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
-        Span::styled("LUMEN", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "LUMEN",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  ·  context monitor"),
     ]);
 
@@ -140,8 +142,16 @@ fn render_gauge_panel(f: &mut Frame, area: Rect, state: &AppState) {
 
     let lines: Vec<Line> = vec![
         Line::from(""),
-        Line::from(Span::styled(format!(" {}", bar), Style::default().fg(color))),
-        Line::from(format!("  {}%    {:>} / {} tokens", pct, fmt_u64(fill), fmt_u64(window))),
+        Line::from(Span::styled(
+            format!(" {}", bar),
+            Style::default().fg(color),
+        )),
+        Line::from(format!(
+            "  {}%    {:>} / {} tokens",
+            pct,
+            fmt_u64(fill),
+            fmt_u64(window)
+        )),
         Line::from(""),
         Line::from(format!("  {}", model_label)),
         Line::from(""),
@@ -200,7 +210,10 @@ fn render_cost_panel(f: &mut Frame, area: Rect, state: &AppState) {
             ),
         ]),
         Line::from(""),
-        Line::from(Span::styled(" ─────────────────", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            " ─────────────────",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             " Saved by caching",

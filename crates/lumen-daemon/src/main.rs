@@ -1,3 +1,4 @@
+use futures_util::{SinkExt, StreamExt};
 use lumen_core::record::Record;
 use lumen_core::schema::DDL;
 use serde::Serialize;
@@ -7,7 +8,6 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use futures_util::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
 
 /// Worst-case lag before a missed notify-event is caught and new session
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // killing the WS stream for the process lifetime.
     tokio::spawn({
         let ws_pool = pool.clone();
-        let ws_tx   = tx.clone();
+        let ws_tx = tx.clone();
         async move {
             loop {
                 if let Err(e) = ws_server(ws_pool.clone(), ws_tx.clone()).await {
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let base    = dirs::home_dir().unwrap().join(".claude/projects");
+    let base = dirs::home_dir().unwrap().join(".claude/projects");
     let offsets: Offsets = Arc::new(Mutex::new(HashMap::new()));
 
     // ── Initial pass ──────────────────────────────────────────────────────
@@ -70,8 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // abort the startup pass.  This is the only place that starts from 0.
     for path in walk_jsonl(&base) {
         match ingest_from(&pool, &path, 0, &tx, false).await {
-            Ok(n)  => { offsets.lock().unwrap().insert(path, n); }
-            Err(e) => { eprintln!("init ingest {:?}: {e}", path); }
+            Ok(n) => {
+                offsets.lock().unwrap().insert(path, n);
+            }
+            Err(e) => {
+                eprintln!("init ingest {:?}: {e}", path);
+            }
         }
     }
     println!("initial import done, watching for changes...");
@@ -82,10 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // polling loop below remains the correctness backbone; a dead watcher
     // does not affect what ultimately ends up in the DB.
     tokio::spawn({
-        let pool    = pool.clone();
-        let tx      = tx.clone();
+        let pool = pool.clone();
+        let tx = tx.clone();
         let offsets = offsets.clone();
-        let base    = base.clone();
+        let base = base.clone();
         async move {
             loop {
                 notify_watch_loop(&pool, &base, &tx, &offsets).await;
@@ -113,16 +117,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// New files (not yet in offsets) start from byte 0.
 /// Per-file errors are logged; the loop always continues.
 async fn poll_all(
-    pool:    &SqlitePool,
-    base:    &Path,
-    tx:      &broadcast::Sender<TurnMsg>,
+    pool: &SqlitePool,
+    base: &Path,
+    tx: &broadcast::Sender<TurnMsg>,
     offsets: &Offsets,
 ) {
     for path in walk_jsonl(base) {
         let start = *offsets.lock().unwrap().get(&path).unwrap_or(&0);
         match ingest_from(pool, &path, start, tx, true).await {
             Ok(end) => advance_offset(offsets, path, end),
-            Err(e)  => eprintln!("poll ingest {:?}: {e}", path),
+            Err(e) => eprintln!("poll ingest {:?}: {e}", path),
         }
     }
 }
@@ -139,9 +143,9 @@ async fn poll_all(
 /// full lifetime and bridges the synchronous mpsc → tokio unbounded_channel.
 /// The async side reads from the tokio channel without blocking the executor.
 async fn notify_watch_loop(
-    pool:    &SqlitePool,
-    base:    &Path,
-    tx:      &broadcast::Sender<TurnMsg>,
+    pool: &SqlitePool,
+    base: &Path,
+    tx: &broadcast::Sender<TurnMsg>,
     offsets: &Offsets,
 ) {
     let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
@@ -158,18 +162,23 @@ async fn notify_watch_loop(
         // the callback holds a sender.  When the watcher drops the callback,
         // evt_tx is dropped and evt_rx drains cleanly.
         let cb_tx = evt_tx;
-        let mut watcher = match notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res { let _ = cb_tx.send(event); }
-            },
-        ) {
-            Ok(w)  => w,
-            Err(e) => { eprintln!("watcher create error: {e}"); return; }
-        };
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res {
+                    let _ = cb_tx.send(event);
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("watcher create error: {e}");
+                    return;
+                }
+            };
 
         use notify::Watcher;
         if let Err(e) = watcher.watch(&base_owned, notify::RecursiveMode::Recursive) {
-            eprintln!("watcher watch error: {e}"); return;
+            eprintln!("watcher watch error: {e}");
+            return;
         }
 
         // Bridge: sync Receiver<Event> → async UnboundedSender<Event>.
@@ -185,11 +194,11 @@ async fn notify_watch_loop(
     // A per-file error is logged and the loop continues to the next path.
     while let Some(event) = fwd_rx.recv().await {
         for path in event.paths {
-            if path.extension().map_or(false, |x| x == "jsonl") {
+            if path.extension().is_some_and(|x| x == "jsonl") {
                 let start = *offsets.lock().unwrap().get(&path).unwrap_or(&0);
                 match ingest_from(pool, &path, start, tx, true).await {
                     Ok(end) => advance_offset(offsets, path, end),
-                    Err(e)  => eprintln!("notify ingest {:?}: {e}", path),
+                    Err(e) => eprintln!("notify ingest {:?}: {e}", path),
                 }
             }
         }
@@ -231,10 +240,10 @@ fn advance_offset(offsets: &Offsets, path: PathBuf, end: u64) {
 ///   - File-open / seek / read errors are returned to the caller, who logs
 ///     and skips.  This keeps error handling at the outermost loop boundary.
 async fn ingest_from(
-    pool:           &SqlitePool,
-    path:           &Path,
-    start:          u64,
-    tx:             &broadcast::Sender<TurnMsg>,
+    pool: &SqlitePool,
+    path: &Path,
+    start: u64,
+    tx: &broadcast::Sender<TurnMsg>,
     broadcast_live: bool,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(path)?;
@@ -244,18 +253,18 @@ async fn ingest_from(
 
     let last_nl = match buf.rfind('\n') {
         Some(i) => i,
-        None    => return Ok(start), // no complete line yet
+        None => return Ok(start), // no complete line yet
     };
     let complete = &buf[..=last_nl];
-    let fname    = path.to_string_lossy().to_string();
-    let mut new  = 0u64;
+    let fname = path.to_string_lossy().to_string();
+    let mut new = 0u64;
 
     for line in complete.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let rec: Record = match serde_json::from_str(line) {
-            Ok(r)  => r,
+            Ok(r) => r,
             Err(_) => continue,
         };
         if !rec.is_billable() {
@@ -292,11 +301,11 @@ async fn ingest_from(
                 let _ = tx.send(TurnMsg {
                     message_id: rec.message.id.clone(),
                     session_id: rec.session_id.clone(),
-                    ts:         rec.timestamp.clone(),
-                    model:      rec.message.model.clone().unwrap_or_default(),
-                    input_tokens:                u.input_tokens,
-                    output_tokens:               u.output_tokens,
-                    cache_read_input_tokens:     u.cache_read_input_tokens,
+                    ts: rec.timestamp.clone(),
+                    model: rec.message.model.clone().unwrap_or_default(),
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cache_read_input_tokens: u.cache_read_input_tokens,
                     cache_creation_input_tokens: u.cache_creation_input_tokens,
                 });
             }
@@ -329,21 +338,31 @@ async fn ingest_from(
 /// Returns Err on bind failure (triggers the restart loop in main).
 /// Individual accept/connection errors are logged and skipped; only a bind
 /// failure kills this invocation and lets the caller retry.
-async fn ws_server(pool: SqlitePool, tx: broadcast::Sender<TurnMsg>) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:9999").await
-        .map_err(|e| { eprintln!("ws bind failed (port 9999 in use?): {e}"); e })?;
+async fn ws_server(
+    pool: SqlitePool,
+    tx: broadcast::Sender<TurnMsg>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:9999")
+        .await
+        .map_err(|e| {
+            eprintln!("ws bind failed (port 9999 in use?): {e}");
+            e
+        })?;
     println!("WebSocket server listening on ws://127.0.0.1:9999");
 
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(pair) => pair,
-            Err(e)   => { eprintln!("ws accept error: {e}"); continue; }
+            Err(e) => {
+                eprintln!("ws accept error: {e}");
+                continue;
+            }
         };
         let pool = pool.clone();
         let mut rx = tx.subscribe();
         tokio::spawn(async move {
             let ws = match tokio_tungstenite::accept_async(stream).await {
-                Ok(w)  => w,
+                Ok(w) => w,
                 Err(_) => return,
             };
             let (mut sink, _read) = ws.split();
@@ -378,7 +397,7 @@ async fn ws_server(pool: SqlitePool, tx: broadcast::Sender<TurnMsg>) -> Result<(
                 });
                 let _ = sink
                     .send(tokio_tungstenite::tungstenite::Message::Text(
-                        snapshot.to_string().into(),
+                        snapshot.to_string(),
                     ))
                     .await;
             }
@@ -388,7 +407,7 @@ async fn ws_server(pool: SqlitePool, tx: broadcast::Sender<TurnMsg>) -> Result<(
                 let msg = serde_json::json!({ "type": "event", "turn": turn });
                 if sink
                     .send(tokio_tungstenite::tungstenite::Message::Text(
-                        msg.to_string().into(),
+                        msg.to_string(),
                     ))
                     .await
                     .is_err()
@@ -411,10 +430,138 @@ fn walk_jsonl(dir: &Path) -> Vec<PathBuf> {
             let p = e.path();
             if p.is_dir() {
                 out.extend(walk_jsonl(&p));
-            } else if p.extension().map_or(false, |x| x == "jsonl") {
+            } else if p.extension().is_some_and(|x| x == "jsonl") {
                 out.push(p);
             }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    const BILLABLE_LINE: &str = r#"{"sessionId":"s1","timestamp":"2025-01-01T00:00:00Z","message":{"id":"__ID__","model":"claude-sonnet-4-6","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+
+    async fn make_pool(dir: &TempDir) -> SqlitePool {
+        let db = dir.path().join("test.db");
+        let url = format!("sqlite:{}?mode=rwc", db.display());
+        let pool = SqlitePoolOptions::new().connect(&url).await.unwrap();
+        sqlx::raw_sql(DDL).execute(&pool).await.unwrap();
+        pool
+    }
+
+    fn write_jsonl(path: &Path, lines: &[&str]) {
+        let mut f = std::fs::File::create(path).unwrap();
+        for line in lines {
+            writeln!(f, "{}", line).unwrap();
+        }
+    }
+
+    // ── Regression: bad JSON line must not kill ingest ─────────────────────────
+
+    #[tokio::test]
+    async fn bad_json_line_is_skipped_not_fatal() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+
+        let jsonl = dir.path().join("session.jsonl");
+        let good = BILLABLE_LINE.replace("__ID__", "msg-good");
+        write_jsonl(&jsonl, &["this line is not json at all !@#$", &good]);
+
+        let (tx, _rx) = broadcast::channel(4);
+        let result = ingest_from(&pool, &jsonl, 0, &tx, false).await;
+        assert!(
+            result.is_ok(),
+            "ingest_from must succeed despite bad JSON line"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the one good line must still be inserted");
+    }
+
+    // ── Regression: duplicate message_id → single DB row ─────────────────────
+
+    #[tokio::test]
+    async fn duplicate_message_id_yields_one_row() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+
+        let jsonl = dir.path().join("session.jsonl");
+        let line = BILLABLE_LINE.replace("__ID__", "msg-dup");
+        write_jsonl(&jsonl, &[&line, &line]);
+
+        let (tx, _rx) = broadcast::channel(4);
+        ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE message_id='msg-dup'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "INSERT OR IGNORE must deduplicate on message_id");
+    }
+
+    // ── Tailing: resume from saved byte offset ────────────────────────────────
+
+    #[tokio::test]
+    async fn tailing_offset_resumes_correctly() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("session.jsonl");
+
+        let line_a = BILLABLE_LINE.replace("__ID__", "msg-tail-a");
+        let line_b = BILLABLE_LINE.replace("__ID__", "msg-tail-b");
+
+        // First pass: write and ingest only line_a
+        write_jsonl(&jsonl, &[&line_a]);
+        let (tx, _rx) = broadcast::channel(4);
+        let offset = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        assert!(offset > 0, "offset must advance past line_a");
+
+        // Append line_b
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&jsonl)
+                .unwrap();
+            writeln!(f, "{}", line_b).unwrap();
+        }
+
+        // Second pass: resume from saved offset — only line_b is new
+        let (tx2, _rx2) = broadcast::channel(4);
+        ingest_from(&pool, &jsonl, offset, &tx2, false)
+            .await
+            .unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "both turns must be in DB; no duplicates from re-read"
+        );
+    }
+
+    // ── walk_jsonl: finds only .jsonl files ──────────────────────────────────
+
+    #[test]
+    fn walk_jsonl_filters_by_extension() {
+        let dir = TempDir::new().unwrap();
+        std::fs::File::create(dir.path().join("a.jsonl")).unwrap();
+        std::fs::File::create(dir.path().join("b.jsonl")).unwrap();
+        std::fs::File::create(dir.path().join("c.txt")).unwrap();
+
+        let found = walk_jsonl(dir.path());
+        assert_eq!(found.len(), 2, "should find exactly the two .jsonl files");
+        assert!(found.iter().all(|p| p.extension().unwrap() == "jsonl"));
+    }
 }

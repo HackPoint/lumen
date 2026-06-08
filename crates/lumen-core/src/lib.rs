@@ -21,7 +21,7 @@ mod tests {
     fn count_tokens() {
         use crate::tokenizer::count_tokens;
         let n = count_tokens("Hello, world!");
-        assert!(n > 0 && n < 10);   // a few tokens, stable
+        assert!(n > 0 && n < 10); // a few tokens, stable
 
         // chars/4 would say ~3; real BPE gives a precise count
         assert_eq!(count_tokens("Hello, world!"), count_tokens("Hello, world!")); // deterministic

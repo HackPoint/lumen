@@ -1,0 +1,15 @@
+{
+    "name": "lumen-dev",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "postCreateCommand": "cargo build -p lumen-core -p lumen-daemon --tests",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml"
+            ]
+        }
+    }
+}

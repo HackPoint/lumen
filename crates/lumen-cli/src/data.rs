@@ -78,10 +78,10 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                     if msg.is_close() {
                         break;
                     }
-                    if msg.is_text() {
-                        if let Ok(text) = msg.into_text() {
-                            apply_msg(&text, &state);
-                        }
+                    if msg.is_text()
+                        && let Ok(text) = msg.into_text()
+                    {
+                        apply_msg(&text, &state);
                     }
                 }
                 state.lock().unwrap().daemon_connected = false;
@@ -247,5 +247,9 @@ pub fn read_db_oneshot() -> Option<OneshotData> {
         .ok()?;
     let fill = fill_raw.max(0) as u64;
     let window = rates::infer_window(fill);
-    Some(OneshotData { fill, window, model })
+    Some(OneshotData {
+        fill,
+        window,
+        model,
+    })
 }
