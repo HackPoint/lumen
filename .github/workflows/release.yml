@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'   # v0.2.0, v1.0.0, v0.2.0-rc.1, …
+
+# ── Platform note ─────────────────────────────────────────────────────────────
+# macOS Apple Silicon ONLY. Lumen is a macOS-specific product (system tray,
+# ~/.claude/ integration, Tauri native APIs). Windows/Linux matrix is a separate
+# port effort — do NOT add runners here until there are working artifacts.
+
+env:
+  PNPM_VERSION: '10'
+  NODE_VERSION: '22'
+  TRIPLE: 'aarch64-apple-darwin'
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 1: Build both artifacts on Apple Silicon
+  # ════════════════════════════════════════════════════════════════════════════
+  build:
+    name: Build (macOS Apple Silicon)
+    runs-on: macos-14          # M1 runner — aarch64 native
+
+    outputs:
+      version:      ${{ steps.meta.outputs.version }}
+      dmg_name:     ${{ steps.meta.outputs.dmg_name }}
+      tarball_name: ${{ steps.meta.outputs.tarball_name }}
+      dmg_sha256:     ${{ steps.checksums.outputs.dmg_sha256 }}
+      tarball_sha256: ${{ steps.checksums.outputs.tarball_sha256 }}
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Version metadata ─────────────────────────────────────────────────
+      - name: Extract version from tag
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"    # strip leading 'v'
+          echo "version=${VERSION}"          >> "$GITHUB_OUTPUT"
+          echo "dmg_name=Lumen_${VERSION}_aarch64.dmg"                        >> "$GITHUB_OUTPUT"
+          echo "tarball_name=lumen-v${VERSION}-aarch64-apple-darwin.tar.gz"   >> "$GITHUB_OUTPUT"
+
+      # ── 3. Node + pnpm ──────────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      # ── 4. Rust toolchain ───────────────────────────────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TRIPLE }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      # ── 5. Install frontend dependencies ────────────────────────────────────
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      # ── 6. Build sidecars (MUST run before tauri build) ─────────────────────
+      # lumen-daemon, lumen-mcp, lumen-tok, and the lumen CLI binary are built
+      # here and staged into lumenator/src-tauri/binaries/ with the target-triple
+      # suffix that Tauri's sidecar mechanism requires.
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      # ── 7. Build CLI tar.gz ─────────────────────────────────────────────────
+      # lumen-cli is also a sidecar (built above) but we ship it separately as
+      # a standalone tarball for the Homebrew formula.
+      - name: Package CLI tarball
+        id: cli
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          TARBALL="${{ steps.meta.outputs.tarball_name }}"
+          mkdir -p dist
+          cp target/release/lumen dist/lumen
+          tar -czf "dist/${TARBALL}" -C dist lumen
+          rm dist/lumen
+          echo "tarball=dist/${TARBALL}" >> "$GITHUB_OUTPUT"
+
+      # ── 8. Build the Tauri app (.dmg) ───────────────────────────────────────
+      # NO SIGNING — unsigned build, users run xattr or install via cask.
+      #
+      # ┌─────────────────────────────────────────────────────────────────────┐
+      # │  SIGNING PLACEHOLDER — slot in notarization here when ready        │
+      # │                                                                     │
+      # │  Required secrets (set in repo Settings → Secrets):                │
+      # │    APPLE_CERTIFICATE         base64-encoded .p12 Developer ID cert │
+      # │    APPLE_CERTIFICATE_PASSWORD passphrase for the .p12              │
+      # │    APPLE_ID                  AppleID email for notarytool          │
+      # │    APPLE_TEAM_ID             10-char Team ID                       │
+      # │    APPLE_ID_PASSWORD         app-specific password for notarytool  │
+      # │                                                                     │
+      # │  Tauri signing env vars to add when implementing:                  │
+      # │    APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID │
+      # │  See: https://tauri.app/distribute/sign/macos/                     │
+      # └─────────────────────────────────────────────────────────────────────┘
+      - name: Build Tauri app
+        working-directory: lumenator
+        run: pnpm tauri build
+        env:
+          # Disable Tauri's code-sign attempt for unsigned builds
+          CI: true
+
+      # ── 9. Compute sha256 checksums ─────────────────────────────────────────
+      - name: Compute checksums
+        id: checksums
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          DMG="target/release/bundle/dmg/Lumen_${VERSION}_aarch64.dmg"
+          TARBALL="${{ steps.cli.outputs.tarball }}"
+
+          DMG_SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+          TAR_SHA=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+
+          echo "dmg_sha256=${DMG_SHA}"     >> "$GITHUB_OUTPUT"
+          echo "tarball_sha256=${TAR_SHA}" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=${DMG}"           >> "$GITHUB_OUTPUT"
+
+          echo "DMG sha256:     $DMG_SHA"
+          echo "Tarball sha256: $TAR_SHA"
+
+      # ── 10. Create GitHub Release with both assets ──────────────────────────
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          TAG="${GITHUB_REF_NAME}"
+          DMG_PATH="${{ steps.checksums.outputs.dmg_path }}"
+          TARBALL="${{ steps.cli.outputs.tarball }}"
+          DMG_NAME="${{ steps.meta.outputs.dmg_name }}"
+          TARBALL_NAME="${{ steps.meta.outputs.tarball_name }}"
+
+          # Use CHANGELOG.md entry for this version as release notes, if present
+          NOTES_FILE=""
+          if [[ -f CHANGELOG.md ]]; then
+            # Extract just this version's block (between its header and the next one)
+            awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found" \
+              CHANGELOG.md > /tmp/release_notes.md
+            [[ -s /tmp/release_notes.md ]] && NOTES_FILE="--notes-file /tmp/release_notes.md"
+          fi
+          [[ -z "$NOTES_FILE" ]] && NOTES_FILE="--notes-file RELEASE_NOTES.md"
+
+          gh release create "$TAG" \
+            "${DMG_PATH}#${DMG_NAME}" \
+            "${TARBALL}#${TARBALL_NAME}" \
+            --title "Lumen ${TAG}" \
+            $NOTES_FILE
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 2: Update the Homebrew tap (runs after build succeeds)
+  # ════════════════════════════════════════════════════════════════════════════
+  update-tap:
+    name: Update Homebrew tap
+    needs: build
+    runs-on: ubuntu-latest        # no macOS toolchain needed for a git commit
+
+    steps:
+      - name: Checkout lumen (for formula templates)
+        uses: actions/checkout@v4
+
+      # TAP_PUSH_TOKEN is a GitHub Personal Access Token with `repo` scope on
+      # HackPoint/homebrew-tap. GITHUB_TOKEN is scoped to this repo and cannot
+      # push to another repo.
+      #
+      # To create the secret:
+      #   1. github.com → Settings → Developer settings → Personal access tokens (classic)
+      #   2. New token: name "tap-push", scope = repo (or fine-grained: Contents write
+      #      on HackPoint/homebrew-tap)
+      #   3. Copy the token value
+      #   4. HackPoint/lumen → Settings → Secrets and variables → Actions → New secret
+      #      Name: TAP_PUSH_TOKEN    Value: (paste token)
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: HackPoint/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formulae with new version + sha256
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          DMG_SHA="${{ needs.build.outputs.dmg_sha256 }}"
+          TAR_SHA="${{ needs.build.outputs.tarball_sha256 }}"
+
+          # ── Casks/lumen.rb ────────────────────────────────────────────────
+          CASK="homebrew-tap/Casks/lumen.rb"
+          sed -i "s/^  version \"[^\"]*\"/  version \"${VERSION}\"/" "$CASK"
+          sed -i "s/^  sha256 \"[^\"]*\"/  sha256 \"${DMG_SHA}\"/"   "$CASK"
+          echo "Cask updated:"
+          grep -E 'version|sha256' "$CASK"
+
+          # ── Formula/lumen-cli.rb ──────────────────────────────────────────
+          FORMULA="homebrew-tap/Formula/lumen-cli.rb"
+          sed -i "s/^  version \"[^\"]*\"/  version \"${VERSION}\"/"    "$FORMULA"
+          sed -i "s/^      sha256 \"[^\"]*\"/      sha256 \"${TAR_SHA}\"/" "$FORMULA"
+          echo "Formula updated:"
+          grep -E 'version|sha256' "$FORMULA"
+
+      - name: Commit + push tap update
+        working-directory: homebrew-tap
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          git config user.name  "HackPoint"
+          git config user.email "6758579+HackPoint@users.noreply.github.com"
+          git add Casks/lumen.rb Formula/lumen-cli.rb
+          git diff --cached --quiet && echo "No tap changes needed." && exit 0
+          git commit -m "chore: bump lumen to v${VERSION}"
+          git push

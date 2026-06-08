@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on the same branch so a fast follow-up commit
+# doesn't queue behind a stale one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PNPM_VERSION: '10'
+  NODE_VERSION: '22'
+
+jobs:
+  check:
+    name: Check (macOS Apple Silicon)
+    runs-on: macos-14
+
+    steps:
+      # ── Checkout + toolchains ─────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      # ── Rust checks ───────────────────────────────────────────────────────
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (lumen-core)
+        run: cargo test -p lumen-core
+
+      # ── Frontend build ───────────────────────────────────────────────────
+      # Verifies the Angular build compiles clean; catches template errors
+      # and TypeScript issues before they block a release.
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm build
+        working-directory: lumenator
+        run: pnpm build
