@@ -1,0 +1,177 @@
+<main class="optimizer">
+    <div class="optimizer__inner">
+
+        <!-- ── Header ── -->
+        <header class="opt__head">
+            <lumen-firefly class="opt__logo" mode="logo" state="full"></lumen-firefly>
+            <p class="brand__tag">Context &amp; cost for Claude Code</p>
+        </header>
+
+        <!-- ── Tab nav (shared with Home) ── -->
+        <nav class="tab-nav" role="tablist" aria-label="Main navigation">
+            <a class="tab-nav__tab"
+               routerLink="/"
+               routerLinkActive="is-active"
+               [routerLinkActiveOptions]="{exact: true}"
+               role="tab">
+               Context
+            </a>
+            <a class="tab-nav__tab"
+               routerLink="/optimizer"
+               routerLinkActive="is-active"
+               role="tab">
+               Optimizer
+            </a>
+        </nav>
+
+        <!-- ── Mode banner ── -->
+        <div class="mode-banner" [attr.data-channel]="s.currentChannel()" role="status">
+            <lumen-firefly [state]="fireflyState()" class="mode-banner__fly"></lumen-firefly>
+            <div class="mode-banner__text">
+                <span class="mode-banner__label">{{ modeLabel() }}</span>
+                <span class="mode-banner__desc">{{ modeDesc() }}</span>
+            </div>
+        </div>
+
+        <!-- ── Hero: effectiveness % or empty state ── -->
+        @if (hasData()) {
+            <section class="hero" aria-label="Optimizer effectiveness">
+                <div class="hero__ring" [style.--hero-color]="heroColor()">
+                    <span class="hero__num">{{ effectPct() }}<span class="hero__pct-sign">%</span></span>
+                    <span class="hero__label">effectiveness</span>
+                </div>
+                <p class="hero__sub">
+                    Every intercepted read returns
+                    <strong>{{ effectPct() }}% fewer tokens</strong> —
+                    measured to the token, never estimated.
+                </p>
+            </section>
+        } @else {
+            <section class="hero hero--empty" aria-label="Optimizer effectiveness">
+                <lumen-firefly state="idle" class="hero__empty-fly"></lumen-firefly>
+                <p class="hero__empty-text">
+                    No optimizer events recorded yet.<br>
+                    Run a task that reads a large file — Lumen will show your
+                    effectiveness ratio here.
+                </p>
+            </section>
+        }
+
+        <!-- ── Two honest cards: CAUSED vs REPORTED ── -->
+        <!--
+            CRITICAL MESSAGING:
+            Card A = "Lumen optimized (caused)" — SUM(saved_tokens) from read_events.
+                     This is what Lumen verifiably did.
+            Card B = "Saved by caching (reported)" — allTime.cacheRead * price-delta.
+                     This is reported BY Claude Code; Lumen did not cause it.
+            These two numbers are NEVER added together. Visual separation enforces this.
+        -->
+        <div class="savings-grid" role="group" aria-label="Savings comparison">
+
+            <!-- Card A: CAUSED by Lumen (E5 signals) -->
+            <div class="savings-card savings-card--caused">
+                <span class="savings-card__badge">Lumen optimized</span>
+                <span class="savings-card__num">{{ fmtTokens(s.lifetimeOptimizedTokens()) }}</span>
+                <span class="savings-card__unit">tokens saved</span>
+                <span class="savings-card__usd">{{ fmtUsd(s.lifetimeOptimizedUsd()) }}</span>
+                <span class="savings-card__note">caused · measured · verifiable · grows with use</span>
+            </div>
+
+            <!-- vs divider -->
+            <div class="savings-sep" aria-hidden="true">
+                <span class="savings-sep__line"></span>
+                <span class="savings-sep__word">vs</span>
+                <span class="savings-sep__line"></span>
+            </div>
+
+            <!-- Card B: REPORTED by Claude Code's caching (D2 usage signal) -->
+            <div class="savings-card savings-card--reported">
+                <span class="savings-card__badge">Saved by caching</span>
+                <span class="savings-card__num">{{ fmtTokens(cacheSavedTokens()) }}</span>
+                <span class="savings-card__unit">cache-read tokens</span>
+                <span class="savings-card__usd">{{ fmtUsd(cacheSavedUsd()) }}</span>
+                <span class="savings-card__note">reported by Claude Code · not caused by Lumen</span>
+            </div>
+
+        </div>
+
+        <!-- ── Period stats: today / this week ── -->
+        <div class="period-row" aria-label="Recent optimizer activity">
+            <div class="period-stat">
+                <span class="period-stat__label">Today</span>
+                <span class="period-stat__val">{{ fmtTokens(s.optimizedToday()) }}</span>
+                <span class="period-stat__unit">tok optimized</span>
+            </div>
+            <div class="period-stat">
+                <span class="period-stat__label">This week</span>
+                <span class="period-stat__val">{{ fmtTokens(s.optimizedThisWeek()) }}</span>
+                <span class="period-stat__unit">tok optimized</span>
+            </div>
+        </div>
+
+        <!-- ── Breakdown by tool ── -->
+        @if (s.optimizedByTool().length > 0) {
+            <section class="breakdown" aria-label="Savings by tool">
+                <h2 class="breakdown__title">By tool</h2>
+                <div class="breakdown__rows">
+                    @for (row of s.optimizedByTool(); track row.tool) {
+                        <div class="breakdown__row">
+                            <span class="breakdown__name">{{ toolLabel(row) }}</span>
+                            <div class="breakdown__bar-wrap" aria-hidden="true">
+                                <div class="breakdown__bar"
+                                     [style.width.%]="barPct(row.savedTokens, maxToolSaved())">
+                                </div>
+                            </div>
+                            <span class="breakdown__count">
+                                {{ fmtTokens(row.savedTokens) }} tok · {{ row.calls }} call{{ row.calls === 1 ? '' : 's' }}
+                            </span>
+                        </div>
+                    }
+                </div>
+            </section>
+        }
+
+        <!-- ── Breakdown by channel ── -->
+        @if (s.optimizedByChannel().length > 0) {
+            <section class="breakdown" aria-label="Savings by channel">
+                <h2 class="breakdown__title">By channel</h2>
+                <div class="breakdown__rows">
+                    @for (row of s.optimizedByChannel(); track row.channel) {
+                        <div class="breakdown__row">
+                            <span class="breakdown__name">{{ chanLabel(row) }}</span>
+                            <div class="breakdown__bar-wrap" aria-hidden="true">
+                                <div class="breakdown__bar"
+                                     [style.width.%]="barPct(row.savedTokens, maxChanSaved())">
+                                </div>
+                            </div>
+                            <span class="breakdown__count">
+                                {{ fmtTokens(row.savedTokens) }} tok · {{ row.calls }} call{{ row.calls === 1 ? '' : 's' }}
+                            </span>
+                        </div>
+                    }
+                </div>
+            </section>
+        }
+
+        <!-- ── Missed reads: CLI only, when calls > 0 ── -->
+        <!--
+            MESSAGING: These are reads that bypassed Lumen entirely.
+            Label: "Not optimized (read in full)" — context only.
+            NEVER counted as savings. NEVER shown in VS Code (hook doesn't fire).
+        -->
+        @if (showMissed()) {
+            <div class="missed" role="note" aria-label="Reads not optimized by Lumen">
+                <span class="missed__label">Not optimized (read in full)</span>
+                <span class="missed__val">
+                    {{ s.missedReads().calls }} call{{ s.missedReads().calls === 1 ? '' : 's' }}
+                    · {{ fmtTokens(s.missedReads().fullTokens) }} tokens
+                </span>
+                <span class="missed__note">
+                    These reads bypassed Lumen's tools. Shown as context only —
+                    never counted as savings.
+                </span>
+            </div>
+        }
+
+    </div>
+</main>

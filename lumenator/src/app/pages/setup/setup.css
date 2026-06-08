@@ -1,0 +1,182 @@
+:host {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.setup {
+    max-width: 520px;
+    margin: 0 auto;
+    padding: 3rem 2rem 4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.6rem;
+}
+
+/* ── Header ── */
+.setup__head {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.setup__logo {
+    font-size: 2.4rem;
+}
+
+.setup__title {
+    font-family: var(--lumen-font-sans);
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--lumen-text);
+    margin: 0;
+    letter-spacing: -0.01em;
+}
+
+/* ── Status line ── */
+.setup__status {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.8rem;
+    color: var(--lumen-text-dim);
+    margin: 0;
+}
+.setup__status--running { color: var(--lumen-ok); }
+
+/* ── Steps list ── */
+.setup__steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.setup__step {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.65rem;
+    padding: 0.7rem 0.9rem;
+    border-radius: 8px;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border, rgba(255,255,255,0.06));
+}
+
+.setup__step-icon {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.78rem;
+    font-weight: 700;
+    min-width: 1.2rem;
+    text-align: center;
+    padding-top: 0.07rem;
+    color: var(--lumen-text-dim);
+}
+
+.setup__step[data-status="Ok"]    .setup__step-icon { color: var(--lumen-ok); }
+.setup__step[data-status="Warn"]  .setup__step-icon { color: var(--lumen-warn); }
+.setup__step[data-status="Error"] .setup__step-icon { color: var(--lumen-alert); }
+.setup__step[data-status="Skip"]  .setup__step-icon { color: var(--lumen-text-dim); opacity: 0.5; }
+
+.setup__step-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.setup__step-label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.84rem;
+    font-weight: 600;
+    color: var(--lumen-text);
+}
+
+.setup__step-detail {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.72rem;
+    color: var(--lumen-text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.setup__step[data-status="Error"] .setup__step-detail { color: var(--lumen-alert); opacity: 0.85; }
+.setup__step[data-status="Warn"]  .setup__step-detail { color: var(--lumen-warn);  opacity: 0.85; }
+
+/* ── Error banner ── */
+.setup__error {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.75rem;
+    color: var(--lumen-alert);
+    background: color-mix(in srgb, var(--lumen-alert) 10%, transparent);
+    border-radius: 6px;
+    padding: 0.6rem 0.9rem;
+    margin: 0;
+}
+
+/* ── Result block ── */
+.setup__result {
+    padding: 0.8rem 1rem;
+    border-radius: 8px;
+}
+
+.setup__result--ok {
+    background: color-mix(in srgb, var(--lumen-ok) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--lumen-ok) 25%, transparent);
+}
+.setup__result--err {
+    background: color-mix(in srgb, var(--lumen-alert) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--lumen-alert) 25%, transparent);
+}
+
+.setup__result-msg {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--lumen-text);
+    margin: 0 0 0.2rem;
+}
+
+.setup__result-hint {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text-dim);
+    margin: 0;
+}
+
+/* ── Actions ── */
+.setup__actions {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.setup__btn {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.45rem 1rem;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.setup__btn:hover { opacity: 0.8; }
+.setup__btn:active { opacity: 0.65; }
+
+.setup__btn--primary {
+    background: var(--lumen-ok);
+    color: #000;
+}
+.setup__btn--ghost {
+    background: var(--lumen-bg-secondary);
+    color: var(--lumen-text);
+    border: 1px solid var(--lumen-border, rgba(255,255,255,0.1));
+}
+.setup__btn--danger {
+    background: color-mix(in srgb, var(--lumen-alert) 15%, transparent);
+    color: var(--lumen-alert);
+    border: 1px solid color-mix(in srgb, var(--lumen-alert) 30%, transparent);
+    margin-left: auto;
+}

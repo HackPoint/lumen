@@ -1,0 +1,179 @@
+:host {
+  display: block;
+  width: 100%;
+}
+
+.usage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  width: 100%;
+}
+
+.usage__title {
+  margin: 0 0 0.1rem;
+  font-family: var(--lumen-font-sans);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--lumen-text-dim);
+}
+
+/* numbers everywhere are tabular monospace */
+.win__cost,
+.win__meta,
+.roll__cost,
+.roll__tok,
+.saved__value,
+.pill {
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── rolling windows ── */
+.usage__rolling {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+}
+
+.win {
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+  padding: 0.8rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.win__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.win__label {
+  font-family: var(--lumen-font-sans);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--lumen-text-dim);
+}
+
+.win__reset {
+  font-family: var(--lumen-font-sans);
+  font-size: 0.66rem;
+  color: var(--lumen-text-dim);
+}
+
+.tag {
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 0.02rem 0.3rem;
+  border: 1px solid var(--lumen-border-strong);
+  border-radius: 999px;
+  color: var(--lumen-text-dim);
+}
+
+.win__cost {
+  color: var(--lumen-text);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  line-height: 1.05;
+}
+
+.win__meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.74rem;
+  color: var(--lumen-text-dim);
+}
+
+.win__split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.1rem;
+}
+
+.pill {
+  font-size: 0.64rem;
+  color: var(--lumen-text-dim);
+  background: var(--lumen-bg-elevated);
+  border: 1px solid var(--lumen-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+}
+
+/* ── calendar rollups ── */
+.usage__rollups {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+
+.roll {
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+  padding: 0.7rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.roll__label {
+  font-family: var(--lumen-font-sans);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--lumen-text-dim);
+}
+
+.roll__cost {
+  color: var(--lumen-text);
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.roll__tok {
+  font-size: 0.68rem;
+  color: var(--lumen-text-dim);
+}
+
+/* ── lifetime saved by caching ── */
+.usage__saved {
+  background: color-mix(in srgb, var(--lumen-save) 10%, var(--lumen-bg-secondary));
+  border: 1px solid color-mix(in srgb, var(--lumen-save) 35%, transparent);
+  border-radius: var(--lumen-radius-sm);
+  padding: 0.9rem 1rem;
+  text-align: center;
+}
+
+.saved__label {
+  font-family: var(--lumen-font-sans);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--lumen-text-dim);
+}
+
+.saved__value {
+  margin-top: 0.2rem;
+  color: var(--lumen-save);
+  font-size: 1.9rem;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
+.saved__sub {
+  margin-top: 0.2rem;
+  font-family: var(--lumen-font-sans);
+  font-size: 0.68rem;
+  color: var(--lumen-text-dim);
+}

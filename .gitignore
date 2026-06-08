@@ -1,0 +1,64 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Node / Angular
+node_modules/
+dist/
+lumenator/.angular/
+lumenator/out-tsc/
+
+# pnpm
+.pnpm-store/
+
+# Tauri generated
+lumenator/src-tauri/gen/
+lumenator/src-tauri/WixTools/
+
+# Build artifacts — never commit these
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.msi
+*.pkg
+*.tar.gz
+
+# Local databases — runtime data, not source
+*.db
+*.db-shm
+*.db-wal
+lumen.db*
+
+# Config backups written by lumen setup/uninstall
+*.lumen_bak
+
+# Claude Code project-level state — machine-specific
+.claude/settings.json
+.claude/settings.local.json
+.claude/lumen/
+
+# Keep: .claude/hooks/ (the hook scripts)
+# Keep: .mcp.json (now contains no machine-specific paths)
+# Keep: CLAUDE.md and DESIGN_CONTRACT.md
+
+# macOS noise
+.DS_Store
+.AppleDouble
+.LSOverride
+__MACOSX/
+
+# Editor
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Pre-compiled sidecars (rebuilt via build-sidecar.sh)
+lumenator/src-tauri/binaries/

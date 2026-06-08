@@ -1,0 +1,59 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Lumen",
+  "version": "0.1.0",
+  "identifier": "io.speedata.lumen",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:4200",
+    "beforeDevCommand": "pnpm start",
+    "beforeBuildCommand": "pnpm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "lumen",
+        "url": "/",
+        "width": 800,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false
+      },
+      {
+        "label": "panel",
+        "title": "Lumen Panel",
+        "url": "/panel",
+        "width": 320,
+        "height": 400,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "transparent": true,
+        "visible": false,
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "externalBin": ["binaries/lumen-daemon", "binaries/lumen-mcp", "binaries/lumen-tok"],
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}
