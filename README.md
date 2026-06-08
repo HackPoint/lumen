@@ -43,7 +43,22 @@ because there is nothing to install yet — an honest "not yet" beats a fake gui
 
 ---
 
-## Install the menu-bar app (.dmg)
+## Install the menu-bar app
+
+### Via Homebrew (recommended — opens with no Gatekeeper prompt)
+
+```bash
+brew tap HackPoint/tap
+brew install --cask HackPoint/tap/lumen
+```
+
+Homebrew clears the quarantine flag automatically. Lumen opens normally with no
+"damaged" dialog. The app is still un-notarized (proper Apple Developer ID signing
+is planned); Homebrew handles the flag for you.
+
+After install, launch Lumen from Spotlight or `/Applications/Lumen.app`.
+
+### Via .dmg (manual — Gatekeeper workaround required)
 
 1. Download **`Lumen_0.1.0_aarch64.dmg`** from the [Releases page](../../releases/latest)
 2. Open the .dmg and drag **Lumen** to your Applications folder
@@ -53,27 +68,15 @@ because there is nothing to install yet — an honest "not yet" beats a fake gui
    xattr -dr com.apple.quarantine /Applications/Lumen.app
    ```
 
-   macOS will say **"Lumen is damaged and can't be opened. You should move it to the
-   Trash."** This is **not actual damage.** It is the standard macOS block for apps
-   that are not yet notarized with an Apple Developer ID. The command above removes
-   the quarantine flag and the dialog will not reappear.
+   macOS will say **"Lumen is damaged and can't be opened."** — this is not actual
+   damage. It is the standard block for un-notarized apps. The command removes
+   the quarantine flag; double-click Lumen normally after.
 
-   **One-line alternative** (downloads and runs the helper):
+   Alternative: try to open it once (blocked), then **System Settings → Privacy &
+   Security → Open Anyway**.
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/HackPoint/lumen/main/scripts/fix-quarantine.sh | bash
-   ```
-
-   (Read [the script](scripts/fix-quarantine.sh) before running — it just calls `xattr -dr`.)
-
-   **System Settings alternative:** Try to open Lumen once (blocked). Then go to
-   **System Settings → Privacy & Security**, scroll to the bottom, and click
-   **"Open Anyway"** next to the Lumen entry.
-
-   > **Note:** Right-click → Open does **not** bypass quarantine for unsigned apps
-   > on macOS 13+. Use Terminal (`xattr -dr`) or System Settings → Open Anyway.
-   > **Why this happens:** macOS requires an Apple Developer ID + notarization ($99/yr).
-   > Notarization is on the roadmap — until then, the `xattr` step is required once per install.
+   > The permanent fix is Apple Developer ID + notarization ($99/yr) — planned for
+   > a later release. Until then, use Homebrew (above) or the xattr command.
 
 4. On first launch, a **Setup** screen appears — click through to register the MCP
    server and hooks. **Restart Claude Code** after setup.
@@ -122,10 +125,10 @@ hooks fire only in the Claude Code CLI, not the VS Code extension.
 
 ### Install
 
-**Via Homebrew (recommended):**
+**Via Homebrew:**
 
 ```bash
-brew tap HackPoint/tap && brew install HackPoint/tap/lumen
+brew tap HackPoint/tap && brew install HackPoint/tap/lumen-cli
 ```
 
 **Via the app:**

@@ -1,4 +1,4 @@
-class Lumen < Formula
+class LumenCli < Formula
   desc "Terminal dashboard for Claude Code — live context fill, cost, and optimizer savings"
   homepage "https://github.com/HackPoint/lumen"
   version "0.1.0"
@@ -15,7 +15,6 @@ class Lumen < Formula
   end
 
   test do
-    # --version exits 0 and prints the version string
     assert_match version.to_s, shell_output("#{bin}/lumen --version")
   end
 end

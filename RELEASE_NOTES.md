@@ -20,32 +20,37 @@ Everything runs locally. No account. No telemetry. Your data never leaves your m
 
 ## Install
 
-### Menu-bar app (.dmg)
+### Menu-bar app — Homebrew (recommended, no Gatekeeper prompt)
+
+```bash
+brew tap HackPoint/tap
+brew install --cask HackPoint/tap/lumen
+```
+
+Homebrew clears the quarantine flag automatically — Lumen opens normally with no
+"Lumen is damaged" dialog. The app is un-notarized (Apple Developer ID signing
+planned for a later release); Homebrew handles the quarantine flag for you.
+
+### Menu-bar app — manual .dmg (fallback)
 
 1. Download **`Lumen_0.1.0_aarch64.dmg`** below.
 2. Open the .dmg and drag Lumen to `/Applications`.
-3. **⚠️ Before opening — run this once in Terminal:**
+3. **⚠️ Before opening, run once in Terminal:**
 
    ```bash
    xattr -dr com.apple.quarantine /Applications/Lumen.app
    ```
 
-   macOS will say **"Lumen is damaged and can't be opened."** — this is **not actual
-   damage**. It is the standard block for un-notarized apps. The command above removes
-   the quarantine flag; Lumen opens normally after.
-
-   Alternative: try to open it once (blocked), then go to
-   **System Settings → Privacy & Security → Open Anyway**.
-
-   > `sudo` is not required if you dragged the app yourself. Add it only if you see
-   > a permission error: `sudo xattr -dr com.apple.quarantine /Applications/Lumen.app`
+   macOS will say **"Lumen is damaged and can't be opened."** — not actual damage.
+   Standard block for un-notarized apps. The command removes the quarantine flag.
+   Alternative: open once (blocked) → **System Settings → Privacy & Security → Open Anyway**.
 
 4. On first launch, a Setup screen registers the MCP server and hooks. **Restart Claude Code** after setup.
 
 ### CLI (`lumen` terminal dashboard)
 
 ```bash
-brew tap HackPoint/tap && brew install HackPoint/tap/lumen
+brew tap HackPoint/tap && brew install HackPoint/tap/lumen-cli
 ```
 
 Or use the **Install CLI** button inside the app (symlinks the bundled binary to your PATH).
