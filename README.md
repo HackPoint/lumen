@@ -121,7 +121,7 @@ hooks fire only in the Claude Code CLI, not the VS Code extension.
 **Via Homebrew (recommended):**
 
 ```bash
-brew tap HackPoint/tap && brew install lumen
+brew tap HackPoint/tap && brew install HackPoint/tap/lumen
 ```
 
 **Via the app:**
