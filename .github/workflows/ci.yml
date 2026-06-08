@@ -47,7 +47,9 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Exclude the Tauri app: its build script requires sidecar binaries
+        # that only exist after `build-sidecar.sh` runs (release pipeline only).
+        run: cargo clippy --workspace --all-targets --exclude Lumen -- -D warnings
 
       - name: cargo test (lumen-core)
         run: cargo test -p lumen-core
