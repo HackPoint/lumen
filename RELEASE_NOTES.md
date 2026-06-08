@@ -39,7 +39,7 @@ Everything runs locally. No account. No telemetry. Your data never leaves your m
 ### CLI (`lumen` terminal dashboard)
 
 ```bash
-brew tap speedata/tap && brew install lumen
+brew tap HackPoint/tap && brew install lumen
 ```
 
 Or use the **Install CLI** button inside the app (symlinks the bundled binary to your PATH).
