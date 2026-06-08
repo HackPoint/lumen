@@ -1,0 +1,19 @@
+[package]
+name = "lumen-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+
+[dependencies]
+lumen-core = { path = "../lumen-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = "0.31"
+tungstenite = "0.24"
+dirs = "5"
