@@ -6,7 +6,7 @@ class Lumen < Formula
   on_macos do
     on_arm do
       url "https://github.com/speedata/lumen/releases/download/v#{version}/lumen-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_SHA256_AARCH64"
+      sha256 "455e72c2e2aa98201cac9fbaee45dfa69773130287fcc43665c5230f8c657881"
     end
   end
 
