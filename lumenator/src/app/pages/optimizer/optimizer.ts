@@ -9,10 +9,11 @@ import { Firefly } from '../../components/firefly/firefly';
 import { SessionService } from '../../session.service';
 import { RATE } from '../../components/index';
 import type { ChannelBreakdown, ToolBreakdown } from '../../components/index';
+import { LumenTooltip } from '../../directives/tooltip.directive';
 
 @Component({
     selector: 'optimizer',
-    imports: [RouterLink, RouterLinkActive, Firefly],
+    imports: [RouterLink, RouterLinkActive, Firefly, LumenTooltip],
     templateUrl: './optimizer.html',
     styleUrl: './optimizer.css',
     changeDetection: ChangeDetectionStrategy.OnPush,

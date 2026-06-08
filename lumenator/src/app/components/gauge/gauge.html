@@ -46,10 +46,21 @@
     </svg>
 
     <div class="gauge__meta">
-        <div class="gauge__tokens">{{ fmtFill() }}<span> / {{ fmtMax() }}</span></div>
+        <!-- tokens + gauge info grouped under one ⓘ -->
+        <div class="gauge__tokens">
+            {{ fmtFill() }}<span> / {{ fmtMax() }}</span>
+            <button class="info-btn" type="button"
+                    [lumenTooltip]="'How full your context window is — latest turn\'s cached tokens vs the inferred window size. Green/amber/red at 80%/95%; near 100% means compaction is near.'">ⓘ</button>
+        </div>
+
         @if (model()) {
-            <div class="gauge__model">{{ model() }}</div>
+            <div class="gauge__model-row">
+                <div class="gauge__model">{{ model() }}</div>
+                <button class="info-btn" type="button"
+                        [lumenTooltip]="'Model of the most recent turn.'">ⓘ</button>
+            </div>
         }
+
         @if (status() === 'alert') {
             <div class="gauge__flag" data-level="alert">compaction imminent</div>
         } @else if (status() === 'warn') {

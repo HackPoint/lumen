@@ -47,10 +47,17 @@
             <button class="setup__btn setup__btn--ghost" (click)="goHome()">
                 Open Lumen
             </button>
+            <button class="setup__btn setup__btn--ghost" (click)="installCli()" [disabled]="cliRunning()">
+                {{ cliRunning() ? 'Installing…' : 'Install CLI' }}
+            </button>
             <button class="setup__btn setup__btn--danger" (click)="uninstall()">
                 Uninstall
             </button>
         </div>
+
+        @if (cliResult()) {
+            <p class="setup__result-hint">{{ cliResult() }}</p>
+        }
     }
 
 </div>
