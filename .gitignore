@@ -48,11 +48,20 @@ lumen.db*
 .LSOverride
 __MACOSX/
 
-# Editor
-.vscode/settings.json
+# Editor / IDE
+.vscode/
 .idea/
 *.swp
 *.swo
+
+# MCP / local tooling configs
+.playwright-mcp/
+
+# Personal screenshots (not referenced by docs)
+lumen_usage.png
+
+# Tauri scaffold boilerplate (not the project README)
+lumenator/README.md
 
 # Environment / secrets
 .env

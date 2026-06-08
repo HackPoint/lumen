@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { RATE } from '../index';
 import type { CostTotals } from '../index';
+import { LumenTooltip } from '../../directives/tooltip.directive';
 
 @Component({
     selector: 'cost',
-    imports: [],
+    imports: [LumenTooltip],
     templateUrl: './cost.html',
     styleUrl: './cost.scss',
     changeDetection: ChangeDetectionStrategy.OnPush

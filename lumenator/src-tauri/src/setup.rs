@@ -593,7 +593,68 @@ fn run_uninstall() -> Vec<SetupStep> {
         steps.push(SetupStep::skip("scripts", "Remove scripts", "~/.claude/lumen/ not found"));
     }
 
+    steps.push(step_remove_cli_symlink());
+
     steps
+}
+
+// ── CLI symlink ────────────────────────────────────────────────────────────────
+
+/// Symlink the bundled `lumen` CLI binary into PATH.
+#[tauri::command]
+pub fn lumen_install_cli() -> Vec<SetupStep> {
+    vec![step_install_cli()]
+}
+
+fn step_install_cli() -> SetupStep {
+    let Some(lumen_bin) = find_binary("lumen") else {
+        return SetupStep::err("cli", "Install CLI", "lumen binary not found in app bundle");
+    };
+
+    let target = cli_symlink_path();
+
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return SetupStep::err(
+                "cli",
+                "Install CLI",
+                &format!("mkdir {}: {e}", parent.display()),
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&target);
+
+    match std::os::unix::fs::symlink(&lumen_bin, &target) {
+        Ok(_) => SetupStep::ok("cli", "Install CLI", &format!("{}", target.display())),
+        Err(e) => SetupStep::err("cli", "Install CLI", &format!("symlink: {e}")),
+    }
+}
+
+fn step_remove_cli_symlink() -> SetupStep {
+    let target = cli_symlink_path();
+    if target.exists() || target.symlink_metadata().is_ok() {
+        match std::fs::remove_file(&target) {
+            Ok(_) => SetupStep::ok("cli", "Remove CLI", &format!("Removed {}", target.display())),
+            Err(e) => SetupStep::err(
+                "cli",
+                "Remove CLI",
+                &format!("remove {}: {e}", target.display()),
+            ),
+        }
+    } else {
+        SetupStep::skip("cli", "Remove CLI", "Not installed")
+    }
+}
+
+fn cli_symlink_path() -> PathBuf {
+    if std::path::Path::new("/usr/local/bin").is_dir() {
+        PathBuf::from("/usr/local/bin/lumen")
+    } else {
+        dirs::home_dir()
+            .map(|h| h.join(".local/bin/lumen"))
+            .unwrap_or_else(|| PathBuf::from("/usr/local/bin/lumen"))
+    }
 }
 
 fn remove_lumen_hooks(root: &mut serde_json::Value) {

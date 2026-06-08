@@ -31,6 +31,9 @@ export class Setup implements OnInit {
     readonly steps  = signal<SetupStep[]>([]);
     readonly error  = signal<string | null>(null);
 
+    readonly cliRunning = signal(false);
+    readonly cliResult  = signal<string | null>(null);
+
     private readonly router: Router;
 
     constructor(router: Router) {
@@ -71,6 +74,23 @@ export class Setup implements OnInit {
 
     goHome(): void {
         this.router.navigate(['/']);
+    }
+
+    async installCli(): Promise<void> {
+        this.cliRunning.set(true);
+        this.cliResult.set(null);
+        try {
+            const steps = await invoke<SetupStep[]>('lumen_install_cli');
+            const step = steps[0];
+            if (step) {
+                const icon = step.status === 'Ok' ? '✓' : '✕';
+                this.cliResult.set(`${icon} ${step.detail}`);
+            }
+        } catch (e: unknown) {
+            this.cliResult.set(`✕ ${String(e)}`);
+        } finally {
+            this.cliRunning.set(false);
+        }
     }
 
     get allOk(): boolean {

@@ -81,3 +81,66 @@ body {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────
+   Info button + tooltip — shared across all surfaces
+   ───────────────────────────────────────────────────────────── */
+
+/* The small ⓘ trigger button. Applied via [lumenTooltip] target elements. */
+.info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  cursor: help;
+  color: var(--lumen-text-dim);
+  font-size: 0.75rem;
+  font-family: var(--lumen-font-sans);
+  line-height: 1;
+  opacity: 0.4;
+  flex-shrink: 0;
+  vertical-align: middle;
+  border-radius: 50%;
+  transition: opacity 0.15s ease;
+  user-select: none;
+}
+
+.info-btn:hover,
+.info-btn:focus-visible {
+  opacity: 1;
+}
+
+/* Show a subtle ring on keyboard focus only. */
+.info-btn:focus {
+  outline: 1px solid var(--lumen-border-strong);
+  outline-offset: 2px;
+}
+
+.info-btn:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Tooltip bubble — appended to document.body by LumenTooltip directive. */
+.lumen-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 26ch;
+  padding: 0.42rem 0.65rem;
+  background: var(--lumen-bg-elevated);
+  border: 1px solid var(--lumen-border-strong);
+  border-radius: 9px;
+  color: var(--lumen-text-dim);
+  font-size: 0.71rem;
+  font-family: var(--lumen-font-sans);
+  line-height: 1.55;
+  pointer-events: none;
+  box-shadow: var(--lumen-shadow);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.lumen-tooltip--visible {
+  opacity: 1;
+}

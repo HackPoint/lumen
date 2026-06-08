@@ -28,7 +28,11 @@
         <div class="mode-banner" [attr.data-channel]="s.currentChannel()" role="status">
             <lumen-firefly [state]="fireflyState()" class="mode-banner__fly"></lumen-firefly>
             <div class="mode-banner__text">
-                <span class="mode-banner__label">{{ modeLabel() }}</span>
+                <span class="mode-banner__label">
+                    {{ modeLabel() }}
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Full mode (CLI) intercepts reads before they run. Soft mode (VS Code) can\'t run hooks, so optimization isn\'t enforced.'">ⓘ</button>
+                </span>
                 <span class="mode-banner__desc">{{ modeDesc() }}</span>
             </div>
         </div>
@@ -38,7 +42,11 @@
             <section class="hero" aria-label="Optimizer effectiveness">
                 <div class="hero__ring" [style.--hero-color]="heroColor()">
                     <span class="hero__num">{{ effectPct() }}<span class="hero__pct-sign">%</span></span>
-                    <span class="hero__label">effectiveness</span>
+                    <span class="hero__label">
+                        effectiveness
+                        <button class="info-btn" type="button"
+                                [lumenTooltip]="'When Lumen intercepts a read, this is how many fewer tokens it returned — measured to the token, never estimated.'">ⓘ</button>
+                    </span>
                 </div>
                 <p class="hero__sub">
                     Every intercepted read returns
@@ -70,7 +78,11 @@
 
             <!-- Card A: CAUSED by Lumen (E5 signals) -->
             <div class="savings-card savings-card--caused">
-                <span class="savings-card__badge">Lumen optimized</span>
+                <span class="savings-card__badge">
+                    Lumen optimized
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Tokens Lumen actually saved by routing reads through its tools. Verifiable, grows with use.'">ⓘ</button>
+                </span>
                 <span class="savings-card__num">{{ fmtTokens(s.lifetimeOptimizedTokens()) }}</span>
                 <span class="savings-card__unit">tokens saved</span>
                 <span class="savings-card__usd">{{ fmtUsd(s.lifetimeOptimizedUsd()) }}</span>
@@ -86,7 +98,11 @@
 
             <!-- Card B: REPORTED by Claude Code's caching (D2 usage signal) -->
             <div class="savings-card savings-card--reported">
-                <span class="savings-card__badge">Saved by caching</span>
+                <span class="savings-card__badge">
+                    Saved by caching
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Reported by Claude Code, not caused by Lumen. Never added to Lumen\'s number.'">ⓘ</button>
+                </span>
                 <span class="savings-card__num">{{ fmtTokens(cacheSavedTokens()) }}</span>
                 <span class="savings-card__unit">cache-read tokens</span>
                 <span class="savings-card__usd">{{ fmtUsd(cacheSavedUsd()) }}</span>
@@ -112,7 +128,11 @@
         <!-- ── Breakdown by tool ── -->
         @if (s.optimizedByTool().length > 0) {
             <section class="breakdown" aria-label="Savings by tool">
-                <h2 class="breakdown__title">By tool</h2>
+                <h2 class="breakdown__title">
+                    By tool
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Tokens saved by each Lumen tool. Only reads routed through Lumen\'s tools are counted.'">ⓘ</button>
+                </h2>
                 <div class="breakdown__rows">
                     @for (row of s.optimizedByTool(); track row.tool) {
                         <div class="breakdown__row">
@@ -134,7 +154,11 @@
         <!-- ── Breakdown by channel ── -->
         @if (s.optimizedByChannel().length > 0) {
             <section class="breakdown" aria-label="Savings by channel">
-                <h2 class="breakdown__title">By channel</h2>
+                <h2 class="breakdown__title">
+                    By channel
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'CLI (Full mode) = reads intercepted by hook. VS Code (Soft mode) = Lumen tools available but not enforced.'">ⓘ</button>
+                </h2>
                 <div class="breakdown__rows">
                     @for (row of s.optimizedByChannel(); track row.channel) {
                         <div class="breakdown__row">
@@ -161,7 +185,11 @@
         -->
         @if (showMissed()) {
             <div class="missed" role="note" aria-label="Reads not optimized by Lumen">
-                <span class="missed__label">Not optimized (read in full)</span>
+                <span class="missed__label">
+                    Not optimized (read in full)
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Reads that bypassed Lumen\'s tools (CLI only). Shown as context — never counted as savings.'">ⓘ</button>
+                </span>
                 <span class="missed__val">
                     {{ s.missedReads().calls }} call{{ s.missedReads().calls === 1 ? '' : 's' }}
                     · {{ fmtTokens(s.missedReads().fullTokens) }} tokens
