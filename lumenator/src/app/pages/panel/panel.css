@@ -1,0 +1,160 @@
+/* The window itself is 320×400 and transparent. The card is inset so its
+   shadow + rounded corners render against the transparent gutter. */
+:host {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    background: transparent;
+}
+
+.panel {
+    position: absolute;
+    inset: 8px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.9rem 1rem 0.85rem;
+    border-radius: 16px;
+    background: var(--lumen-panel-bg);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    backdrop-filter: blur(30px) saturate(180%);
+    border: 1px solid var(--lumen-border-strong);
+    box-shadow: var(--lumen-shadow);
+    overflow: hidden;
+    animation: panel-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* ── header ── */
+.panel__head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.panel__logo {
+    font-size: 0.92rem;
+    flex-shrink: 0;
+}
+
+.panel__brand {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--lumen-text);
+    letter-spacing: 0.2px;
+    flex: 1;
+}
+
+.panel__status {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--lumen-ok);
+    flex-shrink: 0;
+}
+.panel__status[data-status="warn"]  { background: var(--lumen-warn); }
+.panel__status[data-status="alert"] { background: var(--lumen-alert); }
+
+/* ── hero: firefly indicator + precision row ── */
+.panel__hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    flex: 1;
+    justify-content: center;
+}
+
+/* Firefly + % grouped as one living indicator */
+.panel__indicator {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    cursor: default;
+}
+
+.panel__fly {
+    font-size: 7rem; /* ~112px — fills the center of the 304px-wide card */
+}
+
+/* ── Large percentage: same status color as the fill ── */
+.panel__pct {
+    font-family: var(--lumen-font-sans);
+    font-size: 2.8rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-ok);
+}
+.panel__pct[data-status="warn"]  { color: var(--lumen-warn); }
+.panel__pct[data-status="alert"] { color: var(--lumen-alert); }
+
+.panel__pct-sign {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-left: 0.04em;
+    opacity: 0.72;
+}
+
+/* ── precision row below the indicator ── */
+.panel__meta {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+}
+
+.panel__tokens {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.84rem;
+    font-weight: 600;
+    color: var(--lumen-text);
+    letter-spacing: 0.2px;
+}
+
+.panel__sep {
+    color: var(--lumen-text-dim);
+    font-weight: 400;
+}
+
+.panel__model {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.68rem;
+    color: var(--lumen-text-dim);
+    letter-spacing: 0.2px;
+}
+
+.panel__flag {
+    font-size: 0.67rem;
+    font-weight: 600;
+    padding: 0.18rem 0.5rem;
+    border-radius: 999px;
+    margin-top: 0.05rem;
+}
+
+.panel__flag[data-level="warn"] {
+    background: color-mix(in srgb, var(--lumen-warn) 18%, transparent);
+    color: var(--lumen-warn);
+}
+
+.panel__flag[data-level="alert"] {
+    background: color-mix(in srgb, var(--lumen-alert) 18%, transparent);
+    color: var(--lumen-alert);
+}
+
+/* ── cost tiles pushed to the bottom ── */
+panel cost {
+    width: 100%;
+    margin-top: auto;
+}
+
+@keyframes panel-in {
+    from { opacity: 0; transform: scale(0.97); }
+    to   { opacity: 1; transform: none; }
+}

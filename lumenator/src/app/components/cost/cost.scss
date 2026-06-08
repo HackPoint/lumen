@@ -1,0 +1,127 @@
+:host {
+  display: block;
+  width: 100%;
+}
+
+.cost {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  width: 100%;
+}
+
+.cost__heroes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+}
+
+.tile {
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+  padding: 0.95rem 1.05rem;
+  animation: tile-in 0.45s ease both;
+}
+
+.tile--hero:nth-child(2) { animation-delay: 0.06s; }
+
+.tile__label {
+  color: var(--lumen-text-dim);
+  font-family: var(--lumen-font-sans);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.tile__value {
+  margin-top: 0.3rem;
+  color: var(--lumen-text);
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 1.7rem;
+  letter-spacing: -0.5px;
+  line-height: 1.1;
+}
+
+.tile--save .tile__value {
+  color: var(--lumen-save);
+}
+
+.tile__sub {
+  margin-top: 0.3rem;
+  color: var(--lumen-text-dim);
+  font-size: 0.72rem;
+}
+
+.cost__breakdown {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 0.95rem;
+  padding: 0.1rem 0.15rem 0;
+}
+
+.stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.1rem;
+  border-bottom: 1px solid var(--lumen-border);
+}
+
+.stat__label {
+  color: var(--lumen-text-dim);
+  font-size: 0.78rem;
+}
+
+.stat__value {
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--lumen-text);
+  font-size: 0.85rem;
+}
+
+/* ── compact popover: only the hero tiles, quieted down so the gauge leads ── */
+:host-context(.panel) .breakdown {
+  display: none;
+}
+
+:host-context(.panel) .cost {
+  gap: 0.5rem;
+}
+
+:host-context(.panel) .cost__heroes {
+  gap: 0.5rem;
+}
+
+:host-context(.panel) .tile {
+  background: transparent;
+  border-color: var(--lumen-border);
+}
+
+:host-context(.panel) .tile--hero {
+  padding: 0.5rem 0.7rem;
+}
+
+:host-context(.panel) .tile__label {
+  font-size: 0.6rem;
+  letter-spacing: 0.5px;
+}
+
+:host-context(.panel) .tile__value {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin-top: 0.15rem;
+}
+
+:host-context(.panel) .tile__sub {
+  margin-top: 0.15rem;
+  font-size: 0.64rem;
+}
+
+@keyframes tile-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}

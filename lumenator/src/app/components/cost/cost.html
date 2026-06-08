@@ -1,0 +1,35 @@
+<div class="cost">
+    <!-- hero tiles: the two numbers that matter most -->
+    <div class="cost__heroes">
+        <div class="tile tile--hero">
+            <div class="tile__label">Session cost</div>
+            <div class="tile__value">{{ fmt(totalCost()) }}</div>
+        </div>
+
+        <div class="tile tile--hero tile--save">
+            <div class="tile__label">Saved by caching</div>
+            <div class="tile__value">{{ fmt(cacheSavings()) }}</div>
+            <div class="tile__sub">{{ fmtPct(cacheHitRate()) }} cache hit rate</div>
+        </div>
+    </div>
+
+    <!-- quiet breakdown — hidden in the compact popover -->
+    <div class="cost__breakdown breakdown">
+        <div class="stat">
+            <span class="stat__label">Output</span>
+            <span class="stat__value">{{ fmt(costOutput()) }}</span>
+        </div>
+        <div class="stat">
+            <span class="stat__label">Cache read</span>
+            <span class="stat__value">{{ fmt(costCacheRead()) }}</span>
+        </div>
+        <div class="stat">
+            <span class="stat__label">Fresh input</span>
+            <span class="stat__value">{{ fmt(costInput()) }}</span>
+        </div>
+        <div class="stat">
+            <span class="stat__label">Cache write</span>
+            <span class="stat__value">{{ fmt(costCacheWrite()) }}</span>
+        </div>
+    </div>
+</div>

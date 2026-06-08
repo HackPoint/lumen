@@ -1,0 +1,160 @@
+:host {
+  display: block;
+  width: 100%;
+}
+
+.gauge {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+  color: var(--gauge-color, var(--lumen-ok));
+  animation: gauge-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.gauge__svg {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  overflow: visible;
+}
+
+/* soft status-colored bloom behind the arc */
+.gauge__glow {
+  position: absolute;
+  top: -4%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 80%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--gauge-color) 34%, transparent) 0%,
+    transparent 66%
+  );
+  filter: blur(16px);
+  opacity: 0.55;
+  pointer-events: none;
+  transition: background 0.45s ease;
+}
+
+.gauge__track {
+  fill: none;
+  stroke: var(--lumen-track);
+  stroke-linecap: round;
+}
+
+.gauge__fill {
+  fill: none;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 2.5px color-mix(in srgb, var(--gauge-color) 55%, transparent));
+  transition: stroke-dashoffset 0.65s cubic-bezier(0.4, 0, 0.2, 1), stroke 0.4s ease;
+}
+
+.gauge__marker {
+  fill: var(--lumen-bg);
+  stroke: var(--lumen-text-dim);
+}
+
+/* ── center readout ── */
+.gauge__readout {
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge__num {
+  fill: var(--lumen-text);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -1px;
+}
+
+.gauge__sign {
+  fill: var(--lumen-text-dim);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.gauge__caption {
+  fill: var(--lumen-text-dim);
+  font-family: var(--lumen-font-sans);
+  font-size: 6.5px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.gauge__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  text-align: center;
+}
+
+.gauge__tokens {
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--lumen-text);
+  font-size: 0.9rem;
+
+  span {
+    color: var(--lumen-text-dim);
+  }
+}
+
+.gauge__model {
+  font-family: var(--lumen-font-mono);
+  font-size: 0.66rem;
+  color: var(--lumen-text-dim);
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  letter-spacing: 0.2px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gauge__flag {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+
+  &[data-level="alert"] { color: var(--lumen-alert); }
+  &[data-level="warn"]  { color: var(--lumen-warn); }
+}
+
+.gauge[data-status="alert"] .gauge__num {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* ── compact popover: trim the meta so the gauge stays the hero ── */
+:host-context(.panel) .gauge {
+  gap: 0.4rem;
+}
+:host-context(.panel) .gauge__meta {
+  gap: 0.15rem;
+}
+:host-context(.panel) .gauge__model,
+:host-context(.panel) .gauge__flag {
+  display: none;
+}
+:host-context(.panel) .gauge__tokens {
+  font-size: 0.78rem;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+
+@keyframes gauge-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: none; }
+}

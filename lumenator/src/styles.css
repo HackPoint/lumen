@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────
+   Lumen design tokens — theme everything through these.
+   Dark is primary; light follows prefers-color-scheme.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  /* surfaces */
+  --lumen-bg: #0a0c10;
+  --lumen-bg-secondary: #14181f;
+  --lumen-bg-elevated: #1c222c;
+  --lumen-track: #232b37;
+  --lumen-border: rgba(255, 255, 255, 0.08);
+  --lumen-border-strong: rgba(255, 255, 255, 0.12);
+
+  /* text */
+  --lumen-text: #eef2f7;
+  --lumen-text-dim: #899099;
+
+  /* status language (meaning is fixed by SessionService; only values are styled) */
+  --lumen-ok: #3fb950;     /* ratio < 0.80  */
+  --lumen-warn: #d29922;   /* 0.80 – 0.95   */
+  --lumen-alert: #f85149;  /* >= 0.95       */
+  --lumen-save: #2ee6a6;   /* savings accent */
+
+  /* brand — luminous mint, tied to the healthy-gauge green */
+  --lumen-brand: #2fe3a8;
+  --lumen-brand-2: #9cf7d6;
+
+  /* popover chrome */
+  --lumen-panel-bg: rgba(16, 19, 25, 0.82);
+  --lumen-shadow: 0 16px 48px rgba(0, 0, 0, 0.55), 0 2px 10px rgba(0, 0, 0, 0.4);
+
+  /* shape & type */
+  --lumen-radius: 16px;
+  --lumen-radius-sm: 12px;
+  --lumen-font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    system-ui, sans-serif;
+  --lumen-font-mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace,
+    SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --lumen-bg: #f6f7f9;
+    --lumen-bg-secondary: #ffffff;
+    --lumen-bg-elevated: #ffffff;
+    --lumen-track: #e6e9ee;
+    --lumen-border: rgba(0, 0, 0, 0.08);
+    --lumen-border-strong: rgba(0, 0, 0, 0.12);
+    --lumen-text: #1c2128;
+    --lumen-text-dim: #6e7781;
+    --lumen-ok: #1a7f37;
+    --lumen-warn: #9a6700;
+    --lumen-alert: #cf222e;
+    --lumen-save: #11906c;
+    --lumen-brand: #0fae7d;
+    --lumen-brand-2: #2fe3a8;
+    --lumen-panel-bg: rgba(255, 255, 255, 0.78);
+    --lumen-shadow: 0 16px 48px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+}
+
+/* Keep the body transparent so the transparent panel window shows rounded,
+   shadowed corners. Each route paints its own background. */
+html,
+body {
+  margin: 0;
+  background: transparent;
+  color: var(--lumen-text);
+  font-family: var(--lumen-font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

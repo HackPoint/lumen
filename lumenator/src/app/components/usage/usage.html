@@ -1,0 +1,61 @@
+<section class="usage">
+    <h2 class="usage__title">Usage &amp; Cost</h2>
+
+    <!-- Rolling windows: consumption only — never "% of plan" / "remaining". -->
+    <div class="usage__rolling">
+        <div class="win">
+            <div class="win__head">
+                <span class="win__label">Used in last 5h</span>
+                @if (resetApproxLocal(); as t) {
+                    <span class="win__reset">resets ~{{ t }} <span class="tag">approx</span></span>
+                }
+            </div>
+            <div class="win__cost">{{ fmt(cost5h()) }}</div>
+            <div class="win__meta">
+                <span>{{ fmtTokens(report().rolling5h.totalTokens) }} tokens</span>
+                <span>{{ report().rolling5h.turns }} turns</span>
+            </div>
+        </div>
+
+        <div class="win">
+            <div class="win__head">
+                <span class="win__label">Used in last 7d</span>
+            </div>
+            <div class="win__cost">{{ fmt(cost7d()) }}</div>
+            <div class="win__meta">
+                <span>{{ fmtTokens(tokens7d()) }} tokens</span>
+                <span>{{ turns7d() }} turns</span>
+            </div>
+            <div class="win__split">
+                <span class="pill">Opus · {{ fmtTokens(report().rolling7dOpus.totalTokens) }} · {{ report().rolling7dOpus.turns }}t</span>
+                <span class="pill">Other · {{ fmtTokens(report().rolling7dOther.totalTokens) }} · {{ report().rolling7dOther.turns }}t</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Calendar rollups (local day / ISO week / all-time). -->
+    <div class="usage__rollups">
+        <div class="roll">
+            <span class="roll__label">Today</span>
+            <span class="roll__cost">{{ fmt(costToday()) }}</span>
+            <span class="roll__tok">{{ fmtTokens(report().today.totalTokens) }} tok</span>
+        </div>
+        <div class="roll">
+            <span class="roll__label">This week</span>
+            <span class="roll__cost">{{ fmt(costWeek()) }}</span>
+            <span class="roll__tok">{{ fmtTokens(report().thisWeek.totalTokens) }} tok</span>
+        </div>
+        <div class="roll">
+            <span class="roll__label">All-time</span>
+            <span class="roll__cost">{{ fmt(costAll()) }}</span>
+            <span class="roll__tok">{{ fmtTokens(report().allTime.totalTokens) }} tok</span>
+        </div>
+    </div>
+
+    <!-- Lifetime saved by caching — reported, not caused by Lumen. -->
+    <div class="usage__saved">
+        <div class="saved__label">Saved by caching</div>
+        <div class="saved__value">{{ fmt(savedByCaching()) }}</div>
+        <div class="saved__sub">reported — caching by Claude Code, not Lumen</div>
+    </div>
+</section>

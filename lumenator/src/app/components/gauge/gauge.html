@@ -1,0 +1,59 @@
+<div class="gauge" [attr.data-status]="status()" [style.--gauge-color]="fillColor()">
+    <div class="gauge__glow"></div>
+
+    <svg
+        class="gauge__svg"
+        viewBox="0 0 100 100"
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        [attr.aria-label]="percent() + '% of context used'">
+        <!-- track -->
+        <circle
+            class="gauge__track"
+            [attr.cx]="cx" [attr.cy]="cy" [attr.r]="r"
+            pathLength="100"
+            [attr.stroke-width]="stroke"
+            stroke-dasharray="75 100"
+            [attr.transform]="'rotate(' + startAngle + ' ' + cx + ' ' + cy + ')'"
+        />
+        <!-- animated fill -->
+        <circle
+            class="gauge__fill"
+            [attr.cx]="cx" [attr.cy]="cy" [attr.r]="r"
+            pathLength="100"
+            [attr.stroke]="fillColor()"
+            [attr.stroke-width]="stroke"
+            stroke-dasharray="75 100"
+            [style.stroke-dashoffset]="dashOffset()"
+            [attr.transform]="'rotate(' + startAngle + ' ' + cx + ' ' + cy + ')'"
+        />
+        <!-- compaction marker -->
+        <circle
+            class="gauge__marker"
+            [attr.cx]="markerX()" [attr.cy]="markerY()"
+            r="2.4" stroke-width="1.3"
+        />
+
+        <!-- center readout: number is the hero, "%" baseline-aligned, short caption -->
+        <text
+            class="gauge__readout"
+            x="50" y="47"
+            text-anchor="middle"
+            dominant-baseline="central">
+            <tspan class="gauge__num">{{ percent() }}</tspan><tspan class="gauge__sign" dx="1">%</tspan>
+        </text>
+        <text class="gauge__caption" x="50" y="66" text-anchor="middle">context</text>
+    </svg>
+
+    <div class="gauge__meta">
+        <div class="gauge__tokens">{{ fmtFill() }}<span> / {{ fmtMax() }}</span></div>
+        @if (model()) {
+            <div class="gauge__model">{{ model() }}</div>
+        }
+        @if (status() === 'alert') {
+            <div class="gauge__flag" data-level="alert">compaction imminent</div>
+        } @else if (status() === 'warn') {
+            <div class="gauge__flag" data-level="warn">approaching compaction</div>
+        }
+    </div>
+</div>

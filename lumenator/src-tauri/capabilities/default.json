@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": ["main", "panel"],
+  "permissions": [
+    "core:default",
+    "core:tray:default",
+    "core:menu:default",
+    "core:window:allow-create",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "positioner:default",
+    "notification:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "binaries/lumen-daemon", "sidecar": true }]
+    }
+  ]
+}

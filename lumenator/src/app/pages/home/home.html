@@ -1,0 +1,114 @@
+<main class="home">
+    <div class="home__inner">
+        <header class="home__head">
+            <lumen-firefly class="home__logo" mode="logo" state="full"></lumen-firefly>
+            <p class="brand__tag">Context &amp; cost for Claude Code</p>
+        </header>
+
+        <!-- Tab nav: switch between Context and Optimizer screens -->
+        <nav class="tab-nav" role="tablist" aria-label="Main navigation">
+            <a class="tab-nav__tab"
+               routerLink="/"
+               routerLinkActive="is-active"
+               [routerLinkActiveOptions]="{exact: true}"
+               role="tab">
+               Context
+            </a>
+            <a class="tab-nav__tab"
+               routerLink="/optimizer"
+               routerLinkActive="is-active"
+               role="tab">
+               Optimizer
+            </a>
+        </nav>
+
+        <div
+            class="segmented"
+            role="tablist"
+            aria-label="Context window"
+            [style.--seg-count]="s.windowOptions.length"
+            [style.--seg-index]="activeIndex()">
+            <span class="segmented__thumb" aria-hidden="true"></span>
+            @for (opt of s.windowOptions; track opt.label) {
+                <button
+                    type="button"
+                    role="tab"
+                    class="segmented__opt"
+                    [class.is-active]="s.contextOverride() === opt.value"
+                    [attr.aria-selected]="s.contextOverride() === opt.value"
+                    (click)="s.setWindow(opt.value)">
+                    {{ opt.label }}
+                </button>
+            }
+        </div>
+
+        @if (s.notification(); as note) {
+            <div class="banner" [attr.data-level]="note.level" role="status">
+                <span class="banner__dot"></span>
+                <span class="banner__text">{{ note.text }}</span>
+            </div>
+        }
+
+        <div class="gauge-stage">
+            <gauge [fill]="s.fill()" [model]="s.model()" [max]="s.maxContext()"></gauge>
+        </div>
+
+        <cost [totals]="s.totals()"></cost>
+
+        @if (s.usage(); as u) {
+            <usage [report]="u"></usage>
+        }
+
+        <!-- D4+D5: alert settings (in-memory signals only — no localStorage). -->
+        <section class="limits" aria-label="Alert settings">
+            <h2 class="limits__title">Alert Thresholds</h2>
+
+            <div class="limits__fields">
+                <label class="limits__field">
+                    <span class="limits__label">Daily spend</span>
+                    <div class="limits__input-wrap">
+                        <span class="limits__currency" aria-hidden="true">$</span>
+                        <input
+                            class="limits__input"
+                            type="number"
+                            min="0"
+                            step="1"
+                            aria-label="Daily spend limit in dollars"
+                            [value]="s.dailySpendLimit()"
+                            (change)="onDailyLimit($event)">
+                    </div>
+                </label>
+                <label class="limits__field">
+                    <span class="limits__label">Per session</span>
+                    <div class="limits__input-wrap">
+                        <span class="limits__currency" aria-hidden="true">$</span>
+                        <input
+                            class="limits__input"
+                            type="number"
+                            min="0"
+                            step="1"
+                            aria-label="Per-session spend limit in dollars"
+                            [value]="s.sessionSpendLimit()"
+                            (change)="onSessionLimit($event)">
+                    </div>
+                </label>
+            </div>
+
+            <!-- D5: native notification toggle -->
+            <label class="limits__toggle-row">
+                <span class="toggle__track" [class.is-on]="s.nativeNotify()" aria-hidden="true">
+                    <span class="toggle__knob"></span>
+                </span>
+                <span class="limits__toggle-label">Native notifications</span>
+                <input
+                    class="sr-only"
+                    type="checkbox"
+                    aria-label="Enable native OS notifications"
+                    [checked]="s.nativeNotify()"
+                    (change)="onNativeNotify($event)">
+            </label>
+
+            <p class="limits__hint">0 disables a spend alert. Resets to defaults on restart.</p>
+        </section>
+    </div>
+</main>

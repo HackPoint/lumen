@@ -1,0 +1,60 @@
+<!--
+  Panel layout (320×400, transparent window, card inset 8px):
+  ┌──────────────────────────────────┐
+  │ ● lumen-firefly (logo)  ·  dot  │  header
+  ├──────────────────────────────────┤
+  │                                  │
+  │      [firefly battery, 112px]    │  ─┐ indicator
+  │           63%                    │   │ (firefly + % are one unit;
+  │     125,230 / 200,000            │   │ % color = fill color)
+  │     claude-sonnet-4-6            │  ─┘
+  │                                  │
+  ├──────────────────────────────────┤
+  │  session cost    saved by caching│  cost tiles
+  └──────────────────────────────────┘
+
+  Indicator: firefly battery fills bottom→top. Large % directly below,
+  same status color as the fill. Token/model rows smaller beneath.
+  Glow intensifies with urgency (ok → calm, warn → brighter, alert → hottest).
+-->
+<div class="panel">
+    <header class="panel__head">
+        <lumen-firefly class="panel__logo" mode="logo" state="full"></lumen-firefly>
+        <span class="panel__brand">Lumen</span>
+        <span class="panel__status" [attr.data-status]="s.trayStatus()"></span>
+    </header>
+
+    <!-- Central context indicator: firefly battery + % + precision row -->
+    <div class="panel__hero">
+
+        <!-- Firefly + % grouped as a single living indicator -->
+        <div class="panel__indicator" [attr.title]="fillPct() + '% context used'">
+            <lumen-firefly
+                class="panel__fly"
+                mode="battery"
+                [fill]="s.trayPercent()"
+                [status]="s.trayStatus()">
+            </lumen-firefly>
+            <div class="panel__pct" [attr.data-status]="s.trayStatus()">
+                {{ fillPct() }}<span class="panel__pct-sign">%</span>
+            </div>
+        </div>
+
+        <!-- Precision row: tokens + model + status flag -->
+        <div class="panel__meta">
+            <div class="panel__tokens">
+                {{ fmtFill() }}<span class="panel__sep"> / </span>{{ fmtMax() }}
+            </div>
+            @if (s.model()) {
+                <div class="panel__model">{{ s.model() }}</div>
+            }
+            @if (s.trayStatus() === 'alert') {
+                <div class="panel__flag" data-level="alert">compaction imminent</div>
+            } @else if (s.trayStatus() === 'warn') {
+                <div class="panel__flag" data-level="warn">approaching compaction</div>
+            }
+        </div>
+    </div>
+
+    <cost [totals]="s.totals()"></cost>
+</div>
