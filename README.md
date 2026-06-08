@@ -10,8 +10,7 @@ See the whole truth about your Claude Code tokens — context fill, real cost, a
 
 ---
 
-> **Screenshot needed** — `docs/assets/screenshot-gauge.png`
-> Capture: the Lumen main window showing the ring gauge, cost tiles, and caching savings strip.
+![Lumen panel — context gauge, session cost, and caching savings](docs/assets/screenshot-gauge.png)
 
 ---
 
