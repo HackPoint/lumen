@@ -47,32 +47,36 @@ because there is nothing to install yet — an honest "not yet" beats a fake gui
 
 1. Download **`Lumen_0.1.0_aarch64.dmg`** from the [Releases page](../../releases/latest)
 2. Open the .dmg and drag **Lumen** to your Applications folder
-3. Read the Gatekeeper note below before you try to open it
+3. **⚠️ Before opening — run this once in Terminal:**
 
----
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Lumen.app
+   ```
 
-## ⚠️ Gatekeeper — read this before opening
+   macOS will say **"Lumen is damaged and can't be opened. You should move it to the
+   Trash."** This is **not actual damage.** It is the standard macOS block for apps
+   that are not yet notarized with an Apple Developer ID. The command above removes
+   the quarantine flag and the dialog will not reappear.
 
-macOS will say **"Lumen is damaged and can't be opened."**
+   **One-line alternative** (downloads and runs the helper):
 
-This is expected. The build is unsigned (no Apple Developer ID yet — notarization is on
-the roadmap). It is not malware. Here is how to open it:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/HackPoint/lumen/main/scripts/fix-quarantine.sh | bash
+   ```
 
-### Terminal (most reliable)
+   (Read [the script](scripts/fix-quarantine.sh) before running — it just calls `xattr -dr`.)
 
-```bash
-sudo xattr -dr com.apple.quarantine /Applications/Lumen.app
-```
+   **System Settings alternative:** Try to open Lumen once (blocked). Then go to
+   **System Settings → Privacy & Security**, scroll to the bottom, and click
+   **"Open Anyway"** next to the Lumen entry.
 
-Then double-click Lumen normally.
+   > **Note:** Right-click → Open does **not** bypass quarantine for unsigned apps
+   > on macOS 13+. Use Terminal (`xattr -dr`) or System Settings → Open Anyway.
+   > **Why this happens:** macOS requires an Apple Developer ID + notarization ($99/yr).
+   > Notarization is on the roadmap — until then, the `xattr` step is required once per install.
 
-### System Settings
-
-Try to open Lumen once (it will be blocked). Then open **System Settings → Privacy & Security**,
-scroll to the bottom, and click **"Open Anyway"** next to the Lumen entry.
-
-> Right-click → Open does not bypass quarantine for adhoc-signed apps on macOS 13+.
-> Use one of the two options above.
+4. On first launch, a **Setup** screen appears — click through to register the MCP
+   server and hooks. **Restart Claude Code** after setup.
 
 ---
 
