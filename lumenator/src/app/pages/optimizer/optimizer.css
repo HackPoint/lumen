@@ -1,0 +1,457 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Optimizer / Savings screen
+   Background tinted with --lumen-save to distinguish from the Context screen.
+   ───────────────────────────────────────────────────────────────────────────── */
+.optimizer {
+    min-height: 100vh;
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 3rem 2rem 3.5rem;
+    background:
+        radial-gradient(
+            120% 80% at 50% -10%,
+            color-mix(in srgb, var(--lumen-save) 6%, transparent),
+            transparent 58%
+        ),
+        var(--lumen-bg);
+}
+
+.optimizer__inner {
+    width: 100%;
+    max-width: 440px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.3rem;
+}
+
+/* ── header ── */
+.opt__head {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.opt__logo { font-size: 2.8rem; }
+
+.brand__tag {
+    margin: 0;
+    color: var(--lumen-text-dim);
+    font-size: 0.82rem;
+}
+
+/* ── tab nav (shared pattern with Home) ── */
+.tab-nav {
+    display: flex;
+    gap: 0;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: 999px;
+    padding: 4px;
+    user-select: none;
+}
+
+.tab-nav__tab {
+    padding: 0.38rem 1.1rem;
+    border-radius: 999px;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--lumen-text-dim);
+    text-decoration: none;
+    letter-spacing: 0.2px;
+    transition: color 0.15s ease;
+}
+
+.tab-nav__tab:hover { color: var(--lumen-text); }
+
+.tab-nav__tab.is-active {
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border-strong);
+    color: var(--lumen-text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+/* ── mode banner ── */
+.mode-banner {
+    width: 100%;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.65rem;
+    padding: 0.65rem 0.9rem;
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    background: var(--lumen-bg-secondary);
+    animation: fade-up 0.3s ease both;
+}
+
+.mode-banner[data-channel="cli"] {
+    border-color: color-mix(in srgb, var(--lumen-ok) 28%, transparent);
+    background: color-mix(in srgb, var(--lumen-ok) 7%, var(--lumen-bg-secondary));
+}
+
+.mode-banner[data-channel="vscode"] {
+    border-color: color-mix(in srgb, var(--lumen-warn) 28%, transparent);
+    background: color-mix(in srgb, var(--lumen-warn) 7%, var(--lumen-bg-secondary));
+}
+
+.mode-banner__fly {
+    font-size: 1.85rem;
+    flex-shrink: 0;
+    margin-top: 0.05rem;
+}
+
+.mode-banner__text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.mode-banner__label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.79rem;
+    font-weight: 600;
+    color: var(--lumen-text);
+    letter-spacing: 0.3px;
+}
+
+.mode-banner__desc {
+    font-size: 0.75rem;
+    color: var(--lumen-text-dim);
+    line-height: 1.55;
+}
+
+/* ── hero ── */
+.hero {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 1.5rem 1.2rem 1.2rem;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius);
+    animation: fade-up 0.35s ease both;
+}
+
+.hero__ring {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.hero__num {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 3.8rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -3px;
+    color: var(--hero-color, var(--lumen-ok));
+    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--hero-color, var(--lumen-ok)) 38%, transparent));
+}
+
+.hero__pct-sign {
+    font-size: 2rem;
+    letter-spacing: -1px;
+    vertical-align: super;
+    opacity: 0.75;
+}
+
+.hero__label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.3px;
+    color: var(--lumen-text-dim);
+}
+
+.hero__sub {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--lumen-text-dim);
+    text-align: center;
+    line-height: 1.6;
+    max-width: 30ch;
+}
+
+.hero__sub strong {
+    color: var(--lumen-text);
+    font-weight: 600;
+}
+
+/* empty state */
+.hero--empty {
+    gap: 0.9rem;
+    padding: 2rem 1.5rem;
+    opacity: 0.65;
+}
+
+.hero__empty-fly {
+    font-size: 2.8rem;
+}
+
+.hero__empty-text {
+    margin: 0;
+    font-size: 0.83rem;
+    color: var(--lumen-text-dim);
+    text-align: center;
+    line-height: 1.65;
+    max-width: 27ch;
+}
+
+/* ── two honest cards ── */
+.savings-grid {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: stretch;
+}
+
+.savings-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    padding: 0.9rem 0.9rem;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+}
+
+/* Card A: caused by Lumen — green tint to signal authenticity */
+.savings-card--caused {
+    border-color: color-mix(in srgb, var(--lumen-save) 28%, transparent);
+    background: color-mix(in srgb, var(--lumen-save) 5%, var(--lumen-bg-secondary));
+}
+
+/* Card B: reported by Claude Code — muted, visually secondary */
+.savings-card--reported {
+    border-color: color-mix(in srgb, var(--lumen-text-dim) 18%, transparent);
+    opacity: 0.82;
+}
+
+.savings-card__badge {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.64rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+    margin-bottom: 0.12rem;
+}
+
+.savings-card--caused .savings-card__badge { color: var(--lumen-save); }
+
+.savings-card__num {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--lumen-text);
+    line-height: 1;
+}
+
+.savings-card__unit {
+    font-size: 0.67rem;
+    color: var(--lumen-text-dim);
+}
+
+.savings-card__usd {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.84rem;
+    font-weight: 500;
+    color: var(--lumen-text);
+    margin-top: 0.25rem;
+}
+
+.savings-card__note {
+    font-size: 0.61rem;
+    color: var(--lumen-text-dim);
+    opacity: 0.7;
+    line-height: 1.45;
+    margin-top: 0.12rem;
+}
+
+/* vs divider between the two cards */
+.savings-sep {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0 0.65rem;
+    gap: 0.3rem;
+}
+
+.savings-sep__line {
+    width: 1px;
+    flex: 1;
+    background: var(--lumen-border);
+}
+
+.savings-sep__word {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--lumen-text-dim);
+    opacity: 0.5;
+    white-space: nowrap;
+}
+
+/* ── period stats ── */
+.period-row {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+}
+
+.period-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.65rem 0.8rem;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+}
+
+.period-stat__label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    color: var(--lumen-text-dim);
+}
+
+.period-stat__val {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--lumen-text);
+    line-height: 1;
+}
+
+.period-stat__unit {
+    font-size: 0.64rem;
+    color: var(--lumen-text-dim);
+}
+
+/* ── breakdowns ── */
+.breakdown {
+    width: 100%;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    padding: 0.75rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.breakdown__title {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.breakdown__rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.breakdown__row {
+    display: grid;
+    grid-template-columns: 8rem 1fr auto;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.breakdown__name {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.75rem;
+    color: var(--lumen-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.breakdown__bar-wrap {
+    height: 4px;
+    background: var(--lumen-track);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.breakdown__bar {
+    height: 100%;
+    background: var(--lumen-save);
+    border-radius: 2px;
+    min-width: 2px;
+    transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.breakdown__count {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.67rem;
+    color: var(--lumen-text-dim);
+    white-space: nowrap;
+}
+
+/* ── missed reads (CLI only, not savings) ── */
+.missed {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    padding: 0.65rem 0.85rem;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    opacity: 0.72;
+}
+
+.missed__label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    color: var(--lumen-text-dim);
+}
+
+.missed__val {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.84rem;
+    color: var(--lumen-text);
+}
+
+.missed__note {
+    font-size: 0.64rem;
+    color: var(--lumen-text-dim);
+    opacity: 0.72;
+    line-height: 1.45;
+    margin-top: 0.08rem;
+}
+
+@keyframes fade-up {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}

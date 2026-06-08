@@ -1,0 +1,7 @@
+/* The shell paints nothing of its own — each routed page (Home / Panel) brings
+   its own background. Keeping the host transparent lets the "panel" window's
+   rounded, translucent popover show through. */
+:host {
+    display: block;
+    min-height: 100vh;
+}
