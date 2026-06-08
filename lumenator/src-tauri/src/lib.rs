@@ -1,3 +1,6 @@
+#![allow(clippy::single_match)] // match with one arm used intentionally for clarity
+#![allow(clippy::collapsible_match)] // guard conditions in match arms kept explicit for readability
+#![allow(clippy::type_complexity)] // complex sqlx query types are self-documenting inline
 mod setup;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -75,7 +78,7 @@ fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> 
     let size = ICON_SIZE;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let col = status_rgb(status);
-    let ss  = 3u32; // 3×3 supersampling for smooth edges
+    let ss = 3u32; // 3×3 supersampling for smooth edges
 
     let cx = 22.0_f32;
     let cy = 22.0_f32;
@@ -83,10 +86,10 @@ fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> 
     // Geometry — all in buffer pixels, 44×44 canvas (2× retina for 22pt slot).
     // Core: filled solid dot at center.
     // Ring 1 / Ring 2: concentric annuli radiating outward, fading in opacity.
-    let core_r    =  3.5_f32;
-    let ring1_in  =  7.5_f32;
+    let core_r = 3.5_f32;
+    let ring1_in = 7.5_f32;
     let ring1_out = 10.5_f32;
-    let ring2_in  = 14.0_f32;
+    let ring2_in = 14.0_f32;
     let ring2_out = 17.0_f32;
 
     // Core is brightened (50% white blend) so it reads on both light + dark menu bars.
@@ -106,19 +109,18 @@ fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> 
                     let fx = x as f32 + (sx as f32 + 0.5) / ss as f32;
                     let fy = y as f32 + (sy as f32 + 0.5) / ss as f32;
 
-                    let (sr, sg, sb, sa): (u8, u8, u8, f32) =
-                        if in_circle(fx, fy, cx, cy, core_r) {
-                            // Bright core: 50% white blend for legibility
-                            (core_rv, core_gv, core_bv, 1.0)
-                        } else if in_annulus(fx, fy, cx, cy, ring1_in, ring1_out) {
-                            // Inner ring: full status color, near-opaque
-                            (col.0, col.1, col.2, 0.85)
-                        } else if in_annulus(fx, fy, cx, cy, ring2_in, ring2_out) {
-                            // Outer ring: fades outward — signals radiance without dominating
-                            (col.0, col.1, col.2, 0.50)
-                        } else {
-                            (0, 0, 0, 0.0)
-                        };
+                    let (sr, sg, sb, sa): (u8, u8, u8, f32) = if in_circle(fx, fy, cx, cy, core_r) {
+                        // Bright core: 50% white blend for legibility
+                        (core_rv, core_gv, core_bv, 1.0)
+                    } else if in_annulus(fx, fy, cx, cy, ring1_in, ring1_out) {
+                        // Inner ring: full status color, near-opaque
+                        (col.0, col.1, col.2, 0.85)
+                    } else if in_annulus(fx, fy, cx, cy, ring2_in, ring2_out) {
+                        // Outer ring: fades outward — signals radiance without dominating
+                        (col.0, col.1, col.2, 0.50)
+                    } else {
+                        (0, 0, 0, 0.0)
+                    };
 
                     r_acc += sr as f32 * sa;
                     g_acc += sg as f32 * sa;
@@ -129,7 +131,7 @@ fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> 
 
             if a_acc > 0.0 {
                 let idx = ((y * size + x) * 4) as usize;
-                rgba[idx]     = (r_acc / a_acc) as u8;
+                rgba[idx] = (r_acc / a_acc) as u8;
                 rgba[idx + 1] = (g_acc / a_acc) as u8;
                 rgba[idx + 2] = (b_acc / a_acc) as u8;
                 rgba[idx + 3] = ((a_acc / (ss * ss) as f32) * 255.0).round() as u8;
@@ -152,21 +154,19 @@ pub fn run() {
         //  - panel: hide on focus-loss (click-elsewhere dismisses the popover)
         //  - main:  intercept close-requested → hide instead of destroy, so
         //           "Open Lumen" can always re-show it via get_webview_window.
-        .on_window_event(|window, event| {
-            match event {
-                WindowEvent::Focused(false) => {
-                    if window.label() == "panel" {
-                        let _ = window.hide();
-                    }
+        .on_window_event(|window, event| match event {
+            WindowEvent::Focused(false) => {
+                if window.label() == "panel" {
+                    let _ = window.hide();
                 }
-                WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == "main" {
-                        api.prevent_close();
-                        let _ = window.hide();
-                    }
-                }
-                _ => {}
             }
+            WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+            _ => {}
         })
         .setup(|app| {
             // macOS: run as a menu-bar accessory (no Dock icon, tray shows reliably)
@@ -210,10 +210,8 @@ pub fn run() {
 
             // Write pointer file so lumen-mcp can auto-discover the same DB path.
             if let Ok(home) = std::env::var("HOME") {
-                let _ = std::fs::write(
-                    std::path::Path::new(&home).join(".lumen_db_path"),
-                    &db_path,
-                );
+                let _ =
+                    std::fs::write(std::path::Path::new(&home).join(".lumen_db_path"), &db_path);
             }
 
             // spawn the bundled daemon as a sidecar, passing the DB path via env
@@ -476,7 +474,14 @@ async fn get_usage() -> Result<UsageReport, String> {
     let mut opus = TokenAgg::default();
     let mut other = TokenAgg::default();
     for (class, turns, input, output, cache_read, cache_write, total_tokens) in rows {
-        let agg = TokenAgg { turns, input, output, cache_read, cache_write, total_tokens };
+        let agg = TokenAgg {
+            turns,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            total_tokens,
+        };
         if class == "opus" {
             opus = agg;
         } else {
@@ -486,7 +491,11 @@ async fn get_usage() -> Result<UsageReport, String> {
 
     // (c) Calendar rollups in LOCAL time. Week starts MONDAY (ISO-8601):
     //     strftime('%w') is 0=Sun..6=Sat, so (%w + 6) % 7 = days since Monday.
-    let today = fetch_agg(&pool, "WHERE date(ts,'localtime') = date('now','localtime')").await?;
+    let today = fetch_agg(
+        &pool,
+        "WHERE date(ts,'localtime') = date('now','localtime')",
+    )
+    .await?;
     let this_week = fetch_agg(
         &pool,
         "WHERE date(ts,'localtime') >= \
@@ -714,12 +723,14 @@ async fn get_optimizer_stats() -> Result<OptimizerReport, String> {
 
     let by_channel = channel_rows
         .into_iter()
-        .map(|(channel, calls, saved_tokens, full_tokens)| ChannelBreakdown {
-            channel,
-            calls,
-            saved_tokens,
-            full_tokens,
-        })
+        .map(
+            |(channel, calls, saved_tokens, full_tokens)| ChannelBreakdown {
+                channel,
+                calls,
+                saved_tokens,
+                full_tokens,
+            },
+        )
         .collect();
 
     // ── Per-tool breakdown ────────────────────────────────────────────────────
@@ -746,12 +757,11 @@ async fn get_optimizer_stats() -> Result<OptimizerReport, String> {
         .collect();
 
     // ── Current channel (most recent event) ──────────────────────────────────
-    let current_channel: (Option<String>,) = sqlx::query_as(
-        "SELECT channel FROM read_events ORDER BY ts DESC LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap_or((None,));
+    let current_channel: (Option<String>,) =
+        sqlx::query_as("SELECT channel FROM read_events ORDER BY ts DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or((None,));
 
     // ── CLI missed reads ──────────────────────────────────────────────────────
     // builtin_read rows written by the CLI PostToolUse hook when the model used

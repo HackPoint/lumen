@@ -62,3 +62,27 @@ jobs:
       - name: pnpm build
         working-directory: lumenator
         run: pnpm build
+
+  # ── Linux job: portable Rust-core tests (no macOS SDK required) ────────────
+  test-linux:
+    name: Test (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config build-essential
+
+      - name: cargo test (lumen-core)
+        run: cargo test -p lumen-core
+
+      - name: cargo test (lumen-daemon)
+        run: cargo test -p lumen-daemon

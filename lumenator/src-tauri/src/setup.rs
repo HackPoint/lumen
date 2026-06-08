@@ -1,3 +1,4 @@
+#![allow(clippy::unnecessary_map_or)] // map_or style kept for clarity in async context
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::AppHandle;
@@ -14,24 +15,44 @@ pub enum StepStatus {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct SetupStep {
-    pub id:     String,
-    pub label:  String,
+    pub id: String,
+    pub label: String,
     pub status: StepStatus,
     pub detail: String,
 }
 
 impl SetupStep {
     fn ok(id: &str, label: &str, detail: &str) -> Self {
-        Self { id: id.into(), label: label.into(), status: StepStatus::Ok, detail: detail.into() }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            status: StepStatus::Ok,
+            detail: detail.into(),
+        }
     }
     fn warn(id: &str, label: &str, detail: &str) -> Self {
-        Self { id: id.into(), label: label.into(), status: StepStatus::Warn, detail: detail.into() }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            status: StepStatus::Warn,
+            detail: detail.into(),
+        }
     }
     fn err(id: &str, label: &str, detail: &str) -> Self {
-        Self { id: id.into(), label: label.into(), status: StepStatus::Error, detail: detail.into() }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            status: StepStatus::Error,
+            detail: detail.into(),
+        }
     }
     fn skip(id: &str, label: &str, detail: &str) -> Self {
-        Self { id: id.into(), label: label.into(), status: StepStatus::Skip, detail: detail.into() }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            status: StepStatus::Skip,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -107,7 +128,7 @@ fn find_binary(name: &str) -> Option<PathBuf> {
         }
         match probe.parent() {
             Some(p) => probe = p.to_path_buf(),
-            None    => break,
+            None => break,
         }
     }
     None
@@ -278,11 +299,15 @@ fn which_claude() -> bool {
 fn step_install_scripts(db: &str, tok: &str) -> SetupStep {
     let dir = lumen_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return SetupStep::err("scripts", "Install hook scripts", &format!("mkdir ~/.claude/lumen: {e}"));
+        return SetupStep::err(
+            "scripts",
+            "Install hook scripts",
+            &format!("mkdir ~/.claude/lumen: {e}"),
+        );
     }
 
     // Backup existing scripts to .bak if they're ours and paths changed
-    let meter_path   = dir.join("lumen_meter.sh");
+    let meter_path = dir.join("lumen_meter.sh");
     let intercept_path = dir.join("lumen_read_intercept.sh");
 
     let meter_content = METER_TEMPLATE
@@ -290,10 +315,18 @@ fn step_install_scripts(db: &str, tok: &str) -> SetupStep {
         .replace("__LUMEN_TOK__", tok);
 
     if let Err(e) = std::fs::write(&meter_path, &meter_content) {
-        return SetupStep::err("scripts", "Install hook scripts", &format!("write lumen_meter.sh: {e}"));
+        return SetupStep::err(
+            "scripts",
+            "Install hook scripts",
+            &format!("write lumen_meter.sh: {e}"),
+        );
     }
     if let Err(e) = std::fs::write(&intercept_path, INTERCEPT_SCRIPT) {
-        return SetupStep::err("scripts", "Install hook scripts", &format!("write lumen_read_intercept.sh: {e}"));
+        return SetupStep::err(
+            "scripts",
+            "Install hook scripts",
+            &format!("write lumen_read_intercept.sh: {e}"),
+        );
     }
 
     // chmod +x
@@ -304,7 +337,11 @@ fn step_install_scripts(db: &str, tok: &str) -> SetupStep {
         let _ = std::fs::set_permissions(&intercept_path, std::fs::Permissions::from_mode(0o755));
     }
 
-    SetupStep::ok("scripts", "Install hook scripts", "Written to ~/.claude/lumen/")
+    SetupStep::ok(
+        "scripts",
+        "Install hook scripts",
+        "Written to ~/.claude/lumen/",
+    )
 }
 
 fn step_register_mcp(mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
@@ -312,9 +349,12 @@ fn step_register_mcp(mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
 
     // Parse or start fresh
     let mut root: serde_json::Value = if path.exists() {
-        match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+        {
             Some(v) => v,
-            None    => serde_json::json!({}),
+            None => serde_json::json!({}),
         }
     } else {
         serde_json::json!({})
@@ -345,17 +385,28 @@ fn step_register_mcp(mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
 
     match serde_json::to_string_pretty(&root) {
         Ok(s) => match std::fs::write(&path, s) {
-            Ok(_)  => SetupStep::ok("mcp", "Register MCP server", "lumen added to ~/.claude.json"),
-            Err(e) => SetupStep::err("mcp", "Register MCP server", &format!("write ~/.claude.json: {e}")),
+            Ok(_) => SetupStep::ok(
+                "mcp",
+                "Register MCP server",
+                "lumen added to ~/.claude.json",
+            ),
+            Err(e) => SetupStep::err(
+                "mcp",
+                "Register MCP server",
+                &format!("write ~/.claude.json: {e}"),
+            ),
         },
         Err(e) => SetupStep::err("mcp", "Register MCP server", &format!("serialize: {e}")),
     }
 }
 
 fn step_install_hooks() -> SetupStep {
-    let dir       = lumen_dir();
-    let meter     = dir.join("lumen_meter.sh").to_string_lossy().to_string();
-    let intercept = dir.join("lumen_read_intercept.sh").to_string_lossy().to_string();
+    let dir = lumen_dir();
+    let meter = dir.join("lumen_meter.sh").to_string_lossy().to_string();
+    let intercept = dir
+        .join("lumen_read_intercept.sh")
+        .to_string_lossy()
+        .to_string();
 
     let path = global_settings_path();
 
@@ -368,9 +419,12 @@ fn step_install_hooks() -> SetupStep {
 
     // Parse or start fresh
     let mut root: serde_json::Value = if path.exists() {
-        match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+        {
             Some(v) => v,
-            None    => serde_json::json!({}),
+            None => serde_json::json!({}),
         }
     } else {
         serde_json::json!({})
@@ -392,21 +446,30 @@ fn step_install_hooks() -> SetupStep {
     }
 
     // PreToolUse: Read intercept
-    merge_hook_entry(
-        &mut root["hooks"]["PreToolUse"],
-        "Read",
-        &intercept,
-    );
+    merge_hook_entry(&mut root["hooks"]["PreToolUse"], "Read", &intercept);
 
     // PostToolUse: meter for Read + three lumen tools
-    for matcher in &["Read", "mcp__lumen__smart_read", "mcp__lumen__recall_file", "mcp__lumen__compress_logs"] {
+    for matcher in &[
+        "Read",
+        "mcp__lumen__smart_read",
+        "mcp__lumen__recall_file",
+        "mcp__lumen__compress_logs",
+    ] {
         merge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher, &meter);
     }
 
     match serde_json::to_string_pretty(&root) {
         Ok(s) => match std::fs::write(&path, s) {
-            Ok(_)  => SetupStep::ok("hooks", "Install hooks", "Hooks merged into ~/.claude/settings.json"),
-            Err(e) => SetupStep::err("hooks", "Install hooks", &format!("write settings.json: {e}")),
+            Ok(_) => SetupStep::ok(
+                "hooks",
+                "Install hooks",
+                "Hooks merged into ~/.claude/settings.json",
+            ),
+            Err(e) => SetupStep::err(
+                "hooks",
+                "Install hooks",
+                &format!("write settings.json: {e}"),
+            ),
         },
         Err(e) => SetupStep::err("hooks", "Install hooks", &format!("serialize: {e}")),
     }
@@ -421,7 +484,9 @@ fn merge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str, cmd: &str) {
     let arr = arr_val.as_array_mut().unwrap();
 
     // Find existing entry for this matcher
-    let pos = arr.iter().position(|e| e["matcher"].as_str() == Some(matcher));
+    let pos = arr
+        .iter()
+        .position(|e| e["matcher"].as_str() == Some(matcher));
 
     let hook_obj = serde_json::json!({
         "type":    "command",
@@ -436,7 +501,9 @@ fn merge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str, cmd: &str) {
         // Update in-place — replace the lumen hook command, preserve others
         if let Some(hooks) = arr[i]["hooks"].as_array_mut() {
             let lumen_pos = hooks.iter().position(|h| {
-                h["command"].as_str().map_or(false, |c| c.contains("lumen_"))
+                h["command"]
+                    .as_str()
+                    .map_or(false, |c| c.contains("lumen_"))
             });
             if let Some(j) = lumen_pos {
                 hooks[j]["command"] = serde_json::Value::String(cmd.to_string());
@@ -461,8 +528,8 @@ fn run_setup() -> Vec<SetupStep> {
     if fatal {
         for &(id, label) in &[
             ("scripts", "Install hook scripts"),
-            ("mcp",     "Register MCP server"),
-            ("hooks",   "Install hooks"),
+            ("mcp", "Register MCP server"),
+            ("hooks", "Install hooks"),
         ] {
             steps.push(SetupStep::skip(id, label, "Skipped: Claude Code not found"));
         }
@@ -506,7 +573,9 @@ fn run_setup() -> Vec<SetupStep> {
     }
 
     // 5. Install hooks (needs scripts installed first)
-    let scripts_ok = steps.iter().any(|s| s.id == "scripts" && s.status == StepStatus::Ok);
+    let scripts_ok = steps
+        .iter()
+        .any(|s| s.id == "scripts" && s.status == StepStatus::Ok);
     if scripts_ok {
         steps.push(step_install_hooks());
     } else {
@@ -518,9 +587,9 @@ fn run_setup() -> Vec<SetupStep> {
     }
 
     // 6. Write marker on full success
-    let all_good = steps.iter().all(|s| {
-        s.status == StepStatus::Ok || s.status == StepStatus::Warn
-    });
+    let all_good = steps
+        .iter()
+        .all(|s| s.status == StepStatus::Ok || s.status == StepStatus::Warn);
     if all_good {
         let _ = std::fs::create_dir_all(lumen_dir());
         let _ = std::fs::write(marker_path(), "");
@@ -548,14 +617,30 @@ fn run_uninstall() -> Vec<SetupStep> {
                     .ok()
                     .and_then(|s| std::fs::write(&claude_json, s).ok())
                 {
-                    Some(_) => steps.push(SetupStep::ok("mcp",  "Remove MCP entry",  "Removed from ~/.claude.json")),
-                    None    => steps.push(SetupStep::err("mcp", "Remove MCP entry",  "Could not write ~/.claude.json")),
+                    Some(_) => steps.push(SetupStep::ok(
+                        "mcp",
+                        "Remove MCP entry",
+                        "Removed from ~/.claude.json",
+                    )),
+                    None => steps.push(SetupStep::err(
+                        "mcp",
+                        "Remove MCP entry",
+                        "Could not write ~/.claude.json",
+                    )),
                 }
             }
-            _ => steps.push(SetupStep::skip("mcp", "Remove MCP entry", "~/.claude.json not found or not valid JSON")),
+            _ => steps.push(SetupStep::skip(
+                "mcp",
+                "Remove MCP entry",
+                "~/.claude.json not found or not valid JSON",
+            )),
         }
     } else {
-        steps.push(SetupStep::skip("mcp", "Remove MCP entry", "~/.claude.json not found"));
+        steps.push(SetupStep::skip(
+            "mcp",
+            "Remove MCP entry",
+            "~/.claude.json not found",
+        ));
     }
 
     // Remove lumen hooks from ~/.claude/settings.json
@@ -572,25 +657,53 @@ fn run_uninstall() -> Vec<SetupStep> {
                     .ok()
                     .and_then(|s| std::fs::write(&settings, s).ok())
                 {
-                    Some(_) => steps.push(SetupStep::ok("hooks",  "Remove hooks",  "Removed from ~/.claude/settings.json")),
-                    None    => steps.push(SetupStep::err("hooks", "Remove hooks",  "Could not write ~/.claude/settings.json")),
+                    Some(_) => steps.push(SetupStep::ok(
+                        "hooks",
+                        "Remove hooks",
+                        "Removed from ~/.claude/settings.json",
+                    )),
+                    None => steps.push(SetupStep::err(
+                        "hooks",
+                        "Remove hooks",
+                        "Could not write ~/.claude/settings.json",
+                    )),
                 }
             }
-            _ => steps.push(SetupStep::skip("hooks", "Remove hooks", "settings.json not found")),
+            _ => steps.push(SetupStep::skip(
+                "hooks",
+                "Remove hooks",
+                "settings.json not found",
+            )),
         }
     } else {
-        steps.push(SetupStep::skip("hooks", "Remove hooks", "~/.claude/settings.json not found"));
+        steps.push(SetupStep::skip(
+            "hooks",
+            "Remove hooks",
+            "~/.claude/settings.json not found",
+        ));
     }
 
     // Delete ~/.claude/lumen/
     let dir = lumen_dir();
     if dir.exists() {
         match std::fs::remove_dir_all(&dir) {
-            Ok(_)  => steps.push(SetupStep::ok("scripts",  "Remove scripts",  "Deleted ~/.claude/lumen/")),
-            Err(e) => steps.push(SetupStep::err("scripts", "Remove scripts", &format!("rm ~/.claude/lumen: {e}"))),
+            Ok(_) => steps.push(SetupStep::ok(
+                "scripts",
+                "Remove scripts",
+                "Deleted ~/.claude/lumen/",
+            )),
+            Err(e) => steps.push(SetupStep::err(
+                "scripts",
+                "Remove scripts",
+                &format!("rm ~/.claude/lumen: {e}"),
+            )),
         }
     } else {
-        steps.push(SetupStep::skip("scripts", "Remove scripts", "~/.claude/lumen/ not found"));
+        steps.push(SetupStep::skip(
+            "scripts",
+            "Remove scripts",
+            "~/.claude/lumen/ not found",
+        ));
     }
 
     steps.push(step_remove_cli_symlink());
@@ -635,7 +748,11 @@ fn step_remove_cli_symlink() -> SetupStep {
     let target = cli_symlink_path();
     if target.exists() || target.symlink_metadata().is_ok() {
         match std::fs::remove_file(&target) {
-            Ok(_) => SetupStep::ok("cli", "Remove CLI", &format!("Removed {}", target.display())),
+            Ok(_) => SetupStep::ok(
+                "cli",
+                "Remove CLI",
+                &format!("Removed {}", target.display()),
+            ),
             Err(e) => SetupStep::err(
                 "cli",
                 "Remove CLI",
@@ -664,7 +781,9 @@ fn remove_lumen_hooks(root: &mut serde_json::Value) {
                 let hooks = entry["hooks"].as_array();
                 let has_lumen = hooks.map_or(false, |hs| {
                     hs.iter().any(|h| {
-                        h["command"].as_str().map_or(false, |c| c.contains("lumen_"))
+                        h["command"]
+                            .as_str()
+                            .map_or(false, |c| c.contains("lumen_"))
                     })
                 });
                 !has_lumen

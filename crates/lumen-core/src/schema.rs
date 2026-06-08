@@ -1,8 +1,7 @@
 /// Additive migrations run after DDL to upgrade existing DBs.
 /// Each statement is idempotent (errors for "duplicate column" are swallowed by the caller).
-pub const MIGRATIONS: &[&str] = &[
-    "ALTER TABLE read_events ADD COLUMN channel TEXT NOT NULL DEFAULT 'unknown'",
-];
+pub const MIGRATIONS: &[&str] =
+    &["ALTER TABLE read_events ADD COLUMN channel TEXT NOT NULL DEFAULT 'unknown'"];
 
 pub const DDL: &str = r#"
 PRAGMA journal_mode=WAL;

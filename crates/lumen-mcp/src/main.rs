@@ -5,7 +5,7 @@
 use lumen_core::{
     compress::compress_logs,
     meter::{detect_channel, insert_read_event},
-    structure::{detect_lang, outline, CodeItem},
+    structure::{CodeItem, detect_lang, outline},
     tokenizer::count_tokens,
 };
 use serde::{Deserialize, Serialize};
@@ -47,8 +47,12 @@ struct RpcError {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn send(id: Value, result: Value) {
-    let out = serde_json::to_string(&Response { jsonrpc: "2.0", id, result })
-        .expect("serialization never fails");
+    let out = serde_json::to_string(&Response {
+        jsonrpc: "2.0",
+        id,
+        result,
+    })
+    .expect("serialization never fails");
     println!("{out}");
     io::stdout().flush().ok();
 }
@@ -57,7 +61,10 @@ fn send_err(id: Value, code: i32, msg: impl Into<String>) {
     let out = serde_json::to_string(&ErrorResponse {
         jsonrpc: "2.0",
         id,
-        error: RpcError { code, message: msg.into() },
+        error: RpcError {
+            code,
+            message: msg.into(),
+        },
     })
     .expect("serialization never fails");
     println!("{out}");
@@ -77,6 +84,7 @@ fn ok_result(text: String, full_tokens: usize, returned_tokens: usize) -> Value 
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Send the JSON-RPC response AND write a metering row to the DB.
 /// Called instead of `send(id, ok_result(...))` for every lumen tool response.
 /// stdout is written first so the response is never delayed by a DB write.
@@ -120,129 +128,138 @@ fn safe_read(path: &str) -> Result<String, String> {
 // ── MCP handlers ─────────────────────────────────────────────────────────────
 
 fn handle_initialize(id: Value) {
-    send(id, json!({
-        "protocolVersion": "2024-11-05",
-        "capabilities": { "tools": {} },
-        "serverInfo": { "name": "lumen", "version": "0.2.0" }
-    }));
+    send(
+        id,
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "lumen", "version": "0.2.0" }
+        }),
+    );
 }
 
 fn handle_tools_list(id: Value) {
-    send(id, json!({ "tools": [
-        {
-            "name": "lumen_ping",
-            "description": "Ping the Lumen MCP server to verify connectivity. Returns 'lumen-mcp alive: <echo>'.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "echo": { "type": "string", "description": "Optional string to echo back." }
-                }
-            }
-        },
-        {
-            "name": "smart_read",
-            "description": "Read a source-code file structure-first. Returns a compact outline — \
-functions, classes, structs, interfaces, and imports with their exact line ranges — WITHOUT \
-reading all the bodies. Use this INSTEAD OF the built-in Read tool whenever you need to \
-understand what a source file contains, especially for files ≥100 lines. Follow with \
-recall_file to fetch only the specific items you need. Always reports full_tokens vs \
-returned_tokens so the savings are verifiable. Mode 'full' is available as a fallback when \
-the entire file body is genuinely needed.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or relative path to the source file to read."
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["outline", "full"],
-                        "default": "outline",
-                        "description": "'outline' (default): return structural outline with line ranges only, saving tokens. 'full': return complete file content."
+    send(
+        id,
+        json!({ "tools": [
+            {
+                "name": "lumen_ping",
+                "description": "Ping the Lumen MCP server to verify connectivity. Returns 'lumen-mcp alive: <echo>'.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "echo": { "type": "string", "description": "Optional string to echo back." }
                     }
                 }
             },
-            "annotations": {
-                "readOnlyHint": true,
-                "openWorldHint": false
-            }
-        },
-        {
-            "name": "recall_file",
-            "description": "Fetch specific named items (functions, classes, structs, methods) or \
-an explicit line range from a source file WITHOUT reading the whole file. Resolves names via \
-tree-sitter AST — exact match on the function/class name you saw in smart_read's outline. \
-Use after smart_read once you know which items you need. If names don't match, falls back \
-to the outline so you can correct the query. Always reports full_tokens vs returned_tokens.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or relative path to the source file."
-                    },
-                    "names": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Names of items to retrieve (e.g. [\"parse_args\", \"Config\"]). Matched case-insensitively against the outline."
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "First line of an explicit range to retrieve (1-based, inclusive). Use with end_line."
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Last line of an explicit range to retrieve (1-based, inclusive). Use with start_line."
+            {
+                "name": "smart_read",
+                "description": "Read a source-code file structure-first. Returns a compact outline — \
+        functions, classes, structs, interfaces, and imports with their exact line ranges — WITHOUT \
+        reading all the bodies. Use this INSTEAD OF the built-in Read tool whenever you need to \
+        understand what a source file contains, especially for files ≥100 lines. Follow with \
+        recall_file to fetch only the specific items you need. Always reports full_tokens vs \
+        returned_tokens so the savings are verifiable. Mode 'full' is available as a fallback when \
+        the entire file body is genuinely needed.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute or relative path to the source file to read."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["outline", "full"],
+                            "default": "outline",
+                            "description": "'outline' (default): return structural outline with line ranges only, saving tokens. 'full': return complete file content."
+                        }
                     }
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "openWorldHint": false
                 }
             },
-            "annotations": {
-                "readOnlyHint": true,
-                "openWorldHint": false
-            }
-        },
-        {
-            "name": "compress_logs",
-            "description": "Deterministically compact a log file or text dump — collapses \
-consecutive identical lines, stack trace runs (Java/Node/Python/Rust), and blank-line noise \
-into annotated short form with exact counts. Not LLM summarization: fully reversible, no \
-information loss, just compaction. Use BEFORE analyzing error logs, crash dumps, verbose \
-build output, or any large repetitive text to reduce what you need to read. Accepts a file \
-path OR inline text. Reports original vs compressed tokens.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to a log file to read and compress."
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Inline text to compress (use instead of path)."
+            {
+                "name": "recall_file",
+                "description": "Fetch specific named items (functions, classes, structs, methods) or \
+        an explicit line range from a source file WITHOUT reading the whole file. Resolves names via \
+        tree-sitter AST — exact match on the function/class name you saw in smart_read's outline. \
+        Use after smart_read once you know which items you need. If names don't match, falls back \
+        to the outline so you can correct the query. Always reports full_tokens vs returned_tokens.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute or relative path to the source file."
+                        },
+                        "names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Names of items to retrieve (e.g. [\"parse_args\", \"Config\"]). Matched case-insensitively against the outline."
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "First line of an explicit range to retrieve (1-based, inclusive). Use with end_line."
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Last line of an explicit range to retrieve (1-based, inclusive). Use with start_line."
+                        }
                     }
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "openWorldHint": false
                 }
             },
-            "annotations": {
-                "readOnlyHint": true,
-                "openWorldHint": false
+            {
+                "name": "compress_logs",
+                "description": "Deterministically compact a log file or text dump — collapses \
+        consecutive identical lines, stack trace runs (Java/Node/Python/Rust), and blank-line noise \
+        into annotated short form with exact counts. Not LLM summarization: fully reversible, no \
+        information loss, just compaction. Use BEFORE analyzing error logs, crash dumps, verbose \
+        build output, or any large repetitive text to reduce what you need to read. Accepts a file \
+        path OR inline text. Reports original vs compressed tokens.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to a log file to read and compress."
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Inline text to compress (use instead of path)."
+                        }
+                    }
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "openWorldHint": false
+                }
             }
-        }
-    ]}));
+        ]}),
+    );
 }
 
 // ── tool: lumen_ping ─────────────────────────────────────────────────────────
 
 fn tool_ping(id: Value, args: &Value) {
     let echo = args.get("echo").and_then(Value::as_str).unwrap_or("pong");
-    send(id, json!({
-        "content": [{ "type": "text", "text": format!("lumen-mcp alive: {echo}") }],
-        "isError": false
-    }));
+    send(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": format!("lumen-mcp alive: {echo}") }],
+            "isError": false
+        }),
+    );
 }
 
 // ── tool: smart_read ─────────────────────────────────────────────────────────
@@ -260,7 +277,10 @@ fn tool_smart_read(id: Value, args: &Value) {
 
     let full_tokens = count_tokens(&src);
     let line_count = src.lines().count();
-    let mode = args.get("mode").and_then(Value::as_str).unwrap_or("outline");
+    let mode = args
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("outline");
 
     if mode == "full" {
         let text = format!(
@@ -268,8 +288,16 @@ fn tool_smart_read(id: Value, args: &Value) {
             src
         );
         let returned_tokens = count_tokens(&text);
-        return send_and_meter(id, text, full_tokens, returned_tokens,
-            "mcp__lumen__smart_read", "smart_read", path, Some(line_count as i64));
+        return send_and_meter(
+            id,
+            text,
+            full_tokens,
+            returned_tokens,
+            "mcp__lumen__smart_read",
+            "smart_read",
+            path,
+            Some(line_count as i64),
+        );
     }
 
     // outline mode
@@ -278,8 +306,16 @@ fn tool_smart_read(id: Value, args: &Value) {
     let text = format_outline(path, line_count, full_tokens, &items);
     let returned_tokens = count_tokens(&text);
 
-    send_and_meter(id, text, full_tokens, returned_tokens,
-        "mcp__lumen__smart_read", "smart_read", path, Some(line_count as i64));
+    send_and_meter(
+        id,
+        text,
+        full_tokens,
+        returned_tokens,
+        "mcp__lumen__smart_read",
+        "smart_read",
+        path,
+        Some(line_count as i64),
+    );
 }
 
 fn format_outline(path: &str, line_count: usize, full_tokens: usize, items: &[CodeItem]) -> String {
@@ -327,18 +363,21 @@ fn tool_recall_file(id: Value, args: &Value) {
     let src_lines: Vec<&str> = src.lines().collect();
     let line_count = src_lines.len();
 
-    let names: Option<Vec<String>> = args
-        .get("names")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(|s| s.to_lowercase())
-                .collect()
-        });
+    let names: Option<Vec<String>> = args.get("names").and_then(Value::as_array).map(|arr| {
+        arr.iter()
+            .filter_map(Value::as_str)
+            .map(|s| s.to_lowercase())
+            .collect()
+    });
 
-    let start_line = args.get("start_line").and_then(Value::as_u64).map(|n| n as usize);
-    let end_line = args.get("end_line").and_then(Value::as_u64).map(|n| n as usize);
+    let start_line = args
+        .get("start_line")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+    let end_line = args
+        .get("end_line")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
 
     let text = if let Some(queries) = names {
         // Name-based recall
@@ -366,8 +405,16 @@ fn tool_recall_file(id: Value, args: &Value) {
                  # Available items:\n\n{outline_text}"
             );
             let returned_tokens = count_tokens(&msg);
-            return send_and_meter(id, msg, full_tokens, returned_tokens,
-                "mcp__lumen__recall_file", "recall_file", path, Some(line_count as i64));
+            return send_and_meter(
+                id,
+                msg,
+                full_tokens,
+                returned_tokens,
+                "mcp__lumen__recall_file",
+                "recall_file",
+                path,
+                Some(line_count as i64),
+            );
         }
 
         format_items_excerpt(path, &src_lines, &matched)
@@ -378,9 +425,7 @@ fn tool_recall_file(id: Value, args: &Value) {
         let ctx_start = start0.saturating_sub(3);
         let ctx_end = (end0 + 3).min(line_count);
 
-        let mut buf = format!(
-            "# {path} — L{start}-{end} (+3 lines context)\n\n"
-        );
+        let mut buf = format!("# {path} — L{start}-{end} (+3 lines context)\n\n");
         for (i, &line) in src_lines[ctx_start..ctx_end].iter().enumerate() {
             let lineno = ctx_start + i + 1;
             buf.push_str(&format!("{lineno:>5}: {line}\n"));
@@ -395,8 +440,16 @@ fn tool_recall_file(id: Value, args: &Value) {
     };
 
     let returned_tokens = count_tokens(&text);
-    send_and_meter(id, text, full_tokens, returned_tokens,
-        "mcp__lumen__recall_file", "recall_file", path, Some(line_count as i64));
+    send_and_meter(
+        id,
+        text,
+        full_tokens,
+        returned_tokens,
+        "mcp__lumen__recall_file",
+        "recall_file",
+        path,
+        Some(line_count as i64),
+    );
 }
 
 const CTX_LINES: usize = 3;
@@ -407,11 +460,7 @@ fn format_items_excerpt(path: &str, src_lines: &[&str], items: &[&CodeItem]) -> 
         .map(|i| i.name.as_deref().unwrap_or("(anonymous)").to_string())
         .collect();
 
-    let mut buf = format!(
-        "# {path} — {} item(s): {}\n",
-        items.len(),
-        names.join(", ")
-    );
+    let mut buf = format!("# {path} — {} item(s): {}\n", items.len(), names.join(", "));
 
     for item in items {
         let name = item.name.as_deref().unwrap_or("(anonymous)");
@@ -428,29 +477,24 @@ fn format_items_excerpt(path: &str, src_lines: &[&str], items: &[&CodeItem]) -> 
         ));
 
         if ctx_start < start0 {
-            buf.push_str(&format!(
-                "### context [L{}-{}]\n",
-                ctx_start + 1,
-                start0
-            ));
+            buf.push_str(&format!("### context [L{}-{}]\n", ctx_start + 1, start0));
             for (i, &line) in src_lines[ctx_start..start0].iter().enumerate() {
                 let lineno = ctx_start + i + 1;
                 buf.push_str(&format!("{lineno:>5}: {line}\n"));
             }
         }
 
-        buf.push_str(&format!("### body [L{}-{}]\n", item.start_line, item.end_line));
+        buf.push_str(&format!(
+            "### body [L{}-{}]\n",
+            item.start_line, item.end_line
+        ));
         for (i, &line) in src_lines[start0..end0].iter().enumerate() {
             let lineno = start0 + i + 1;
             buf.push_str(&format!("{lineno:>5}: {line}\n"));
         }
 
         if end0 < ctx_end {
-            buf.push_str(&format!(
-                "### context [L{}-{}]\n",
-                end0 + 1,
-                ctx_end
-            ));
+            buf.push_str(&format!("### context [L{}-{}]\n", end0 + 1, ctx_end));
             for (i, &line) in src_lines[end0..ctx_end].iter().enumerate() {
                 let lineno = end0 + i + 1;
                 buf.push_str(&format!("{lineno:>5}: {line}\n"));
@@ -470,7 +514,11 @@ fn tool_compress_logs(id: Value, args: &Value) {
             Err(e) => return send_err(id, -32602, e),
         }
     } else if let Some(text) = args.get("text").and_then(Value::as_str) {
-        (text.to_string(), "(inline text)".to_string(), "(inline)".to_string())
+        (
+            text.to_string(),
+            "(inline text)".to_string(),
+            "(inline)".to_string(),
+        )
     } else {
         return send_err(id, -32602, "compress_logs: provide either 'path' or 'text'");
     };
@@ -484,17 +532,23 @@ fn tool_compress_logs(id: Value, args: &Value) {
         comp_lines = result.compressed_lines,
         orig_tok = result.original_tokens,
         comp_tok = result.compressed_tokens,
-        saved = result.original_tokens.saturating_sub(result.compressed_tokens),
+        saved = result
+            .original_tokens
+            .saturating_sub(result.compressed_tokens),
     );
 
     let text = format!("{}{}", header, result.text);
     let orig_lines = result.original_lines as i64;
     // Compare raw compressed vs raw original (header is constant overhead, not savings).
     send_and_meter(
-        id, text,
-        result.original_tokens, result.compressed_tokens,
-        "mcp__lumen__compress_logs", "compress_logs",
-        &meter_path, Some(orig_lines),
+        id,
+        text,
+        result.original_tokens,
+        result.compressed_tokens,
+        "mcp__lumen__compress_logs",
+        "compress_logs",
+        &meter_path,
+        Some(orig_lines),
     );
 }
 
@@ -503,7 +557,10 @@ fn tool_compress_logs(id: Value, args: &Value) {
 fn handle_tools_call(id: Value, params: Option<Value>) {
     let params = params.unwrap_or_else(|| json!({}));
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     match name {
         "lumen_ping" => tool_ping(id, &args),
