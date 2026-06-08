@@ -24,15 +24,21 @@ Everything runs locally. No account. No telemetry. Your data never leaves your m
 
 1. Download **`Lumen_0.1.0_aarch64.dmg`** below.
 2. Open the .dmg and drag Lumen to `/Applications`.
-3. **Important — Gatekeeper:** macOS will say *"Lumen is damaged and can't be opened."*
-   This is expected (the build is unsigned). Run in Terminal:
+3. **⚠️ Before opening — run this once in Terminal:**
 
    ```bash
-   sudo xattr -dr com.apple.quarantine /Applications/Lumen.app
+   xattr -dr com.apple.quarantine /Applications/Lumen.app
    ```
 
-   Then double-click Lumen normally. Alternatively: try to open it once (blocked), then
+   macOS will say **"Lumen is damaged and can't be opened."** — this is **not actual
+   damage**. It is the standard block for un-notarized apps. The command above removes
+   the quarantine flag; Lumen opens normally after.
+
+   Alternative: try to open it once (blocked), then go to
    **System Settings → Privacy & Security → Open Anyway**.
+
+   > `sudo` is not required if you dragged the app yourself. Add it only if you see
+   > a permission error: `sudo xattr -dr com.apple.quarantine /Applications/Lumen.app`
 
 4. On first launch, a Setup screen registers the MCP server and hooks. **Restart Claude Code** after setup.
 
