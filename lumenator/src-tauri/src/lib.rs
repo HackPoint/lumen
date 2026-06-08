@@ -44,6 +44,7 @@ async fn connect_daemon(app: tauri::AppHandle) {
 // ─────────────────────────────────────────────────────────────────────────
 // Tray icon: a firefly silhouette in the current status color. Rendered as
 // a COLORED image (icon_as_template(false)) at 2× for retina sharpness.
+// Shape: concept P — solid core + 2 concentric rings, status-colored.
 // ─────────────────────────────────────────────────────────────────────────
 
 const ICON_SIZE: u32 = 44; // 2× the ~22pt menu-bar slot
@@ -63,30 +64,35 @@ fn in_circle(fx: f32, fy: f32, cx: f32, cy: f32, r: f32) -> bool {
     dx * dx + dy * dy <= r * r
 }
 
-fn in_ellipse(fx: f32, fy: f32, cx: f32, cy: f32, erx: f32, ery: f32, angle: f32) -> bool {
-    let dx = fx - cx;
-    let dy = fy - cy;
-    let (sin_a, cos_a) = angle.sin_cos();
-    let lx = dx * cos_a + dy * sin_a;
-    let ly = -dx * sin_a + dy * cos_a;
-    (lx / erx) * (lx / erx) + (ly / ery) * (ly / ery) <= 1.0
+fn in_annulus(fx: f32, fy: f32, cx: f32, cy: f32, r_inner: f32, r_outer: f32) -> bool {
+    let d2 = (fx - cx) * (fx - cx) + (fy - cy) * (fy - cy);
+    d2 >= r_inner * r_inner && d2 <= r_outer * r_outer
 }
 
-/// Render the firefly silhouette tray icon for a given status.
+/// Concept P: solid core dot + 2 concentric rings, all status-colored.
+/// Redrawn on status/percent change only; no continuous animation.
 fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> {
     let size = ICON_SIZE;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let col = status_rgb(status);
-    let ss = 3u32;
+    let ss  = 3u32; // 3×3 supersampling for smooth edges
 
-    // Shape parameters (pixels, origin top-left, canvas 44×44)
-    let (hcx, hcy, hr)        = (22.0_f32,  8.5_f32,  4.0_f32);            // head
-    let (bcx, bcy, brx, bry)  = (22.0_f32, 20.0_f32,  5.0_f32,  9.0_f32); // body
-    let (lcx, lcy, lwx, lwy)  = (10.0_f32, 17.5_f32,  9.5_f32,  3.0_f32); // left wing
-    let (rcx, rcy, rwx, rwy)  = (34.0_f32, 17.5_f32,  9.5_f32,  3.0_f32); // right wing
-    let wing_a                 = 20.0_f32.to_radians();
-    let (tcx, tcy, trx, try_) = (22.0_f32, 33.0_f32,  4.5_f32,  4.0_f32); // tail
-    let (kcx, kcy, kr)        = (22.0_f32, 33.0_f32,  2.0_f32);            // bright core
+    let cx = 22.0_f32;
+    let cy = 22.0_f32;
+
+    // Geometry — all in buffer pixels, 44×44 canvas (2× retina for 22pt slot).
+    // Core: filled solid dot at center.
+    // Ring 1 / Ring 2: concentric annuli radiating outward, fading in opacity.
+    let core_r    =  3.5_f32;
+    let ring1_in  =  7.5_f32;
+    let ring1_out = 10.5_f32;
+    let ring2_in  = 14.0_f32;
+    let ring2_out = 17.0_f32;
+
+    // Core is brightened (50% white blend) so it reads on both light + dark menu bars.
+    let core_rv = (col.0 as f32 * 0.5 + 255.0 * 0.5) as u8;
+    let core_gv = (col.1 as f32 * 0.5 + 255.0 * 0.5) as u8;
+    let core_bv = (col.2 as f32 * 0.5 + 255.0 * 0.5) as u8;
 
     for y in 0..size {
         for x in 0..size {
@@ -101,21 +107,15 @@ fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> 
                     let fy = y as f32 + (sy as f32 + 0.5) / ss as f32;
 
                     let (sr, sg, sb, sa): (u8, u8, u8, f32) =
-                        if in_circle(fx, fy, kcx, kcy, kr) {
-                            // bright core: 30% status + 70% white
-                            let br = (col.0 as f32 * 0.3 + 255.0 * 0.7) as u8;
-                            let bg = (col.1 as f32 * 0.3 + 255.0 * 0.7) as u8;
-                            let bb = (col.2 as f32 * 0.3 + 255.0 * 0.7) as u8;
-                            (br, bg, bb, 1.0)
-                        } else if in_circle(fx, fy, hcx, hcy, hr)
-                               || in_ellipse(fx, fy, bcx, bcy, brx, bry, 0.0)
-                               || in_ellipse(fx, fy, tcx, tcy, trx, try_, 0.0)
-                        {
-                            (col.0, col.1, col.2, 1.0)
-                        } else if in_ellipse(fx, fy, lcx, lcy, lwx, lwy,  wing_a)
-                               || in_ellipse(fx, fy, rcx, rcy, rwx, rwy, -wing_a)
-                        {
-                            (col.0, col.1, col.2, 0.55)
+                        if in_circle(fx, fy, cx, cy, core_r) {
+                            // Bright core: 50% white blend for legibility
+                            (core_rv, core_gv, core_bv, 1.0)
+                        } else if in_annulus(fx, fy, cx, cy, ring1_in, ring1_out) {
+                            // Inner ring: full status color, near-opaque
+                            (col.0, col.1, col.2, 0.85)
+                        } else if in_annulus(fx, fy, cx, cy, ring2_in, ring2_out) {
+                            // Outer ring: fades outward — signals radiance without dominating
+                            (col.0, col.1, col.2, 0.50)
                         } else {
                             (0, 0, 0, 0.0)
                         };
@@ -299,7 +299,8 @@ pub fn run() {
             get_optimizer_stats,
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
-            setup::lumen_uninstall
+            setup::lumen_uninstall,
+            setup::lumen_install_cli
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

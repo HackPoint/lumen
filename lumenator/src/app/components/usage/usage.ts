@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { RATE } from '../index';
 import type { TokenAgg, UsageReport } from '../index';
+import { LumenTooltip } from '../../directives/tooltip.directive';
 
 /**
  * Dumb presentational view of the Usage & Cost report. Input-driven; all dollar
@@ -13,7 +14,7 @@ import type { TokenAgg, UsageReport } from '../index';
  */
 @Component({
     selector: 'usage',
-    imports: [],
+    imports: [LumenTooltip],
     templateUrl: './usage.html',
     styleUrl: './usage.scss',
     changeDetection: ChangeDetectionStrategy.OnPush

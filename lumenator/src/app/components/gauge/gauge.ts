@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { LumenTooltip } from '../../directives/tooltip.directive';
 
 @Component({
     selector: 'gauge',
-    imports: [],
+    imports: [LumenTooltip],
     templateUrl: './gauge.html',
     styleUrl: './gauge.scss',
     changeDetection: ChangeDetectionStrategy.OnPush

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.speedata.lumen",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../dist/lumenator/browser",
     "devUrl": "http://localhost:4200",
     "beforeDevCommand": "pnpm start",
     "beforeBuildCommand": "pnpm run build"
@@ -42,7 +42,7 @@
     }
   },
   "bundle": {
-    "externalBin": ["binaries/lumen-daemon", "binaries/lumen-mcp", "binaries/lumen-tok"],
+    "externalBin": ["binaries/lumen-daemon", "binaries/lumen-mcp", "binaries/lumen-tok", "binaries/lumen"],
     "active": true,
     "targets": "all",
     "icon": [

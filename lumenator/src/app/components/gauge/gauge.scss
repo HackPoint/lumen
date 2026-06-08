@@ -105,6 +105,14 @@
   }
 }
 
+/* Row wrapping the model pill + its info button on the same line. */
+.gauge__model-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+}
+
 .gauge__model {
   font-family: var(--lumen-font-mono);
   font-size: 0.66rem;
@@ -114,7 +122,7 @@
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
   letter-spacing: 0.2px;
-  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -141,7 +149,7 @@
 :host-context(.panel) .gauge__meta {
   gap: 0.15rem;
 }
-:host-context(.panel) .gauge__model,
+:host-context(.panel) .gauge__model-row,
 :host-context(.panel) .gauge__flag {
   display: none;
 }

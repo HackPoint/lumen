@@ -5,7 +5,11 @@
     <div class="usage__rolling">
         <div class="win">
             <div class="win__head">
-                <span class="win__label">Used in last 5h</span>
+                <span class="win__label">
+                    Used in last 5h
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Rolling consumption (not a plan-limit %). Reset time is approximate.'">ⓘ</button>
+                </span>
                 @if (resetApproxLocal(); as t) {
                     <span class="win__reset">resets ~{{ t }} <span class="tag">approx</span></span>
                 }
@@ -19,7 +23,11 @@
 
         <div class="win">
             <div class="win__head">
-                <span class="win__label">Used in last 7d</span>
+                <span class="win__label">
+                    Used in last 7d
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Rolling consumption over 7 days (not a plan-limit %). Opus vs. other split shown below.'">ⓘ</button>
+                </span>
             </div>
             <div class="win__cost">{{ fmt(cost7d()) }}</div>
             <div class="win__meta">
@@ -36,17 +44,29 @@
     <!-- Calendar rollups (local day / ISO week / all-time). -->
     <div class="usage__rollups">
         <div class="roll">
-            <span class="roll__label">Today</span>
+            <span class="roll__label">
+                Today
+                <button class="info-btn" type="button"
+                        [lumenTooltip]="'Calendar totals (local time; week starts Monday).'">ⓘ</button>
+            </span>
             <span class="roll__cost">{{ fmt(costToday()) }}</span>
             <span class="roll__tok">{{ fmtTokens(report().today.totalTokens) }} tok</span>
         </div>
         <div class="roll">
-            <span class="roll__label">This week</span>
+            <span class="roll__label">
+                This week
+                <button class="info-btn" type="button"
+                        [lumenTooltip]="'Calendar totals (local time; week starts Monday).'">ⓘ</button>
+            </span>
             <span class="roll__cost">{{ fmt(costWeek()) }}</span>
             <span class="roll__tok">{{ fmtTokens(report().thisWeek.totalTokens) }} tok</span>
         </div>
         <div class="roll">
-            <span class="roll__label">All-time</span>
+            <span class="roll__label">
+                All-time
+                <button class="info-btn" type="button"
+                        [lumenTooltip]="'All recorded history, from the first session Lumen watched.'">ⓘ</button>
+            </span>
             <span class="roll__cost">{{ fmt(costAll()) }}</span>
             <span class="roll__tok">{{ fmtTokens(report().allTime.totalTokens) }} tok</span>
         </div>
@@ -54,7 +74,11 @@
 
     <!-- Lifetime saved by caching — reported, not caused by Lumen. -->
     <div class="usage__saved">
-        <div class="saved__label">Saved by caching</div>
+        <div class="saved__label">
+            Saved by caching
+            <button class="info-btn" type="button"
+                    [lumenTooltip]="'Reported by Claude Code — not caused by Lumen. Never added to Lumen\'s savings number.'">ⓘ</button>
+        </div>
         <div class="saved__value">{{ fmt(savedByCaching()) }}</div>
         <div class="saved__sub">reported — caching by Claude Code, not Lumen</div>
     </div>
