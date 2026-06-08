@@ -4,7 +4,7 @@
 
 See the whole truth about your Claude Code tokens — context fill, real cost, and verifiable optimization.
 
-[![Download](https://img.shields.io/github/v/release/hackpoint/lumen?label=download&color=3fb950)](../../releases/latest)
+[![Download](https://img.shields.io/github/v/release/HackPoint/lumen?label=download&color=3fb950)](../../releases/latest)
 ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
