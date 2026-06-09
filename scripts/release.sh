@@ -122,7 +122,7 @@ echo "  ✓ Cargo.lock"
 # ── changelog ─────────────────────────────────────────────────────────────────
 
 echo ""
-echo "Generating CHANGELOG entry for $TAG…"
+echo "Generating CHANGELOG entry for ${TAG}…"
 
 LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 if [[ -n "$LAST_TAG" ]]; then
