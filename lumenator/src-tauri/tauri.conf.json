@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Lumen",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "io.speedata.lumen",
   "build": {
     "frontendDist": "../dist/lumenator/browser",
@@ -42,7 +42,12 @@
     }
   },
   "bundle": {
-    "externalBin": ["binaries/lumen-daemon", "binaries/lumen-mcp", "binaries/lumen-tok", "binaries/lumen"],
+    "externalBin": [
+      "binaries/lumen-daemon",
+      "binaries/lumen-mcp",
+      "binaries/lumen-tok",
+      "binaries/lumen"
+    ],
     "active": true,
     "targets": "all",
     "icon": [
