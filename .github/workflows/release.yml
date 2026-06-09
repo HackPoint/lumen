@@ -179,6 +179,7 @@ jobs:
   update-tap:
     name: Update Homebrew tap
     needs: build
+    if: ${{ secrets.TAP_PUSH_TOKEN != '' }}
     runs-on: ubuntu-latest        # no macOS toolchain needed for a git commit
 
     steps:
