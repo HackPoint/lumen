@@ -65,10 +65,17 @@ jobs:
         working-directory: lumenator
         run: pnpm build
 
-  # ── Linux job: portable Rust-core tests (no macOS SDK required) ────────────
-  test-linux:
-    name: Test (ubuntu-latest)
-    runs-on: ubuntu-latest
+  # ── Cross-platform CLI/core job: Linux + Windows ───────────────────────────
+  # The `lumen` CLI and the core/daemon/mcp crates are pure cross-platform Rust.
+  # SQLite is compiled from source (rusqlite `bundled`), so no system libsqlite3
+  # is needed on any OS. The Tauri GUI is macOS-only and lives in the check job.
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -80,11 +87,8 @@ jobs:
           workspaces: ". -> target"
           cache-on-failure: true
 
-      - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config build-essential
+      - name: Build CLI (proves cross-platform compile)
+        run: cargo build -p lumen-cli --release
 
-      - name: cargo test (lumen-core)
-        run: cargo test -p lumen-core
-
-      - name: cargo test (lumen-daemon)
-        run: cargo test -p lumen-daemon
+      - name: cargo test (core + daemon + mcp)
+        run: cargo test -p lumen-core -p lumen-daemon -p lumen-mcp

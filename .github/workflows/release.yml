@@ -174,7 +174,80 @@ jobs:
             $NOTES_OPT
 
   # ════════════════════════════════════════════════════════════════════════════
-  # Job 2: Update the Homebrew tap (runs after build succeeds)
+  # Job 2: Cross-platform CLI artifacts (Linux + Windows)
+  # ────────────────────────────────────────────────────────────────────────────
+  # The GUI (.dmg) is macOS-only, but the `lumen` CLI is pure cross-platform Rust
+  # (SQLite compiled from source via rusqlite `bundled` — no system lib needed).
+  # These jobs build the CLI per target and attach it to the release the macOS
+  # build job created, so each platform gets a native `lumen` binary.
+  # ════════════════════════════════════════════════════════════════════════════
+  build-cli:
+    name: Build CLI (${{ matrix.name }})
+    needs: build          # the GitHub Release must exist before we upload to it
+
+    permissions:
+      contents: write          # required to upload assets to the release
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Build CLI
+        run: cargo build -p lumen-cli --release --target ${{ matrix.target }}
+
+      # Package as .tar.gz on Unix; upload to the release with --clobber so
+      # re-runs replace rather than fail on an existing asset.
+      - name: Package + upload (Unix)
+        if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME}"
+          ASSET="lumen-v${VERSION}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/lumen" dist/lumen
+          tar -czf "dist/${ASSET}" -C dist lumen
+          gh release upload "$TAG" "dist/${ASSET}" --clobber
+
+      # Package as .zip on Windows (lumen.exe).
+      - name: Package + upload (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v',''
+          $tag     = "${env:GITHUB_REF_NAME}"
+          $asset   = "lumen-v$version-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/lumen.exe" "dist/lumen.exe"
+          Compress-Archive -Path "dist/lumen.exe" -DestinationPath "dist/$asset" -Force
+          gh release upload "$tag" "dist/$asset" --clobber
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 3: Update the Homebrew tap (runs after build succeeds)
   # ════════════════════════════════════════════════════════════════════════════
   update-tap:
     name: Update Homebrew tap
