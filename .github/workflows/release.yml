@@ -187,8 +187,10 @@ jobs:
 
       - name: Check TAP_PUSH_TOKEN availability
         id: tap_token
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
         run: |
-          if [[ -n "${{ secrets.TAP_PUSH_TOKEN }}" ]]; then
+          if [[ -n "$TAP_PUSH_TOKEN" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
