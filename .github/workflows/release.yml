@@ -185,6 +185,18 @@ jobs:
       - name: Checkout lumen (for formula templates)
         uses: actions/checkout@v4
 
+      - name: Check TAP_PUSH_TOKEN availability
+        id: tap_token
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          if [[ -n "$TAP_PUSH_TOKEN" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "TAP_PUSH_TOKEN is not set; skipping Homebrew tap update."
+          fi
+
       # TAP_PUSH_TOKEN is a GitHub Personal Access Token with `repo` scope on
       # HackPoint/homebrew-tap. GITHUB_TOKEN is scoped to this repo and cannot
       # push to another repo.
@@ -197,6 +209,7 @@ jobs:
       #   4. HackPoint/lumen → Settings → Secrets and variables → Actions → New secret
       #      Name: TAP_PUSH_TOKEN    Value: (paste token)
       - name: Checkout homebrew-tap
+        if: steps.tap_token.outputs.configured == 'true'
         uses: actions/checkout@v4
         with:
           repository: HackPoint/homebrew-tap
@@ -204,6 +217,7 @@ jobs:
           path: homebrew-tap
 
       - name: Update formulae with new version + sha256
+        if: steps.tap_token.outputs.configured == 'true'
         run: |
           VERSION="${{ needs.build.outputs.version }}"
           DMG_SHA="${{ needs.build.outputs.dmg_sha256 }}"
@@ -224,6 +238,7 @@ jobs:
           grep -E 'version|sha256' "$FORMULA"
 
       - name: Commit + push tap update
+        if: steps.tap_token.outputs.configured == 'true'
         working-directory: homebrew-tap
         run: |
           VERSION="${{ needs.build.outputs.version }}"
