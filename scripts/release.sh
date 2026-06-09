@@ -166,7 +166,7 @@ echo "  ✓ CHANGELOG.md"
 echo ""
 printf "Proceed? Commit chore(release): %s and tag %s. [y/N] " "$TAG" "$TAG"
 read -r answer
-[[ "${answer,,}" == "y" ]] || { echo "Aborted — no commit made."; exit 0; }
+[[ "$answer" == [Yy] ]] || { echo "Aborted — no commit made."; exit 0; }
 
 # ── commit + tag ──────────────────────────────────────────────────────────────
 
