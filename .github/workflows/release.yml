@@ -4,11 +4,19 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'   # v0.2.0, v1.0.0, v0.2.0-rc.1, …
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build Windows/CLI artifacts for (e.g. v1.0.0). The macOS DMG and Homebrew tap are NOT rebuilt on manual runs.'
+        required: true
+        default: 'v1.0.0'
 
 # ── Platform note ─────────────────────────────────────────────────────────────
-# macOS Apple Silicon ONLY. Lumen is a macOS-specific product (system tray,
-# ~/.claude/ integration, Tauri native APIs). Windows/Linux matrix is a separate
-# port effort — do NOT add runners here until there are working artifacts.
+# macOS Apple Silicon is the primary GUI target. Lumen is a macOS-first product
+# (system tray, ~/.claude/ integration, Tauri native APIs). A Windows GUI
+# installer (NSIS .exe + MSI) is also produced for users who want a downloadable
+# setup file; note the ~/.claude/ monitoring is macOS-oriented and may be only
+# partially functional on Windows until a full port lands.
 
 env:
   PNPM_VERSION: '10'
@@ -17,10 +25,37 @@ env:
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
-  # Job 1: Build both artifacts on Apple Silicon
+  # Job 0: Resolve the target tag/version for both push and manual dispatch
+  # ────────────────────────────────────────────────────────────────────────────
+  # On a tag push, GITHUB_REF_NAME is the tag. On workflow_dispatch it is the
+  # branch (e.g. "main"), so we read the tag from the input instead. Every other
+  # job consumes these outputs rather than GITHUB_REF_NAME directly.
+  # ════════════════════════════════════════════════════════════════════════════
+  resolve:
+    name: Resolve tag/version
+    runs-on: ubuntu-latest
+    outputs:
+      tag:     ${{ steps.r.outputs.tag }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - id: r
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}"          >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}"    >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${TAG#v}"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 1: Build both artifacts on Apple Silicon (tag push only)
   # ════════════════════════════════════════════════════════════════════════════
   build:
     name: Build (macOS Apple Silicon)
+    needs: resolve
+    if: github.event_name == 'push'
     runs-on: macos-14          # M1 runner — aarch64 native
 
     permissions:
@@ -183,7 +218,10 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   build-cli:
     name: Build CLI (${{ matrix.name }})
-    needs: build          # the GitHub Release must exist before we upload to it
+    # The GitHub Release must exist before we upload to it: on a tag push the
+    # macOS `build` job creates it; on a manual dispatch it already exists.
+    needs: [resolve, build]
+    if: always() && needs.resolve.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.build.result == 'success')
 
     permissions:
       contents: write          # required to upload assets to the release
@@ -203,6 +241,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -223,8 +263,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          TAG="${GITHUB_REF_NAME}"
+          VERSION="${{ needs.resolve.outputs.version }}"
+          TAG="${{ needs.resolve.outputs.tag }}"
           ASSET="lumen-v${VERSION}-${{ matrix.target }}.tar.gz"
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/lumen" dist/lumen
@@ -238,8 +278,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}" -replace '^v',''
-          $tag     = "${env:GITHUB_REF_NAME}"
+          $version = "${{ needs.resolve.outputs.version }}"
+          $tag     = "${{ needs.resolve.outputs.tag }}"
           $asset   = "lumen-v$version-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/lumen.exe" "dist/lumen.exe"
@@ -247,11 +287,97 @@ jobs:
           gh release upload "$tag" "dist/$asset" --clobber
 
   # ════════════════════════════════════════════════════════════════════════════
-  # Job 3: Update the Homebrew tap (runs after build succeeds)
+  # Job 3: Windows GUI installer (.exe setup + .msi)
+  # ────────────────────────────────────────────────────────────────────────────
+  # Builds the full Tauri app on a Windows runner and produces a downloadable
+  # NSIS setup .exe and an MSI, both attached to the release. Mirrors the macOS
+  # build's sidecar-staging step, but for the x86_64-pc-windows-msvc triple.
+  # ════════════════════════════════════════════════════════════════════════════
+  build-gui-windows:
+    name: Build GUI installer (Windows x86_64)
+    needs: [resolve, build]
+    if: always() && needs.resolve.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.build.result == 'success')
+    runs-on: windows-latest
+
+    permissions:
+      contents: write          # required to upload assets to the release
+
+    env:
+      TRIPLE_WIN: 'x86_64-pc-windows-msvc'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      # Stage the sidecars Tauri's externalBin expects, suffixed with the host
+      # target triple (.exe). Equivalent to lumenator/build-sidecar.sh on macOS.
+      # `cargo build -p lumen-mcp` emits BOTH lumen-mcp.exe and lumen-tok.exe.
+      - name: Build sidecars (Windows)
+        shell: pwsh
+        run: |
+          cargo build -p lumen-daemon -p lumen-mcp -p lumen-cli --release
+          $dest = "lumenator/src-tauri/binaries"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          foreach ($bin in @("lumen-daemon","lumen-mcp","lumen-tok","lumen")) {
+            Copy-Item "target/release/$bin.exe" "$dest/$bin-$env:TRIPLE_WIN.exe" -Force
+            Write-Host "sidecar ready: binaries/$bin-$env:TRIPLE_WIN.exe"
+          }
+
+      # targets:"all" in tauri.conf.json → NSIS setup .exe + MSI. Tauri fetches
+      # the NSIS and WiX toolchains automatically on first build.
+      - name: Build Tauri app (NSIS + MSI)
+        working-directory: lumenator
+        run: pnpm tauri build
+        env:
+          CI: true
+
+      - name: Upload installers to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ needs.resolve.outputs.tag }}"
+          $setup = Get-ChildItem -Path target/release/bundle/nsis -Filter *-setup.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi   = Get-ChildItem -Path target/release/bundle/msi  -Filter *.msi        -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $setup) { Write-Error "NSIS setup .exe not found under target/release/bundle/nsis"; exit 1 }
+          Write-Host "Uploading $($setup.Name)"
+          gh release upload "$tag" "$($setup.FullName)" --clobber
+          if ($msi) {
+            Write-Host "Uploading $($msi.Name)"
+            gh release upload "$tag" "$($msi.FullName)" --clobber
+          } else {
+            Write-Host "MSI not produced (skipping)"
+          }
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 4: Update the Homebrew tap (tag push only, after macOS build succeeds)
   # ════════════════════════════════════════════════════════════════════════════
   update-tap:
     name: Update Homebrew tap
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest        # no macOS toolchain needed for a git commit
 
     steps:
