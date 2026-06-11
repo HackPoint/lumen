@@ -35,19 +35,26 @@ jobs:
     name: Resolve tag/version
     runs-on: ubuntu-latest
     outputs:
-      tag:     ${{ steps.r.outputs.tag }}
-      version: ${{ steps.r.outputs.version }}
+      tag:       ${{ steps.r.outputs.tag }}
+      version:   ${{ steps.r.outputs.version }}
+      build_ref: ${{ steps.r.outputs.build_ref }}
     steps:
       - id: r
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Attach artifacts to the chosen release tag, but BUILD from the
+            # commit the dispatch ran on (the default branch HEAD). The tagged
+            # source may predate cross-platform fixes needed to build on Windows.
             TAG="${{ inputs.tag }}"
+            BUILD_REF="${{ github.sha }}"
           else
             TAG="${GITHUB_REF_NAME}"
+            BUILD_REF="${GITHUB_REF_NAME}"
           fi
-          echo "tag=${TAG}"          >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}"    >> "$GITHUB_OUTPUT"
-          echo "Resolved tag=${TAG} version=${TAG#v}"
+          echo "tag=${TAG}"              >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}"        >> "$GITHUB_OUTPUT"
+          echo "build_ref=${BUILD_REF}"  >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${TAG#v} build_ref=${BUILD_REF}"
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 1: Build both artifacts on Apple Silicon (tag push only)
@@ -242,7 +249,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.build_ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -308,7 +315,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.build_ref }}
 
       - uses: actions/setup-node@v4
         with:
