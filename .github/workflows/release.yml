@@ -297,8 +297,8 @@ jobs:
   # Job 3: Windows GUI installer (.exe setup + .msi)
   # ────────────────────────────────────────────────────────────────────────────
   # Builds the full Tauri app on a Windows runner and produces a downloadable
-  # NSIS setup .exe and an MSI, both attached to the release. Mirrors the macOS
-  # build's sidecar-staging step, but for the x86_64-pc-windows-msvc triple.
+  # NSIS setup .exe attached to the release. Mirrors the macOS build's
+  # sidecar-staging step, but for the x86_64-pc-windows-msvc triple.
   # ════════════════════════════════════════════════════════════════════════════
   build-gui-windows:
     name: Build GUI installer (Windows x86_64)
@@ -352,31 +352,25 @@ jobs:
             Write-Host "sidecar ready: binaries/$bin-$env:TRIPLE_WIN.exe"
           }
 
-      # targets:"all" in tauri.conf.json → NSIS setup .exe + MSI. Tauri fetches
-      # the NSIS and WiX toolchains automatically on first build.
-      - name: Build Tauri app (NSIS + MSI)
+      # NSIS only: it produces the downloadable setup .exe and is Tauri's
+      # recommended Windows installer. MSI is skipped — WiX 3 (light.exe) fails
+      # to link reliably in CI and adds no value over the NSIS installer.
+      - name: Build Tauri app (NSIS installer)
         working-directory: lumenator
-        run: pnpm tauri build
+        run: pnpm tauri build --bundles nsis
         env:
           CI: true
 
-      - name: Upload installers to release
+      - name: Upload installer to release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ needs.resolve.outputs.tag }}"
           $setup = Get-ChildItem -Path target/release/bundle/nsis -Filter *-setup.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          $msi   = Get-ChildItem -Path target/release/bundle/msi  -Filter *.msi        -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $setup) { Write-Error "NSIS setup .exe not found under target/release/bundle/nsis"; exit 1 }
           Write-Host "Uploading $($setup.Name)"
           gh release upload "$tag" "$($setup.FullName)" --clobber
-          if ($msi) {
-            Write-Host "Uploading $($msi.Name)"
-            gh release upload "$tag" "$($msi.FullName)" --clobber
-          } else {
-            Write-Host "MSI not produced (skipping)"
-          }
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 4: Update the Homebrew tap (tag push only, after macOS build succeeds)
