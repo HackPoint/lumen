@@ -738,9 +738,16 @@ fn step_install_cli() -> SetupStep {
 
     let _ = std::fs::remove_file(&target);
 
-    match std::os::unix::fs::symlink(&lumen_bin, &target) {
+    // Unix: symlink into a bin dir on PATH. Windows lacks user symlinks without
+    // elevation/developer-mode, so copy the binary into place instead.
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(&lumen_bin, &target);
+    #[cfg(windows)]
+    let result = std::fs::copy(&lumen_bin, &target).map(|_| ());
+
+    match result {
         Ok(_) => SetupStep::ok("cli", "Install CLI", &format!("{}", target.display())),
-        Err(e) => SetupStep::err("cli", "Install CLI", &format!("symlink: {e}")),
+        Err(e) => SetupStep::err("cli", "Install CLI", &format!("install: {e}")),
     }
 }
 
@@ -764,6 +771,7 @@ fn step_remove_cli_symlink() -> SetupStep {
     }
 }
 
+#[cfg(unix)]
 fn cli_symlink_path() -> PathBuf {
     if std::path::Path::new("/usr/local/bin").is_dir() {
         PathBuf::from("/usr/local/bin/lumen")
@@ -772,6 +780,13 @@ fn cli_symlink_path() -> PathBuf {
             .map(|h| h.join(".local/bin/lumen"))
             .unwrap_or_else(|| PathBuf::from("/usr/local/bin/lumen"))
     }
+}
+
+#[cfg(windows)]
+fn cli_symlink_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".local").join("bin").join("lumen.exe"))
+        .unwrap_or_else(|| PathBuf::from("lumen.exe"))
 }
 
 fn remove_lumen_hooks(root: &mut serde_json::Value) {
