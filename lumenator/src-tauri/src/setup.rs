@@ -134,6 +134,47 @@ fn find_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn app_support_dir() -> PathBuf {
+    home().join("Library/Application Support/io.speedata.lumen")
+}
+
+// macOS runs unsigned / quarantined apps from ephemeral, read-only locations:
+// a mounted DMG (`/Volumes/…`) or a Gatekeeper App Translocation mount
+// (`/private/var/folders/…/AppTranslocation/…`). Both disappear when the DMG is
+// ejected or the app is moved, leaving the MCP `command` path we recorded in
+// ~/.claude.json dangling — Claude Code then fails with
+// `ENOENT … posix_spawn '/Volumes/…/lumen-mcp'`.
+fn is_ephemeral_path(p: &std::path::Path) -> bool {
+    let s = p.to_string_lossy();
+    s.starts_with("/Volumes/") || s.contains("/AppTranslocation/")
+}
+
+// Resolve a sidecar binary to a path that survives the DMG being ejected. If the
+// bundled binary lives on an ephemeral mount, copy it into a stable, user-writable
+// location (`…/io.speedata.lumen/bin/<name>`) and return that; otherwise return
+// the resolved path unchanged. Copying the standalone Mach-O preserves its
+// embedded code signature, so it still launches.
+fn stable_binary(name: &str) -> Option<PathBuf> {
+    let found = find_binary(name)?;
+    if !is_ephemeral_path(&found) {
+        return Some(found);
+    }
+    let bin_dir = app_support_dir().join("bin");
+    if std::fs::create_dir_all(&bin_dir).is_err() {
+        return Some(found); // fall back rather than failing setup outright
+    }
+    let dest = bin_dir.join(name);
+    if std::fs::copy(&found, &dest).is_err() {
+        return Some(found);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
+    Some(dest)
+}
+
 fn db_path() -> String {
     std::env::var("LUMEN_DB").unwrap_or_else(|_| {
         home()
@@ -537,8 +578,8 @@ fn run_setup() -> Vec<SetupStep> {
     }
 
     // 2. Resolve binary paths
-    let mcp_bin = find_binary("lumen-mcp");
-    let tok_bin = find_binary("lumen-tok");
+    let mcp_bin = stable_binary("lumen-mcp");
+    let tok_bin = stable_binary("lumen-tok");
 
     let mcp_str = mcp_bin
         .as_ref()

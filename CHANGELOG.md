@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.1] — 2026-06-17
+
+### Fixes
+- fix(setup): register MCP sidecars from a stable path when the app runs from a
+  DMG or App Translocation mount. Previously the `lumen-mcp`/`lumen-tok` paths
+  written to `~/.claude.json` pointed inside the ejected `/Volumes/…` mount, so
+  Claude Code failed to launch the server with
+  `ENOENT … posix_spawn '/Volumes/…/lumen-mcp'`. The sidecars are now copied to
+  `~/Library/Application Support/io.speedata.lumen/bin/` and registered there.
+
 ## [1.0.0] — 2026-06-09
 
 ### Features
