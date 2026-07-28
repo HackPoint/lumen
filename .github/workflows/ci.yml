@@ -51,10 +51,15 @@ jobs:
         # that only exist after `build-sidecar.sh` runs (release pipeline only).
         run: cargo clippy --workspace --all-targets --exclude Lumen -- -D warnings
 
-      - name: cargo test (lumen-core)
-        run: cargo test -p lumen-core
+      # Every non-Tauri crate, not just lumen-core: lumen-cli and lumen-stats
+      # were never tested on any platform, and lumen-stats holds the rollup
+      # arithmetic the GUI displays.
+      - name: cargo test (all non-Tauri crates)
+        run: |
+          cargo test -p lumen-core -p lumen-cli -p lumen-daemon \
+                     -p lumen-mcp  -p lumen-stats --all-targets
 
-      # ── Frontend build ───────────────────────────────────────────────────
+      # ── Frontend ─────────────────────────────────────────────────────────
       # Verifies the Angular build compiles clean; catches template errors
       # and TypeScript issues before they block a release.
       - name: pnpm install
@@ -65,10 +70,17 @@ jobs:
         working-directory: lumenator
         run: pnpm build
 
+      # The frontend suite enforces its own coverage thresholds via the
+      # `test` target in angular.json, so a drop in coverage fails here.
+      - name: pnpm test
+        working-directory: lumenator
+        run: pnpm test
+
   # ── Cross-platform CLI/core job: Linux + Windows ───────────────────────────
-  # The `lumen` CLI and the core/daemon/mcp crates are pure cross-platform Rust.
-  # SQLite is compiled from source (rusqlite `bundled`), so no system libsqlite3
-  # is needed on any OS. The Tauri GUI is macOS-only and lives in the check job.
+  # The `lumen` CLI and the core/daemon/mcp/stats crates are pure cross-platform
+  # Rust. SQLite is compiled from source (rusqlite `bundled`), so no system
+  # libsqlite3 is needed on any OS. The GUI is covered by its own jobs: macOS in
+  # `check`, Linux in `gui-linux` below.
   test:
     name: Test (${{ matrix.os }})
     strategy:
@@ -90,5 +102,55 @@ jobs:
       - name: Build CLI (proves cross-platform compile)
         run: cargo build -p lumen-cli --release
 
-      - name: cargo test (core + daemon + mcp)
-        run: cargo test -p lumen-core -p lumen-daemon -p lumen-mcp
+      # lumen-cli and lumen-stats were missing here, so the TUI rendering code
+      # and every rollup query went untested on Linux and Windows entirely.
+      - name: cargo test (all non-Tauri crates)
+        run: |
+          cargo test -p lumen-core -p lumen-cli -p lumen-daemon \
+                     -p lumen-mcp  -p lumen-stats --all-targets
+
+  # ── Linux GUI job ──────────────────────────────────────────────────────────
+  # Now that Lumen ships a Linux AppImage and .deb, the Tauri crate has to build
+  # and pass on Linux too. Without this, a Linux-only break in the GUI would only
+  # surface during a release, when the tag is already pushed.
+  #
+  # Sidecars are built first because `tauri_build::build()` resolves every
+  # externalBin against the target triple and fails if one is missing — that
+  # missing step is the reason clippy still needs `--exclude Lumen` on macOS.
+  gui-linux:
+    name: GUI build + test (Linux)
+    runs-on: ubuntu-22.04    # matches the release job: libwebkit2gtk-4.1 soname
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: cargo test (Tauri crate on Linux)
+        run: cargo test -p Lumen
+
+      - name: cargo clippy (Tauri crate on Linux)
+        run: cargo clippy -p Lumen --all-targets -- -D warnings
