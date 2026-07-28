@@ -112,14 +112,6 @@ fn marker_path() -> PathBuf {
     marker_path_in(&home())
 }
 
-fn claude_json_path() -> PathBuf {
-    claude_json_path_in(&home())
-}
-
-fn global_settings_path() -> PathBuf {
-    global_settings_path_in(&home())
-}
-
 // ── Binary resolution ─────────────────────────────────────────────────────────
 //
 // In release (.app bundle): sidecars sit alongside the main exe in
@@ -364,7 +356,11 @@ fn which_claude() -> bool {
 }
 
 fn step_install_scripts(db: &str, tok: &str) -> SetupStep {
-    let dir = lumen_dir();
+    step_install_scripts_in(&home(), db, tok)
+}
+
+fn step_install_scripts_in(home: &Path, db: &str, tok: &str) -> SetupStep {
+    let dir = lumen_dir_in(home);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return SetupStep::err(
             "scripts",
@@ -412,7 +408,11 @@ fn step_install_scripts(db: &str, tok: &str) -> SetupStep {
 }
 
 fn step_register_mcp(mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
-    let path = claude_json_path();
+    step_register_mcp_in(&home(), mcp_bin, db, tok)
+}
+
+fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
+    let path = claude_json_path_in(home);
 
     // Parse or start fresh
     let mut root: serde_json::Value = if path.exists() {
@@ -468,14 +468,18 @@ fn step_register_mcp(mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
 }
 
 fn step_install_hooks() -> SetupStep {
-    let dir = lumen_dir();
+    step_install_hooks_in(&home())
+}
+
+fn step_install_hooks_in(home: &Path) -> SetupStep {
+    let dir = lumen_dir_in(home);
     let meter = dir.join("lumen_meter.sh").to_string_lossy().to_string();
     let intercept = dir
         .join("lumen_read_intercept.sh")
         .to_string_lossy()
         .to_string();
 
-    let path = global_settings_path();
+    let path = global_settings_path_in(home);
 
     // Ensure ~/.claude/ exists
     if let Some(parent) = path.parent() {
@@ -666,10 +670,17 @@ fn run_setup() -> Vec<SetupStep> {
 }
 
 fn run_uninstall() -> Vec<SetupStep> {
+    run_uninstall_in(&home())
+}
+
+/// Uninstall against an explicit home. Tests drive this form so they can never
+/// touch the developer's real ~/.claude — this function deletes directories and
+/// rewrites two config files.
+fn run_uninstall_in(home: &Path) -> Vec<SetupStep> {
     let mut steps = Vec::new();
 
     // Remove MCP entry from ~/.claude.json
-    let claude_json = claude_json_path();
+    let claude_json = claude_json_path_in(home);
     if claude_json.exists() {
         match std::fs::read_to_string(&claude_json)
             .ok()
@@ -709,7 +720,7 @@ fn run_uninstall() -> Vec<SetupStep> {
     }
 
     // Remove lumen hooks from ~/.claude/settings.json
-    let settings = global_settings_path();
+    let settings = global_settings_path_in(home);
     if settings.exists() {
         match std::fs::read_to_string(&settings)
             .ok()
@@ -749,7 +760,7 @@ fn run_uninstall() -> Vec<SetupStep> {
     }
 
     // Delete ~/.claude/lumen/
-    let dir = lumen_dir();
+    let dir = lumen_dir_in(home);
     if dir.exists() {
         match std::fs::remove_dir_all(&dir) {
             Ok(_) => steps.push(SetupStep::ok(
@@ -978,8 +989,6 @@ mod tests {
         let h = home();
         assert_eq!(lumen_dir(), lumen_dir_in(&h));
         assert_eq!(marker_path(), marker_path_in(&h));
-        assert_eq!(claude_json_path(), claude_json_path_in(&h));
-        assert_eq!(global_settings_path(), global_settings_path_in(&h));
         assert_eq!(app_support_dir(), app_support_dir_in(&h));
     }
 
@@ -1255,6 +1264,366 @@ mod tests {
         for key in ["id", "label", "status", "detail"] {
             assert!(v.get(key).is_some(), "missing key: {key}");
         }
+    }
+
+    // ── step_install_scripts_in ──────────────────────────────────────────────
+
+    #[test]
+    fn installing_scripts_writes_both_hooks_executable() {
+        let h = TempDir::new().unwrap();
+        let step = step_install_scripts_in(h.path(), "/tmp/lumen.db", "/bin/lumen-tok");
+        assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
+
+        let dir = lumen_dir_in(h.path());
+        for name in ["lumen_meter.sh", "lumen_read_intercept.sh"] {
+            let f = dir.join(name);
+            assert!(f.exists(), "{name} must be written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+                assert_eq!(
+                    mode & 0o111,
+                    0o111,
+                    "{name} must be executable, got {mode:o}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_meter_script_is_templated_with_the_real_paths() {
+        let h = TempDir::new().unwrap();
+        step_install_scripts_in(h.path(), "/my/lumen.db", "/my/lumen-tok");
+        let body = std::fs::read_to_string(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
+        assert!(body.contains("/my/lumen.db"), "DB path must be substituted");
+        assert!(
+            body.contains("/my/lumen-tok"),
+            "tok path must be substituted"
+        );
+        assert!(
+            !body.contains("__LUMEN_DB__") && !body.contains("__LUMEN_TOK__"),
+            "no placeholder may survive templating:\n{body}"
+        );
+    }
+
+    #[test]
+    fn reinstalling_scripts_overwrites_stale_paths() {
+        let h = TempDir::new().unwrap();
+        step_install_scripts_in(h.path(), "/old.db", "/old-tok");
+        step_install_scripts_in(h.path(), "/new.db", "/new-tok");
+        let body = std::fs::read_to_string(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
+        assert!(body.contains("/new.db"));
+        assert!(!body.contains("/old.db"), "the stale path must be gone");
+    }
+
+    // ── step_register_mcp_in ─────────────────────────────────────────────────
+
+    #[test]
+    fn registering_the_mcp_server_creates_claude_json() {
+        let h = TempDir::new().unwrap();
+        let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        let entry = &v["mcpServers"]["lumen"];
+        assert_eq!(entry["type"], "stdio");
+        assert_eq!(entry["command"], "/bin/lumen-mcp");
+        assert_eq!(entry["env"]["LUMEN_DB"], "/db");
+        assert_eq!(entry["env"]["LUMEN_TOK"], "/tok");
+    }
+
+    #[test]
+    fn registering_preserves_other_mcp_servers_and_unrelated_keys() {
+        let h = TempDir::new().unwrap();
+        std::fs::write(
+            claude_json_path_in(h.path()),
+            r#"{"numStartups":17,"mcpServers":{"other":{"command":"/other"}}}"#,
+        )
+        .unwrap();
+
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        assert_eq!(v["numStartups"], 17, "unrelated settings must survive");
+        assert_eq!(v["mcpServers"]["other"]["command"], "/other");
+        assert_eq!(v["mcpServers"]["lumen"]["command"], "/bin/lumen-mcp");
+    }
+
+    #[test]
+    fn registering_backs_up_the_previous_claude_json() {
+        let h = TempDir::new().unwrap();
+        let path = claude_json_path_in(h.path());
+        std::fs::write(&path, r#"{"numStartups":1}"#).unwrap();
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        let bak = path.with_extension("json.lumen_bak");
+        assert!(bak.exists(), "a backup must be taken before rewriting");
+        assert!(std::fs::read_to_string(&bak)
+            .unwrap()
+            .contains("numStartups"));
+    }
+
+    #[test]
+    fn registering_recovers_from_a_corrupt_claude_json() {
+        // Rather than refusing forever, setup starts fresh — the original is
+        // still recoverable from the .lumen_bak copy.
+        let h = TempDir::new().unwrap();
+        std::fs::write(claude_json_path_in(h.path()), "{ not json at all").unwrap();
+        let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        assert_eq!(step.status, StepStatus::Ok);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        assert_eq!(v["mcpServers"]["lumen"]["command"], "/bin/lumen-mcp");
+    }
+
+    #[test]
+    fn registering_is_idempotent() {
+        let h = TempDir::new().unwrap();
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        let first = std::fs::read_to_string(claude_json_path_in(h.path())).unwrap();
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        let second = std::fs::read_to_string(claude_json_path_in(h.path())).unwrap();
+        assert_eq!(first, second, "re-running setup must be a no-op");
+    }
+
+    // ── step_install_hooks_in ────────────────────────────────────────────────
+
+    #[test]
+    fn installing_hooks_registers_the_intercept_and_all_four_meters() {
+        let h = TempDir::new().unwrap();
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
+
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "one PreToolUse matcher: Read");
+        assert_eq!(pre[0]["matcher"], "Read");
+        assert!(pre[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("lumen_read_intercept.sh"));
+
+        let post = v["hooks"]["PostToolUse"].as_array().unwrap();
+        let matchers: Vec<&str> = post
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            matchers,
+            vec![
+                "Read",
+                "mcp__lumen__smart_read",
+                "mcp__lumen__recall_file",
+                "mcp__lumen__compress_logs"
+            ],
+            "the built-in Read plus all three lumen tools must be metered"
+        );
+    }
+
+    #[test]
+    fn installing_hooks_preserves_unrelated_settings() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        std::fs::write(
+            global_settings_path_in(h.path()),
+            r#"{"theme":"dark","hooks":{"SessionStart":[{"matcher":"*","hooks":[]}]}}"#,
+        )
+        .unwrap();
+
+        step_install_hooks_in(h.path());
+
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert!(
+            v["hooks"]["SessionStart"].is_array(),
+            "another hook phase must survive"
+        );
+        assert!(v["hooks"]["PreToolUse"].is_array());
+    }
+
+    #[test]
+    fn installing_hooks_is_idempotent() {
+        let h = TempDir::new().unwrap();
+        step_install_hooks_in(h.path());
+        let first = std::fs::read_to_string(global_settings_path_in(h.path())).unwrap();
+        step_install_hooks_in(h.path());
+        let second = std::fs::read_to_string(global_settings_path_in(h.path())).unwrap();
+        assert_eq!(first, second, "re-running setup must not duplicate hooks");
+    }
+
+    #[test]
+    fn installing_hooks_recovers_from_corrupt_settings() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        std::fs::write(global_settings_path_in(h.path()), "]]not json[[").unwrap();
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.status, StepStatus::Ok);
+        assert!(
+            global_settings_path_in(h.path())
+                .with_extension("json.lumen_bak")
+                .exists(),
+            "the unreadable original is still backed up"
+        );
+    }
+
+    // ── run_uninstall_in ─────────────────────────────────────────────────────
+
+    #[test]
+    fn uninstall_removes_everything_setup_installed() {
+        let h = TempDir::new().unwrap();
+        step_install_scripts_in(h.path(), "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_install_hooks_in(h.path());
+
+        let steps = run_uninstall_in(h.path());
+        assert!(
+            steps.iter().all(|s| s.status != StepStatus::Error),
+            "no step may fail: {steps:?}"
+        );
+
+        // MCP entry gone.
+        let claude: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        assert!(claude["mcpServers"].get("lumen").is_none());
+
+        // Hooks gone.
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+        assert!(settings["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(settings["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // Scripts directory gone.
+        assert!(!lumen_dir_in(h.path()).exists());
+    }
+
+    #[test]
+    fn uninstall_keeps_a_foreign_mcp_server_and_foreign_hooks() {
+        let h = TempDir::new().unwrap();
+        std::fs::write(
+            claude_json_path_in(h.path()),
+            r#"{"mcpServers":{"other":{"command":"/other"}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        std::fs::write(
+            global_settings_path_in(h.path()),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"command":"/theirs.sh"}]}]}}"#,
+        )
+        .unwrap();
+
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_install_hooks_in(h.path());
+        run_uninstall_in(h.path());
+
+        let claude: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        assert_eq!(
+            claude["mcpServers"]["other"]["command"], "/other",
+            "another MCP server must survive our uninstall"
+        );
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+        let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "the foreign hook must remain");
+        assert_eq!(pre[0]["matcher"], "Write");
+    }
+
+    #[test]
+    fn uninstall_on_a_clean_machine_skips_rather_than_failing() {
+        let h = TempDir::new().unwrap();
+        let steps = run_uninstall_in(h.path());
+        assert!(
+            steps.iter().all(|s| s.status != StepStatus::Error),
+            "nothing installed is not an error: {steps:?}"
+        );
+        assert!(
+            steps.iter().any(|s| s.status == StepStatus::Skip),
+            "it should report skips: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn uninstall_is_idempotent() {
+        let h = TempDir::new().unwrap();
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_install_hooks_in(h.path());
+        run_uninstall_in(h.path());
+        let steps = run_uninstall_in(h.path());
+        assert!(steps.iter().all(|s| s.status != StepStatus::Error));
+    }
+
+    #[test]
+    fn uninstall_reports_one_step_per_action() {
+        let h = TempDir::new().unwrap();
+        let ids: Vec<String> = run_uninstall_in(h.path())
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["mcp", "hooks", "scripts", "cli"]);
+    }
+
+    // ── install then uninstall round trip ────────────────────────────────────
+
+    #[test]
+    fn a_full_round_trip_leaves_config_as_it_started() {
+        // The strongest guarantee an uninstaller can offer: byte-identical config.
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        let claude_before = r#"{
+  "numStartups": 42
+}"#;
+        let settings_before = r#"{
+  "theme": "dark"
+}"#;
+        std::fs::write(claude_json_path_in(h.path()), claude_before).unwrap();
+        std::fs::write(global_settings_path_in(h.path()), settings_before).unwrap();
+
+        step_install_scripts_in(h.path(), "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_install_hooks_in(h.path());
+        run_uninstall_in(h.path());
+
+        let claude: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(claude["numStartups"], 42);
+        assert_eq!(settings["theme"], "dark");
+        // Empty arrays remain where we merged; nothing of ours is left behind.
+        assert!(claude["mcpServers"].get("lumen").is_none());
+        assert!(settings["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     // ── marker / setup-needed detection ──────────────────────────────────────
