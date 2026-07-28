@@ -358,9 +358,14 @@ jobs:
           cargo build -p lumen-daemon -p lumen-mcp -p lumen-cli --release
           $dest = "lumenator/src-tauri/binaries"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          foreach ($bin in @("lumen-daemon","lumen-mcp","lumen-tok","lumen")) {
-            Copy-Item "target/release/$bin.exe" "$dest/$bin-$env:TRIPLE_WIN.exe" -Force
-            Write-Host "sidecar ready: binaries/$bin-$env:TRIPLE_WIN.exe"
+          # built name -> staged name. The CLI is built as lumen.exe but staged as
+          # lumen-cli.exe, matching build-sidecar.sh: the app executable is Lumen,
+          # and on a case-insensitive filesystem `lumen` would be the same path.
+          $map = @{ "lumen-daemon"="lumen-daemon"; "lumen-mcp"="lumen-mcp"; "lumen-tok"="lumen-tok"; "lumen"="lumen-cli" }
+          foreach ($built in $map.Keys) {
+            $staged = $map[$built]
+            Copy-Item "target/release/$built.exe" "$dest/$staged-$env:TRIPLE_WIN.exe" -Force
+            Write-Host "sidecar ready: binaries/$staged-$env:TRIPLE_WIN.exe"
           }
 
       # NSIS only: it produces the downloadable setup .exe and is Tauri's
@@ -575,8 +580,16 @@ jobs:
         if: steps.tap_token.outputs.configured == 'true'
         run: |
           set -euo pipefail
-          cp Casks/lumen.rb        homebrew-tap/Casks/lumen.rb
+          cp Casks/lumen-app.rb    homebrew-tap/Casks/lumen-app.rb
           cp Formula/lumen-cli.rb  homebrew-tap/Formula/lumen-cli.rb
+
+          # The cask used to be published as `lumen`, which collides with the
+          # unrelated homebrew/cask/lumen. Leaving the old file in place would keep
+          # that ambiguity alive for anyone who already tapped, so it is removed.
+          if [[ -f homebrew-tap/Casks/lumen.rb ]]; then
+            git -C homebrew-tap rm -q Casks/lumen.rb
+            echo "removed the superseded Casks/lumen.rb"
+          fi
           echo "templates copied; version/sha256 are stamped in the next steps"
 
       # Hash the PUBLISHED assets rather than reading values passed between jobs.
@@ -637,9 +650,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # ── Casks/lumen.rb ────────────────────────────────────────────────
+          # ── Casks/lumen-app.rb ────────────────────────────────────────────
           # One platform, one sha256 — a plain substitution is unambiguous here.
-          CASK="homebrew-tap/Casks/lumen.rb"
+          CASK="homebrew-tap/Casks/lumen-app.rb"
           sed -i "s/^  version \"[^\"]*\"/  version \"${VERSION}\"/" "$CASK"
           if [[ -n "$DMG_SHA" ]]; then
             sed -i "s/^  sha256 \"[^\"]*\"/  sha256 \"${DMG_SHA}\"/" "$CASK"
@@ -669,7 +682,7 @@ jobs:
           VERSION="${{ needs.resolve.outputs.version }}"
           git config user.name  "HackPoint"
           git config user.email "6758579+HackPoint@users.noreply.github.com"
-          git add Casks/lumen.rb Formula/lumen-cli.rb
+          git add -A Casks Formula
           git diff --cached --quiet && echo "No tap changes needed." && exit 0
           git commit -m "chore: bump lumen to v${VERSION}"
           git push

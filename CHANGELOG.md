@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.1.4] — 2026-07-28
+
+### Fixes
+- fix(macos): stop the app executable from overwriting the bundled CLI. The GUI is
+  built as `Lumen` and the CLI sidecar was staged as `lumen`; macOS filesystems are
+  case-insensitive, so both resolved to the same path inside `Contents/MacOS/` and
+  the GUI won. Every macOS build since 1.0.0 therefore shipped **no CLI at all**,
+  and Setup's "Install CLI" button symlinked the GUI as the `lumen` command. The
+  sidecar is now staged as `lumen-cli`; the command users type is unchanged, since
+  that name comes from the symlink rather than the bundle.
+- fix(macos): refresh a login item that points at a stale executable. The rename
+  above moves the app's binary, and an app moved out of `/Applications` changes path
+  too — either way the login item would fail at the one moment it matters. The
+  marker now records the path it registered and re-registers when it no longer
+  matches, while still leaving a user's opt-out switched off.
+- fix(brew): publish the GUI as the `lumen-app` cask. `homebrew/cask` already ships
+  an unrelated `lumen` (a screen-brightness tool), so `brew install --cask lumen`
+  installed the wrong application and `brew upgrade --cask lumen` offered to replace
+  this one with it. Pairs with the `lumen-cli` formula.
+
+### Notes
+- **Upgrading from 1.1.3 or earlier requires one manual step**, because the cask
+  token changed:
+
+  ```bash
+  brew uninstall --cask lumen && brew install --cask lumen-app
+  ```
+
+  Data in `~/Library/Application Support/io.speedata.lumen/` is untouched.
+
 ## [1.1.3] — 2026-07-28
 
 ### Fixes

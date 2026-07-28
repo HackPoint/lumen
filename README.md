@@ -61,8 +61,21 @@ are documented in the install sections below.
 
 ```bash
 brew tap HackPoint/tap
-brew install --cask HackPoint/tap/lumen
+brew install --cask lumen-app
 ```
+
+> **The cask is `lumen-app`, not `lumen`.** Homebrew already ships an unrelated
+> `lumen` (a screen-brightness tool), so that token would install the wrong
+> application. The installed app is still **Lumen.app** and the terminal command is
+> still `lumen`.
+>
+> Upgrading from 1.1.3 or earlier, which used the `lumen` token? Move across once:
+>
+> ```bash
+> brew uninstall --cask lumen && brew install --cask lumen-app
+> ```
+>
+> Your data in `~/Library/Application Support/io.speedata.lumen/` is untouched.
 
 Homebrew clears the quarantine flag automatically. Lumen opens normally with no
 "damaged" dialog. The app is still un-notarized (proper Apple Developer ID signing

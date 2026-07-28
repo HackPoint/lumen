@@ -155,19 +155,51 @@ pub fn step_disable_autostart(a: &dyn AutoStart) -> SetupStep {
 /// transient failure is retried next time rather than silently given up on.
 ///
 /// Returns true when it registered the item on this call.
-pub fn ensure_autostart_once(a: &dyn AutoStart, marker: &Path) -> bool {
-    if marker.exists() {
+pub fn ensure_autostart_once(a: &dyn AutoStart, marker: &Path, current_exe: &str) -> bool {
+    let recorded = std::fs::read_to_string(marker).ok();
+    // The marker stores the executable path it registered, so a login item left
+    // pointing somewhere stale can be spotted and refreshed. That is not
+    // hypothetical: the app's executable was renamed from `lumen` to `Lumen` when
+    // the CLI sidecar stopped colliding with it, and an app moved out of
+    // /Applications changes path too. A login item aimed at a path that no longer
+    // exists fails silently at the one moment it is supposed to work.
+    let stale = recorded.as_deref().is_some_and(|r| r.trim() != current_exe);
+    if recorded.is_some() && !stale {
         return false;
     }
+
     let record = || {
         if let Some(dir) = marker.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(marker, "");
+        let _ = std::fs::write(marker, current_exe);
     };
+
     match a.is_enabled() {
+        Ok(true) if stale => {
+            // Re-registering rewrites the entry with the current path. Enabling an
+            // already-enabled item is how the plugin refreshes it.
+            match a.enable() {
+                Ok(()) => {
+                    log::info!("refreshed the login item to {current_exe}");
+                    record();
+                    true
+                }
+                Err(e) => {
+                    log::warn!("could not refresh the login item: {e}");
+                    false
+                }
+            }
+        }
         // Already on — nothing to do, but record it so a later opt-out sticks.
         Ok(true) => {
+            record();
+            false
+        }
+        // Disabled and previously recorded means the user turned it off. Update the
+        // stored path so a later re-enable is not mistaken for staleness, but do
+        // not switch it back on.
+        Ok(false) if recorded.is_some() => {
             record();
             false
         }
@@ -193,9 +225,14 @@ fn autostart_marker_in(home: &Path) -> PathBuf {
     lumen_dir_in(home).join(".autostart_done")
 }
 
-/// Run the one-time registration against the real home and plugin.
+/// Run the one-time registration against the real home, plugin and executable.
 pub fn ensure_autostart_once_for(app: &AppHandle) -> bool {
-    ensure_autostart_once(&PluginAutoStart(app), &autostart_marker_in(&home()))
+    // An unresolvable current_exe would make every launch look stale and rewrite
+    // the login item forever, so fall back to a constant instead of a guess.
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    ensure_autostart_once(&PluginAutoStart(app), &autostart_marker_in(&home()), &exe)
 }
 
 /// [`AutoStart`] backed by the real plugin.
@@ -997,8 +1034,16 @@ pub fn lumen_install_cli() -> Vec<SetupStep> {
 }
 
 fn step_install_cli() -> SetupStep {
-    let Some(lumen_bin) = find_binary("lumen") else {
-        return SetupStep::err("cli", "Install CLI", "lumen binary not found in app bundle");
+    // "lumen-cli", not "lumen": the bundled CLI is staged under that name so it
+    // cannot collide with the app's own `Lumen` executable on a case-insensitive
+    // filesystem. Looking for "lumen" here found the GUI and symlinked *that* as
+    // the `lumen` command.
+    let Some(lumen_bin) = find_binary("lumen-cli") else {
+        return SetupStep::err(
+            "cli",
+            "Install CLI",
+            "lumen-cli binary not found in app bundle — rebuild sidecars with build-sidecar.sh",
+        );
     };
 
     let target = cli_symlink_path();
@@ -1118,6 +1163,9 @@ mod tests {
     // The same rule covers login items: FakeAutoStart below keeps every autostart
     // assertion in memory, so no test can register a LaunchAgent (or a Windows
     // Run key) on the machine running the suite.
+
+    /// Stands in for the app's own executable path in autostart assertions.
+    const EXE: &str = "/Applications/Lumen.app/Contents/MacOS/Lumen";
 
     // ── Autostart test double ────────────────────────────────────────────────
 
@@ -1265,7 +1313,7 @@ mod tests {
         let marker = h.path().join(".claude/lumen/.autostart_done");
         let a = FakeAutoStart::default();
 
-        assert!(ensure_autostart_once(&a, &marker), "should register");
+        assert!(ensure_autostart_once(&a, &marker, EXE), "should register");
         assert!(a.enabled.get());
         assert!(marker.exists(), "marker records that this ran");
     }
@@ -1276,12 +1324,12 @@ mod tests {
         let marker = h.path().join(".claude/lumen/.autostart_done");
         let a = FakeAutoStart::default();
 
-        ensure_autostart_once(&a, &marker);
+        ensure_autostart_once(&a, &marker, EXE);
         assert_eq!(a.enable_calls.get(), 1);
 
         // Every subsequent launch is a no-op.
         for _ in 0..3 {
-            assert!(!ensure_autostart_once(&a, &marker));
+            assert!(!ensure_autostart_once(&a, &marker, EXE));
         }
         assert_eq!(a.enable_calls.get(), 1, "must not re-register");
     }
@@ -1293,13 +1341,13 @@ mod tests {
         let marker = h.path().join(".claude/lumen/.autostart_done");
         let a = FakeAutoStart::default();
 
-        ensure_autostart_once(&a, &marker);
+        ensure_autostart_once(&a, &marker, EXE);
         assert!(a.enabled.get());
 
         a.disable().unwrap(); // user flips the toggle off
         assert!(!a.enabled.get());
 
-        ensure_autostart_once(&a, &marker); // next launch
+        ensure_autostart_once(&a, &marker, EXE); // next launch
         assert!(
             !a.enabled.get(),
             "startup must not re-enable what the user turned off"
@@ -1312,7 +1360,7 @@ mod tests {
         let marker = h.path().join(".claude/lumen/.autostart_done");
         let a = FakeAutoStart::on();
 
-        assert!(!ensure_autostart_once(&a, &marker), "nothing to do");
+        assert!(!ensure_autostart_once(&a, &marker, EXE), "nothing to do");
         assert_eq!(a.enable_calls.get(), 0);
         assert!(
             marker.exists(),
@@ -1328,11 +1376,11 @@ mod tests {
         let marker = h.path().join(".claude/lumen/.autostart_done");
         let broken = FakeAutoStart::broken_write();
 
-        assert!(!ensure_autostart_once(&broken, &marker));
+        assert!(!ensure_autostart_once(&broken, &marker, EXE));
         assert!(!marker.exists(), "must not record a failure as done");
         assert_eq!(broken.enable_calls.get(), 1);
 
-        assert!(!ensure_autostart_once(&broken, &marker));
+        assert!(!ensure_autostart_once(&broken, &marker, EXE));
         assert_eq!(broken.enable_calls.get(), 2, "retried");
     }
 
@@ -1342,9 +1390,103 @@ mod tests {
         let marker = h.path().join(".claude/lumen/.autostart_done");
         assert!(!ensure_autostart_once(
             &FakeAutoStart::broken_read(),
-            &marker
+            &marker,
+            EXE
         ));
         assert!(!marker.exists());
+    }
+
+    // ── stale-path refresh ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_login_item_pointing_at_a_stale_executable_is_refreshed() {
+        // Renaming the app executable from `lumen` to `Lumen` left every existing
+        // login item aimed at the old path. It must be rewritten, not left to rely
+        // on a case-insensitive filesystem happening to resolve it.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "/Applications/Lumen.app/Contents/MacOS/lumen").unwrap();
+        let a = FakeAutoStart::on();
+
+        let refreshed = ensure_autostart_once(&a, &marker, EXE);
+
+        assert!(refreshed, "a stale path must be re-registered");
+        assert_eq!(a.enable_calls.get(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            EXE,
+            "the marker must record the path it just registered"
+        );
+    }
+
+    #[test]
+    fn an_empty_legacy_marker_counts_as_stale() {
+        // 1.1.2 and 1.1.3 wrote an empty marker, so it carries no path to compare.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+
+        let a = FakeAutoStart::on();
+        assert!(ensure_autostart_once(&a, &marker, EXE));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), EXE);
+    }
+
+    #[test]
+    fn a_matching_marker_is_left_completely_alone() {
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, EXE).unwrap();
+        let a = FakeAutoStart::on();
+
+        assert!(!ensure_autostart_once(&a, &marker, EXE));
+        assert_eq!(
+            a.enable_calls.get(),
+            0,
+            "no work when the path still matches"
+        );
+    }
+
+    #[test]
+    fn a_stale_path_does_not_re_enable_what_the_user_turned_off() {
+        // The opt-out still wins: the recorded path is corrected so the next launch
+        // sees no staleness, but the item stays off.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "/old/path/lumen").unwrap();
+        let a = FakeAutoStart::default(); // disabled — user opted out
+
+        assert!(!ensure_autostart_once(&a, &marker, EXE));
+        assert!(!a.enabled.get(), "must stay off");
+        assert_eq!(a.enable_calls.get(), 0);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            EXE,
+            "path is corrected so this is not re-evaluated every launch"
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_fails_is_retried_rather_than_recorded() {
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "/old/path/lumen").unwrap();
+        let broken = FakeAutoStart {
+            enabled: std::cell::Cell::new(true),
+            fail_write: true,
+            ..Default::default()
+        };
+
+        assert!(!ensure_autostart_once(&broken, &marker, EXE));
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "/old/path/lumen",
+            "a failed refresh must not claim the new path"
+        );
     }
 
     #[test]
@@ -1352,7 +1494,11 @@ mod tests {
         // First launch on a machine with no ~/.claude/lumen yet.
         let h = TempDir::new().unwrap();
         let marker = h.path().join("deep/nested/path/.autostart_done");
-        assert!(ensure_autostart_once(&FakeAutoStart::default(), &marker));
+        assert!(ensure_autostart_once(
+            &FakeAutoStart::default(),
+            &marker,
+            EXE
+        ));
         assert!(marker.exists());
     }
 
