@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.3] — 2026-07-28
+
+### Fixes
+- fix: apply schema migrations on the sqlx paths, not only the rusqlite one. The
+  daemon and the GUI executed `DDL` alone, which is `CREATE TABLE IF NOT EXISTS`
+  and therefore a no-op on a database that already has its tables — so
+  `turns.is_subagent`, added in 1.1.0, never reached any existing install. Because
+  the daemon binds that column on every insert, **ingest failed on every row and
+  the gauge silently froze** on upgrade; only a database created fresh at 1.1.0 or
+  later worked. Both now call a shared `init_schema`, which runs the DDL and then
+  the additive migrations, including the backfill that classifies existing subagent
+  rows. Found by upgrading a real 0.1.0 install and finding the column absent.
+
 ## [1.1.2] — 2026-07-28
 
 ### Fixes

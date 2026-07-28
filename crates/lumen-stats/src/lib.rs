@@ -27,10 +27,17 @@ pub fn db_url() -> String {
 
 /// Open a pool against `url`.
 pub async fn connect(url: &str) -> Result<SqlitePool, String> {
-    SqlitePoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .connect(url)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Every query below references turns.is_subagent, which only exists after the
+    // migrations run. Opening the GUI before the daemon has started would
+    // otherwise hit "no such column" on a database created before 1.1.0.
+    lumen_core::schema::init_schema(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(pool)
 }
 
 /// Open a pool against the ambient `LUMEN_DB`.

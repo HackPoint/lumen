@@ -1,6 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
 use lumen_core::record::Record;
-use lumen_core::schema::DDL;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -89,7 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = SqlitePoolOptions::new().connect(&conn).await?;
     eprintln!("lumen-daemon using db: {db_path}");
 
-    sqlx::raw_sql(DDL).execute(&pool).await?;
+    // init_schema, not raw DDL: DDL alone is CREATE TABLE IF NOT EXISTS, so on an
+    // existing database it is a no-op and the is_subagent column added in 1.1.0
+    // never appeared — making every insert below fail on an unknown column.
+    lumen_core::schema::init_schema(&pool).await?;
 
     let (tx, _rx) = broadcast::channel::<TurnMsg>(1000);
 
@@ -568,7 +570,7 @@ mod tests {
         let db = dir.path().join("test.db");
         let url = format!("sqlite:{}?mode=rwc", db.display());
         let pool = SqlitePoolOptions::new().connect(&url).await.unwrap();
-        sqlx::raw_sql(DDL).execute(&pool).await.unwrap();
+        lumen_core::schema::init_schema(&pool).await.unwrap();
         pool
     }
 
@@ -748,7 +750,7 @@ mod ws_tests {
     async fn pool_with_schema(dir: &TempDir) -> SqlitePool {
         let url = format!("sqlite:{}?mode=rwc", dir.path().join("ws.db").display());
         let pool = SqlitePoolOptions::new().connect(&url).await.unwrap();
-        sqlx::raw_sql(DDL).execute(&pool).await.unwrap();
+        lumen_core::schema::init_schema(&pool).await.unwrap();
         pool
     }
 
