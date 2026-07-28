@@ -10,12 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+/// Where the GUI and CLI expect to find the daemon.
+const WS_ADDR: &str = "127.0.0.1:9999";
+
 /// Worst-case lag before a missed notify-event is caught and new session
 /// files are discovered. notify handles the common fast path; polling is
 /// the correctness guarantee.
 const POLL_SECS: u64 = 3;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct TurnMsg {
     message_id: String,
     session_id: String,
@@ -342,14 +345,24 @@ async fn ws_server(
     pool: SqlitePool,
     tx: broadcast::Sender<TurnMsg>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:9999")
-        .await
-        .map_err(|e| {
-            eprintln!("ws bind failed (port 9999 in use?): {e}");
-            e
-        })?;
-    println!("WebSocket server listening on ws://127.0.0.1:9999");
+    let listener = tokio::net::TcpListener::bind(WS_ADDR).await.map_err(|e| {
+        eprintln!("ws bind failed (port 9999 in use?): {e}");
+        e
+    })?;
+    println!("WebSocket server listening on ws://{WS_ADDR}");
+    serve_ws(listener, pool, tx).await
+}
 
+/// The accept loop, taking an already-bound listener.
+///
+/// Split from `ws_server` so tests can bind port 0, learn the ephemeral port and
+/// drive a real client — binding the fixed 9999 in a test would collide with a
+/// running daemon and with other tests.
+async fn serve_ws(
+    listener: tokio::net::TcpListener,
+    pool: SqlitePool,
+    tx: broadcast::Sender<TurnMsg>,
+) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(pair) => pair,
@@ -563,5 +576,289 @@ mod tests {
         let found = walk_jsonl(dir.path());
         assert_eq!(found.len(), 2, "should find exactly the two .jsonl files");
         assert!(found.iter().all(|p| p.extension().unwrap() == "jsonl"));
+    }
+}
+
+#[cfg(test)]
+mod ws_tests {
+    //! End-to-end tests for the WebSocket surface the GUI and CLI consume.
+    //!
+    //! These bind an ephemeral port, run the real `serve_ws` accept loop and
+    //! connect a real client, so they cover the snapshot query, the live
+    //! broadcast, and the `Utf8Bytes` framing that the tungstenite 0.30 upgrade
+    //! changed.
+
+    use super::*;
+    use futures_util::StreamExt;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tempfile::TempDir;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn pool_with_schema(dir: &TempDir) -> SqlitePool {
+        let url = format!("sqlite:{}?mode=rwc", dir.path().join("ws.db").display());
+        let pool = SqlitePoolOptions::new().connect(&url).await.unwrap();
+        sqlx::raw_sql(DDL).execute(&pool).await.unwrap();
+        pool
+    }
+
+    async fn add_turn(pool: &SqlitePool, id: &str, session: &str, ts: &str, fill: i64) {
+        sqlx::query(
+            "INSERT INTO turns(message_id,session_id,ts,model,input_tokens,output_tokens,
+                               cache_read_input_tokens,cache_creation_input_tokens)
+             VALUES(?,?,?,'claude-sonnet-4',10,20,?,5)",
+        )
+        .bind(id)
+        .bind(session)
+        .bind(ts)
+        .bind(fill)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Start `serve_ws` on an ephemeral port; returns the ws:// URL and the sender.
+    async fn start(pool: SqlitePool) -> (String, broadcast::Sender<TurnMsg>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, _rx) = broadcast::channel::<TurnMsg>(64);
+        let server_tx = tx.clone();
+        tokio::spawn(async move {
+            let _ = serve_ws(listener, pool, server_tx).await;
+        });
+        (format!("ws://{addr}"), tx)
+    }
+
+    /// Read the next text frame, failing the test rather than hanging forever.
+    async fn next_json<S>(stream: &mut S) -> serde_json::Value
+    where
+        S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting for a frame")
+            .expect("stream ended")
+            .expect("websocket error");
+        let text = msg.into_text().expect("frame must be text");
+        serde_json::from_str(&text).expect("frame must be JSON")
+    }
+
+    #[tokio::test]
+    async fn a_client_receives_a_snapshot_on_connect() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        add_turn(&pool, "m1", "s1", "2026-01-01T10:00:00Z", 1_000).await;
+        add_turn(&pool, "m2", "s1", "2026-01-01T11:00:00Z", 7_000).await;
+
+        let (url, _tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let snap = next_json(&mut ws).await;
+
+        assert_eq!(snap["type"], "snapshot");
+        let sessions = snap["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["session_id"], "s1");
+        assert_eq!(sessions[0]["input"], 20, "summed across both turns");
+        assert_eq!(sessions[0]["output"], 40);
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_fill_is_the_latest_turn_not_the_session_max() {
+        // After /compact the fill DROPS. Reporting MAX would leave the gauge
+        // stuck at the pre-compaction high-water mark.
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        add_turn(&pool, "m1", "s1", "2026-01-01T10:00:00Z", 190_000).await;
+        add_turn(&pool, "m2", "s1", "2026-01-01T11:00:00Z", 12_000).await;
+
+        let (url, _tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let snap = next_json(&mut ws).await;
+        assert_eq!(
+            snap["sessions"][0]["fill"], 12_000,
+            "must follow the newest turn, not the peak"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_db_still_produces_a_snapshot_frame() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, _tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let snap = next_json(&mut ws).await;
+        assert_eq!(snap["type"], "snapshot");
+        assert!(snap["sessions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_row_per_session_is_reported() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        add_turn(&pool, "a", "s1", "2026-01-01T10:00:00Z", 100).await;
+        add_turn(&pool, "b", "s2", "2026-01-01T11:00:00Z", 200).await;
+
+        let (url, _tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let snap = next_json(&mut ws).await;
+        assert_eq!(snap["sessions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_turn_reaches_a_connected_client() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _snapshot = next_json(&mut ws).await;
+
+        tx.send(TurnMsg {
+            message_id: "msg-live".into(),
+            session_id: "s1".into(),
+            ts: "2026-01-01T12:00:00Z".into(),
+            model: "claude-opus-4".into(),
+            input_tokens: 11,
+            output_tokens: 22,
+            cache_read_input_tokens: 33,
+            cache_creation_input_tokens: 44,
+        })
+        .unwrap();
+
+        let event = next_json(&mut ws).await;
+        assert_eq!(event["type"], "event");
+        assert_eq!(event["turn"]["message_id"], "msg-live");
+        assert_eq!(event["turn"]["model"], "claude-opus-4");
+        assert_eq!(event["turn"]["cache_read_input_tokens"], 33);
+    }
+
+    #[tokio::test]
+    async fn every_connected_client_gets_the_same_live_turn() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool).await;
+
+        let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _ = next_json(&mut a).await;
+        let _ = next_json(&mut b).await;
+
+        tx.send(TurnMsg {
+            message_id: "fanout".into(),
+            session_id: "s1".into(),
+            ts: "2026-01-01T12:00:00Z".into(),
+            model: "m".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_input_tokens: 1,
+            cache_creation_input_tokens: 1,
+        })
+        .unwrap();
+
+        assert_eq!(next_json(&mut a).await["turn"]["message_id"], "fanout");
+        assert_eq!(next_json(&mut b).await["turn"]["message_id"], "fanout");
+    }
+
+    #[tokio::test]
+    async fn turn_frames_arrive_in_order() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _ = next_json(&mut ws).await;
+
+        for i in 0..5 {
+            tx.send(TurnMsg {
+                message_id: format!("m{i}"),
+                session_id: "s1".into(),
+                ts: "2026-01-01T12:00:00Z".into(),
+                model: "m".into(),
+                input_tokens: i,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+            .unwrap();
+        }
+        for i in 0..5 {
+            assert_eq!(
+                next_json(&mut ws).await["turn"]["message_id"],
+                format!("m{i}")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disconnecting_client_does_not_stop_the_server() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool).await;
+
+        {
+            let (mut doomed, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let _ = next_json(&mut doomed).await;
+        } // dropped mid-stream
+
+        // A turn sent to nobody must not poison the broadcast channel.
+        let _ = tx.send(TurnMsg {
+            message_id: "orphan".into(),
+            session_id: "s1".into(),
+            ts: "2026-01-01T12:00:00Z".into(),
+            model: "m".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
+
+        // A fresh client must still be served.
+        let (mut fresh, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert_eq!(next_json(&mut fresh).await["type"], "snapshot");
+    }
+
+    #[tokio::test]
+    async fn frames_are_text_not_binary() {
+        // The CLI checks msg.is_text() and the GUI parses event.payload as a
+        // string; a binary frame would be silently dropped by both.
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, _tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(msg.is_text(), "got {msg:?}");
+    }
+
+    #[tokio::test]
+    async fn ingest_then_broadcast_reaches_the_client_end_to_end() {
+        // The real pipeline: a JSONL line lands on disk, ingest_from parses and
+        // stores it, and the resulting broadcast reaches a websocket client.
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool.clone()).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _ = next_json(&mut ws).await;
+
+        let line = r#"{"sessionId":"s-e2e","timestamp":"2026-01-01T12:00:00Z","message":{"id":"msg-e2e","model":"claude-sonnet-4-6","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":9,"cache_read_input_tokens":5000,"cache_creation_input_tokens":0}}}"#;
+        let jsonl = dir.path().join("session.jsonl");
+        std::fs::write(&jsonl, format!("{line}\n")).unwrap();
+
+        let end = ingest_from(&pool, &jsonl, 0, &tx, true).await.unwrap();
+        assert!(end > 0, "offset must advance past the consumed line");
+
+        let event = next_json(&mut ws).await;
+        assert_eq!(event["type"], "event");
+        assert_eq!(event["turn"]["message_id"], "msg-e2e");
+        assert_eq!(event["turn"]["session_id"], "s-e2e");
+        assert_eq!(event["turn"]["cache_read_input_tokens"], 5000);
+
+        // And it is durable, not just broadcast.
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE message_id='msg-e2e'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, 1);
     }
 }
