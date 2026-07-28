@@ -399,9 +399,13 @@ fn db_url() -> String {
 }
 
 /// Run the standard token-aggregate SELECT with a caller-supplied WHERE clause
-/// (pass "" for all-time). The clause is a fixed string literal at every call
-/// site below — no user input is interpolated.
-async fn fetch_agg(pool: &sqlx::SqlitePool, where_clause: &str) -> Result<TokenAgg, String> {
+/// (pass "" for all-time). The `&'static str` bound is what makes the
+/// `AssertSqlSafe` below sound: no runtime value can reach the clause, so no
+/// user input is interpolated.
+async fn fetch_agg(
+    pool: &sqlx::SqlitePool,
+    where_clause: &'static str,
+) -> Result<TokenAgg, String> {
     let sql = format!(
         "SELECT COUNT(*),
                 COALESCE(SUM(input_tokens),0),
@@ -412,7 +416,7 @@ async fn fetch_agg(pool: &sqlx::SqlitePool, where_clause: &str) -> Result<TokenA
                            + cache_read_input_tokens + cache_creation_input_tokens),0)
          FROM turns {where_clause}"
     );
-    let t: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(&sql)
+    let t: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;

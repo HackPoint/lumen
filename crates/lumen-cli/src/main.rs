@@ -63,11 +63,16 @@ fn main() {
     }
 }
 
+// ratatui 0.30 gave `Backend` an associated `Error` type, so the backend's error
+// has to be convertible into the `io::Error` this returns (it is for Crossterm).
 fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     state: &Arc<Mutex<data::AppState>>,
     no_anim: bool,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    io::Error: From<B::Error>,
+{
     loop {
         {
             let mut s = state.lock().unwrap();
