@@ -2711,6 +2711,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "lumen-core",
+ "lumen-stats",
  "notify",
  "serde",
  "serde_json",

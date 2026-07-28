@@ -11,7 +11,20 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// Where the GUI and CLI expect to find the daemon.
-const WS_ADDR: &str = "127.0.0.1:9999";
+const DEFAULT_WS_ADDR: &str = "127.0.0.1:9999";
+
+/// Resolve the WebSocket bind address.
+///
+/// Overridable via `LUMEN_WS_ADDR` for two reasons: a user whose port 9999 is
+/// already taken can move the daemon rather than being stuck (the bind-failure
+/// path already anticipates this), and the e2e tests can bind an ephemeral port
+/// instead of colliding with a daemon the developer has running.
+fn ws_addr() -> String {
+    match std::env::var("LUMEN_WS_ADDR") {
+        Ok(a) if !a.trim().is_empty() => a,
+        _ => DEFAULT_WS_ADDR.to_string(),
+    }
+}
 
 /// Worst-case lag before a missed notify-event is caught and new session
 /// files are discovered. notify handles the common fast path; polling is
@@ -345,11 +358,12 @@ async fn ws_server(
     pool: SqlitePool,
     tx: broadcast::Sender<TurnMsg>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = tokio::net::TcpListener::bind(WS_ADDR).await.map_err(|e| {
-        eprintln!("ws bind failed (port 9999 in use?): {e}");
+    let addr = ws_addr();
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        eprintln!("ws bind failed ({addr} in use?): {e}");
         e
     })?;
-    println!("WebSocket server listening on ws://{WS_ADDR}");
+    println!("WebSocket server listening on ws://{addr}");
     serve_ws(listener, pool, tx).await
 }
 
