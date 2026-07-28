@@ -17,3 +17,6 @@ serde_json = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 tungstenite = "0.30"
 dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
