@@ -48,13 +48,23 @@ case "$TRIPLE" in
     *windows*) EXE=".exe" ;;
 esac
 
+# Pairs of "built binary:sidecar name". They differ for the CLI: it is built as
+# `lumen`, but the app's own executable is `Lumen`, and macOS filesystems are
+# case-insensitive — so staging the CLI as `lumen` put both at the same path
+# inside Contents/MacOS/ and the GUI silently overwrote the CLI. Staging it as
+# `lumen-cli` keeps them distinct; the command users type is still `lumen`,
+# because that name comes from the symlink Setup creates, not from the bundle.
+#
 # lumen-tok is a second binary of the lumen-mcp crate; lumen comes from lumen-cli.
-for bin in lumen-daemon lumen-mcp lumen-tok lumen; do
-    src="$ROOT/target/release/${bin}${EXE}"
+for pair in lumen-daemon:lumen-daemon lumen-mcp:lumen-mcp lumen-tok:lumen-tok lumen:lumen-cli; do
+    built="${pair%%:*}"
+    staged="${pair##*:}"
+    src="$ROOT/target/release/${built}${EXE}"
     if [[ ! -f "$src" ]]; then
         echo "error: expected ${src} after the build — did a crate fail to produce it?" >&2
         exit 1
     fi
-    cp "$src" "$BIN_DIR/${bin}-${TRIPLE}${EXE}"
-    echo "sidecar ready: binaries/${bin}-${TRIPLE}${EXE}"
+    dst="$BIN_DIR/${staged}-${TRIPLE}${EXE}"
+    cp "$src" "$dst"
+    echo "sidecar ready: binaries/${staged}-${TRIPLE}${EXE}"
 done
