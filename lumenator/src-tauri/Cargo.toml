@@ -1,7 +1,7 @@
 [package]
 name = "Lumen"
 version = "1.1.0"
-description = "macOS menu-bar app for Claude Code — live context gauge, cost, and optimizer"
+description = "Menu-bar and tray app for Claude Code — live context gauge, cost, and optimizer"
 authors = ["HackPoint"]
 license = "MIT"
 repository = "https://github.com/HackPoint/lumen"
