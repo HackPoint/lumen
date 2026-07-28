@@ -85,8 +85,12 @@ export class LumenTooltip implements OnDestroy {
         // Center horizontally over the trigger, clamped to the viewport.
         const vw = this.doc.documentElement.clientWidth;
         let left = rect.left + rect.width / 2 - tw / 2;
-        if (left < GAP) left = GAP;
-        if (left + tw > vw - GAP) left = vw - tw - GAP;
+        // Clamp right first, then left, so a tooltip WIDER than the viewport
+        // still starts on-screen. The other order lets the right-edge clamp
+        // undo the left one and place the tooltip at a negative offset —
+        // reachable in the narrow tray popover.
+        left = Math.min(left, vw - tw - GAP);
+        left = Math.max(GAP, left);
 
         tip.style.top = `${top}px`;
         tip.style.left = `${left}px`;

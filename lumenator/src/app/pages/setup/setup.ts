@@ -2,11 +2,12 @@ import {
     ChangeDetectionStrategy,
     Component,
     OnInit,
+    inject,
     signal,
 } from '@angular/core';
-import { invoke } from '@tauri-apps/api/core';
 import { Router } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
+import { TauriBridge } from '../../tauri-bridge';
 
 type StepStatus = 'Ok' | 'Warn' | 'Error' | 'Skip';
 
@@ -35,6 +36,7 @@ export class Setup implements OnInit {
     readonly cliResult  = signal<string | null>(null);
 
     private readonly router: Router;
+    private readonly bridge = inject(TauriBridge);
 
     constructor(router: Router) {
         this.router = router;
@@ -49,7 +51,7 @@ export class Setup implements OnInit {
         this.steps.set([]);
         this.error.set(null);
         try {
-            const result = await invoke<SetupStep[]>('lumen_run_setup');
+            const result = await this.bridge.invoke<SetupStep[]>('lumen_run_setup');
             this.steps.set(result);
             this.phase.set('done');
         } catch (e: unknown) {
@@ -63,7 +65,7 @@ export class Setup implements OnInit {
         this.steps.set([]);
         this.error.set(null);
         try {
-            const result = await invoke<SetupStep[]>('lumen_uninstall');
+            const result = await this.bridge.invoke<SetupStep[]>('lumen_uninstall');
             this.steps.set(result);
             this.phase.set('done');
         } catch (e: unknown) {
@@ -80,7 +82,7 @@ export class Setup implements OnInit {
         this.cliRunning.set(true);
         this.cliResult.set(null);
         try {
-            const steps = await invoke<SetupStep[]>('lumen_install_cli');
+            const steps = await this.bridge.invoke<SetupStep[]>('lumen_install_cli');
             const step = steps[0];
             if (step) {
                 const icon = step.status === 'Ok' ? '✓' : '✕';

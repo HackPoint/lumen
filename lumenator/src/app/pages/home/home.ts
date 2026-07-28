@@ -5,7 +5,7 @@ import { Cost } from '../../components/cost/cost';
 import { Usage } from '../../components/usage/usage';
 import { Firefly } from '../../components/firefly/firefly';
 import { SessionService } from '../../session.service';
-import { invoke } from '@tauri-apps/api/core';
+import { TauriBridge } from '../../tauri-bridge';
 
 @Component({
     selector: 'home',
@@ -17,9 +17,10 @@ import { invoke } from '@tauri-apps/api/core';
 export class Home implements OnInit {
     readonly s = inject(SessionService);
     private readonly router = inject(Router);
+    private readonly bridge = inject(TauriBridge);
 
     ngOnInit(): void {
-        invoke<boolean>('lumen_setup_needed')
+        this.bridge.invoke<boolean>('lumen_setup_needed')
             .then(needed => { if (needed) this.router.navigate(['/setup']); })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });
     }

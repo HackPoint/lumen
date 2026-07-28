@@ -25,7 +25,14 @@ export class Gauge {
     readonly band = (this.sweep / 360) * 100;
 
     // --- derived state (semantics preserved) ---
-    readonly ratio = computed(() => Math.max(0, Math.min(1, this.fill() / this.max())));
+    readonly ratio = computed(() => {
+        const max = this.max();
+        // An unknown window reads as empty, matching the TUI's `window == 0`
+        // no-data branch. Without this guard fill/0 gives Infinity (rendering a
+        // confident 100%) or, for fill=0, NaN — which reaches the DOM as "NaN%".
+        if (max <= 0) return 0;
+        return Math.max(0, Math.min(1, this.fill() / max));
+    });
     readonly percent = computed(() => Math.round(this.ratio() * 100));
 
     // Compaction marker sits at 95% of the window — the alert threshold.

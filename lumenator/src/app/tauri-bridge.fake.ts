@@ -55,6 +55,14 @@ export class FakeTauriBridge implements TauriBridge {
     this.notifications.push(options);
   }
 
+  /** How many times the window was parked under the tray. */
+  moveWindowCalls = 0;
+
+  moveWindowToTray(): Promise<void> {
+    this.moveWindowCalls++;
+    return Promise.resolve();
+  }
+
   // ── helpers for assertions ────────────────────────────────────────────────
 
   /** How many times `cmd` was invoked. */
