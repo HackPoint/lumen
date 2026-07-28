@@ -3,6 +3,12 @@ name = "lumen-mcp"
 version = "1.0.0"
 edition = "2024"
 
+# Request handling lives in the lib so it can be unit-tested; the binaries are
+# thin shells that own the stdout/DB side effects.
+[lib]
+name = "lumen_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lumen-mcp"
 path = "src/main.rs"
@@ -15,3 +21,6 @@ path = "src/tok.rs"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 lumen-core = { path = "../lumen-core" }
+
+[dev-dependencies]
+tempfile = "3"
