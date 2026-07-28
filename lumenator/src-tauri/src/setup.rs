@@ -76,6 +76,9 @@ pub fn lumen_uninstall() -> Vec<SetupStep> {
     run_uninstall()
 }
 
+/// Bundle identifier, matching `identifier` in tauri.conf.json.
+const APP_ID: &str = "io.speedata.lumen";
+
 // ── Standard path helpers ─────────────────────────────────────────────────────
 //
 // Every path below is derived from a `home` argument, and the no-argument
@@ -148,8 +151,27 @@ fn find_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Per-user application data directory, resolved per OS.
+///
+/// macOS keeps the path it has always used, so existing installs need no
+/// migration. Linux follows the XDG default and Windows uses Roaming AppData.
+/// The `$XDG_DATA_HOME` override is deliberately not honoured: every path in this
+/// module derives from a single `home` argument so tests can never escape their
+/// tempdir, and one env var reading differently in tests than in production is
+/// exactly the class of bug that costs more than it saves.
 fn app_support_dir_in(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/io.speedata.lumen")
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support").join(APP_ID)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        home.join("AppData").join("Roaming").join(APP_ID)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home.join(".local").join("share").join(APP_ID)
+    }
 }
 
 fn app_support_dir() -> PathBuf {
@@ -162,6 +184,9 @@ fn app_support_dir() -> PathBuf {
 // ejected or the app is moved, leaving the MCP `command` path we recorded in
 // ~/.claude.json dangling — Claude Code then fails with
 // `ENOENT … posix_spawn '/Volumes/…/lumen-mcp'`.
+/// Both markers are macOS-specific, so this is always false on Linux and
+/// Windows — where packages install to a stable prefix and the problem does not
+/// arise. Kept unconditional so the logic has one shape on every platform.
 fn is_ephemeral_path(p: &std::path::Path) -> bool {
     let s = p.to_string_lossy();
     s.starts_with("/Volumes/") || s.contains("/AppTranslocation/")
@@ -194,12 +219,16 @@ fn stable_binary(name: &str) -> Option<PathBuf> {
 }
 
 fn db_path() -> String {
-    std::env::var("LUMEN_DB").unwrap_or_else(|_| {
-        home()
-            .join("Library/Application Support/io.speedata.lumen/lumen.db")
-            .to_string_lossy()
-            .to_string()
-    })
+    std::env::var("LUMEN_DB").unwrap_or_else(|_| db_path_in(&home()))
+}
+
+/// The metering DB inside the per-OS data directory. Derived from
+/// [`app_support_dir_in`] so the two can never disagree about where data lives.
+fn db_path_in(home: &Path) -> String {
+    app_support_dir_in(home)
+        .join("lumen.db")
+        .to_string_lossy()
+        .to_string()
 }
 
 // ── Script templates ──────────────────────────────────────────────────────────
@@ -977,9 +1006,54 @@ mod tests {
             global_settings_path_in(h),
             Path::new("/tmp/fake-home/.claude/settings.json")
         );
+        // The data directory is per-OS, so assert the platform's own layout.
+        #[cfg(target_os = "macos")]
         assert_eq!(
             app_support_dir_in(h),
             Path::new("/tmp/fake-home/Library/Application Support/io.speedata.lumen")
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            app_support_dir_in(h),
+            Path::new("/tmp/fake-home/AppData/Roaming/io.speedata.lumen")
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(
+            app_support_dir_in(h),
+            Path::new("/tmp/fake-home/.local/share/io.speedata.lumen"),
+            "Linux follows the XDG default"
+        );
+    }
+
+    #[test]
+    fn the_data_directory_is_under_the_home_on_every_platform() {
+        // Whatever the layout, it must stay inside the supplied home — otherwise a
+        // test could reach outside its tempdir and touch the real machine.
+        let h = Path::new("/tmp/fake-home");
+        assert!(app_support_dir_in(h).starts_with(h));
+        assert!(app_support_dir_in(h).ends_with(APP_ID));
+    }
+
+    #[test]
+    fn the_db_lives_inside_the_data_directory() {
+        // Derived from app_support_dir_in, so the two cannot drift apart and end
+        // up reading and writing different files.
+        let h = Path::new("/tmp/fake-home");
+        let db = db_path_in(h);
+        assert!(
+            db.starts_with(&app_support_dir_in(h).to_string_lossy().to_string()),
+            "db {db} must sit inside the data dir"
+        );
+        assert!(db.ends_with("lumen.db"));
+    }
+
+    #[test]
+    fn the_bundle_id_matches_tauri_conf() {
+        // A drift here would put data in a directory the app never reads.
+        let conf = include_str!("../tauri.conf.json");
+        assert!(
+            conf.contains(&format!("\"identifier\": \"{APP_ID}\"")),
+            "APP_ID must match tauri.conf.json identifier"
         );
     }
 
