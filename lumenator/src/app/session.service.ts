@@ -1,10 +1,8 @@
-import { Injectable, computed, effect, signal, untracked } from '@angular/core';
-import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
+import { DestroyRef, Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { Observable, scan, startWith, merge, from, filter } from 'rxjs';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { RATE } from './components';
+import { TauriBridge } from './tauri-bridge';
 import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
 
 // Known context-window tiers (reference data, not logic).
@@ -41,15 +39,13 @@ function parseDaemon(raw: string): DaemonMsg | null {
 }
 
 /** Live stream of daemon messages from the Tauri "daemon" event. */
-function liveStream$(): Observable<DaemonMsg> {
+function liveStream$(bridge: TauriBridge): Observable<DaemonMsg> {
   return new Observable<DaemonMsg>((subscriber) => {
-    const unlisten = listen('daemon', (event) => {
-      const msg = parseDaemon(event.payload as string);
+    const sub = bridge.listen$('daemon').subscribe((raw) => {
+      const msg = parseDaemon(raw);
       if (msg) subscriber.next(msg);
     });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
+    return () => sub.unsubscribe();
   });
 }
 
@@ -57,9 +53,9 @@ function liveStream$(): Observable<DaemonMsg> {
  * One-shot: ask the backend for the cached snapshot (fixes the race where the
  * daemon sent the snapshot before Angular started listening).
  */
-function cachedSnapshot$(): Observable<DaemonMsg> {
+function cachedSnapshot$(bridge: TauriBridge): Observable<DaemonMsg> {
   return from(
-      invoke<string | null>('request_snapshot')
+      bridge.invoke<string | null>('request_snapshot')
           .then((raw) => (raw ? parseDaemon(raw) : null))
           .catch(() => null),
   ).pipe(filter((m): m is DaemonMsg => m !== null));
@@ -67,9 +63,16 @@ function cachedSnapshot$(): Observable<DaemonMsg> {
 
 @Injectable({ providedIn: 'root' })
 export class SessionService {
+  /**
+   * Every backend call goes through this seam so the service can be constructed
+   * in a test or a plain browser. Declared first: `sessions` below uses it in
+   * its own field initialiser, and field order is initialisation order.
+   */
+  private readonly bridge = inject(TauriBridge);
+
   /** Cached snapshot (on demand) merged with the live event stream. */
   private readonly sessions = toSignal(
-      merge(cachedSnapshot$(), liveStream$()).pipe(
+      merge(cachedSnapshot$(this.bridge), liveStream$(this.bridge)).pipe(
           scan<DaemonMsg, SessionMap>((acc, msg) => {
             if (msg.kind === 'snapshot') {
               for (const s of msg.sessions) {
@@ -96,7 +99,12 @@ export class SessionService {
             const pt = prev?.totals ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
             acc[t.session_id] = {
               fill: t.cache_read_input_tokens,
-              model: t.model,
+              // Keep the last known model when a turn reports none. The snapshot
+              // branch above preserves it, the CLI reducer guards the same way
+              // (crates/lumen-cli/src/data.rs), and get_sessions picks the most
+              // recent NON-NULL model — this branch was the only one that let an
+              // empty model blank out a known one.
+              model: t.model || (prev?.model ?? ''),
               ts: Date.now(),
               startTs: prev?.startTs ?? Date.now(),
               recentOutput,
@@ -294,7 +302,7 @@ export class SessionService {
 
   /** Re-fetch the aggregate report. */
   refreshUsage(): void {
-    invoke<UsageReport>('get_usage')
+    this.bridge.invoke<UsageReport>('get_usage')
         .then((u) => this.usage.set(u))
         .catch(() => { /* not in Tauri / db not ready — ignore */ });
   }
@@ -320,7 +328,7 @@ export class SessionService {
 
   /** Re-fetch the optimizer report. */
   refreshOptimizerStats(): void {
-    invoke<OptimizerReport>('get_optimizer_stats')
+    this.bridge.invoke<OptimizerReport>('get_optimizer_stats')
         .then((r) => this.optimizerStats.set(r))
         .catch(() => { /* not in Tauri / db not ready — ignore */ });
   }
@@ -394,7 +402,7 @@ export class SessionService {
     effect(() => {
       const percent = this.trayPercent();
       const status = this.trayStatus();
-      invoke('update_tray', { percent, status }).catch(() => {});
+      this.bridge.invoke('update_tray', { percent, status }).catch(() => {});
     });
 
     // ── D4: cost threshold edge-trigger ──────────────────────────────────
@@ -502,10 +510,13 @@ export class SessionService {
     // Aggregate reports: fetch once now, then refresh slowly.
     this.refreshUsage();
     this.refreshOptimizerStats();
-    setInterval(() => {
+    // Tied to the injector lifetime: an uncleared interval outlives the service
+    // and, in tests, leaks across cases.
+    const refreshTimer = setInterval(() => {
       this.refreshUsage();
       this.refreshOptimizerStats();
     }, USAGE_REFRESH_MS);
+    inject(DestroyRef).onDestroy(() => clearInterval(refreshTimer));
   }
 
   /**
@@ -515,13 +526,13 @@ export class SessionService {
    */
   private async fireNativeNotification(title: string, body: string): Promise<void> {
     try {
-      let granted = await isPermissionGranted();
+      let granted = await this.bridge.isPermissionGranted();
       if (!granted) {
-        const perm = await requestPermission();
+        const perm = await this.bridge.requestPermission();
         granted = perm === 'granted';
       }
       if (granted) {
-        sendNotification({ title, body });
+        this.bridge.sendNotification({ title, body });
       }
     } catch {
       // Outside Tauri context, or permission permanently denied — skip silently.
