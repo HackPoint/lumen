@@ -25,8 +25,13 @@
   token changed:
 
   ```bash
-  brew uninstall --cask lumen && brew install --cask lumen-app
+  brew uninstall --cask lumen
+  brew trust --cask HackPoint/tap/lumen-app
+  brew install --cask lumen-app
   ```
+
+  The `trust` step is required because Homebrew refuses casks from a tap outside
+  `homebrew/cask` until they are explicitly trusted.
 
   Data in `~/Library/Application Support/io.speedata.lumen/` is untouched.
 
