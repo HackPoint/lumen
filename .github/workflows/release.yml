@@ -209,10 +209,21 @@ jobs:
             fi
           fi
 
+          # The tag filter accepts prereleases (v1.1.0-rc.1), but without
+          # --prerelease gh would mark one as Latest — pointing every
+          # releases/latest link and the README download badge at a release
+          # candidate. Anything with a hyphen in its version is a prerelease.
+          PRERELEASE_OPT=""
+          if [[ "$VERSION" == *-* ]]; then
+            PRERELEASE_OPT="--prerelease"
+            echo "::notice::${TAG} is a prerelease; it will not be marked Latest"
+          fi
+
           gh release create "$TAG" \
             "${DMG_PATH}#${DMG_NAME}" \
             "${TARBALL}#${TARBALL_NAME}" \
             --title "Lumen ${TAG}" \
+            $PRERELEASE_OPT \
             $NOTES_OPT
 
   # ════════════════════════════════════════════════════════════════════════════
