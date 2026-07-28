@@ -35,6 +35,17 @@ export class Setup implements OnInit {
     readonly cliRunning = signal(false);
     readonly cliResult  = signal<string | null>(null);
 
+    /**
+     * Whether Lumen is registered to start at login.
+     *
+     * Setup turns this on, but it stays a toggle: a login item is the user's
+     * machine, not ours, and someone who turns it off must not have it silently
+     * re-enabled behind their back.
+     */
+    readonly autostart        = signal(false);
+    readonly autostartBusy    = signal(false);
+    readonly autostartError   = signal<string | null>(null);
+
     private readonly router: Router;
     private readonly bridge = inject(TauriBridge);
 
@@ -58,6 +69,38 @@ export class Setup implements OnInit {
             this.error.set(String(e));
             this.phase.set('done');
         }
+        // Read the real state rather than assuming setup's step succeeded — it
+        // reports Warn, not Error, when the login item could not be registered.
+        await this.refreshAutostart();
+    }
+
+    /** Read the current login-item state from the backend. */
+    async refreshAutostart(): Promise<void> {
+        try {
+            this.autostart.set(await this.bridge.invoke<boolean>('lumen_autostart_enabled'));
+        } catch {
+            // A backend that cannot answer is reported as off; the toggle still
+            // renders and the user can try to switch it on.
+            this.autostart.set(false);
+        }
+    }
+
+    async toggleAutostart(): Promise<void> {
+        this.autostartBusy.set(true);
+        this.autostartError.set(null);
+        const want = !this.autostart();
+        try {
+            // Trust the returned state over `want`: the OS is the authority on
+            // whether the login item actually exists now.
+            this.autostart.set(
+                await this.bridge.invoke<boolean>('lumen_set_autostart', { enable: want }),
+            );
+        } catch (e: unknown) {
+            this.autostartError.set(String(e));
+            await this.refreshAutostart();
+        } finally {
+            this.autostartBusy.set(false);
+        }
     }
 
     async uninstall(): Promise<void> {
@@ -72,6 +115,9 @@ export class Setup implements OnInit {
             this.error.set(String(e));
             this.phase.set('done');
         }
+        // Uninstall removes the login item, so the toggle must not keep claiming
+        // it is on.
+        await this.refreshAutostart();
     }
 
     goHome(): void {

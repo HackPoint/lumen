@@ -147,6 +147,15 @@ pub fn run() {
         // positioner: lets us place the panel relative to the tray icon
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
+        // Launch at login. LaunchAgent rather than the AppleScript login-item
+        // route on macOS: it does not require the app to live in /Applications,
+        // so it keeps working for a build run from anywhere. No extra argv — the
+        // app cannot tell a login launch from a manual one, and does not need to,
+        // because both windows start hidden and the tray is the whole interface.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(SnapshotCache::default())
         // Window lifecycle:
         //  - panel: hide on focus-loss (click-elsewhere dismisses the popover)
@@ -300,7 +309,9 @@ pub fn run() {
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
             setup::lumen_uninstall,
-            setup::lumen_install_cli
+            setup::lumen_install_cli,
+            setup::lumen_autostart_enabled,
+            setup::lumen_set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

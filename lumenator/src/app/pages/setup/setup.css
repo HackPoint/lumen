@@ -180,3 +180,83 @@
     border: 1px solid color-mix(in srgb, var(--lumen-alert) 30%, transparent);
     margin-left: auto;
 }
+
+/* ── Launch-at-login toggle ── */
+.setup__option {
+    margin-top: 0.9rem;
+}
+
+.setup__toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.6rem 0.75rem;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border, rgba(255, 255, 255, 0.06));
+    border-radius: 8px;
+    cursor: pointer;
+}
+.setup__toggle:hover { border-color: var(--lumen-border, rgba(255, 255, 255, 0.14)); }
+
+/* The native checkbox stays in the accessibility tree and keeps keyboard
+   behaviour; only its default rendering is replaced by the track below.
+   `appearance: none` rather than `display: none`, which would make it
+   unfocusable. */
+.setup__toggle-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    margin: 0;
+    pointer-events: none;
+}
+
+.setup__toggle-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 20px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--lumen-text-dim) 30%, transparent);
+    transition: background 0.15s;
+}
+.setup__toggle-track[data-on="true"] { background: var(--lumen-ok); }
+
+.setup__toggle-knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.15s;
+}
+.setup__toggle-track[data-on="true"] .setup__toggle-knob { transform: translateX(14px); }
+
+/* Focus has to be visible on the track, since the input itself is not painted. */
+.setup__toggle-input:focus-visible + .setup__toggle-track {
+    outline: 2px solid var(--lumen-ok);
+    outline-offset: 2px;
+}
+
+.setup__toggle-input:disabled + .setup__toggle-track { opacity: 0.5; }
+
+.setup__toggle-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.setup__toggle-label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--lumen-text);
+}
+
+.setup__toggle-detail {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.72rem;
+    color: var(--lumen-text-dim);
+}
