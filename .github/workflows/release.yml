@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to build Windows/CLI artifacts for (e.g. v1.0.0). The macOS DMG and Homebrew tap are NOT rebuilt on manual runs.'
+        description: 'Existing release tag to build Windows/Linux/CLI artifacts for (e.g. v1.1.0). The macOS DMG is NOT rebuilt on manual runs; the Homebrew tap IS updated, from whatever is published on that release.'
         required: true
         default: 'v1.0.0'
 
@@ -515,42 +515,52 @@ jobs:
     # sha256 is computed from the tarball that job publishes. resolve supplies the
     # tag (needs must name it; a transitive dependency is not addressable).
     needs: [resolve, build, build-cli]
-    if: github.event_name == 'push'
+    # Also runs on workflow_dispatch: the tap is derived from the published
+    # release, so a tap left stale by a missing credential can be brought up to
+    # date without cutting a new tag. On that path `build` is skipped, hence
+    # always() plus an explicit check that only the jobs we need succeeded.
+    if: |
+      always() && needs.resolve.result == 'success'
+      && (github.event_name == 'workflow_dispatch'
+          || (needs.build.result == 'success' && needs.build-cli.result == 'success'))
     runs-on: ubuntu-latest        # no macOS toolchain needed for a git commit
 
     steps:
       - name: Checkout lumen (for formula templates)
         uses: actions/checkout@v4
 
-      - name: Check TAP_PUSH_TOKEN availability
+      - name: Check tap credentials availability
         id: tap_token
         env:
-          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
-          if [[ -n "$TAP_PUSH_TOKEN" ]]; then
+          if [[ -n "$TAP_DEPLOY_KEY" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "TAP_PUSH_TOKEN is not set; skipping Homebrew tap update."
+            # A plain echo is how this went unnoticed for two releases: the tap sat
+            # at 0.1.0 while 1.0.0 and 1.0.1 shipped, because a skipped job still
+            # reports success. An annotation surfaces it in the run summary.
+            echo "::warning::TAP_DEPLOY_KEY is not set — the Homebrew tap was NOT updated. Formula users stay on the previous version."
           fi
 
-      # TAP_PUSH_TOKEN is a GitHub Personal Access Token with `repo` scope on
-      # HackPoint/homebrew-tap. GITHUB_TOKEN is scoped to this repo and cannot
-      # push to another repo.
+      # Authentication is an SSH deploy key on HackPoint/homebrew-tap, not a
+      # personal access token. GITHUB_TOKEN cannot push to another repository, so
+      # some cross-repo credential is required — and a deploy key is the narrowest
+      # one available: it grants write to that single repo, authenticates as the
+      # repo rather than as a user, and is revocable on its own without touching
+      # any other access. A `repo`-scoped PAT would instead carry write access to
+      # every repository the owner can reach.
       #
-      # To create the secret:
-      #   1. github.com → Settings → Developer settings → Personal access tokens (classic)
-      #   2. New token: name "tap-push", scope = repo (or fine-grained: Contents write
-      #      on HackPoint/homebrew-tap)
-      #   3. Copy the token value
-      #   4. HackPoint/lumen → Settings → Secrets and variables → Actions → New secret
-      #      Name: TAP_PUSH_TOKEN    Value: (paste token)
+      # To rotate: generate a new ed25519 keypair, replace the deploy key at
+      # github.com/HackPoint/homebrew-tap → Settings → Deploy keys (allow write
+      # access), and update the TAP_DEPLOY_KEY secret with the private half.
       - name: Checkout homebrew-tap
         if: steps.tap_token.outputs.configured == 'true'
         uses: actions/checkout@v4
         with:
           repository: HackPoint/homebrew-tap
-          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
           path: homebrew-tap
 
       # The in-repo Casks/ and Formula/ files are the source of truth, but nothing
@@ -569,39 +579,61 @@ jobs:
           cp Formula/lumen-cli.rb  homebrew-tap/Formula/lumen-cli.rb
           echo "templates copied; version/sha256 are stamped in the next steps"
 
-      # The macOS tarball's hash comes from the build job, which computed it from
-      # the exact file it uploaded. The Linux tarball is built by build-cli, which
-      # exports no outputs, so hash the published asset instead — that also proves
-      # the formula points at something actually downloadable.
-      - name: Compute sha256 of the released Linux CLI tarball
+      # Hash the PUBLISHED assets rather than reading values passed between jobs.
+      # Two reasons: the formula then cannot disagree with what is actually
+      # downloadable, and the job no longer depends on `build`'s outputs — which
+      # are empty on a workflow_dispatch, since that path skips `build`. That is
+      # what lets the tap be repaired for a release that has already shipped.
+      - name: Compute sha256 of the published assets
         if: steps.tap_token.outputs.configured == 'true'
-        id: linux_sha
+        id: shas
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.resolve.outputs.tag }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          ASSET="lumen-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p /tmp/tapdl
 
-          if gh release download "$TAG" --pattern "$ASSET" --dir /tmp/tapdl --clobber; then
-            SHA=$(sha256sum "/tmp/tapdl/$ASSET" | awk '{print $1}')
-            echo "$ASSET -> $SHA"
-          else
-            # Not fatal: the macOS formula is still publishable, and the patcher
-            # leaves the Linux hash alone rather than writing a wrong one.
-            echo "::warning::${ASSET} is not on release ${TAG}; leaving the Linux sha256 unchanged"
-            SHA=""
-          fi
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          # Echoes the sha256 of a downloaded asset, or nothing if it is absent.
+          hash_asset() {
+            local pattern="$1"
+            local f
+            if gh release download "$TAG" --pattern "$pattern" --dir /tmp/tapdl --clobber 2>/dev/null; then
+              f=$(find /tmp/tapdl -name "$pattern" -print -quit)
+              [[ -n "$f" ]] && sha256sum "$f" | awk '{print $1}'
+            fi
+          }
+
+          # The DMG is named from tauri.conf.json's version, not the tag, so it is
+          # discovered by pattern rather than constructed (a prerelease tag makes
+          # the two differ).
+          DMG_SHA=$(hash_asset 'Lumen_*_aarch64.dmg')
+          MAC_SHA=$(hash_asset "lumen-v${VERSION}-aarch64-apple-darwin.tar.gz")
+          LINUX_SHA=$(hash_asset "lumen-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz")
+
+          for pair in "DMG:$DMG_SHA" "macOS CLI:$MAC_SHA" "Linux CLI:$LINUX_SHA"; do
+            name=${pair%%:*}; sha=${pair#*:}
+            if [[ -n "$sha" ]]; then
+              echo "${name} -> ${sha}"
+            else
+              # Not fatal: the patcher leaves a hash it was given no value for
+              # alone, which beats overwriting it with one known to be wrong.
+              echo "::warning::no ${name} asset on ${TAG}; leaving its sha256 unchanged"
+            fi
+          done
+
+          echo "dmg=${DMG_SHA}"     >> "$GITHUB_OUTPUT"
+          echo "mac=${MAC_SHA}"     >> "$GITHUB_OUTPUT"
+          echo "linux=${LINUX_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Update formulae with new version + sha256
         if: steps.tap_token.outputs.configured == 'true'
         env:
-          VERSION: ${{ needs.build.outputs.version }}
-          DMG_SHA: ${{ needs.build.outputs.dmg_sha256 }}
-          MAC_SHA: ${{ needs.build.outputs.tarball_sha256 }}
-          LINUX_SHA: ${{ steps.linux_sha.outputs.sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          DMG_SHA: ${{ steps.shas.outputs.dmg }}
+          MAC_SHA: ${{ steps.shas.outputs.mac }}
+          LINUX_SHA: ${{ steps.shas.outputs.linux }}
         run: |
           set -euo pipefail
 
@@ -609,7 +641,13 @@ jobs:
           # One platform, one sha256 — a plain substitution is unambiguous here.
           CASK="homebrew-tap/Casks/lumen.rb"
           sed -i "s/^  version \"[^\"]*\"/  version \"${VERSION}\"/" "$CASK"
-          sed -i "s/^  sha256 \"[^\"]*\"/  sha256 \"${DMG_SHA}\"/"   "$CASK"
+          if [[ -n "$DMG_SHA" ]]; then
+            sed -i "s/^  sha256 \"[^\"]*\"/  sha256 \"${DMG_SHA}\"/" "$CASK"
+          else
+            # Substituting an empty value would write `sha256 ""`, which fails
+            # every cask install with an unhelpful checksum error.
+            echo "::warning::no DMG hash; leaving the cask's sha256 unchanged"
+          fi
           echo "Cask updated:"
           grep -E 'version|sha256' "$CASK"
 
@@ -628,7 +666,7 @@ jobs:
         if: steps.tap_token.outputs.configured == 'true'
         working-directory: homebrew-tap
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${{ needs.resolve.outputs.version }}"
           git config user.name  "HackPoint"
           git config user.email "6758579+HackPoint@users.noreply.github.com"
           git add Casks/lumen.rb Formula/lumen-cli.rb
