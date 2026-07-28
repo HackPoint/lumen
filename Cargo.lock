@@ -20,6 +20,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-positioner",
  "tauri-plugin-shell",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
 ]

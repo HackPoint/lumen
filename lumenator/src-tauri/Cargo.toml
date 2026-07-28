@@ -33,3 +33,6 @@ futures-util = "0.3"
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
 dirs = "6.0.0"
+
+[dev-dependencies]
+tempfile = "3"
