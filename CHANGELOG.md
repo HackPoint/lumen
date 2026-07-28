@@ -2,7 +2,44 @@
 
 ## [1.1.0] — 2026-07-28
 
+### Features
+- feat(linux): ship the GUI on Linux (x86_64) as an AppImage and a `.deb`. Both
+  bundle the daemon, MCP server and CLI as sidecars. The `.deb` declares its
+  WebKitGTK and app-indicator dependencies so `apt install ./lumen_*.deb` pulls
+  them in.
+- feat(linux): offer the `lumen` CLI on Linux via Homebrew. The release pipeline
+  had built an x86_64 Linux binary since 1.0.0, but the formula never referenced
+  it, so `brew install lumen-cli` failed on Linux with no bottle.
+
+### Fixes
+- fix(gui): store data in the per-OS location instead of hard-coding macOS's.
+  `~/Library/Application Support/` was used on every platform, so on Linux the
+  database landed in a literal `~/Library/…` directory. Linux now uses
+  `~/.local/share/io.speedata.lumen/` (XDG) and Windows `%APPDATA%`.
+- fix(gui): gate the legacy `com.tauri.dev` database migration to macOS. It
+  probed a macOS-only path, which could never match elsewhere.
+- fix(core): fall back to `USERPROFILE` when `HOME` is unset, so the database
+  path resolves on Windows.
+- fix(build): derive the sidecar target triple from the toolchain rather than
+  hard-coding `aarch64-apple-darwin`. On any other host the build produced files
+  Tauri could not find and failed on a missing sidecar.
+- fix(release): stamp each platform's own sha256 into the Homebrew formula. One
+  `sed` matched every `sha256` line, so adding the Linux entry would have written
+  the macOS tarball's hash to it and broken every Linux install's checksum.
+- fix(release): copy the in-repo formula templates into the tap. The job only
+  rewrote the version and sha256 of whatever was already in the tap, so no
+  structural change — including the new Linux block — could ever reach users.
+- fix(daemon): wrap WebSocket text payloads in `Utf8Bytes` for tungstenite 0.30.
+- fix(cli): bound `run_loop` on `io::Error: From<B::Error>` now that ratatui 0.30
+  gives `Backend` an associated error type.
+- fix(gui): tighten `fetch_agg`'s WHERE clause to `&'static str` so sqlx 0.9's
+  `SqlSafeStr` audit is satisfied structurally rather than by comment.
+
 ### Maintenance
+- ci: test `lumen-cli` and `lumen-stats`, which no platform tested before, and
+  add a Linux job that builds, tests and lints the Tauri crate — previously the
+  GUI crate was never linted at all.
+- ci: run the frontend suite (`pnpm test`) with its coverage thresholds enforced.
 - chore(deps): update the whole dependency tree to latest. Rust: sqlx 0.8 → 0.9,
   rusqlite 0.31 → 0.39, tiktoken-rs 0.6 → 0.12, ratatui 0.29 → 0.30,
   crossterm 0.28 → 0.29, notify 6 → 8, tungstenite/tokio-tungstenite 0.24 → 0.30,
@@ -11,13 +48,6 @@
   and the `@tauri-apps/*` packages to 2.11.x.
 - chore(deps): pull in the sqlx 0.8.1+ fix for the SQLite binary-protocol
   integer overflow (RUSTSEC-2024-0363), which the old 0.8.0 lock pin blocked.
-
-### Fixes
-- fix(daemon): wrap WebSocket text payloads in `Utf8Bytes` for tungstenite 0.30.
-- fix(cli): bound `run_loop` on `io::Error: From<B::Error>` now that ratatui 0.30
-  gives `Backend` an associated error type.
-- fix(gui): tighten `fetch_agg`'s WHERE clause to `&'static str` so sqlx 0.9's
-  `SqlSafeStr` audit is satisfied structurally rather than by comment.
 
 ### Notes
 - Angular 22 raises the Node floor to **22.22.3** (or 24.15+/26+). CI's

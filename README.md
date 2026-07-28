@@ -6,6 +6,7 @@ See the whole truth about your Claude Code tokens — context fill, real cost, a
 
 [![Download](https://img.shields.io/github/v/release/HackPoint/lumen?label=download&color=3fb950)](../../releases/latest)
 ![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-lightgrey)
+![Platform](https://img.shields.io/badge/Linux-x86__64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -16,7 +17,8 @@ See the whole truth about your Claude Code tokens — context fill, real cost, a
 
 ## What it shows
 
-Lumen is a macOS menu-bar app and terminal dashboard for [Claude Code](https://claude.ai/code) users.
+Lumen is a tray/menu-bar app and terminal dashboard for [Claude Code](https://claude.ai/code) users,
+running on macOS, Linux and Windows.
 It watches your session files locally and surfaces things Claude Code doesn't show in its own interface:
 
 | Signal | Where it appears |
@@ -33,13 +35,23 @@ None of this leaves your machine. No account, no telemetry. See [Security & priv
 
 ## Platform support
 
-**macOS (Apple Silicon) today.**
+| Platform | GUI | CLI (`lumen`) | Notes |
+| --- | --- | --- | --- |
+| **macOS** (Apple Silicon) | ✅ `.dmg` + Homebrew cask | ✅ Homebrew | Primary development platform |
+| **Linux** (x86_64) | ✅ AppImage + `.deb` | ✅ Homebrew + tarball | Requires WebKitGTK 4.1 — see below |
+| **Windows** (x86_64) | ✅ `.exe` installer | ✅ `.zip` | GUI installer is un-signed |
+| macOS (Intel) | ❌ | ❌ | Build on request — open an issue |
+| Linux (arm64) | ❌ | ❌ | No artifact built yet |
 
-Lumen is built and tested on aarch64 macOS only. Intel Macs, Windows, and Linux are
-planned but not yet available. There are no install instructions for those platforms
-because there is nothing to install yet — an honest "not yet" beats a fake guide.
+**Requirements**
 
-**Requirements:** macOS 13 Ventura or later · Apple Silicon (aarch64) · [Claude Code](https://claude.ai/code) installed
+- **macOS:** 13 Ventura or later · Apple Silicon (aarch64)
+- **Linux:** glibc 2.35+ (Ubuntu 22.04 / Debian 12 or newer) · WebKitGTK 4.1 · a
+  tray-capable desktop (see [Linux tray support](#linux-tray-support))
+- **All platforms:** [Claude Code](https://claude.ai/code) installed
+
+The GUI is not code-signed or notarized on any platform. Per-platform workarounds
+are documented in the install sections below.
 
 ---
 
@@ -60,7 +72,7 @@ After install, launch Lumen from Spotlight or `/Applications/Lumen.app`.
 
 ### Via .dmg (manual — Gatekeeper workaround required)
 
-1. Download **`Lumen_0.1.0_aarch64.dmg`** from the [Releases page](../../releases/latest)
+1. Download **`Lumen_1.1.0_aarch64.dmg`** from the [Releases page](../../releases/latest)
 2. Open the .dmg and drag **Lumen** to your Applications folder
 3. **⚠️ Before opening — run this once in Terminal:**
 
@@ -80,6 +92,65 @@ After install, launch Lumen from Spotlight or `/Applications/Lumen.app`.
 
 4. On first launch, a **Setup** screen appears — click through to register the MCP
    server and hooks. **Restart Claude Code** after setup.
+
+### Linux (x86_64)
+
+Two packages are published per release. Both bundle the daemon, MCP server and CLI
+as sidecars, so there is nothing else to install.
+
+**AppImage** — works on any distribution, no root needed:
+
+```bash
+VERSION=1.1.0
+curl -LO "https://github.com/HackPoint/lumen/releases/download/v${VERSION}/Lumen-${VERSION}-x86_64.AppImage"
+chmod +x "Lumen-${VERSION}-x86_64.AppImage"
+./"Lumen-${VERSION}-x86_64.AppImage"
+```
+
+**.deb** — for Debian, Ubuntu and derivatives:
+
+```bash
+VERSION=1.1.0
+curl -LO "https://github.com/HackPoint/lumen/releases/download/v${VERSION}/lumen_${VERSION}_amd64.deb"
+sudo apt install "./lumen_${VERSION}_amd64.deb"    # apt resolves the dependencies
+```
+
+Then launch **Lumen** from your desktop's application menu — the package installs a
+`.desktop` entry. From a shell the binary is `Lumen` (capital L, matching the product
+name).
+
+`apt install ./file.deb` is deliberate over `dpkg -i`: the package declares
+WebKitGTK and app-indicator dependencies, and only `apt` will pull them in.
+
+If WebKitGTK is missing, install it directly:
+
+```bash
+# Debian / Ubuntu
+sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
+
+# Fedora
+sudo dnf install webkit2gtk4.1 gtk3 libappindicator-gtk3
+
+# Arch
+sudo pacman -S webkit2gtk-4.1 gtk3 libappindicator-gtk3
+```
+
+#### Linux tray support
+
+Lumen lives in the system tray, and Linux tray support depends on your desktop:
+
+| Desktop | Works out of the box? |
+| --- | --- |
+| KDE Plasma, Cinnamon, Budgie, XFCE | ✅ Yes |
+| GNOME | ⚠️ Needs the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/) — GNOME removed tray icons |
+| Sway / i3 / wlroots | ⚠️ Needs a tray-capable bar (Waybar with `tray`, or `i3status-rust`) |
+
+With no tray host running, the app still works and the main window still opens —
+you just lose the menu-bar icon. If the window does not appear on Wayland, force
+X11: `GDK_BACKEND=x11 ./Lumen-1.1.0-x86_64.AppImage`.
+
+Data lives in `~/.local/share/io.speedata.lumen/` (following the XDG layout),
+not in `~/Library` as on macOS.
 
 ---
 
@@ -105,7 +176,8 @@ After setup, **restart Claude Code** for the MCP server and hooks to activate.
 
 ### Opening the main window
 
-Lumen lives in the **menu bar** (top-right of your screen), not in the Dock.
+Lumen lives in the **menu bar / system tray**, not in the Dock or taskbar — top-right
+on macOS, wherever your desktop puts indicators on Linux and Windows.
 
 | Action | Result |
 | --- | --- |
@@ -130,6 +202,10 @@ hooks fire only in the Claude Code CLI, not the VS Code extension.
 ```bash
 brew tap HackPoint/tap && brew install HackPoint/tap/lumen-cli
 ```
+
+Works on macOS (Apple Silicon) and Linux (x86_64). On Windows, or without
+Homebrew, download the archive for your platform from the
+[Releases page](../../releases/latest) and put `lumen` on your `PATH`.
 
 **Via the app:**
 
@@ -473,7 +549,14 @@ rm -f ~/.lumen_db_path
 
 ## Build from source
 
-**Prerequisites:** Rust (stable), Node 20+, pnpm
+**Prerequisites:** Rust (stable), Node 22.22.3+ (Angular 22's floor), pnpm
+
+On Linux, also install the GUI toolkit headers:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev \
+                 libayatana-appindicator3-dev librsvg2-dev patchelf
+```
 
 ```bash
 git clone https://github.com/HackPoint/lumen.git
@@ -488,7 +571,7 @@ pnpm install
 # Development mode
 pnpm tauri dev
 
-# Production build → Lumen.app + Lumen_0.1.0_aarch64.dmg
+# Production build → Lumen.app + Lumen_1.1.0_aarch64.dmg
 pnpm tauri build
 # Artifacts at: target/release/bundle/macos/ and target/release/bundle/dmg/
 ```
@@ -501,6 +584,7 @@ crates/
   lumen-daemon/  file watcher + SQLite ingester + WebSocket server
   lumen-mcp/     MCP stdio server (smart_read, recall_file, compress_logs, lumen_ping)
                  also builds lumen-tok (standalone BPE tokenizer)
+  lumen-stats/   SQLite rollups the GUI displays: usage, sessions, optimizer
 lumenator/       Tauri application: Angular frontend + Rust backend
 ```
 
@@ -511,10 +595,11 @@ lumenator/       Tauri application: Angular frontend + Rust backend
 | | |
 | --- | --- |
 | Unsigned / un-notarized | Workaround documented above. Notarization on the roadmap. |
-| Apple Silicon only | Intel (x86_64) build on request — open an issue. Windows/Linux not yet available. |
+| No Intel macOS or arm64 Linux build | Build on request — open an issue. |
+| Linux tray needs a tray host | GNOME requires the AppIndicator extension; see [Linux tray support](#linux-tray-support). |
 | Hooks are CLI-only | VS Code extension API does not support PreToolUse/PostToolUse hooks. Soft mode available. |
 | Optimizer requires model cooperation in Soft mode | Full mode (CLI) enforces interception; Soft mode doesn't. |
-| Context window is inferred, not authoritative | Lumen infers 200K / 500K / 1M from the model name. Your actual window may differ by plan tier. |
+| Context window comes from a built-in model table | Known models use their published window; unrecognised ones fall back to inferring 200K / 500K / 1M from observed fill. Your actual window may differ by plan tier. |
 | Plan limits not visible | Lumen reads consumption from session files but cannot query Anthropic for your plan's token limits. |
 
 ---
