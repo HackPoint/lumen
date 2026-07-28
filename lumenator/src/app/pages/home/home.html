@@ -51,6 +51,16 @@
 
         <div class="gauge-stage">
             <gauge [fill]="s.fill()" [model]="s.model()" [max]="s.maxContext()"></gauge>
+            <!-- Which session the gauge is following. Only worth the space when
+                 the answer is not obvious. -->
+            @if (s.project()) {
+                <div class="gauge-stage__project" [lumenTooltip]="projectHint()">
+                    {{ s.project() }}
+                    @if (s.sessionCount() > 1) {
+                        <span class="gauge-stage__count">+{{ s.sessionCount() - 1 }} more</span>
+                    }
+                </div>
+            }
         </div>
 
         <cost [totals]="s.totals()"></cost>

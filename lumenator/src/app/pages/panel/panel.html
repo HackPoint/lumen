@@ -48,6 +48,11 @@
             @if (s.model()) {
                 <div class="panel__model">{{ s.model() }}</div>
             }
+            <!-- With several editor windows open the gauge follows whichever is
+                 newest, so name the project rather than leaving it ambiguous. -->
+            @if (s.project()) {
+                <div class="panel__project" [lumenTooltip]="projectHint()">{{ s.project() }}</div>
+            }
             @if (s.trayStatus() === 'alert') {
                 <div class="panel__flag" data-level="alert">compaction imminent</div>
             } @else if (s.trayStatus() === 'warn') {

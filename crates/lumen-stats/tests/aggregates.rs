@@ -51,6 +51,28 @@ async fn turn(pool: &SqlitePool, id: &str, session: &str, ts: &str, model: &str,
         .expect("insert turn");
 }
 
+/// Insert a SUBAGENT turn — same session_id as the parent, as Claude Code writes
+/// them, but flagged so it stays out of the context-fill gauge.
+async fn subagent_turn(pool: &SqlitePool, id: &str, session: &str, ts: &str, t: Tokens) {
+    let sql = format!(
+        "INSERT INTO turns(message_id,session_id,ts,model,input_tokens,output_tokens,
+                           cache_read_input_tokens,cache_creation_input_tokens,
+                           source_file,is_subagent)
+         VALUES(?1,?2,{ts},'claude-sonnet-4-6',?3,?4,?5,?6,
+                '/h/.claude/projects/-p/parent/subagents/agent-1.jsonl',1)"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(session)
+        .bind(t.0)
+        .bind(t.1)
+        .bind(t.2)
+        .bind(t.3)
+        .execute(pool)
+        .await
+        .expect("insert subagent turn");
+}
+
 /// Insert a turn with a NULL model.
 async fn turn_no_model(pool: &SqlitePool, id: &str, session: &str, ts: &str) {
     let sql = format!(
@@ -491,6 +513,121 @@ async fn sessions_is_capped_at_the_documented_limit() {
         get_sessions(&pool).await.unwrap().len() as i64,
         SESSION_LIMIT,
         "the query LIMIT and the documented SESSION_LIMIT must agree"
+    );
+}
+
+// ── subagent turns: real spend, separate context ─────────────────────────────
+
+#[tokio::test]
+async fn a_subagents_tokens_count_toward_cost() {
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "m1",
+        "s1",
+        "'2026-01-01T10:00:00Z'",
+        "sonnet",
+        (10, 20, 300_000, 5),
+    )
+    .await;
+    subagent_turn(
+        &pool,
+        "sub1",
+        "s1",
+        "'2026-01-01T10:01:00Z'",
+        (7, 9, 4_000, 1),
+    )
+    .await;
+
+    let u = get_usage(&pool).await.unwrap();
+    assert_eq!(u.all_time.turns, 2, "a subagent turn is still a turn");
+    assert_eq!(u.all_time.input, 17, "and its tokens are real spend");
+    assert_eq!(u.all_time.output, 29);
+    assert_eq!(u.all_time.cache_read, 304_000);
+}
+
+#[tokio::test]
+async fn a_subagents_context_does_not_become_the_sessions_peak_fill() {
+    // The bug: subagent transcripts reuse the parent's sessionId, so a subagent's
+    // small fresh context was treated as the parent session's context fill.
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "m1",
+        "s1",
+        "'2026-01-01T10:00:00Z'",
+        "sonnet",
+        (0, 0, 300_000, 0),
+    )
+    .await;
+    // Newest turn, tiny context — this is what used to hijack the gauge.
+    subagent_turn(
+        &pool,
+        "sub1",
+        "s1",
+        "'2026-01-01T10:05:00Z'",
+        (0, 0, 4_000, 0),
+    )
+    .await;
+
+    let rows = get_sessions(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1, "a subagent does not create a second session");
+    assert_eq!(
+        rows[0].peak_cache_read, 300_000,
+        "the peak must come from the main agent, not the subagent"
+    );
+    assert_eq!(rows[0].turn_count, 2, "but both turns are counted");
+}
+
+#[tokio::test]
+async fn a_subagent_with_a_larger_context_still_does_not_set_the_peak() {
+    // Even if a subagent somehow reads more context than the parent, it is not
+    // the parent's context — the exclusion is by kind, not by magnitude.
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "m1",
+        "s1",
+        "'2026-01-01T10:00:00Z'",
+        "sonnet",
+        (0, 0, 50_000, 0),
+    )
+    .await;
+    subagent_turn(
+        &pool,
+        "sub1",
+        "s1",
+        "'2026-01-01T10:01:00Z'",
+        (0, 0, 900_000, 0),
+    )
+    .await;
+
+    let rows = get_sessions(&pool).await.unwrap();
+    assert_eq!(rows[0].peak_cache_read, 50_000);
+}
+
+#[tokio::test]
+async fn a_session_of_only_subagent_turns_reports_no_fill() {
+    // Honest answer: there is no main-agent context to report.
+    let (_d, pool) = fixture().await;
+    subagent_turn(
+        &pool,
+        "sub1",
+        "s1",
+        "'2026-01-01T10:00:00Z'",
+        (1, 1, 7_000, 1),
+    )
+    .await;
+
+    let rows = get_sessions(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].peak_cache_read, 0,
+        "no main-agent turn means no fill"
+    );
+    assert_eq!(
+        rows[0].turn_count, 1,
+        "the turn still exists and still cost money"
     );
 }
 

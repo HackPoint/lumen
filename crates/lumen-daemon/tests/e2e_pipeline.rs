@@ -404,3 +404,110 @@ async fn a_late_joining_client_gets_the_history_in_its_snapshot() {
         "fill comes from the newest turn so the gauge is current"
     );
 }
+
+// ── subagent handling, end to end ────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_subagent_transcript_is_ingested_but_does_not_hijack_the_gauge() {
+    // Claude Code writes subagent transcripts under
+    //   <project>/<session-uuid>/subagents/agent-<id>.jsonl
+    // and — critically — they carry the PARENT's sessionId. Before the fix, the
+    // subagent's small fresh context was treated as the session's context fill,
+    // so the gauge dipped whenever a subagent ran.
+    let fx = start_daemon().await;
+    let db = fx.db.clone();
+
+    // Main agent, deep into a large context.
+    append(
+        &fx.projects.join("session.jsonl"),
+        &[transcript_line(
+            "main-1",
+            "shared-session",
+            "2026-01-01T10:00:00Z",
+            (10, 20, 300_000, 5),
+        )],
+    );
+    wait_until("the main turn", || turn_count(&db) == 1).await;
+
+    // Subagent, same sessionId, tiny fresh context, and NEWER.
+    let sub_dir = fx.projects.join("shared-session/subagents");
+    std::fs::create_dir_all(&sub_dir).unwrap();
+    append(
+        &sub_dir.join("agent-abc123.jsonl"),
+        &[transcript_line(
+            "sub-1",
+            "shared-session",
+            "2026-01-01T10:05:00Z",
+            (7, 9, 4_000, 1),
+        )],
+    );
+    wait_until("the subagent turn", || turn_count(&db) == 2).await;
+
+    let conn = lumen_core::meter::connect_db(&db).unwrap();
+
+    // Both rows land, and only the subagent one is flagged.
+    let flagged: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM turns WHERE is_subagent = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(flagged, 1, "exactly the subagent turn is flagged");
+    let which: String = conn
+        .query_row(
+            "SELECT message_id FROM turns WHERE is_subagent = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(which, "sub-1");
+
+    // Cost keeps both; the gauge keeps only the main agent.
+    let pool = lumen_stats::connect(&format!("sqlite:{}?mode=rwc", db.display()))
+        .await
+        .unwrap();
+    let usage = lumen_stats::get_usage(&pool).await.unwrap();
+    assert_eq!(usage.all_time.turns, 2, "both turns are real spend");
+    assert_eq!(usage.all_time.input, 17);
+
+    let sessions = lumen_stats::get_sessions(&pool).await.unwrap();
+    assert_eq!(sessions.len(), 1, "a subagent is not a separate session");
+    assert_eq!(
+        sessions[0].peak_cache_read, 300_000,
+        "the gauge follows the main agent, not the subagent's 4,000"
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_labels_the_session_with_its_project() {
+    // With two editor windows open the gauge follows whichever session is newest,
+    // so it has to say which project that is. The transcript records no cwd, so
+    // the label comes from the encoded project directory.
+    let fx = start_daemon().await;
+    let db = fx.db.clone();
+    append(
+        &fx.projects.join("session.jsonl"),
+        &[transcript_line(
+            "p1",
+            "sess-p",
+            "2026-01-01T10:00:00Z",
+            (1, 1, 1_000, 1),
+        )],
+    );
+    wait_until("the turn", || turn_count(&db) == 1).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&fx.ws_url).await.unwrap();
+    let first = ws.next().await.expect("frame").expect("ok");
+    let snap: serde_json::Value = serde_json::from_str(&first.into_text().unwrap()).unwrap();
+
+    let session = &snap["sessions"][0];
+    // The fixture writes under ".../projects/test-project/...", so the label is
+    // derived from that directory name.
+    assert_eq!(
+        session["project"].as_str(),
+        Some("test-project"),
+        "got {session}"
+    );
+    assert_eq!(session["fill"], 1_000);
+}

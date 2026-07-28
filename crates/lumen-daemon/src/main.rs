@@ -41,6 +41,12 @@ struct TurnMsg {
     output_tokens: i64,
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
+    /// True when this turn came from a subagent transcript. Consumers must keep
+    /// its tokens in cost but exclude its cache_read from the context gauge.
+    is_subagent: bool,
+    /// Short project label, so a client watching several concurrent sessions can
+    /// say which one it is showing.
+    project: Option<String>,
 }
 
 /// Per-file byte offsets shared between the notify path and the poll path.
@@ -273,6 +279,9 @@ async fn ingest_from(
     };
     let complete = &buf[..=last_nl];
     let fname = path.to_string_lossy().to_string();
+    // Both are properties of the path, so resolve once per file, not per line.
+    let is_subagent = lumen_core::project::is_subagent_path(&fname);
+    let project = lumen_core::project::label_for_transcript(&fname);
     let mut new = 0u64;
 
     for line in complete.lines() {
@@ -292,8 +301,9 @@ async fn ingest_from(
             "INSERT OR IGNORE INTO turns
              (message_id, session_id, ts, model,
               input_tokens, output_tokens,
-              cache_read_input_tokens, cache_creation_input_tokens, source_file)
-             VALUES (?,?,?,?,?,?,?,?,?)",
+              cache_read_input_tokens, cache_creation_input_tokens, source_file,
+              is_subagent)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&rec.message.id)
         .bind(&rec.session_id)
@@ -304,6 +314,7 @@ async fn ingest_from(
         .bind(u.cache_read_input_tokens)
         .bind(u.cache_creation_input_tokens)
         .bind(&fname)
+        .bind(is_subagent as i64)
         .execute(pool)
         .await?;
 
@@ -323,6 +334,8 @@ async fn ingest_from(
                     output_tokens: u.output_tokens,
                     cache_read_input_tokens: u.cache_read_input_tokens,
                     cache_creation_input_tokens: u.cache_creation_input_tokens,
+                    is_subagent,
+                    project: project.clone(),
                 });
             }
             // Calibration: real vs estimated output tokens (unchanged).
@@ -400,23 +413,46 @@ async fn serve_ws(
             #[allow(clippy::type_complexity)]
             let snapshot_rows = sqlx::query_as::<
                 _,
-                (String, i64, i64, i64, i64, i64, i64, String, Option<String>),
+                (
+                    String,
+                    i64,
+                    i64,
+                    i64,
+                    i64,
+                    Option<i64>,
+                    i64,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                ),
             >(
+                // Cost SUMs cover every turn including subagents — that is real
+                // spend. fill / peak_fill deliberately exclude subagents: their
+                // transcripts reuse the parent's sessionId but carry a separate,
+                // fresh context, so counting them made the gauge dip whenever a
+                // subagent ran.
                 "SELECT t.session_id,
                         SUM(t.input_tokens),
                         SUM(t.output_tokens),
                         SUM(t.cache_read_input_tokens),
                         SUM(t.cache_creation_input_tokens),
                         (SELECT cache_read_input_tokens FROM turns
-                          WHERE session_id = t.session_id ORDER BY ts DESC LIMIT 1),
+                          WHERE session_id = t.session_id AND is_subagent = 0
+                          ORDER BY ts DESC LIMIT 1),
                         -- Peak fill: the window is derived from the session's
                         -- high-water mark, never the momentary fill, so /compact
                         -- cannot shrink the reported window mid-session.
-                        COALESCE(MAX(t.cache_read_input_tokens),0),
+                        (SELECT COALESCE(MAX(cache_read_input_tokens),0) FROM turns
+                          WHERE session_id = t.session_id AND is_subagent = 0),
                         MAX(t.ts),
                         (SELECT t2.model FROM turns t2
                           WHERE t2.session_id = t.session_id AND t2.model IS NOT NULL
-                          ORDER BY t2.ts DESC LIMIT 1)
+                          ORDER BY t2.ts DESC LIMIT 1),
+                        -- Project identity: the transcript records no cwd, so the
+                        -- encoded project directory is all we have.
+                        (SELECT t3.source_file FROM turns t3
+                          WHERE t3.session_id = t.session_id AND t3.source_file IS NOT NULL
+                          ORDER BY t3.ts DESC LIMIT 1)
                  FROM turns t GROUP BY t.session_id",
             )
             .fetch_all(&pool)
@@ -425,13 +461,18 @@ async fn serve_ws(
             if let Ok(rows) = snapshot_rows {
                 let snapshot = serde_json::json!({
                     "type": "snapshot",
-                    "sessions": rows.iter().map(|(s, i, o, cr, cw, fill, peak, ts, model)| {
+                    "sessions": rows.iter().map(|(s, i, o, cr, cw, fill, peak, ts, model, src)| {
+                        // A session made up entirely of subagent turns has no
+                        // main-agent fill to report; 0 is the honest answer.
+                        let project = src
+                            .as_deref()
+                            .and_then(lumen_core::project::label_for_transcript);
                         serde_json::json!({
                             "session_id": s,
                             "input": i, "output": o,
                             "cache_read": cr, "cache_write": cw,
-                            "fill": fill, "peak_fill": peak, "ts": ts,
-                            "model": model
+                            "fill": fill.unwrap_or(0), "peak_fill": peak, "ts": ts,
+                            "model": model, "project": project
                         })
                     }).collect::<Vec<_>>()
                 });
@@ -747,6 +788,8 @@ mod ws_tests {
             output_tokens: 22,
             cache_read_input_tokens: 33,
             cache_creation_input_tokens: 44,
+            is_subagent: false,
+            project: None,
         })
         .unwrap();
 
@@ -777,6 +820,8 @@ mod ws_tests {
             output_tokens: 1,
             cache_read_input_tokens: 1,
             cache_creation_input_tokens: 1,
+            is_subagent: false,
+            project: None,
         })
         .unwrap();
 
@@ -802,6 +847,8 @@ mod ws_tests {
                 output_tokens: 0,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                is_subagent: false,
+                project: None,
             })
             .unwrap();
         }
@@ -834,6 +881,8 @@ mod ws_tests {
             output_tokens: 0,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            is_subagent: false,
+            project: None,
         });
 
         // A fresh client must still be served.
