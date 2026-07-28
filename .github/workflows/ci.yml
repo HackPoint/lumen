@@ -55,9 +55,7 @@ jobs:
       # were never tested on any platform, and lumen-stats holds the rollup
       # arithmetic the GUI displays.
       - name: cargo test (all non-Tauri crates)
-        run: |
-          cargo test -p lumen-core -p lumen-cli -p lumen-daemon \
-                     -p lumen-mcp  -p lumen-stats --all-targets
+        run: cargo test -p lumen-core -p lumen-cli -p lumen-daemon -p lumen-mcp -p lumen-stats --all-targets
 
       # ── Frontend ─────────────────────────────────────────────────────────
       # Verifies the Angular build compiles clean; catches template errors
@@ -105,9 +103,7 @@ jobs:
       # lumen-cli and lumen-stats were missing here, so the TUI rendering code
       # and every rollup query went untested on Linux and Windows entirely.
       - name: cargo test (all non-Tauri crates)
-        run: |
-          cargo test -p lumen-core -p lumen-cli -p lumen-daemon \
-                     -p lumen-mcp  -p lumen-stats --all-targets
+        run: cargo test -p lumen-core -p lumen-cli -p lumen-daemon -p lumen-mcp -p lumen-stats --all-targets
 
   # ── Linux GUI job ──────────────────────────────────────────────────────────
   # Now that Lumen ships a Linux AppImage and .deb, the Tauri crate has to build
