@@ -1,5 +1,5 @@
 cask "lumen" do
-  version "1.1.1"
+  version "1.1.2"
   sha256 "2eb328f4936b532f756cfc60db18fb782dab7ed124716595bc3bf2b7887d6818"
 
   url "https://github.com/HackPoint/lumen/releases/download/v#{version}/Lumen_#{version}_aarch64.dmg"

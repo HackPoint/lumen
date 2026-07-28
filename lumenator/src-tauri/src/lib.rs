@@ -294,6 +294,13 @@ pub fn run() {
                 Err(e) => log::error!("TRAY: build failed: {e}"),
             }
 
+            // Register the login item for installs that completed setup before
+            // this feature existed. run_setup is skipped once its marker is
+            // present, so without this an existing user would never get one.
+            if setup::ensure_autostart_once_for(app.handle()) {
+                log::info!("registered Lumen as a login item");
+            }
+
             // connect to the daemon WS and forward to the frontend
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connect_daemon(handle));

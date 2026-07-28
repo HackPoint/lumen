@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.2] — 2026-07-28
+
+### Fixes
+- fix: register the login item on existing installs. 1.1.1 only did so inside
+  `run_setup`, which is skipped entirely once `~/.claude/lumen/.setup_done` exists
+  — so anyone who had already set Lumen up got no login item, however many times
+  they upgraded. The feature worked for fresh installs only. Registration now also
+  happens once at startup, behind its own `.autostart_done` marker so that turning
+  the toggle off is not undone by the next launch, and so a failed attempt is
+  retried rather than silently abandoned.
+
 ## [1.1.1] — 2026-07-28
 
 ### Features
