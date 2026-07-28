@@ -7,7 +7,10 @@ cask "lumen" do
   desc "macOS menu-bar app for Claude Code — live context gauge, cost, and optimizer"
   homepage "https://github.com/HackPoint/lumen"
 
-  depends_on macos: ">= :ventura"
+  # `macos: :ventura` already means "Ventura or newer" for a cask. The string
+  # comparison form Homebrew deprecated (">= :ventura") warned on every
+  # `brew info`/`install` and is slated to become an error.
+  depends_on macos: :ventura
   depends_on arch: :arm64
 
   app "Lumen.app"
