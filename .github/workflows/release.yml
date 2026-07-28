@@ -373,11 +373,133 @@ jobs:
           gh release upload "$tag" "$($setup.FullName)" --clobber
 
   # ════════════════════════════════════════════════════════════════════════════
+  # Job 3b: Linux GUI packages (AppImage + .deb)
+  # ────────────────────────────────────────────────────────────────────────────
+  # Two formats because they solve different problems: the AppImage is a single
+  # portable file that needs nothing installed, and the .deb integrates with apt
+  # and the desktop menu. Both are x86_64 — arm64 Linux would need either a
+  # cross-toolchain or an arm runner, so it is deliberately out of scope here.
+  #
+  # Runner: ubuntu-22.04 rather than -latest, on purpose. WebKitGTK ships as
+  # libwebkit2gtk-4.1 on 22.04, which is what Tauri 2 links against; 24.04 moved
+  # to a newer soname, and a package built there will not install on 22.04.
+  # Building on the older base keeps the artifacts usable on both.
+  # ════════════════════════════════════════════════════════════════════════════
+  build-gui-linux:
+    name: Build GUI packages (Linux x86_64)
+    needs: [resolve, build]
+    if: always() && needs.resolve.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.build.result == 'success')
+    runs-on: ubuntu-22.04
+
+    permissions:
+      contents: write          # required to upload assets to the release
+
+    env:
+      TRIPLE_LINUX: 'x86_64-unknown-linux-gnu'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.build_ref }}
+
+      # Tauri's Linux prerequisites. libayatana-appindicator3-dev is what makes
+      # the tray icon work — without it the app builds and runs but shows no tray,
+      # which is most of the product. patchelf and libfuse2 are AppImage's.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2 \
+            file \
+            build-essential \
+            curl \
+            wget
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      # build-sidecar.sh derives the triple from the toolchain, so the same script
+      # serves macOS and Linux.
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: Build Tauri app (AppImage + deb)
+        working-directory: lumenator
+        run: pnpm tauri build --bundles appimage,deb
+        env:
+          CI: true
+
+      # Rename to carry the arch, so the release assets are unambiguous next to
+      # the macOS DMG and the Windows setup .exe.
+      - name: Upload packages to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve.outputs.tag }}"
+          VERSION="${{ needs.resolve.outputs.version }}"
+          OUT=target/release/bundle
+
+          APPIMAGE=$(find "$OUT/appimage" -name '*.AppImage' -print -quit 2>/dev/null || true)
+          DEB=$(find "$OUT/deb" -name '*.deb' -print -quit 2>/dev/null || true)
+
+          if [[ -z "$APPIMAGE" && -z "$DEB" ]]; then
+            echo "error: neither an AppImage nor a .deb was produced under $OUT" >&2
+            find "$OUT" -maxdepth 2 -type f -print 2>/dev/null || true
+            exit 1
+          fi
+
+          if [[ -n "$APPIMAGE" ]]; then
+            NAME="Lumen-${VERSION}-x86_64.AppImage"
+            cp "$APPIMAGE" "$NAME"
+            gh release upload "$TAG" "$NAME" --clobber
+            echo "uploaded $NAME"
+          else
+            echo "::warning::no AppImage produced; continuing with the .deb only"
+          fi
+
+          if [[ -n "$DEB" ]]; then
+            NAME="lumen_${VERSION}_amd64.deb"
+            cp "$DEB" "$NAME"
+            gh release upload "$TAG" "$NAME" --clobber
+            echo "uploaded $NAME"
+          else
+            echo "::warning::no .deb produced; continuing with the AppImage only"
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════════
   # Job 4: Update the Homebrew tap (tag push only, after macOS build succeeds)
   # ════════════════════════════════════════════════════════════════════════════
   update-tap:
     name: Update Homebrew tap
-    needs: build
+    # build-cli as well as build: the formula now offers a Linux binary, and its
+    # sha256 is computed from the tarball that job publishes. resolve supplies the
+    # tag (needs must name it; a transitive dependency is not addressable).
+    needs: [resolve, build, build-cli]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest        # no macOS toolchain needed for a git commit
 
@@ -416,14 +538,60 @@ jobs:
           token: ${{ secrets.TAP_PUSH_TOKEN }}
           path: homebrew-tap
 
-      - name: Update formulae with new version + sha256
+      # The in-repo Casks/ and Formula/ files are the source of truth, but nothing
+      # ever copied them into the tap — the job only rewrote the version and sha256
+      # of whatever was already there. So a STRUCTURAL change (a new platform block,
+      # a new dependency, a changed url) could never reach users, however many times
+      # the release ran. That is why the tap still offered no Linux build.
+      #
+      # Copying wholesale means a hand-edit made directly in the tap is overwritten
+      # on the next release. That is the intent: the tap is generated, not authored.
+      - name: Render formula templates into the tap
         if: steps.tap_token.outputs.configured == 'true'
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
-          DMG_SHA="${{ needs.build.outputs.dmg_sha256 }}"
-          TAR_SHA="${{ needs.build.outputs.tarball_sha256 }}"
+          set -euo pipefail
+          cp Casks/lumen.rb        homebrew-tap/Casks/lumen.rb
+          cp Formula/lumen-cli.rb  homebrew-tap/Formula/lumen-cli.rb
+          echo "templates copied; version/sha256 are stamped in the next steps"
+
+      # The macOS tarball's hash comes from the build job, which computed it from
+      # the exact file it uploaded. The Linux tarball is built by build-cli, which
+      # exports no outputs, so hash the published asset instead — that also proves
+      # the formula points at something actually downloadable.
+      - name: Compute sha256 of the released Linux CLI tarball
+        if: steps.tap_token.outputs.configured == 'true'
+        id: linux_sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          ASSET="lumen-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+
+          if gh release download "$TAG" --pattern "$ASSET" --dir /tmp/tapdl --clobber; then
+            SHA=$(sha256sum "/tmp/tapdl/$ASSET" | awk '{print $1}')
+            echo "$ASSET -> $SHA"
+          else
+            # Not fatal: the macOS formula is still publishable, and the patcher
+            # leaves the Linux hash alone rather than writing a wrong one.
+            echo "::warning::${ASSET} is not on release ${TAG}; leaving the Linux sha256 unchanged"
+            SHA=""
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Update formulae with new version + sha256
+        if: steps.tap_token.outputs.configured == 'true'
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          DMG_SHA: ${{ needs.build.outputs.dmg_sha256 }}
+          MAC_SHA: ${{ needs.build.outputs.tarball_sha256 }}
+          LINUX_SHA: ${{ steps.linux_sha.outputs.sha }}
+        run: |
+          set -euo pipefail
 
           # ── Casks/lumen.rb ────────────────────────────────────────────────
+          # One platform, one sha256 — a plain substitution is unambiguous here.
           CASK="homebrew-tap/Casks/lumen.rb"
           sed -i "s/^  version \"[^\"]*\"/  version \"${VERSION}\"/" "$CASK"
           sed -i "s/^  sha256 \"[^\"]*\"/  sha256 \"${DMG_SHA}\"/"   "$CASK"
@@ -431,11 +599,15 @@ jobs:
           grep -E 'version|sha256' "$CASK"
 
           # ── Formula/lumen-cli.rb ──────────────────────────────────────────
-          FORMULA="homebrew-tap/Formula/lumen-cli.rb"
-          sed -i "s/^  version \"[^\"]*\"/  version \"${VERSION}\"/"    "$FORMULA"
-          sed -i "s/^      sha256 \"[^\"]*\"/      sha256 \"${TAR_SHA}\"/" "$FORMULA"
+          # Two sha256 lines now, one per platform block. A blind sed matched both
+          # and stamped the macOS hash onto the Linux entry, breaking every Linux
+          # install's checksum, so attribute each hash to its enclosing block.
+          python3 scripts/patch-formula.py homebrew-tap/Formula/lumen-cli.rb \
+            --version    "$VERSION" \
+            --macos-sha  "$MAC_SHA" \
+            --linux-sha  "$LINUX_SHA"
           echo "Formula updated:"
-          grep -E 'version|sha256' "$FORMULA"
+          grep -E 'version "|sha256|on_macos|on_linux' homebrew-tap/Formula/lumen-cli.rb
 
       - name: Commit + push tap update
         if: steps.tap_token.outputs.configured == 'true'
