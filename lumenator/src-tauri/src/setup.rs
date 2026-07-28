@@ -142,6 +142,62 @@ pub fn step_disable_autostart(a: &dyn AutoStart) -> SetupStep {
     }
 }
 
+/// Register the login item once, for installs that predate this feature.
+///
+/// [`step_enable_autostart`] only runs inside `run_setup`, which is skipped
+/// entirely once `.setup_done` exists — so every user who had already set Lumen up
+/// would never get a login item, no matter how many times they upgraded. This runs
+/// at startup to close that gap.
+///
+/// Guarded by its own marker, not the setup one: a user who turns the toggle off
+/// must not find it switched back on at the next launch. The marker is written
+/// only once the item is actually registered (or found already registered), so a
+/// transient failure is retried next time rather than silently given up on.
+///
+/// Returns true when it registered the item on this call.
+pub fn ensure_autostart_once(a: &dyn AutoStart, marker: &Path) -> bool {
+    if marker.exists() {
+        return false;
+    }
+    let record = || {
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(marker, "");
+    };
+    match a.is_enabled() {
+        // Already on — nothing to do, but record it so a later opt-out sticks.
+        Ok(true) => {
+            record();
+            false
+        }
+        Ok(false) => match a.enable() {
+            Ok(()) => {
+                record();
+                true
+            }
+            Err(e) => {
+                log::warn!("could not register the login item: {e}");
+                false
+            }
+        },
+        Err(e) => {
+            log::warn!("could not read the login-item state: {e}");
+            false
+        }
+    }
+}
+
+/// Marker recording that the one-time login-item registration has happened.
+fn autostart_marker_in(home: &Path) -> PathBuf {
+    lumen_dir_in(home).join(".autostart_done")
+}
+
+/// Run the one-time registration against the real home and plugin.
+pub fn ensure_autostart_once_for(app: &AppHandle) -> bool {
+    ensure_autostart_once(&PluginAutoStart(app), &autostart_marker_in(&home()))
+}
+
 /// [`AutoStart`] backed by the real plugin.
 struct PluginAutoStart<'a>(&'a AppHandle);
 
@@ -1197,6 +1253,115 @@ mod tests {
         };
         assert_eq!(step_disable_autostart(&broken).status, StepStatus::Warn);
         assert!(a.enabled.get(), "unrelated instance untouched");
+    }
+
+    // ── ensure_autostart_once ────────────────────────────────────────────────
+
+    #[test]
+    fn an_existing_install_gets_a_login_item_on_first_launch_after_upgrade() {
+        // The gap this closes: run_setup is skipped once .setup_done exists, so
+        // upgrading users would never have had a login item registered.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        let a = FakeAutoStart::default();
+
+        assert!(ensure_autostart_once(&a, &marker), "should register");
+        assert!(a.enabled.get());
+        assert!(marker.exists(), "marker records that this ran");
+    }
+
+    #[test]
+    fn the_one_time_registration_does_not_repeat_on_later_launches() {
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        let a = FakeAutoStart::default();
+
+        ensure_autostart_once(&a, &marker);
+        assert_eq!(a.enable_calls.get(), 1);
+
+        // Every subsequent launch is a no-op.
+        for _ in 0..3 {
+            assert!(!ensure_autostart_once(&a, &marker));
+        }
+        assert_eq!(a.enable_calls.get(), 1, "must not re-register");
+    }
+
+    #[test]
+    fn turning_the_toggle_off_is_not_undone_by_the_next_launch() {
+        // The whole reason this has its own marker: the user's opt-out has to win.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        let a = FakeAutoStart::default();
+
+        ensure_autostart_once(&a, &marker);
+        assert!(a.enabled.get());
+
+        a.disable().unwrap(); // user flips the toggle off
+        assert!(!a.enabled.get());
+
+        ensure_autostart_once(&a, &marker); // next launch
+        assert!(
+            !a.enabled.get(),
+            "startup must not re-enable what the user turned off"
+        );
+    }
+
+    #[test]
+    fn an_already_enabled_login_item_is_recorded_without_re_registering() {
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        let a = FakeAutoStart::on();
+
+        assert!(!ensure_autostart_once(&a, &marker), "nothing to do");
+        assert_eq!(a.enable_calls.get(), 0);
+        assert!(
+            marker.exists(),
+            "still recorded, so an opt-out later sticks"
+        );
+    }
+
+    #[test]
+    fn a_failed_registration_is_retried_on_the_next_launch() {
+        // No marker is written on failure, so a transient problem self-heals
+        // instead of the user silently never getting a login item.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        let broken = FakeAutoStart::broken_write();
+
+        assert!(!ensure_autostart_once(&broken, &marker));
+        assert!(!marker.exists(), "must not record a failure as done");
+        assert_eq!(broken.enable_calls.get(), 1);
+
+        assert!(!ensure_autostart_once(&broken, &marker));
+        assert_eq!(broken.enable_calls.get(), 2, "retried");
+    }
+
+    #[test]
+    fn an_unreadable_setting_does_not_write_the_marker() {
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        assert!(!ensure_autostart_once(
+            &FakeAutoStart::broken_read(),
+            &marker
+        ));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn the_marker_directory_is_created_if_it_does_not_exist() {
+        // First launch on a machine with no ~/.claude/lumen yet.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join("deep/nested/path/.autostart_done");
+        assert!(ensure_autostart_once(&FakeAutoStart::default(), &marker));
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn the_autostart_marker_is_separate_from_the_setup_marker() {
+        // Sharing .setup_done would mean an upgrading user never gets a login
+        // item, which is the bug this whole path exists for.
+        let h = TempDir::new().unwrap();
+        assert_ne!(autostart_marker_in(h.path()), marker_path_in(h.path()));
     }
 
     #[test]

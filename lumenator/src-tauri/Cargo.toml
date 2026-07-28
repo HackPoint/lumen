@@ -1,6 +1,6 @@
 [package]
 name = "Lumen"
-version = "1.1.1"
+version = "1.1.2"
 description = "Menu-bar and tray app for Claude Code — live context gauge, cost, and optimizer"
 authors = ["HackPoint"]
 license = "MIT"
