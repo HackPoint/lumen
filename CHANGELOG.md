@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.1.0] — 2026-07-28
+
+### Maintenance
+- chore(deps): update the whole dependency tree to latest. Rust: sqlx 0.8 → 0.9,
+  rusqlite 0.31 → 0.39, tiktoken-rs 0.6 → 0.12, ratatui 0.29 → 0.30,
+  crossterm 0.28 → 0.29, notify 6 → 8, tungstenite/tokio-tungstenite 0.24 → 0.30,
+  dirs 5 → 6, plus every semver-compatible bump in `Cargo.lock`. Frontend:
+  Angular 20 → 22, TypeScript 5.8 → 6.0, zone.js 0.15 → 0.16, Tailwind 4.3.3,
+  and the `@tauri-apps/*` packages to 2.11.x.
+- chore(deps): pull in the sqlx 0.8.1+ fix for the SQLite binary-protocol
+  integer overflow (RUSTSEC-2024-0363), which the old 0.8.0 lock pin blocked.
+
+### Fixes
+- fix(daemon): wrap WebSocket text payloads in `Utf8Bytes` for tungstenite 0.30.
+- fix(cli): bound `run_loop` on `io::Error: From<B::Error>` now that ratatui 0.30
+  gives `Backend` an associated error type.
+- fix(gui): tighten `fetch_agg`'s WHERE clause to `&'static str` so sqlx 0.9's
+  `SqlSafeStr` audit is satisfied structurally rather than by comment.
+
+### Notes
+- Angular 22 raises the Node floor to **22.22.3** (or 24.15+/26+). CI's
+  `node-version: '22'` resolves to a new enough 22.x; local toolchains below
+  22.22.3 need updating before `pnpm build` will run.
+- TypeScript stays on 6.0.x — Angular 22's compiler pins `typescript >=6.0 <6.1`,
+  so 7.x is not yet available to this project.
+- rusqlite is capped at 0.39: it and sqlx-sqlite both link `sqlite3`, and
+  sqlx 0.9 accepts `libsqlite3-sys >=0.30.1 <0.38`. Bump the two together.
+
 ## [1.0.1] — 2026-06-17
 
 ### Fixes

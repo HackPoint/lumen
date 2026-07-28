@@ -397,7 +397,7 @@ async fn ws_server(
                 });
                 let _ = sink
                     .send(tokio_tungstenite::tungstenite::Message::Text(
-                        snapshot.to_string(),
+                        snapshot.to_string().into(),
                     ))
                     .await;
             }
@@ -407,7 +407,7 @@ async fn ws_server(
                 let msg = serde_json::json!({ "type": "event", "turn": turn });
                 if sink
                     .send(tokio_tungstenite::tungstenite::Message::Text(
-                        msg.to_string(),
+                        msg.to_string().into(),
                     ))
                     .await
                     .is_err()
