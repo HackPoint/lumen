@@ -397,7 +397,11 @@ async fn serve_ws(
             // 1. Snapshot on connect.
             // fill = latest turn's cache_read (not session MAX) so the gauge
             // reflects the real current context fill, including drops after /compact.
-            if let Ok(rows) = sqlx::query_as::<_, (String, i64, i64, i64, i64, i64, String)>(
+            #[allow(clippy::type_complexity)]
+            let snapshot_rows = sqlx::query_as::<
+                _,
+                (String, i64, i64, i64, i64, i64, i64, String, Option<String>),
+            >(
                 "SELECT t.session_id,
                         SUM(t.input_tokens),
                         SUM(t.output_tokens),
@@ -405,20 +409,29 @@ async fn serve_ws(
                         SUM(t.cache_creation_input_tokens),
                         (SELECT cache_read_input_tokens FROM turns
                           WHERE session_id = t.session_id ORDER BY ts DESC LIMIT 1),
-                        MAX(t.ts)
+                        -- Peak fill: the window is derived from the session's
+                        -- high-water mark, never the momentary fill, so /compact
+                        -- cannot shrink the reported window mid-session.
+                        COALESCE(MAX(t.cache_read_input_tokens),0),
+                        MAX(t.ts),
+                        (SELECT t2.model FROM turns t2
+                          WHERE t2.session_id = t.session_id AND t2.model IS NOT NULL
+                          ORDER BY t2.ts DESC LIMIT 1)
                  FROM turns t GROUP BY t.session_id",
             )
             .fetch_all(&pool)
-            .await
-            {
+            .await;
+
+            if let Ok(rows) = snapshot_rows {
                 let snapshot = serde_json::json!({
                     "type": "snapshot",
-                    "sessions": rows.iter().map(|(s, i, o, cr, cw, fill, ts)| {
+                    "sessions": rows.iter().map(|(s, i, o, cr, cw, fill, peak, ts, model)| {
                         serde_json::json!({
                             "session_id": s,
                             "input": i, "output": o,
                             "cache_read": cr, "cache_write": cw,
-                            "fill": fill, "ts": ts
+                            "fill": fill, "peak_fill": peak, "ts": ts,
+                            "model": model
                         })
                     }).collect::<Vec<_>>()
                 });

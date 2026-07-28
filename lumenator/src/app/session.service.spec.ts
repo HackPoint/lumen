@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { SessionService, WINDOW_OPTIONS } from './session.service';
+import { SessionService, WINDOW_OPTIONS, modelWindow, resolveWindow } from './session.service';
 import { TauriBridge } from './tauri-bridge';
 import { FakeTauriBridge } from './tauri-bridge.fake';
 import { RATE } from './components';
@@ -228,21 +228,108 @@ describe('SessionService', () => {
     expect(s.trayStatus()).toBe('ok');
   });
 
-  // ── context window inference ──────────────────────────────────────────────
+  // ── context window resolution ─────────────────────────────────────────────
+  //
+  // The window is a property of the MODEL. The tier-inference tests below use
+  // `claude-sonnet-4`, which has no published entry, so they cover the FALLBACK
+  // path; the model-driven tests that follow cover the normal path.
 
-  it('infers the smallest tier that fits the observed fill', () => {
+  it('reports the published window for a known model, whatever the fill', () => {
+    // THE REPORTED BUG: "267,593 / 500,000" on a model whose window is 1M. The
+    // window was inferred from the fill, and a 1M session that has only reached
+    // 267K is indistinguishable from a 500K one.
+    const s = build();
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', cache_read_input_tokens: 267_593 }));
+    expect(s.fill()).toBe(267_593);
+    expect(s.maxContext()).toBe(1_000_000);
+  });
+
+  it.each([
+    ['claude-opus-5', 1_000_000],
+    ['claude-opus-4-8', 1_000_000],
+    ['claude-opus-4-7', 1_000_000],
+    ['claude-opus-4-6', 1_000_000],
+    ['claude-sonnet-5', 1_000_000],
+    ['claude-sonnet-4-6', 1_000_000],
+    ['claude-haiku-4-5', 200_000],
+  ])('gives %s a window of %i', (model, expected) => {
+    const s = build();
+    bridge.emit('daemon', turnFrame({ model, cache_read_input_tokens: 10_000 }));
+    expect(s.maxContext()).toBe(expected);
+  });
+
+  it('resolves a dated model id like its alias', () => {
+    const s = build();
+    bridge.emit('daemon', turnFrame({ model: 'claude-haiku-4-5-20251001' }));
+    expect(s.maxContext()).toBe(200_000);
+  });
+
+  it('keeps the window steady when a compaction drops the fill', () => {
+    // Real pattern from a shipped DB: 317,241 -> 16,794 -> 314,173. Deriving the
+    // window from the momentary fill collapsed it to 200K mid-session.
+    const s = build();
+    bridge.emit('daemon', turnFrame({ model: 'mystery-model', cache_read_input_tokens: 317_241 }));
+    expect(s.maxContext()).toBe(500_000);
+
+    bridge.emit('daemon', turnFrame({ model: 'mystery-model', cache_read_input_tokens: 16_794 }));
+    expect(s.fill()).toBe(16_794);
+    expect(s.peakFill()).toBe(317_241);
+    expect(s.maxContext()).toBe(500_000);
+  });
+
+  it('tracks the peak fill monotonically', () => {
+    const s = build();
+    for (const fill of [1_000, 50_000, 20_000, 90_000, 10_000]) {
+      bridge.emit('daemon', turnFrame({ cache_read_input_tokens: fill }));
+    }
+    expect(s.peakFill()).toBe(90_000);
+    expect(s.fill()).toBe(10_000);
+  });
+
+  it('uses the peak and model the daemon reports in a snapshot', () => {
+    const s = build();
+    bridge.emit(
+      'daemon',
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: [{
+          session_id: 's1', fill: 12_000, peak_fill: 400_000,
+          model: 'claude-opus-4-8', input: 0, output: 0, cache_read: 0, cache_write: 0,
+          ts: '2026-01-01T10:00:00Z',
+        }],
+      }),
+    );
+    expect(s.fill()).toBe(12_000);
+    expect(s.peakFill()).toBe(400_000);
+    expect(s.maxContext()).toBe(1_000_000);
+  });
+
+  it('mirrors the Rust window table exactly', () => {
+    // crates/lumen-core/src/rates.rs MODEL_WINDOWS is the other half of this
+    // pair; a drift between them shows the same session two different windows
+    // in the TUI and the GUI.
+    expect(modelWindow('claude-opus-4-8')).toBe(1_000_000);
+    expect(modelWindow('claude-haiku-4-5')).toBe(200_000);
+    expect(modelWindow('claude-sonnet-4')).toBeNull();
+    expect(modelWindow('')).toBeNull();
+    expect(resolveWindow('', 0)).toBe(200_000);
+    // Never claim a window narrower than a fill actually observed.
+    expect(resolveWindow('claude-haiku-4-5', 400_000)).toBe(500_000);
+  });
+
+  it('infers the smallest tier that fits an unknown model (fallback path)', () => {
     const s = build();
     bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 150_000 }));
     expect(s.maxContext()).toBe(200_000);
   });
 
-  it('steps up to the next tier once the fill exceeds the smaller one', () => {
+  it('steps an unknown model up to the next tier as fill grows (fallback path)', () => {
     const s = build();
     bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 250_000 }));
     expect(s.maxContext()).toBe(500_000);
   });
 
-  it('clamps to the largest known tier for an enormous fill', () => {
+  it('clamps an unknown model to the largest tier (fallback path)', () => {
     const s = build();
     bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 5_000_000 }));
     expect(s.maxContext()).toBe(1_000_000);

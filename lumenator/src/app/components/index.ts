@@ -1,5 +1,8 @@
 interface SessionState {
     fill: number;
+    /** Session high-water mark. The context window is derived from this, never
+     *  from `fill` — /compact drops fill sharply and would shrink the window. */
+    peakFill: number;
     model: string;
     ts: number;
     startTs: number;        // first turn seen this session
@@ -45,6 +48,10 @@ interface SnapshotSession {
     cache_read: number;
     cache_write: number;
     fill: number;
+    /** Session peak fill. Absent from daemons predating this field. */
+    peak_fill?: number;
+    /** Most recent non-null model for the session. Absent on older daemons. */
+    model?: string | null;
     ts: string;
 }
 
