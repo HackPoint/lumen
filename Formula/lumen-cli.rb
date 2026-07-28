@@ -1,7 +1,7 @@
 class LumenCli < Formula
   desc "Terminal dashboard for Claude Code — live context fill, cost, and optimizer savings"
   homepage "https://github.com/HackPoint/lumen"
-  version "1.1.0"
+  version "1.1.1"
 
   on_macos do
     on_arm do
