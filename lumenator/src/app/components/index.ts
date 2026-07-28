@@ -1,9 +1,15 @@
 interface SessionState {
     fill: number;
+    /** Monotonic fold counter, used only to break ties on `ts`. Millisecond
+     *  timestamps collide when two windows are both active. */
+    seq: number;
     /** Session high-water mark. The context window is derived from this, never
      *  from `fill` — /compact drops fill sharply and would shrink the window. */
     peakFill: number;
     model: string;
+    /** Short project label, so a user with several editor windows open can tell
+     *  which session the gauge is following. Empty when unknown. */
+    project: string;
     ts: number;
     startTs: number;        // first turn seen this session
     recentOutput: number[]; // last N output_tokens for velocity
@@ -14,11 +20,18 @@ type SessionMap = Record<string, SessionState>;
 /** Daemon turn payload (matches the Rust TurnMsg). */
 interface Turn {
     session_id: string;
+    /** Turn timestamp (ISO-8601 UTC). Ordering sessions by arrival time instead
+     *  of this put snapshot and live turns on different clocks. */
+    ts?: string;
     model: string;
     cache_read_input_tokens: number;
     cache_creation_input_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    /** Subagent turns cost money but carry their own separate context, so they
+     *  must not drive the fill gauge. Absent on older daemons. */
+    is_subagent?: boolean;
+    project?: string | null;
 }
 
 /** Opus pricing, USD per token (per-1M ÷ 1e6). */
@@ -52,6 +65,8 @@ interface SnapshotSession {
     peak_fill?: number;
     /** Most recent non-null model for the session. Absent on older daemons. */
     model?: string | null;
+    /** Short project label derived from the transcript path. */
+    project?: string | null;
     ts: string;
 }
 

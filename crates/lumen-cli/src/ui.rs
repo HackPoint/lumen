@@ -59,7 +59,7 @@ fn render_header(f: &mut Frame, area: Rect, state: &AppState, no_anim: bool) {
     let ring = ring_frame(state.tick, no_anim);
     let color = fill_color(state.fill, state.window);
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             ring,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -72,7 +72,19 @@ fn render_header(f: &mut Frame, area: Rect, state: &AppState, no_anim: bool) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  ·  context monitor"),
-    ]);
+    ];
+
+    // With several editor windows open the gauge follows whichever session is
+    // newest, so name the project it belongs to rather than leaving it ambiguous.
+    if !state.project.is_empty() {
+        spans.push(Span::raw("  ·  "));
+        spans.push(Span::styled(
+            state.project.clone(),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    let line = Line::from(spans);
 
     f.render_widget(Paragraph::new(vec![line]), area);
 }

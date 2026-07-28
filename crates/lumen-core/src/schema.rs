@@ -1,7 +1,16 @@
 /// Additive migrations run after DDL to upgrade existing DBs.
 /// Each statement is idempotent (errors for "duplicate column" are swallowed by the caller).
-pub const MIGRATIONS: &[&str] =
-    &["ALTER TABLE read_events ADD COLUMN channel TEXT NOT NULL DEFAULT 'unknown'"];
+pub const MIGRATIONS: &[&str] = &[
+    "ALTER TABLE read_events ADD COLUMN channel TEXT NOT NULL DEFAULT 'unknown'",
+    // Subagent transcripts reuse the parent's sessionId, so their turns land in
+    // the parent session. They are real spend (kept in cost) but carry their own
+    // fresh context, so they must NOT drive the context-fill gauge.
+    "ALTER TABLE turns ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+    // Backfill existing rows from the path they were ingested from. Idempotent,
+    // so it is safe to re-run on every open.
+    "UPDATE turns SET is_subagent = 1 \
+     WHERE is_subagent = 0 AND source_file LIKE '%/subagents/%'",
+];
 
 pub const DDL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -20,7 +29,10 @@ CREATE TABLE IF NOT EXISTS turns (
     web_search_requests         INTEGER,
     web_fetch_requests          INTEGER,
     service_tier                TEXT,
-    source_file                 TEXT
+    source_file                 TEXT,
+    -- 1 when the turn came from a subagent transcript. Counted in cost, excluded
+    -- from the context-fill gauge (a subagent's context is not the session's).
+    is_subagent                 INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (

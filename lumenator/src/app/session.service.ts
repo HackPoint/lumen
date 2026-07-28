@@ -116,6 +116,9 @@ function cachedSnapshot$(bridge: TauriBridge): Observable<DaemonMsg> {
   ).pipe(filter((m): m is DaemonMsg => m !== null));
 }
 
+/** Fold counter for `SessionState.seq`. Module-scoped: one reducer per service. */
+let seq = 0;
+
 @Injectable({ providedIn: 'root' })
 export class SessionService {
   /**
@@ -129,6 +132,10 @@ export class SessionService {
   private readonly sessions = toSignal(
       merge(cachedSnapshot$(this.bridge), liveStream$(this.bridge)).pipe(
           scan<DaemonMsg, SessionMap>((acc, msg) => {
+            // Increments on every fold. Two editor windows produce turns in the
+            // same millisecond, and `ts` alone then keeps whichever session was
+            // seen first — which is the opposite of "follow the active window".
+            seq += 1;
             if (msg.kind === 'snapshot') {
               for (const s of msg.sessions) {
                 acc[s.session_id] = {
@@ -140,6 +147,8 @@ export class SessionService {
                       s.fill,
                   ),
                   model: s.model || (acc[s.session_id]?.model ?? ''),
+                  project: s.project || (acc[s.session_id]?.project ?? ''),
+                  seq,
                   ts: Date.parse(s.ts) || Date.now(),
                   startTs: acc[s.session_id]?.startTs ?? Date.now(),
                   recentOutput: acc[s.session_id]?.recentOutput ?? [],
@@ -158,16 +167,28 @@ export class SessionService {
             const prev = acc[t.session_id];
             const recentOutput = [...(prev?.recentOutput ?? []), t.output_tokens].slice(-10);
             const pt = prev?.totals ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+            // A subagent transcript reuses the parent's sessionId but starts with a
+            // fresh, small context. Its tokens are real spend (folded into totals
+            // below), but letting it set `fill` made the gauge dip every time one
+            // ran — so the gauge keeps the main agent's values.
+            const sub = t.is_subagent === true;
             acc[t.session_id] = {
-              fill: t.cache_read_input_tokens,
-              peakFill: Math.max(prev?.peakFill ?? 0, t.cache_read_input_tokens),
+              fill: sub ? (prev?.fill ?? 0) : t.cache_read_input_tokens,
+              peakFill: sub
+                  ? (prev?.peakFill ?? 0)
+                  : Math.max(prev?.peakFill ?? 0, t.cache_read_input_tokens),
               // Keep the last known model when a turn reports none. The snapshot
               // branch above preserves it, the CLI reducer guards the same way
               // (crates/lumen-cli/src/data.rs), and get_sessions picks the most
               // recent NON-NULL model — this branch was the only one that let an
-              // empty model blank out a known one.
-              model: t.model || (prev?.model ?? ''),
-              ts: Date.now(),
+              // empty model blank out a known one. A subagent may run a different
+              // model, which must not become the session's.
+              model: sub ? (prev?.model ?? '') : t.model || (prev?.model ?? ''),
+              project: t.project || (prev?.project ?? ''),
+              seq,
+              // The turn's own timestamp, so live turns and snapshot rows are
+              // ordered on the same clock.
+              ts: (t.ts ? Date.parse(t.ts) : NaN) || Date.now(),
               startTs: prev?.startTs ?? Date.now(),
               recentOutput,
               totals: {
@@ -189,13 +210,22 @@ export class SessionService {
     const map = this.sessions();
     let latest: SessionState | null = null;
     for (const s of Object.values(map)) {
-      if (!latest || s.ts > latest.ts) latest = s;
+      // Strictly-greater on ts alone kept the FIRST session seen whenever two
+      // windows produced turns in the same millisecond. Falling back to seq makes
+      // the most recently updated session win, which is what "active" means.
+      if (latest === null || s.ts > latest.ts || (s.ts === latest.ts && s.seq > latest.seq)) {
+        latest = s;
+      }
     }
     return latest;
   });
 
   readonly fill = computed(() => this.active()?.fill ?? 0);
   readonly model = computed(() => this.active()?.model ?? '');
+  /** Project the gauge is currently following. Empty when unknown. */
+  readonly project = computed(() => this.active()?.project ?? '');
+  /** How many sessions have been seen — >1 means the label matters. */
+  readonly sessionCount = computed(() => Object.keys(this.sessions()).length);
   readonly totals = computed(() =>
       this.active()?.totals ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   );

@@ -272,7 +272,12 @@ pub async fn get_sessions(pool: &SqlitePool) -> Result<Vec<SessionSummary>, Stri
             COALESCE(SUM(cache_creation_input_tokens),0),
             COALESCE(SUM(input_tokens + output_tokens
                        + cache_read_input_tokens + cache_creation_input_tokens),0) AS total_tokens,
-            COALESCE(MAX(cache_read_input_tokens),0)                               AS peak_cache_read
+            -- Peak fill EXCLUDES subagent turns: they reuse the parent's
+            -- sessionId but carry their own fresh context, so counting them
+            -- would misreport how full this session's context actually got.
+            -- Their tokens stay in the SUMs above, because they are real spend.
+            (SELECT COALESCE(MAX(cache_read_input_tokens),0) FROM turns t4
+               WHERE t4.session_id = t.session_id AND t4.is_subagent = 0)       AS peak_cache_read
          FROM turns t
          GROUP BY session_id
          ORDER BY MAX(ts) DESC

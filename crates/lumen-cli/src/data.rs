@@ -14,6 +14,9 @@ pub struct AppState {
     /// `fill`: /compact drops fill sharply and would otherwise shrink the window.
     pub peak_fill: u64,
     pub model: String,
+    /// Short project label for the session being shown. With several editor
+    /// windows open the gauge follows whichever is newest, so it has to say which.
+    pub project: String,
     pub window: u64,
     pub session_input: i64,
     pub session_output: i64,
@@ -59,6 +62,8 @@ struct Session {
     peak_fill: Option<i64>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
     ts: String,
 }
 
@@ -69,6 +74,12 @@ struct Turn {
     output_tokens: i64,
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
+    /// Subagent turns cost money but carry their own context — see
+    /// lumen_core::project. Absent on older daemons, defaulting to false.
+    #[serde(default)]
+    is_subagent: bool,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 // ── Background data loop ──────────────────────────────────────────────────────
@@ -128,28 +139,50 @@ fn apply_msg(text: &str, state: &Arc<Mutex<AppState>>) {
                     {
                         s.model = m.to_string();
                     }
+                    if let Some(p) = latest.project.as_deref()
+                        && !p.is_empty()
+                    {
+                        s.project = p.to_string();
+                    }
                     s.window = rates::resolve_window(&s.model, s.peak_fill);
                 }
-                // Sum all sessions for cost display
-                s.session_input = sessions.iter().map(|x| x.input).sum();
-                s.session_output = sessions.iter().map(|x| x.output).sum();
-                s.session_cache_read = sessions.iter().map(|x| x.cache_read).sum();
-                s.session_cache_write = sessions.iter().map(|x| x.cache_write).sum();
+                // Cost is scoped to the session the gauge is showing, so the two
+                // agree. Summing every session made "SESSION" actually mean "all
+                // sessions", which read as inflated next to one window's context.
+                if let Some(latest) = sessions.iter().max_by_key(|x| &x.ts) {
+                    s.session_input = latest.input;
+                    s.session_output = latest.output;
+                    s.session_cache_read = latest.cache_read;
+                    s.session_cache_write = latest.cache_write;
+                }
             }
         }
         "event" => {
             if let Some(t) = env.turn {
+                // Cost counts every turn, subagents included — it is real spend.
                 s.session_input += t.input_tokens;
                 s.session_output += t.output_tokens;
                 s.session_cache_read += t.cache_read_input_tokens;
                 s.session_cache_write += t.cache_creation_input_tokens;
-                s.fill = t.cache_read_input_tokens.max(0) as u64;
-                s.peak_fill = s.peak_fill.max(s.fill);
-                if !t.model.is_empty() {
-                    s.model = t.model;
+
+                if let Some(p) = t.project.as_deref()
+                    && !p.is_empty()
+                {
+                    s.project = p.to_string();
                 }
-                // Model first, peak second — see rates::resolve_window.
-                s.window = rates::resolve_window(&s.model, s.peak_fill);
+
+                // The gauge does NOT. A subagent reuses the parent's sessionId but
+                // starts with a fresh, small context, so letting it set `fill` made
+                // the gauge dip every time one ran.
+                if !t.is_subagent {
+                    s.fill = t.cache_read_input_tokens.max(0) as u64;
+                    s.peak_fill = s.peak_fill.max(s.fill);
+                    if !t.model.is_empty() {
+                        s.model = t.model;
+                    }
+                    // Model first, peak second — see rates::resolve_window.
+                    s.window = rates::resolve_window(&s.model, s.peak_fill);
+                }
             }
         }
         _ => {}
@@ -356,23 +389,36 @@ mod tests {
         )
     }
 
+    /// An event envelope for a SUBAGENT turn, as the daemon now flags them.
+    fn subagent_event(cache_read: i64, input: i64, output: i64) -> String {
+        format!(
+            r#"{{"type":"event","turn":{{"model":"claude-opus-4-8","input_tokens":{input},
+                "output_tokens":{output},"cache_read_input_tokens":{cache_read},
+                "cache_creation_input_tokens":0,"is_subagent":true,
+                "project":"lumen"}}}}"#
+        )
+    }
+
     // ── apply_msg: snapshot frames ───────────────────────────────────────────
 
     #[test]
-    fn snapshot_sums_every_session_for_cost() {
+    fn snapshot_scopes_cost_to_the_session_the_gauge_shows() {
+        // Cost and gauge must describe the same session. Summing every session
+        // made "SESSION" mean "all sessions", which looks inflated next to one
+        // window's context — and gets worse the more editor windows are open.
         let st = state();
         apply_msg(
             &snapshot(&[
-                ("a", 10, 20, 30, 40, 1_000, "2026-01-01T10:00:00Z"),
-                ("b", 1, 2, 3, 4, 500, "2026-01-01T09:00:00Z"),
+                ("newest", 10, 20, 30, 40, 1_000, "2026-01-01T10:00:00Z"),
+                ("older", 1, 2, 3, 4, 500, "2026-01-01T09:00:00Z"),
             ]),
             &st,
         );
         let s = st.lock().unwrap();
-        assert_eq!(s.session_input, 11, "cost is the sum across sessions");
-        assert_eq!(s.session_output, 22);
-        assert_eq!(s.session_cache_read, 33);
-        assert_eq!(s.session_cache_write, 44);
+        assert_eq!(s.session_input, 10, "only the active session's tokens");
+        assert_eq!(s.session_output, 20);
+        assert_eq!(s.session_cache_read, 30);
+        assert_eq!(s.session_cache_write, 40);
     }
 
     #[test]
@@ -472,6 +518,77 @@ mod tests {
         assert!(st.lock().unwrap().last_update.is_none());
         apply_msg(&event("m", 0, 0, 0, 0), &st);
         assert!(st.lock().unwrap().last_update.is_some());
+    }
+
+    // ── subagent turns ───────────────────────────────────────────────────────
+
+    #[test]
+    fn a_subagent_turn_adds_cost_but_does_not_move_the_gauge() {
+        // Subagent transcripts reuse the parent's sessionId, so their turns arrive
+        // on the same session. Their tokens are real spend; their small fresh
+        // context is not this session's context.
+        let st = state();
+        apply_msg(&event("claude-opus-4-8", 10, 20, 300_000, 5), &st);
+        apply_msg(&subagent_event(4_000, 7, 9), &st);
+
+        let s = st.lock().unwrap();
+        assert_eq!(
+            s.fill, 300_000,
+            "the gauge must not dip to the subagent's 4,000"
+        );
+        assert_eq!(s.peak_fill, 300_000);
+        assert_eq!(s.session_input, 17, "but the cost includes both turns");
+        assert_eq!(s.session_output, 29);
+        assert_eq!(s.session_cache_read, 304_000);
+    }
+
+    #[test]
+    fn a_subagent_turn_still_reports_the_project() {
+        let st = state();
+        apply_msg(&subagent_event(1_000, 1, 1), &st);
+        assert_eq!(st.lock().unwrap().project, "lumen");
+    }
+
+    #[test]
+    fn a_subagent_turn_does_not_overwrite_the_model_or_window() {
+        let st = state();
+        apply_msg(&event("claude-haiku-4-5", 0, 0, 100_000, 0), &st);
+        // The subagent runs opus-4-8; adopting its model would jump the window
+        // from 200K to 1M for a session that is actually on Haiku.
+        apply_msg(&subagent_event(1_000, 0, 0), &st);
+        let s = st.lock().unwrap();
+        assert_eq!(s.model, "claude-haiku-4-5");
+        assert_eq!(s.window, 200_000);
+    }
+
+    #[test]
+    fn a_turn_without_the_subagent_flag_is_treated_as_main_agent() {
+        // Older daemons omit the field; serde defaults it to false.
+        let st = state();
+        apply_msg(&event("claude-opus-4-8", 0, 0, 123_000, 0), &st);
+        assert_eq!(st.lock().unwrap().fill, 123_000);
+    }
+
+    // ── project label ────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_snapshot_reports_the_project_label() {
+        let st = state();
+        apply_msg(
+            r#"{"type":"snapshot","sessions":[{"session_id":"s1","input":0,"output":0,
+               "cache_read":0,"cache_write":0,"fill":5000,"peak_fill":5000,
+               "model":"claude-opus-4-8","project":"datapulse-gitlab",
+               "ts":"2026-01-01T10:00:00Z"}]}"#,
+            &st,
+        );
+        assert_eq!(st.lock().unwrap().project, "datapulse-gitlab");
+    }
+
+    #[test]
+    fn a_missing_project_leaves_the_label_empty_rather_than_guessing() {
+        let st = state();
+        apply_msg(&event("claude-opus-4-8", 0, 0, 1_000, 0), &st);
+        assert!(st.lock().unwrap().project.is_empty());
     }
 
     // ── apply_msg: malformed input ───────────────────────────────────────────

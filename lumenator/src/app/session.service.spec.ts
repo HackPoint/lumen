@@ -96,6 +96,11 @@ describe('SessionService', () => {
     }
   }
 
+  /** A daemon event for a SUBAGENT turn — same session, its own fresh context. */
+  function subagentFrame(over: Record<string, unknown> = {}): string {
+    return turnFrame({ is_subagent: true, project: 'lumen', ...over });
+  }
+
   afterEach(() => {
     TestBed.resetTestingModule();
   });
@@ -389,6 +394,114 @@ describe('SessionService', () => {
     bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 190_000 }));
     TestBed.tick();
     expect(bridge.lastArgsOf('update_tray')).toEqual({ percent: 95, status: 'alert' });
+  });
+
+  // ── subagent turns: real spend, separate context ──────────────────────────
+
+  it('adds a subagent turn to cost but does not move the gauge', () => {
+    // Subagent transcripts reuse the parent's sessionId. Their tokens are real
+    // spend; their small fresh context is not this session's context.
+    const s = build();
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-opus-4-8', input_tokens: 10, output_tokens: 20,
+      cache_read_input_tokens: 300_000, cache_creation_input_tokens: 5,
+    }));
+    bridge.emit('daemon', subagentFrame({
+      input_tokens: 7, output_tokens: 9, cache_read_input_tokens: 4_000,
+    }));
+
+    expect(s.fill()).toBe(300_000);
+    expect(s.peakFill()).toBe(300_000);
+    expect(s.totals()).toEqual({
+      input: 17, output: 29, cacheRead: 304_000, cacheWrite: 5,
+    });
+  });
+
+  it('does not let a subagent change the model or the window', () => {
+    // The subagent may run a different model; adopting it would jump a Haiku
+    // session's window from 200K to 1M.
+    const s = build();
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-haiku-4-5', cache_read_input_tokens: 100_000,
+    }));
+    bridge.emit('daemon', subagentFrame({
+      model: 'claude-opus-4-8', cache_read_input_tokens: 1_000,
+    }));
+    expect(s.model()).toBe('claude-haiku-4-5');
+    expect(s.maxContext()).toBe(200_000);
+  });
+
+  it('treats a turn with no subagent flag as the main agent', () => {
+    // Older daemons omit the field.
+    const s = build();
+    bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 123_000 }));
+    expect(s.fill()).toBe(123_000);
+  });
+
+  it('does not create a second session for a subagent', () => {
+    const s = build();
+    bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 50_000 }));
+    bridge.emit('daemon', subagentFrame({ cache_read_input_tokens: 900 }));
+    expect(s.sessionCount()).toBe(1);
+  });
+
+  // ── project label ─────────────────────────────────────────────────────────
+
+  it('reports the project the gauge is following', () => {
+    const s = build();
+    bridge.emit('daemon', turnFrame({ project: 'datapulse-gitlab' }));
+    expect(s.project()).toBe('datapulse-gitlab');
+  });
+
+  it('leaves the project empty rather than guessing', () => {
+    const s = build();
+    bridge.emit('daemon', turnFrame({}));
+    expect(s.project()).toBe('');
+  });
+
+  it('follows the newest session and relabels when it changes', () => {
+    // Two editor windows: the gauge follows whichever is newest, and the label
+    // has to move with it or the reading is ambiguous.
+    const s = build();
+    bridge.emit('daemon', turnFrame({
+      session_id: 'win-a', project: 'lumen', cache_read_input_tokens: 40_000,
+    }));
+    expect(s.project()).toBe('lumen');
+    expect(s.fill()).toBe(40_000);
+
+    bridge.emit('daemon', turnFrame({
+      session_id: 'win-b', project: 'datapulse-gitlab', cache_read_input_tokens: 9_000,
+    }));
+    expect(s.project()).toBe('datapulse-gitlab');
+    expect(s.fill()).toBe(9_000);
+    expect(s.sessionCount()).toBe(2);
+  });
+
+  it('keeps each session\'s cost separate across windows', () => {
+    // Cost is scoped to the session the gauge shows, so the two agree.
+    const s = build();
+    bridge.emit('daemon', turnFrame({
+      session_id: 'win-a', project: 'lumen', input_tokens: 1_000,
+    }));
+    bridge.emit('daemon', turnFrame({
+      session_id: 'win-b', project: 'other', input_tokens: 7,
+    }));
+    expect(s.totals().input).toBe(7);
+    expect(s.project()).toBe('other');
+  });
+
+  it('carries the project through a snapshot', () => {
+    const s = build();
+    bridge.emit('daemon', JSON.stringify({
+      type: 'snapshot',
+      sessions: [{
+        session_id: 's1', fill: 5_000, peak_fill: 5_000,
+        model: 'claude-opus-4-8', project: 'datapulse-gitlab',
+        input: 0, output: 0, cache_read: 0, cache_write: 0,
+        ts: '2026-01-01T10:00:00Z',
+      }],
+    }));
+    expect(s.project()).toBe('datapulse-gitlab');
   });
 
   // ── cost ──────────────────────────────────────────────────────────────────

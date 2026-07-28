@@ -1,5 +1,6 @@
 pub mod compress;
 pub mod meter;
+pub mod project;
 pub mod rates;
 pub mod record;
 pub mod schema;
