@@ -61,8 +61,12 @@ are documented in the install sections below.
 
 ```bash
 brew tap HackPoint/tap
+brew trust --cask HackPoint/tap/lumen-app   # required for casks outside homebrew/cask
 brew install --cask lumen-app
 ```
+
+Without the `trust` step Homebrew refuses with *"Refusing to load cask … from
+untrusted tap"*. That applies to every third-party cask, not just this one.
 
 > **The cask is `lumen-app`, not `lumen`.** Homebrew already ships an unrelated
 > `lumen` (a screen-brightness tool), so that token would install the wrong
