@@ -88,6 +88,11 @@ async fn start_daemon() -> Fixture {
 
     let child = Command::new(env!("CARGO_BIN_EXE_lumen-daemon"))
         .env("HOME", home.path())
+        // HOME alone does not isolate the daemon on Windows: dirs::home_dir()
+        // consults HOME only on Unix and resolves %USERPROFILE% on Windows, so
+        // these tests watched the real user profile there and every one of them
+        // timed out. The explicit override is platform-independent.
+        .env("LUMEN_PROJECTS_DIR", home.path().join(".claude/projects"))
         .env("LUMEN_DB", &db)
         .env("LUMEN_WS_ADDR", &addr)
         .stdout(Stdio::null())
