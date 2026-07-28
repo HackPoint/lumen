@@ -58,6 +58,34 @@
         @if (cliResult()) {
             <p class="setup__result-hint">{{ cliResult() }}</p>
         }
+
+        <!-- Setup enables this; the toggle exists so it stays the user's choice.
+             A native checkbox rather than role="switch": it carries the checked
+             state and keyboard handling itself, with no ARIA to keep in sync. -->
+        <div class="setup__option">
+            <label class="setup__toggle">
+                <input
+                    class="setup__toggle-input"
+                    type="checkbox"
+                    [checked]="autostart()"
+                    [disabled]="autostartBusy()"
+                    (change)="toggleAutostart()">
+                <span class="setup__toggle-track" [attr.data-on]="autostart()">
+                    <span class="setup__toggle-knob"></span>
+                </span>
+                <span class="setup__toggle-body">
+                    <span class="setup__toggle-label">Start Lumen at login</span>
+                    <span class="setup__toggle-detail">
+                        {{ autostart()
+                            ? 'Lumen appears in your menu bar automatically.'
+                            : 'You will need to open Lumen yourself each time.' }}
+                    </span>
+                </span>
+            </label>
+            @if (autostartError()) {
+                <p class="setup__error">{{ autostartError() }}</p>
+            }
+        </div>
     }
 
 </div>

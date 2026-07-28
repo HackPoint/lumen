@@ -66,14 +66,118 @@ pub fn lumen_setup_needed() -> bool {
 
 /// Run all setup steps. Returns one entry per step.
 #[tauri::command]
-pub fn lumen_run_setup(_app: AppHandle) -> Vec<SetupStep> {
-    run_setup()
+pub fn lumen_run_setup(app: AppHandle) -> Vec<SetupStep> {
+    run_setup(&PluginAutoStart(&app))
 }
 
 /// Remove all Lumen configuration from ~/.claude/. Returns one entry per action.
 #[tauri::command]
-pub fn lumen_uninstall() -> Vec<SetupStep> {
-    run_uninstall()
+pub fn lumen_uninstall(app: AppHandle) -> Vec<SetupStep> {
+    run_uninstall(&PluginAutoStart(&app))
+}
+
+// ── Launch at login ───────────────────────────────────────────────────────────
+
+/// The slice of the autostart plugin this module needs.
+///
+/// The plugin's manager hangs off a live `AppHandle`, which cannot be built in a
+/// unit test, so the steps below take this trait and the real implementation is a
+/// thin wrapper over the plugin.
+pub trait AutoStart {
+    fn is_enabled(&self) -> Result<bool, String>;
+    fn enable(&self) -> Result<(), String>;
+    fn disable(&self) -> Result<(), String>;
+}
+
+const AUTOSTART_ID: &str = "autostart";
+const AUTOSTART_LABEL: &str = "Start Lumen at login";
+
+/// Register Lumen as a login item.
+///
+/// Failure is a warning, never an error: both windows start hidden and the tray
+/// is the whole interface, so not being a login item is an inconvenience, not a
+/// broken install — and `run_setup` only writes its completion marker when every
+/// step is Ok or Warn. An Error here would make setup repeat forever on a machine
+/// whose login-item mechanism is unavailable or locked down by policy.
+pub fn step_enable_autostart(a: &dyn AutoStart) -> SetupStep {
+    match a.is_enabled() {
+        // Enabling something already enabled is not an error, but reporting it
+        // as freshly done would be a lie.
+        Ok(true) => SetupStep::ok(AUTOSTART_ID, AUTOSTART_LABEL, "Already enabled"),
+        Ok(false) => match a.enable() {
+            Ok(()) => SetupStep::ok(
+                AUTOSTART_ID,
+                AUTOSTART_LABEL,
+                "Enabled — Lumen starts with your session",
+            ),
+            Err(e) => SetupStep::warn(
+                AUTOSTART_ID,
+                AUTOSTART_LABEL,
+                &format!("Could not enable: {e}"),
+            ),
+        },
+        Err(e) => SetupStep::warn(
+            AUTOSTART_ID,
+            AUTOSTART_LABEL,
+            &format!("Could not read the current setting: {e}"),
+        ),
+    }
+}
+
+/// Deregister the login item. The mirror of [`step_enable_autostart`], so
+/// uninstall leaves nothing behind that would relaunch a removed app.
+pub fn step_disable_autostart(a: &dyn AutoStart) -> SetupStep {
+    const LABEL: &str = "Remove login item";
+    match a.is_enabled() {
+        Ok(false) => SetupStep::skip(AUTOSTART_ID, LABEL, "Was not enabled"),
+        Ok(true) => match a.disable() {
+            Ok(()) => SetupStep::ok(AUTOSTART_ID, LABEL, "Lumen no longer starts at login"),
+            Err(e) => SetupStep::warn(AUTOSTART_ID, LABEL, &format!("Could not disable: {e}")),
+        },
+        Err(e) => SetupStep::warn(
+            AUTOSTART_ID,
+            LABEL,
+            &format!("Could not read the current setting: {e}"),
+        ),
+    }
+}
+
+/// [`AutoStart`] backed by the real plugin.
+struct PluginAutoStart<'a>(&'a AppHandle);
+
+impl AutoStart for PluginAutoStart<'_> {
+    fn is_enabled(&self) -> Result<bool, String> {
+        use tauri_plugin_autostart::ManagerExt;
+        self.0.autolaunch().is_enabled().map_err(|e| e.to_string())
+    }
+    fn enable(&self) -> Result<(), String> {
+        use tauri_plugin_autostart::ManagerExt;
+        self.0.autolaunch().enable().map_err(|e| e.to_string())
+    }
+    fn disable(&self) -> Result<(), String> {
+        use tauri_plugin_autostart::ManagerExt;
+        self.0.autolaunch().disable().map_err(|e| e.to_string())
+    }
+}
+
+/// Is Lumen currently registered to start at login?
+#[tauri::command]
+pub fn lumen_autostart_enabled(app: AppHandle) -> bool {
+    // A read failure reports "off" rather than propagating: the Setup screen
+    // shows this as a toggle, and a toggle has to render something.
+    PluginAutoStart(&app).is_enabled().unwrap_or(false)
+}
+
+/// Turn the login item on or off, returning the state actually achieved.
+#[tauri::command]
+pub fn lumen_set_autostart(app: AppHandle, enable: bool) -> Result<bool, String> {
+    let a = PluginAutoStart(&app);
+    if enable {
+        a.enable()?
+    } else {
+        a.disable()?
+    }
+    a.is_enabled()
 }
 
 /// Bundle identifier, matching `identifier` in tauri.conf.json.
@@ -618,7 +722,7 @@ fn merge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str, cmd: &str) {
 
 // ── Main orchestration ────────────────────────────────────────────────────────
 
-fn run_setup() -> Vec<SetupStep> {
+fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
     let mut steps = Vec::new();
 
     // 1. Detect Claude Code
@@ -630,6 +734,10 @@ fn run_setup() -> Vec<SetupStep> {
             ("scripts", "Install hook scripts"),
             ("mcp", "Register MCP server"),
             ("hooks", "Install hooks"),
+            // Skipped rather than enabled: with no Claude Code there is nothing
+            // to monitor, so a login item would start an app with no purpose.
+            // Setup did not complete, so this runs again on the next launch.
+            (AUTOSTART_ID, AUTOSTART_LABEL),
         ] {
             steps.push(SetupStep::skip(id, label, "Skipped: Claude Code not found"));
         }
@@ -686,7 +794,12 @@ fn run_setup() -> Vec<SetupStep> {
         ));
     }
 
-    // 6. Write marker on full success
+    // 6. Register the login item. Deliberately last: it is the only step that
+    // touches something outside ~/.claude, and it must be inside the all_good
+    // check below so a warning here still lets setup complete.
+    steps.push(step_enable_autostart(autostart));
+
+    // 7. Write marker on full success
     let all_good = steps
         .iter()
         .all(|s| s.status == StepStatus::Ok || s.status == StepStatus::Warn);
@@ -698,14 +811,14 @@ fn run_setup() -> Vec<SetupStep> {
     steps
 }
 
-fn run_uninstall() -> Vec<SetupStep> {
-    run_uninstall_in(&home())
+fn run_uninstall(autostart: &dyn AutoStart) -> Vec<SetupStep> {
+    run_uninstall_in(&home(), autostart)
 }
 
 /// Uninstall against an explicit home. Tests drive this form so they can never
 /// touch the developer's real ~/.claude — this function deletes directories and
 /// rewrites two config files.
-fn run_uninstall_in(home: &Path) -> Vec<SetupStep> {
+fn run_uninstall_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
     let mut steps = Vec::new();
 
     // Remove MCP entry from ~/.claude.json
@@ -812,6 +925,9 @@ fn run_uninstall_in(home: &Path) -> Vec<SetupStep> {
     }
 
     steps.push(step_remove_cli_symlink());
+    // Last, and unconditional: leaving a login item behind would relaunch an app
+    // the user just uninstalled.
+    steps.push(step_disable_autostart(autostart));
 
     steps
 }
@@ -942,6 +1058,156 @@ mod tests {
     // be tested against the real home directory — run_setup rewrites
     // ~/.claude.json and ~/.claude/settings.json, and a test that resolved the
     // developer's actual home would corrupt their Claude Code install.
+    //
+    // The same rule covers login items: FakeAutoStart below keeps every autostart
+    // assertion in memory, so no test can register a LaunchAgent (or a Windows
+    // Run key) on the machine running the suite.
+
+    // ── Autostart test double ────────────────────────────────────────────────
+
+    /// In-memory [`AutoStart`] that records what was asked of it.
+    #[derive(Default)]
+    struct FakeAutoStart {
+        enabled: std::cell::Cell<bool>,
+        enable_calls: std::cell::Cell<usize>,
+        disable_calls: std::cell::Cell<usize>,
+        fail_read: bool,
+        fail_write: bool,
+    }
+
+    impl FakeAutoStart {
+        fn on() -> Self {
+            Self {
+                enabled: std::cell::Cell::new(true),
+                ..Default::default()
+            }
+        }
+        fn broken_read() -> Self {
+            Self {
+                fail_read: true,
+                ..Default::default()
+            }
+        }
+        fn broken_write() -> Self {
+            Self {
+                fail_write: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl AutoStart for FakeAutoStart {
+        fn is_enabled(&self) -> Result<bool, String> {
+            if self.fail_read {
+                return Err("no login-item service".into());
+            }
+            Ok(self.enabled.get())
+        }
+        fn enable(&self) -> Result<(), String> {
+            self.enable_calls.set(self.enable_calls.get() + 1);
+            if self.fail_write {
+                return Err("permission denied".into());
+            }
+            self.enabled.set(true);
+            Ok(())
+        }
+        fn disable(&self) -> Result<(), String> {
+            self.disable_calls.set(self.disable_calls.get() + 1);
+            if self.fail_write {
+                return Err("permission denied".into());
+            }
+            self.enabled.set(false);
+            Ok(())
+        }
+    }
+
+    fn find<'a>(steps: &'a [SetupStep], id: &str) -> &'a SetupStep {
+        steps
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("no step with id {id:?}"))
+    }
+
+    // ── step_enable_autostart ────────────────────────────────────────────────
+
+    #[test]
+    fn enabling_autostart_registers_the_login_item() {
+        let a = FakeAutoStart::default();
+        let step = step_enable_autostart(&a);
+        assert_eq!(step.status, StepStatus::Ok);
+        assert!(a.enabled.get(), "should be enabled afterwards");
+        assert_eq!(a.enable_calls.get(), 1);
+    }
+
+    #[test]
+    fn enabling_an_already_enabled_login_item_does_not_re_register_it() {
+        // Setup can be re-run from the UI; doing the work twice would rewrite the
+        // LaunchAgent plist for no reason.
+        let a = FakeAutoStart::on();
+        let step = step_enable_autostart(&a);
+        assert_eq!(step.status, StepStatus::Ok);
+        assert_eq!(step.detail, "Already enabled");
+        assert_eq!(a.enable_calls.get(), 0, "must not call enable() again");
+    }
+
+    #[test]
+    fn a_login_item_that_cannot_be_registered_warns_rather_than_errors() {
+        // Must be Warn: run_setup only writes its marker when every step is Ok or
+        // Warn, so an Error would make setup repeat on every single launch.
+        let a = FakeAutoStart::broken_write();
+        let step = step_enable_autostart(&a);
+        assert_eq!(step.status, StepStatus::Warn);
+        assert!(step.detail.contains("permission denied"), "{}", step.detail);
+    }
+
+    #[test]
+    fn an_unreadable_autostart_setting_warns() {
+        let step = step_enable_autostart(&FakeAutoStart::broken_read());
+        assert_eq!(step.status, StepStatus::Warn);
+        assert!(step.detail.contains("no login-item service"));
+    }
+
+    // ── step_disable_autostart ───────────────────────────────────────────────
+
+    #[test]
+    fn uninstalling_removes_the_login_item() {
+        let a = FakeAutoStart::on();
+        let step = step_disable_autostart(&a);
+        assert_eq!(step.status, StepStatus::Ok);
+        assert!(!a.enabled.get());
+        assert_eq!(a.disable_calls.get(), 1);
+    }
+
+    #[test]
+    fn disabling_a_login_item_that_was_never_set_is_a_skip() {
+        let a = FakeAutoStart::default();
+        let step = step_disable_autostart(&a);
+        assert_eq!(step.status, StepStatus::Skip);
+        assert_eq!(a.disable_calls.get(), 0);
+    }
+
+    #[test]
+    fn a_login_item_that_cannot_be_removed_warns() {
+        let a = FakeAutoStart::on();
+        // Make the write fail while still reporting enabled.
+        let broken = FakeAutoStart {
+            enabled: std::cell::Cell::new(true),
+            fail_write: true,
+            ..Default::default()
+        };
+        assert_eq!(step_disable_autostart(&broken).status, StepStatus::Warn);
+        assert!(a.enabled.get(), "unrelated instance untouched");
+    }
+
+    #[test]
+    fn enable_then_disable_returns_to_the_original_state() {
+        // Setup followed by uninstall must leave no login item behind.
+        let a = FakeAutoStart::default();
+        assert_eq!(step_enable_autostart(&a).status, StepStatus::Ok);
+        assert!(a.enabled.get());
+        assert_eq!(step_disable_autostart(&a).status, StepStatus::Ok);
+        assert!(!a.enabled.get());
+    }
 
     // ── is_ephemeral_path ────────────────────────────────────────────────────
     //
@@ -1561,7 +1827,7 @@ mod tests {
         step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
         step_install_hooks_in(h.path());
 
-        let steps = run_uninstall_in(h.path());
+        let steps = run_uninstall_in(h.path(), &FakeAutoStart::default());
         assert!(
             steps.iter().all(|s| s.status != StepStatus::Error),
             "no step may fail: {steps:?}"
@@ -1608,7 +1874,7 @@ mod tests {
 
         step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
         step_install_hooks_in(h.path());
-        run_uninstall_in(h.path());
+        run_uninstall_in(h.path(), &FakeAutoStart::default());
 
         let claude: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
@@ -1630,7 +1896,7 @@ mod tests {
     #[test]
     fn uninstall_on_a_clean_machine_skips_rather_than_failing() {
         let h = TempDir::new().unwrap();
-        let steps = run_uninstall_in(h.path());
+        let steps = run_uninstall_in(h.path(), &FakeAutoStart::default());
         assert!(
             steps.iter().all(|s| s.status != StepStatus::Error),
             "nothing installed is not an error: {steps:?}"
@@ -1646,19 +1912,52 @@ mod tests {
         let h = TempDir::new().unwrap();
         step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
         step_install_hooks_in(h.path());
-        run_uninstall_in(h.path());
-        let steps = run_uninstall_in(h.path());
+        run_uninstall_in(h.path(), &FakeAutoStart::default());
+        let steps = run_uninstall_in(h.path(), &FakeAutoStart::default());
         assert!(steps.iter().all(|s| s.status != StepStatus::Error));
     }
 
     #[test]
     fn uninstall_reports_one_step_per_action() {
         let h = TempDir::new().unwrap();
-        let ids: Vec<String> = run_uninstall_in(h.path())
+        let ids: Vec<String> = run_uninstall_in(h.path(), &FakeAutoStart::default())
             .into_iter()
             .map(|s| s.id)
             .collect();
-        assert_eq!(ids, vec!["mcp", "hooks", "scripts", "cli"]);
+        assert_eq!(ids, vec!["mcp", "hooks", "scripts", "cli", "autostart"]);
+    }
+
+    #[test]
+    fn uninstall_actually_removes_an_enabled_login_item() {
+        // The unit test above proves the step; this proves it is wired into the
+        // uninstall path, which is what would leave a removed app relaunching at
+        // every login if it were forgotten.
+        let h = TempDir::new().unwrap();
+        let a = FakeAutoStart::on();
+        let steps = run_uninstall_in(h.path(), &a);
+        assert_eq!(find(&steps, "autostart").status, StepStatus::Ok);
+        assert!(!a.enabled.get(), "login item must be gone after uninstall");
+    }
+
+    #[test]
+    fn uninstall_still_completes_when_the_login_item_cannot_be_removed() {
+        // A locked-down login-item mechanism must not stop the rest of uninstall
+        // from cleaning up ~/.claude.
+        let h = TempDir::new().unwrap();
+        let broken = FakeAutoStart {
+            enabled: std::cell::Cell::new(true),
+            fail_write: true,
+            ..Default::default()
+        };
+        let steps = run_uninstall_in(h.path(), &broken);
+        assert_eq!(find(&steps, "autostart").status, StepStatus::Warn);
+        for id in ["mcp", "hooks", "scripts", "cli"] {
+            assert_ne!(
+                find(&steps, id).status,
+                StepStatus::Error,
+                "{id} should still have been attempted"
+            );
+        }
     }
 
     // ── install then uninstall round trip ────────────────────────────────────
@@ -1680,7 +1979,7 @@ mod tests {
         step_install_scripts_in(h.path(), "/db", "/tok");
         step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
         step_install_hooks_in(h.path());
-        run_uninstall_in(h.path());
+        run_uninstall_in(h.path(), &FakeAutoStart::default());
 
         let claude: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())

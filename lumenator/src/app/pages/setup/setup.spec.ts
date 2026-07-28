@@ -215,4 +215,97 @@ describe('Setup', () => {
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
     expect(text).toContain('lumen added to ~/.claude.json');
   });
+
+  // ── launch at login ────────────────────────────────────────────────────────
+  //
+  // The toggle reflects the OS, not what the UI last asked for: a login item can
+  // fail to register (policy, sandbox) and setup reports that as Warn, not Error,
+  // so believing the request instead of the result would show a lie.
+
+  it('reads the real login-item state after setup rather than assuming it', async () => {
+    const s = await build((b) => b.responses.set('lumen_autostart_enabled', true));
+    expect(bridge.countOf('lumen_autostart_enabled')).toBe(1);
+    expect(s.autostart()).toBe(true);
+  });
+
+  it('shows the toggle off when setup could not register the login item', async () => {
+    const s = await build((b) => {
+      b.responses.set('lumen_run_setup', [step('autostart', 'Warn', 'Could not enable')]);
+      b.responses.set('lumen_autostart_enabled', false);
+    });
+    expect(s.autostart()).toBe(false);
+  });
+
+  it('treats an unanswerable backend as off so the toggle still renders', async () => {
+    const s = await build((b) => b.failures.add('lumen_autostart_enabled'));
+    expect(s.autostart()).toBe(false);
+  });
+
+  it('turning the toggle on asks the backend to enable it', async () => {
+    const s = await build((b) => {
+      b.responses.set('lumen_autostart_enabled', false);
+      b.responses.set('lumen_set_autostart', true);
+    });
+    await s.toggleAutostart();
+    expect(bridge.lastArgsOf('lumen_set_autostart')).toEqual({ enable: true });
+    expect(s.autostart()).toBe(true);
+  });
+
+  it('turning the toggle off asks the backend to disable it', async () => {
+    const s = await build((b) => {
+      b.responses.set('lumen_autostart_enabled', true);
+      b.responses.set('lumen_set_autostart', false);
+    });
+    await s.toggleAutostart();
+    expect(bridge.lastArgsOf('lumen_set_autostart')).toEqual({ enable: false });
+    expect(s.autostart()).toBe(false);
+  });
+
+  it('believes the state the OS reports, not the state it asked for', async () => {
+    // Asked to enable, but the OS still says off — the toggle must not lie.
+    const s = await build((b) => {
+      b.responses.set('lumen_autostart_enabled', false);
+      b.responses.set('lumen_set_autostart', false);
+    });
+    await s.toggleAutostart();
+    expect(s.autostart()).toBe(false);
+  });
+
+  it('surfaces a toggle failure and re-reads the actual state', async () => {
+    const s = await build((b) => {
+      b.responses.set('lumen_autostart_enabled', false);
+      b.failures.add('lumen_set_autostart');
+    });
+    const before = bridge.countOf('lumen_autostart_enabled');
+    await s.toggleAutostart();
+    expect(s.autostartError()).toContain('lumen_set_autostart failed');
+    expect(bridge.countOf('lumen_autostart_enabled')).toBe(before + 1);
+    expect(s.autostartBusy()).toBe(false);
+  });
+
+  it('clears the busy flag even when the toggle succeeds', async () => {
+    const s = await build((b) => b.responses.set('lumen_set_autostart', true));
+    await s.toggleAutostart();
+    expect(s.autostartBusy()).toBe(false);
+  });
+
+  it('re-reads the login-item state after uninstall removed it', async () => {
+    const s = await build((b) => b.responses.set('lumen_autostart_enabled', true));
+    expect(s.autostart()).toBe(true);
+    // Uninstall disables it, so the next read reports off.
+    bridge.responses.set('lumen_uninstall', [step('autostart', 'Ok')]);
+    bridge.responses.set('lumen_autostart_enabled', false);
+    await s.uninstall();
+    expect(s.autostart()).toBe(false);
+  });
+
+  it('renders the toggle with a label a user can act on', async () => {
+    await build((b) => b.responses.set('lumen_autostart_enabled', true));
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Start Lumen at login');
+    const box = el.querySelector<HTMLInputElement>('.setup__toggle-input');
+    expect(box).not.toBeNull();
+    expect(box!.type).toBe('checkbox');
+    expect(box!.checked).toBe(true);
+  });
 });
