@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/lumen-core", "crates/lumen-cli", "crates/lumen-daemon", "crates/lumen-mcp", "lumenator/src-tauri"]
+members = [
+    "crates/lumen-core",
+    "crates/lumen-cli",
+    "crates/lumen-daemon",
+    "crates/lumen-mcp",
+    "crates/lumen-stats",
+    "lumenator/src-tauri",
+]

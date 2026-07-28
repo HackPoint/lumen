@@ -1,0 +1,21 @@
+[package]
+name = "lumen-stats"
+version = "1.0.0"
+edition = "2024"
+
+# Read-only aggregate queries over the metering DB. These used to live inside the
+# Tauri GUI crate, which cannot build without bundled sidecar binaries — so none
+# of this arithmetic could be tested in CI. Here it is plain async SQLite and
+# runs on every platform.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
+
+[dev-dependencies]
+# The tests build a real schema with the production DDL rather than a hand-rolled
+# copy, so a drift between schema.rs and these queries fails the test.
+lumen-core = { path = "../lumen-core" }
+tempfile = "3"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
