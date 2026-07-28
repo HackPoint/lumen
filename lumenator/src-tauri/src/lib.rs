@@ -194,8 +194,11 @@ pub fn run() {
                 std::env::set_var("LUMEN_DB", &db_path);
             }
 
-            // Migrate DB from old com.tauri.dev identifier if this is a new install path.
-            // This handles the one-time transition when the bundle identifier changed.
+            // One-time migration from the old com.tauri.dev bundle identifier.
+            // macOS-only: that identifier never shipped on any other platform, and
+            // the path below is a macOS layout, so elsewhere this could only ever
+            // look for a file that cannot exist.
+            #[cfg(target_os = "macos")]
             if !std::path::Path::new(&db_path).exists() {
                 if let Some(home) = dirs::home_dir() {
                     let old_db = home.join("Library/Application Support/com.tauri.dev/lumen.db");
@@ -207,9 +210,10 @@ pub fn run() {
             }
 
             // Write pointer file so lumen-mcp can auto-discover the same DB path.
-            if let Ok(home) = std::env::var("HOME") {
-                let _ =
-                    std::fs::write(std::path::Path::new(&home).join(".lumen_db_path"), &db_path);
+            // dirs::home_dir() rather than $HOME: Windows sets USERPROFILE, not
+            // HOME, so reading the env var directly skipped this entirely there.
+            if let Some(home) = dirs::home_dir() {
+                let _ = std::fs::write(home.join(".lumen_db_path"), &db_path);
             }
 
             // spawn the bundled daemon as a sidecar, passing the DB path via env

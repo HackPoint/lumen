@@ -35,9 +35,14 @@ pub fn detect_channel() -> &'static str {
 ///
 /// Returns None if none of the above resolves.
 pub fn db_path() -> Option<std::path::PathBuf> {
+    // HOME on Unix, USERPROFILE on Windows — the pointer file is written to
+    // whichever the platform actually uses, so both must be consulted.
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
     resolve_db_path(
         std::env::var("LUMEN_DB").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
+        home.as_deref(),
         std::env::current_exe().ok().as_deref(),
     )
 }
