@@ -406,7 +406,11 @@ jobs:
       contents: write          # required to upload assets to the release
 
     env:
-      TRIPLE_LINUX: 'x86_64-unknown-linux-gnu'
+      # Overrides the workflow-level TRIPLE, which is the macOS triple. Without
+      # this, build-sidecar.sh inherited aarch64-apple-darwin on the Linux runner
+      # and named its Linux binaries as macOS ones, so tauri_build could not find
+      # any sidecar for this target and the build died in the build script.
+      TRIPLE: 'x86_64-unknown-linux-gnu'
 
     steps:
       - uses: actions/checkout@v4
