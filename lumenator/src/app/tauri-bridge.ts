@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { moveWindow, Position } from '@tauri-apps/plugin-positioner';
 import {
   isPermissionGranted,
   requestPermission,
@@ -46,5 +47,10 @@ export class TauriBridge {
 
   sendNotification(options: { title: string; body: string }): void {
     sendNotification(options);
+  }
+
+  /** Park the popover under the tray icon. */
+  moveWindowToTray(): Promise<void> {
+    return moveWindow(Position.TrayBottomCenter);
   }
 }
