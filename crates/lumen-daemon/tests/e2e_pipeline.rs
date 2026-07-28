@@ -282,7 +282,7 @@ async fn a_partial_final_line_is_not_ingested_until_it_is_complete() {
     // First half, with NO trailing newline.
     {
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(full[..split].as_bytes()).unwrap();
+        f.write_all(&full.as_bytes()[..split]).unwrap();
         f.flush().unwrap();
     }
     // Give the daemon a poll cycle to see the incomplete line.
@@ -313,7 +313,7 @@ async fn a_duplicate_transcript_line_does_not_double_count() {
     let db = fx.db.clone();
 
     let line = transcript_line("dup-1", "sess-d", "2026-01-01T10:00:00Z", (5, 5, 5, 5));
-    append(&fx.projects.join("a.jsonl"), &[line.clone()]);
+    append(&fx.projects.join("a.jsonl"), std::slice::from_ref(&line));
     wait_until("the first copy", || turn_count(&db) == 1).await;
 
     // Same message id, different file — as happens when a transcript is copied.

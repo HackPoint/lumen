@@ -5,8 +5,63 @@ import { RATE } from './components';
 import { TauriBridge } from './tauri-bridge';
 import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
 
-// Known context-window tiers (reference data, not logic).
+// Fallback tiers, used ONLY when the model is unrecognised.
 const CONTEXT_TIERS = [200_000, 500_000, 1_000_000] as const;
+
+/**
+ * Published context windows per model. MIRRORS `MODEL_WINDOWS` in
+ * crates/lumen-core/src/rates.rs — keep the two in sync.
+ *
+ * The window is a property of the MODEL, not of how full the context is.
+ * Inferring it from observed fill under-reports systematically: a 1M-window
+ * session that has only reached 267K is indistinguishable from a 500K one, which
+ * is why the gauge used to read "267,593 / 500,000" on a 1M model.
+ *
+ * Matched by longest prefix so dated ids (claude-haiku-4-5-20251001) resolve
+ * like their alias. Unrecognised models are deliberately absent — falling back
+ * to inference is honest; asserting a window we cannot back up is not.
+ */
+const MODEL_WINDOWS: ReadonlyArray<readonly [string, number]> = [
+  // Every current Opus / Sonnet / Fable / Mythos model is 1M.
+  ['claude-fable-5', 1_000_000],
+  ['claude-mythos-5', 1_000_000],
+  ['claude-opus-5', 1_000_000],
+  ['claude-opus-4-8', 1_000_000],
+  ['claude-opus-4-7', 1_000_000],
+  ['claude-opus-4-6', 1_000_000],
+  ['claude-sonnet-5', 1_000_000],
+  ['claude-sonnet-4-6', 1_000_000],
+  // Haiku is the only current model below 1M.
+  ['claude-haiku-4-5', 200_000],
+];
+
+/** The published window for `model`, or null if unrecognised. */
+export function modelWindow(model: string): number | null {
+  const m = model.toLowerCase();
+  let best: readonly [string, number] | null = null;
+  for (const entry of MODEL_WINDOWS) {
+    if (m.startsWith(entry[0]) && (best === null || entry[0].length > best[0].length)) {
+      best = entry;
+    }
+  }
+  return best?.[1] ?? null;
+}
+
+/** Smallest tier that fits `fill`. Only a lower bound — see resolveWindow. */
+export function inferWindow(fill: number): number {
+  return CONTEXT_TIERS.find((t) => fill <= t) ?? CONTEXT_TIERS[CONTEXT_TIERS.length - 1];
+}
+
+/**
+ * The window to display. `peakFill` must be the session HIGH-WATER MARK, not the
+ * current fill — /compact drops fill sharply and inferring from the momentary
+ * value would shrink the window mid-session and make the gauge jump.
+ */
+export function resolveWindow(model: string, peakFill: number): number {
+  const published = modelWindow(model);
+  // Never claim a window smaller than a fill we have actually observed.
+  return published === null ? inferWindow(peakFill) : Math.max(published, inferWindow(peakFill));
+}
 
 // User-selectable window options. null = auto-infer from observed fill.
 export const WINDOW_OPTIONS = [
@@ -78,7 +133,13 @@ export class SessionService {
               for (const s of msg.sessions) {
                 acc[s.session_id] = {
                   fill: s.fill,
-                  model: acc[s.session_id]?.model ?? '',
+                  // Prefer the daemon's peak; fall back to the current fill.
+                  peakFill: Math.max(
+                      acc[s.session_id]?.peakFill ?? 0,
+                      s.peak_fill ?? s.fill,
+                      s.fill,
+                  ),
+                  model: s.model || (acc[s.session_id]?.model ?? ''),
                   ts: Date.parse(s.ts) || Date.now(),
                   startTs: acc[s.session_id]?.startTs ?? Date.now(),
                   recentOutput: acc[s.session_id]?.recentOutput ?? [],
@@ -99,6 +160,7 @@ export class SessionService {
             const pt = prev?.totals ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
             acc[t.session_id] = {
               fill: t.cache_read_input_tokens,
+              peakFill: Math.max(prev?.peakFill ?? 0, t.cache_read_input_tokens),
               // Keep the last known model when a turn reports none. The snapshot
               // branch above preserves it, the CLI reducer guards the same way
               // (crates/lumen-cli/src/data.rs), and get_sessions picks the most
@@ -145,11 +207,15 @@ export class SessionService {
     this.contextOverride.set(v);
   }
 
+  /** Session high-water mark, for window resolution. */
+  readonly peakFill = computed(() => this.active()?.peakFill ?? 0);
+
   readonly maxContext = computed(() => {
     const override = this.contextOverride();
     if (override) return override;
-    const seen = this.fill();
-    return CONTEXT_TIERS.find((t) => seen <= t) ?? CONTEXT_TIERS.at(-1)!;
+    // Model first, peak second. Using the momentary fill here is what made a
+    // 1M-window session read as 500K, and made the window shrink after /compact.
+    return resolveWindow(this.model(), this.peakFill());
   });
 
   readonly compactionThreshold = computed(() => this.maxContext() * COMPACTION_RATIO);

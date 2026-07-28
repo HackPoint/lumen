@@ -10,6 +10,9 @@ use serde::Deserialize;
 #[derive(Default)]
 pub struct AppState {
     pub fill: u64,
+    /// Session high-water mark. The window is derived from this, never from
+    /// `fill`: /compact drops fill sharply and would otherwise shrink the window.
+    pub peak_fill: u64,
     pub model: String,
     pub window: u64,
     pub session_input: i64,
@@ -51,6 +54,11 @@ struct Session {
     cache_read: i64,
     cache_write: i64,
     fill: i64,
+    /// Absent on daemons older than this field; falls back to `fill`.
+    #[serde(default)]
+    peak_fill: Option<i64>,
+    #[serde(default)]
+    model: Option<String>,
     ts: String,
 }
 
@@ -112,7 +120,15 @@ fn apply_msg(text: &str, state: &Arc<Mutex<AppState>>) {
                 // Use the session with the latest ts for the fill value
                 if let Some(latest) = sessions.iter().max_by_key(|x| &x.ts) {
                     s.fill = latest.fill.max(0) as u64;
-                    s.window = rates::infer_window(s.fill);
+                    // Prefer the daemon's peak; fall back to the current fill.
+                    let peak = latest.peak_fill.unwrap_or(latest.fill).max(0) as u64;
+                    s.peak_fill = s.peak_fill.max(peak).max(s.fill);
+                    if let Some(m) = latest.model.as_deref()
+                        && !m.is_empty()
+                    {
+                        s.model = m.to_string();
+                    }
+                    s.window = rates::resolve_window(&s.model, s.peak_fill);
                 }
                 // Sum all sessions for cost display
                 s.session_input = sessions.iter().map(|x| x.input).sum();
@@ -128,10 +144,12 @@ fn apply_msg(text: &str, state: &Arc<Mutex<AppState>>) {
                 s.session_cache_read += t.cache_read_input_tokens;
                 s.session_cache_write += t.cache_creation_input_tokens;
                 s.fill = t.cache_read_input_tokens.max(0) as u64;
-                s.window = rates::infer_window(s.fill);
+                s.peak_fill = s.peak_fill.max(s.fill);
                 if !t.model.is_empty() {
                     s.model = t.model;
                 }
+                // Model first, peak second — see rates::resolve_window.
+                s.window = rates::resolve_window(&s.model, s.peak_fill);
             }
         }
         _ => {}
@@ -178,7 +196,16 @@ fn poll_db_at(path: &std::path::Path, state: &Arc<Mutex<AppState>>) {
         }
     };
     let fill = fill_raw.max(0) as u64;
-    let window = rates::infer_window(fill);
+    // Peak over the whole session, so the window survives a /compact.
+    let peak: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(cache_read_input_tokens),0) FROM turns WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(fill_raw);
+    let peak_fill = peak.max(fill_raw).max(0) as u64;
+    let window = rates::resolve_window(&model, peak_fill);
 
     let sess = conn
         .query_row(
@@ -226,6 +253,7 @@ fn poll_db_at(path: &std::path::Path, state: &Arc<Mutex<AppState>>) {
 
     let mut s = state.lock().unwrap();
     s.fill = fill;
+    s.peak_fill = peak_fill;
     s.window = window;
     s.model = model;
     s.session_input = sess.0;
@@ -250,15 +278,29 @@ pub fn read_db_oneshot() -> Option<OneshotData> {
 /// path is a parameter.
 fn read_db_oneshot_at(path: &std::path::Path) -> Option<OneshotData> {
     let conn = lumen_core::meter::connect_db(path).ok()?;
-    let (model, fill_raw) = conn
+    let (model, fill_raw, session_id) = conn
         .query_row(
-            "SELECT model, cache_read_input_tokens FROM turns ORDER BY ts DESC LIMIT 1",
+            "SELECT model, cache_read_input_tokens, session_id \
+             FROM turns ORDER BY ts DESC LIMIT 1",
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )
         .ok()?;
     let fill = fill_raw.max(0) as u64;
-    let window = rates::infer_window(fill);
+    let peak: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(cache_read_input_tokens),0) FROM turns WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(fill_raw);
+    let window = rates::resolve_window(&model, peak.max(fill_raw).max(0) as u64);
     Some(OneshotData {
         fill,
         window,
@@ -279,6 +321,7 @@ mod tests {
 
     /// A snapshot envelope with one session per supplied tuple:
     /// (session_id, input, output, cache_read, cache_write, fill, ts).
+    /// Carries no model or peak_fill — exercises the pre-upgrade daemon shape.
     fn snapshot(rows: &[(&str, i64, i64, i64, i64, i64, &str)]) -> String {
         let sessions: Vec<String> = rows
             .iter()
@@ -292,6 +335,15 @@ mod tests {
         format!(
             r#"{{"type":"snapshot","sessions":[{}]}}"#,
             sessions.join(",")
+        )
+    }
+
+    /// A snapshot carrying the model and peak fill the current daemon sends.
+    fn snapshot_full(session: &str, fill: i64, peak: i64, model: &str, ts: &str) -> String {
+        format!(
+            r#"{{"type":"snapshot","sessions":[{{"session_id":"{session}","input":0,
+               "output":0,"cache_read":0,"cache_write":0,"fill":{fill},
+               "peak_fill":{peak},"model":"{model}","ts":"{ts}"}}]}}"#
         )
     }
 
@@ -464,6 +516,98 @@ mod tests {
             st.lock().unwrap().no_data,
             "unparseable bytes are not evidence of a healthy daemon"
         );
+    }
+
+    // ── context window resolution ────────────────────────────────────────────
+
+    #[test]
+    fn a_known_model_gets_its_published_window_not_one_inferred_from_fill() {
+        // The reported bug: 267,593 / 500,000 on a model whose window is 1M.
+        let st = state();
+        apply_msg(&event("claude-opus-4-8", 0, 0, 267_593, 0), &st);
+        let s = st.lock().unwrap();
+        assert_eq!(s.fill, 267_593);
+        assert_eq!(
+            s.window, 1_000_000,
+            "opus-4-8 has a 1M window; inferring 500K from the fill was the bug"
+        );
+    }
+
+    #[test]
+    fn haiku_keeps_its_smaller_window() {
+        let st = state();
+        apply_msg(&event("claude-haiku-4-5-20251001", 0, 0, 150_000, 0), &st);
+        assert_eq!(st.lock().unwrap().window, 200_000);
+    }
+
+    #[test]
+    fn an_unknown_model_still_infers_from_the_peak() {
+        let st = state();
+        apply_msg(&event("some-future-model", 0, 0, 250_000, 0), &st);
+        assert_eq!(st.lock().unwrap().window, 500_000);
+    }
+
+    #[test]
+    fn a_compaction_does_not_shrink_the_window() {
+        // Real pattern from the shipped DB: fill climbs, drops hard on /compact,
+        // then climbs again. Inferring from the momentary fill made the window
+        // (and therefore the whole gauge) jump.
+        let st = state();
+        apply_msg(&event("mystery-model", 0, 0, 317_241, 0), &st);
+        let after_peak = st.lock().unwrap().window;
+        assert_eq!(after_peak, 500_000);
+
+        apply_msg(&event("mystery-model", 0, 0, 16_794, 0), &st);
+        let s = st.lock().unwrap();
+        assert_eq!(s.fill, 16_794, "the gauge follows the current fill");
+        assert_eq!(
+            s.window, 500_000,
+            "but the window holds at the peak instead of collapsing to 200K"
+        );
+        assert_eq!(s.peak_fill, 317_241);
+    }
+
+    #[test]
+    fn the_peak_only_ever_rises() {
+        let st = state();
+        for fill in [1_000i64, 50_000, 20_000, 90_000, 10_000] {
+            apply_msg(&event("m", 0, 0, fill, 0), &st);
+        }
+        assert_eq!(st.lock().unwrap().peak_fill, 90_000);
+    }
+
+    #[test]
+    fn a_snapshot_uses_the_daemons_peak_and_model() {
+        let st = state();
+        // Post-compaction fill of 12K, but the session peaked at 400K on a 1M model.
+        apply_msg(
+            &snapshot_full(
+                "s1",
+                12_000,
+                400_000,
+                "claude-opus-4-8",
+                "2026-01-01T10:00:00Z",
+            ),
+            &st,
+        );
+        let s = st.lock().unwrap();
+        assert_eq!(s.fill, 12_000);
+        assert_eq!(s.peak_fill, 400_000);
+        assert_eq!(s.model, "claude-opus-4-8");
+        assert_eq!(s.window, 1_000_000);
+    }
+
+    #[test]
+    fn a_snapshot_without_peak_or_model_still_works() {
+        // An older daemon omits both fields; the client must not break.
+        let st = state();
+        apply_msg(
+            &snapshot(&[("a", 0, 0, 0, 0, 250_000, "2026-01-01T10:00:00Z")]),
+            &st,
+        );
+        let s = st.lock().unwrap();
+        assert_eq!(s.peak_fill, 250_000, "falls back to the current fill");
+        assert_eq!(s.window, 500_000, "and to tier inference");
     }
 
     // ── DB fallback path ─────────────────────────────────────────────────────
