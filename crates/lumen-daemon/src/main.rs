@@ -26,6 +26,35 @@ fn ws_addr() -> String {
     }
 }
 
+/// Resolve the directory of Claude Code transcripts to watch.
+///
+/// Overridable via `LUMEN_PROJECTS_DIR` so the e2e tests can point the daemon at
+/// a tempdir. Setting `HOME` is not enough: `dirs::home_dir()` reads `HOME` only
+/// on Unix, and on Windows resolves `%USERPROFILE%` — so a test that exported
+/// `HOME` still had the daemon watching the real user profile and ingesting
+/// nothing. An explicit override behaves the same on every platform, and leaves
+/// production resolution untouched: `%USERPROFILE%` is where Claude Code
+/// actually writes transcripts on Windows.
+fn projects_dir() -> Option<PathBuf> {
+    resolve_projects_dir(
+        std::env::var("LUMEN_PROJECTS_DIR").ok().as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// The precedence policy behind [`projects_dir`], with the environment passed in.
+///
+/// Separated for the same reason as `lumen_core::meter::resolve_db_path`: mutating
+/// the environment in a test is racy across threads and `unsafe` in edition 2024.
+fn resolve_projects_dir(override_dir: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+    match override_dir {
+        Some(d) if !d.trim().is_empty() => Some(PathBuf::from(d)),
+        // No `unwrap()`: a machine where the home directory cannot be resolved
+        // should report that, not panic inside an unrelated startup step.
+        _ => home.map(|h| h.join(".claude/projects")),
+    }
+}
+
 /// Worst-case lag before a missed notify-event is caught and new session
 /// files are discovered. notify handles the common fast path; polling is
 /// the correctness guarantee.
@@ -84,7 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let base = dirs::home_dir().unwrap().join(".claude/projects");
+    let base = match projects_dir() {
+        Some(b) => b,
+        None => {
+            eprintln!("cannot resolve a home directory; set LUMEN_PROJECTS_DIR");
+            return Ok(());
+        }
+    };
+    eprintln!("lumen-daemon watching: {}", base.display());
     let offsets: Offsets = Arc::new(Mutex::new(HashMap::new()));
 
     // ── Initial pass ──────────────────────────────────────────────────────
@@ -541,6 +577,53 @@ mod tests {
         for line in lines {
             writeln!(f, "{}", line).unwrap();
         }
+    }
+
+    // ── resolve_projects_dir ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_watch_root_defaults_to_dot_claude_projects_under_home() {
+        assert_eq!(
+            resolve_projects_dir(None, Some(Path::new("/Users/me"))),
+            Some(PathBuf::from("/Users/me/.claude/projects"))
+        );
+    }
+
+    #[test]
+    fn an_override_wins_over_the_home_derived_path() {
+        // This is what makes the e2e tests hermetic on Windows, where
+        // dirs::home_dir() ignores HOME and resolves %USERPROFILE% instead.
+        assert_eq!(
+            resolve_projects_dir(Some("/tmp/fixture/projects"), Some(Path::new("/Users/me"))),
+            Some(PathBuf::from("/tmp/fixture/projects"))
+        );
+    }
+
+    #[test]
+    fn a_blank_override_falls_back_rather_than_watching_an_empty_path() {
+        // An exported-but-empty variable is a common shell accident; watching ""
+        // would silently ingest nothing.
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                resolve_projects_dir(Some(blank), Some(Path::new("/Users/me"))),
+                Some(PathBuf::from("/Users/me/.claude/projects")),
+                "blank override {blank:?} should fall back"
+            );
+        }
+    }
+
+    #[test]
+    fn no_home_and_no_override_resolves_to_nothing_instead_of_panicking() {
+        // The old code called dirs::home_dir().unwrap() here.
+        assert_eq!(resolve_projects_dir(None, None), None);
+    }
+
+    #[test]
+    fn an_override_still_works_with_no_resolvable_home() {
+        assert_eq!(
+            resolve_projects_dir(Some("/tmp/p"), None),
+            Some(PathBuf::from("/tmp/p"))
+        );
     }
 
     // ── Regression: bad JSON line must not kill ingest ─────────────────────────
