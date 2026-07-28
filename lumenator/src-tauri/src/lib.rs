@@ -354,3 +354,167 @@ async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
     let pool = lumen_stats::connect_default().await?;
     lumen_stats::get_optimizer_stats(&pool).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RGBA of one pixel in the tray buffer.
+    fn px(rgba: &[u8], x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let i = ((y * ICON_SIZE + x) * 4) as usize;
+        (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3])
+    }
+
+    // ── status colours ───────────────────────────────────────────────────────
+
+    #[test]
+    fn status_maps_to_the_documented_traffic_light() {
+        assert_eq!(status_rgb("alert"), (248, 81, 73), "red");
+        assert_eq!(status_rgb("warn"), (210, 153, 34), "amber");
+        assert_eq!(status_rgb("ok"), (63, 185, 80), "green");
+    }
+
+    #[test]
+    fn an_unknown_status_falls_back_to_green() {
+        // The frontend only ever sends ok/warn/alert; anything else must render
+        // as healthy rather than panic or go transparent.
+        assert_eq!(status_rgb(""), (63, 185, 80));
+        assert_eq!(status_rgb("garbage"), (63, 185, 80));
+    }
+
+    // ── geometry predicates ──────────────────────────────────────────────────
+
+    #[test]
+    fn in_circle_is_inclusive_of_its_boundary() {
+        assert!(in_circle(0.0, 0.0, 0.0, 0.0, 1.0), "centre is inside");
+        assert!(in_circle(1.0, 0.0, 0.0, 0.0, 1.0), "exactly on the edge");
+        assert!(!in_circle(1.001, 0.0, 0.0, 0.0, 1.0), "just outside");
+    }
+
+    #[test]
+    fn in_annulus_excludes_the_hole_and_the_outside() {
+        // Ring from r=2 to r=4 around the origin.
+        assert!(!in_annulus(1.0, 0.0, 0.0, 0.0, 2.0, 4.0), "inside the hole");
+        assert!(
+            in_annulus(2.0, 0.0, 0.0, 0.0, 2.0, 4.0),
+            "on the inner edge"
+        );
+        assert!(in_annulus(3.0, 0.0, 0.0, 0.0, 2.0, 4.0), "in the band");
+        assert!(
+            in_annulus(4.0, 0.0, 0.0, 0.0, 2.0, 4.0),
+            "on the outer edge"
+        );
+        assert!(!in_annulus(4.001, 0.0, 0.0, 0.0, 2.0, 4.0), "beyond it");
+    }
+
+    #[test]
+    fn in_annulus_is_symmetric_about_the_centre() {
+        for (dx, dy) in [(3.0, 0.0), (-3.0, 0.0), (0.0, 3.0), (0.0, -3.0)] {
+            assert!(
+                in_annulus(50.0 + dx, 50.0 + dy, 50.0, 50.0, 2.0, 4.0),
+                "offset ({dx},{dy}) must be in the ring"
+            );
+        }
+    }
+
+    // ── rendered icon ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_icon_is_a_square_retina_buffer() {
+        let img = render_tray_icon(50, "ok");
+        assert_eq!(img.width(), ICON_SIZE);
+        assert_eq!(img.height(), ICON_SIZE);
+        assert_eq!(
+            img.rgba().len(),
+            (ICON_SIZE * ICON_SIZE * 4) as usize,
+            "4 bytes per pixel"
+        );
+    }
+
+    #[test]
+    fn the_core_is_opaque_and_the_far_corner_is_transparent() {
+        let img = render_tray_icon(50, "ok");
+        let rgba = img.rgba();
+        let (_, _, _, centre_a) = px(rgba, 22, 22);
+        let (_, _, _, corner_a) = px(rgba, 0, 0);
+        assert_eq!(centre_a, 255, "the core dot must be fully opaque");
+        assert_eq!(corner_a, 0, "the corner is outside every shape");
+    }
+
+    #[test]
+    fn the_core_is_brightened_so_it_reads_on_both_menu_bars() {
+        // The core is a 50% white blend of the status colour, so every channel
+        // must be lighter than the raw colour.
+        let raw = status_rgb("ok");
+        let img = render_tray_icon(50, "ok");
+        let (r, g, b, _) = px(img.rgba(), 22, 22);
+        assert!(
+            r > raw.0 && g > raw.1 && b > raw.2,
+            "got ({r},{g},{b}) vs {raw:?}"
+        );
+    }
+
+    #[test]
+    fn the_rings_are_translucent_rather_than_solid() {
+        let img = render_tray_icon(50, "ok");
+        let rgba = img.rgba();
+        // Ring 1 spans r=7.5..10.5 from centre (22,22): x=31 is r=9.
+        let (_, _, _, ring1_a) = px(rgba, 31, 22);
+        // Ring 2 spans r=14..17: x=38 is r=16.
+        let (_, _, _, ring2_a) = px(rgba, 38, 22);
+        assert!(ring1_a > 0 && ring1_a < 255, "inner ring alpha {ring1_a}");
+        assert!(ring2_a > 0 && ring2_a < 255, "outer ring alpha {ring2_a}");
+        assert!(
+            ring2_a < ring1_a,
+            "the outer ring must fade: {ring2_a} should be under {ring1_a}"
+        );
+    }
+
+    #[test]
+    fn the_gap_between_the_rings_is_transparent() {
+        let img = render_tray_icon(50, "ok");
+        // r=12 sits between ring1 (ends 10.5) and ring2 (starts 14).
+        let (_, _, _, a) = px(img.rgba(), 34, 22);
+        assert_eq!(a, 0, "the gap must be see-through");
+    }
+
+    #[test]
+    fn each_status_paints_a_different_icon() {
+        let ok = render_tray_icon(50, "ok").rgba().to_vec();
+        let warn = render_tray_icon(50, "warn").rgba().to_vec();
+        let alert = render_tray_icon(50, "alert").rgba().to_vec();
+        assert_ne!(ok, warn);
+        assert_ne!(warn, alert);
+        assert_ne!(ok, alert);
+    }
+
+    #[test]
+    fn the_percent_argument_does_not_change_the_icon() {
+        // Concept P is status-coloured only — the ring geometry is fixed and the
+        // percentage is conveyed by colour, not by fill. Pinned so a future
+        // percent-driven design is a deliberate change, not an accident.
+        let a = render_tray_icon(0, "ok").rgba().to_vec();
+        let b = render_tray_icon(99, "ok").rgba().to_vec();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn every_percent_renders_without_panicking() {
+        for p in [0u8, 1, 50, 80, 95, 100, 255] {
+            for status in ["ok", "warn", "alert"] {
+                let img = render_tray_icon(p, status);
+                assert_eq!(img.rgba().len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+            }
+        }
+    }
+
+    // ── db_url ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn db_url_is_a_sqlite_url_in_read_write_create_mode() {
+        // rwc so a first run against a missing file creates it instead of erroring.
+        let url = lumen_stats::db_url();
+        assert!(url.starts_with("sqlite:"), "got {url}");
+        assert!(url.ends_with("?mode=rwc"), "got {url}");
+    }
+}

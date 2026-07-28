@@ -1,6 +1,6 @@
 #![allow(clippy::unnecessary_map_or)] // map_or style kept for clarity in async context
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
 // ── Result types ──────────────────────────────────────────────────────────────
@@ -77,25 +77,47 @@ pub fn lumen_uninstall() -> Vec<SetupStep> {
 }
 
 // ── Standard path helpers ─────────────────────────────────────────────────────
+//
+// Every path below is derived from a `home` argument, and the no-argument
+// wrappers pass the real one. Tests call the `*_in` forms with a tempdir so they
+// can never touch the developer's own ~/.claude — this module rewrites
+// ~/.claude.json and ~/.claude/settings.json, so a test that resolved the real
+// home would corrupt the machine it runs on.
 
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
+fn lumen_dir_in(home: &Path) -> PathBuf {
+    home.join(".claude/lumen")
+}
+
+fn marker_path_in(home: &Path) -> PathBuf {
+    lumen_dir_in(home).join(".setup_done")
+}
+
+fn claude_json_path_in(home: &Path) -> PathBuf {
+    home.join(".claude.json")
+}
+
+fn global_settings_path_in(home: &Path) -> PathBuf {
+    home.join(".claude/settings.json")
+}
+
 fn lumen_dir() -> PathBuf {
-    home().join(".claude/lumen")
+    lumen_dir_in(&home())
 }
 
 fn marker_path() -> PathBuf {
-    lumen_dir().join(".setup_done")
+    marker_path_in(&home())
 }
 
 fn claude_json_path() -> PathBuf {
-    home().join(".claude.json")
+    claude_json_path_in(&home())
 }
 
 fn global_settings_path() -> PathBuf {
-    home().join(".claude/settings.json")
+    global_settings_path_in(&home())
 }
 
 // ── Binary resolution ─────────────────────────────────────────────────────────
@@ -134,8 +156,12 @@ fn find_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn app_support_dir_in(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/io.speedata.lumen")
+}
+
 fn app_support_dir() -> PathBuf {
-    home().join("Library/Application Support/io.speedata.lumen")
+    app_support_dir_in(&home())
 }
 
 // macOS runs unsigned / quarantined apps from ephemeral, read-only locations:
@@ -650,9 +676,7 @@ fn run_uninstall() -> Vec<SetupStep> {
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         {
             Some(mut v) if v.is_object() => {
-                if let Some(mcp) = v["mcpServers"].as_object_mut() {
-                    mcp.remove("lumen");
-                }
+                remove_mcp_entry(&mut v);
                 let _ = std::fs::copy(&claude_json, claude_json.with_extension("json.lumen_bak"));
                 match serde_json::to_string_pretty(&v)
                     .ok()
@@ -830,9 +854,29 @@ fn cli_symlink_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("lumen.exe"))
 }
 
+/// Remove Lumen's entry from a parsed ~/.claude.json.
+///
+/// `get_mut` for the same reason as `remove_lumen_hooks`: index-mutation would
+/// insert `"mcpServers": null` into a config that never had the key.
+fn remove_mcp_entry(root: &mut serde_json::Value) {
+    if let Some(mcp) = root.get_mut("mcpServers").and_then(|m| m.as_object_mut()) {
+        mcp.remove("lumen");
+    }
+}
+
+/// Strip Lumen's hook entries from a parsed settings.json.
+///
+/// Uses `get_mut` rather than index-mutation throughout: `root["hooks"][phase]`
+/// AUTO-VIVIFIES on a `&mut Value`, so on a settings file with no hooks it would
+/// insert `"hooks": {"PreToolUse": null, "PostToolUse": null}` — and
+/// `run_uninstall` writes the result straight back to disk. An uninstall must
+/// never add keys to config it does not own.
 fn remove_lumen_hooks(root: &mut serde_json::Value) {
-    for phase in &["PreToolUse", "PostToolUse"] {
-        if let Some(arr) = root["hooks"][phase].as_array_mut() {
+    let Some(hooks) = root.get_mut("hooks") else {
+        return;
+    };
+    for phase in ["PreToolUse", "PostToolUse"] {
+        if let Some(arr) = hooks.get_mut(phase).and_then(|v| v.as_array_mut()) {
             arr.retain(|entry| {
                 let hooks = entry["hooks"].as_array();
                 let has_lumen = hooks.map_or(false, |hs| {
@@ -845,5 +889,392 @@ fn remove_lumen_hooks(root: &mut serde_json::Value) {
                 !has_lumen
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    // NOTE: every test here uses a tempdir as "home". Nothing in this module may
+    // be tested against the real home directory — run_setup rewrites
+    // ~/.claude.json and ~/.claude/settings.json, and a test that resolved the
+    // developer's actual home would corrupt their Claude Code install.
+
+    // ── is_ephemeral_path ────────────────────────────────────────────────────
+    //
+    // This three-line predicate is the whole of the 1.0.1 bugfix: sidecar paths
+    // recorded from a DMG mount or an App Translocation directory go stale as
+    // soon as the volume is ejected, and Claude Code then fails to spawn the MCP
+    // server with ENOENT.
+
+    #[test]
+    fn a_dmg_mount_is_ephemeral() {
+        assert!(is_ephemeral_path(Path::new(
+            "/Volumes/Lumen 1.1.0/Lumen.app/Contents/MacOS/lumen-mcp"
+        )));
+    }
+
+    #[test]
+    fn an_app_translocation_path_is_ephemeral() {
+        assert!(is_ephemeral_path(Path::new(
+            "/private/var/folders/ab/xyz/d/AppTranslocation/1234-5678/d/Lumen.app/Contents/MacOS/lumen-mcp"
+        )));
+    }
+
+    #[test]
+    fn an_installed_application_path_is_not_ephemeral() {
+        assert!(!is_ephemeral_path(Path::new(
+            "/Applications/Lumen.app/Contents/MacOS/lumen-mcp"
+        )));
+    }
+
+    #[test]
+    fn a_user_local_path_is_not_ephemeral() {
+        assert!(!is_ephemeral_path(Path::new(
+            "/Users/someone/Library/Application Support/io.speedata.lumen/bin/lumen-mcp"
+        )));
+    }
+
+    #[test]
+    fn a_volumes_substring_elsewhere_in_the_path_is_not_ephemeral() {
+        // Only a /Volumes/ PREFIX is ephemeral. A directory that merely contains
+        // the word must not be misclassified, or we would needlessly copy
+        // sidecars for users with such a path.
+        assert!(!is_ephemeral_path(Path::new(
+            "/Users/someone/Volumes/lumen-mcp"
+        )));
+    }
+
+    // ── path helpers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn path_helpers_all_hang_off_the_supplied_home() {
+        let h = Path::new("/tmp/fake-home");
+        assert_eq!(lumen_dir_in(h), Path::new("/tmp/fake-home/.claude/lumen"));
+        assert_eq!(
+            marker_path_in(h),
+            Path::new("/tmp/fake-home/.claude/lumen/.setup_done")
+        );
+        assert_eq!(
+            claude_json_path_in(h),
+            Path::new("/tmp/fake-home/.claude.json")
+        );
+        assert_eq!(
+            global_settings_path_in(h),
+            Path::new("/tmp/fake-home/.claude/settings.json")
+        );
+        assert_eq!(
+            app_support_dir_in(h),
+            Path::new("/tmp/fake-home/Library/Application Support/io.speedata.lumen")
+        );
+    }
+
+    #[test]
+    fn the_real_home_helpers_agree_with_the_parameterised_ones() {
+        // Guards against the wrappers drifting from the *_in functions.
+        let h = home();
+        assert_eq!(lumen_dir(), lumen_dir_in(&h));
+        assert_eq!(marker_path(), marker_path_in(&h));
+        assert_eq!(claude_json_path(), claude_json_path_in(&h));
+        assert_eq!(global_settings_path(), global_settings_path_in(&h));
+        assert_eq!(app_support_dir(), app_support_dir_in(&h));
+    }
+
+    // ── merge_hook_entry ─────────────────────────────────────────────────────
+    //
+    // Mutates the user's global Claude settings. Losing a foreign hook here
+    // silently breaks someone else's tooling, so the preserve cases matter as
+    // much as the add case.
+
+    #[test]
+    fn merge_creates_the_array_when_the_slot_is_missing() {
+        let mut v = json!(null);
+        merge_hook_entry(&mut v, "Read", "/bin/lumen_hook.sh");
+        assert_eq!(v[0]["matcher"], "Read");
+        assert_eq!(v[0]["hooks"][0]["type"], "command");
+        assert_eq!(v[0]["hooks"][0]["command"], "/bin/lumen_hook.sh");
+    }
+
+    #[test]
+    fn merge_coerces_a_non_array_value_rather_than_panicking() {
+        let mut v = json!("this should have been an array");
+        merge_hook_entry(&mut v, "Read", "/bin/lumen_hook.sh");
+        assert!(v.is_array());
+        assert_eq!(v.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_appends_a_new_matcher_alongside_existing_ones() {
+        let mut v = json!([{
+            "matcher": "Write",
+            "hooks": [{ "type": "command", "command": "/other/tool.sh" }]
+        }]);
+        merge_hook_entry(&mut v, "Read", "/bin/lumen_hook.sh");
+        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["matcher"], "Write", "the foreign matcher stays first");
+        assert_eq!(v[1]["matcher"], "Read");
+    }
+
+    #[test]
+    fn merge_updates_an_existing_lumen_command_in_place() {
+        let mut v = json!([{
+            "matcher": "Read",
+            "hooks": [{ "type": "command", "command": "/old/path/lumen_intercept.sh" }]
+        }]);
+        merge_hook_entry(&mut v, "Read", "/new/path/lumen_intercept.sh");
+        assert_eq!(
+            v.as_array().unwrap().len(),
+            1,
+            "must not duplicate the matcher"
+        );
+        assert_eq!(v[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["hooks"][0]["command"], "/new/path/lumen_intercept.sh");
+    }
+
+    #[test]
+    fn merge_preserves_a_foreign_hook_on_the_same_matcher() {
+        let mut v = json!([{
+            "matcher": "Read",
+            "hooks": [{ "type": "command", "command": "/somebody/elses/hook.sh" }]
+        }]);
+        merge_hook_entry(&mut v, "Read", "/bin/lumen_intercept.sh");
+        let hooks = v[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 2, "the foreign hook must survive");
+        assert_eq!(hooks[0]["command"], "/somebody/elses/hook.sh");
+        assert_eq!(hooks[1]["command"], "/bin/lumen_intercept.sh");
+    }
+
+    #[test]
+    fn merge_replaces_only_the_lumen_hook_leaving_neighbours_alone() {
+        let mut v = json!([{
+            "matcher": "Read",
+            "hooks": [
+                { "type": "command", "command": "/first/party.sh" },
+                { "type": "command", "command": "/old/lumen_intercept.sh" },
+                { "type": "command", "command": "/third/party.sh" }
+            ]
+        }]);
+        merge_hook_entry(&mut v, "Read", "/new/lumen_intercept.sh");
+        let hooks = v[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 3, "no hook added, none removed");
+        assert_eq!(hooks[0]["command"], "/first/party.sh");
+        assert_eq!(hooks[1]["command"], "/new/lumen_intercept.sh");
+        assert_eq!(hooks[2]["command"], "/third/party.sh");
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let mut v = json!(null);
+        merge_hook_entry(&mut v, "Read", "/bin/lumen_hook.sh");
+        let after_first = v.clone();
+        merge_hook_entry(&mut v, "Read", "/bin/lumen_hook.sh");
+        assert_eq!(v, after_first, "re-running setup must not duplicate hooks");
+    }
+
+    // ── remove_lumen_hooks ───────────────────────────────────────────────────
+    //
+    // The uninstall path. Over-removing destroys unrelated user config.
+
+    #[test]
+    fn remove_strips_lumen_entries_from_both_phases() {
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse":  [{ "matcher": "Read", "hooks": [{ "command": "/x/lumen_intercept.sh" }] }],
+                "PostToolUse": [{ "matcher": "Read", "hooks": [{ "command": "/x/lumen_meter.sh" }] }]
+            }
+        });
+        remove_lumen_hooks(&mut root);
+        assert!(root["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
+        assert!(root["hooks"]["PostToolUse"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_keeps_hooks_that_are_not_ours() {
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "Read",  "hooks": [{ "command": "/x/lumen_intercept.sh" }] },
+                    { "matcher": "Write", "hooks": [{ "command": "/somebody/else.sh" }] }
+                ]
+            }
+        });
+        remove_lumen_hooks(&mut root);
+        let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "only the lumen entry is removed");
+        assert_eq!(pre[0]["matcher"], "Write");
+    }
+
+    #[test]
+    fn remove_drops_a_whole_entry_that_contains_any_lumen_hook() {
+        // Documented consequence: an entry is matched as a unit, so a foreign
+        // hook sharing an entry with a lumen hook goes with it. Pinned so the
+        // behaviour is a decision rather than a surprise.
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Read",
+                    "hooks": [
+                        { "command": "/somebody/else.sh" },
+                        { "command": "/x/lumen_intercept.sh" }
+                    ]
+                }]
+            }
+        });
+        remove_lumen_hooks(&mut root);
+        assert!(root["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_is_a_no_op_on_settings_with_no_hooks_key() {
+        let mut root = json!({ "theme": "dark" });
+        let before = root.clone();
+        remove_lumen_hooks(&mut root);
+        assert_eq!(root, before, "unrelated settings must be untouched");
+    }
+
+    #[test]
+    fn remove_is_a_no_op_on_an_empty_object() {
+        let mut root = json!({});
+        remove_lumen_hooks(&mut root);
+        assert_eq!(root, json!({}), "must not create a hooks key");
+    }
+
+    #[test]
+    fn remove_does_not_invent_a_hooks_key_on_uninstall() {
+        // Regression: `root["hooks"][phase]` auto-vivifies on a &mut Value, and
+        // run_uninstall writes the result straight back to ~/.claude/settings.json
+        // — so uninstalling used to INJECT "hooks": {"PreToolUse": null,
+        // "PostToolUse": null} into settings that never had hooks at all.
+        let mut root = json!({ "theme": "dark", "model": "opus" });
+        remove_lumen_hooks(&mut root);
+        assert!(
+            root.get("hooks").is_none(),
+            "uninstall must leave no trace, got {root}"
+        );
+    }
+
+    #[test]
+    fn remove_leaves_a_hooks_object_that_lacks_our_phases_alone() {
+        let mut root = json!({ "hooks": { "SessionStart": [] } });
+        let before = root.clone();
+        remove_lumen_hooks(&mut root);
+        assert_eq!(root, before, "must not add PreToolUse/PostToolUse keys");
+    }
+
+    // ── remove_mcp_entry ─────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_mcp_drops_only_the_lumen_server() {
+        let mut root = json!({
+            "mcpServers": {
+                "lumen": { "command": "/x/lumen-mcp" },
+                "other": { "command": "/y/other-mcp" }
+            }
+        });
+        remove_mcp_entry(&mut root);
+        assert!(root["mcpServers"].get("lumen").is_none());
+        assert!(
+            root["mcpServers"].get("other").is_some(),
+            "another MCP server must survive our uninstall"
+        );
+    }
+
+    #[test]
+    fn remove_mcp_does_not_invent_an_mcpservers_key() {
+        // Same auto-vivification regression as the hooks path, on ~/.claude.json.
+        let mut root = json!({ "numStartups": 42 });
+        remove_mcp_entry(&mut root);
+        assert!(
+            root.get("mcpServers").is_none(),
+            "uninstall must not add mcpServers, got {root}"
+        );
+    }
+
+    #[test]
+    fn remove_mcp_is_idempotent() {
+        let mut root = json!({ "mcpServers": { "lumen": { "command": "/x" } } });
+        remove_mcp_entry(&mut root);
+        let after = root.clone();
+        remove_mcp_entry(&mut root);
+        assert_eq!(root, after);
+    }
+
+    #[test]
+    fn remove_then_merge_round_trips() {
+        let mut root = json!({ "hooks": { "PreToolUse": null } });
+        merge_hook_entry(&mut root["hooks"]["PreToolUse"], "Read", "/x/lumen_hook.sh");
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        remove_lumen_hooks(&mut root);
+        assert!(root["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
+    }
+
+    // ── cli_symlink_path ─────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_symlink_lands_in_a_bin_directory_for_this_platform() {
+        let p = cli_symlink_path();
+        let name = p.file_name().unwrap().to_string_lossy();
+        #[cfg(windows)]
+        assert_eq!(name, "lumen.exe");
+        #[cfg(unix)]
+        assert_eq!(name, "lumen");
+        assert!(
+            p.parent().unwrap().ends_with("bin"),
+            "must target a bin dir, got {p:?}"
+        );
+        assert!(p.is_absolute(), "must be absolute so it can be symlinked");
+    }
+
+    // ── SetupStep constructors ───────────────────────────────────────────────
+
+    #[test]
+    fn setup_step_constructors_carry_their_status() {
+        let cases = [
+            (SetupStep::ok("i", "l", "d"), StepStatus::Ok),
+            (SetupStep::warn("i", "l", "d"), StepStatus::Warn),
+            (SetupStep::err("i", "l", "d"), StepStatus::Error),
+            (SetupStep::skip("i", "l", "d"), StepStatus::Skip),
+        ];
+        for (step, expected) in cases {
+            assert_eq!(step.id, "i");
+            assert_eq!(step.label, "l");
+            assert_eq!(step.detail, "d");
+            assert_eq!(
+                serde_json::to_value(step.status).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn setup_step_serialises_for_the_frontend() {
+        let v = serde_json::to_value(SetupStep::ok("detect", "Detect Claude", "found")).unwrap();
+        for key in ["id", "label", "status", "detail"] {
+            assert!(v.get(key).is_some(), "missing key: {key}");
+        }
+    }
+
+    // ── marker / setup-needed detection ──────────────────────────────────────
+
+    #[test]
+    fn setup_is_needed_when_the_marker_is_absent() {
+        let dir = TempDir::new().unwrap();
+        assert!(!marker_path_in(dir.path()).exists());
+    }
+
+    #[test]
+    fn setup_is_satisfied_once_the_marker_exists() {
+        let dir = TempDir::new().unwrap();
+        let marker = marker_path_in(dir.path());
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+        assert!(marker.exists());
+        assert!(
+            marker.starts_with(dir.path()),
+            "the marker must live under the supplied home, never the real one"
+        );
     }
 }
