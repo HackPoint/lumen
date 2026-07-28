@@ -3,8 +3,6 @@
 #![allow(clippy::type_complexity)] // complex sqlx query types are self-documenting inline
 mod setup;
 use futures_util::StreamExt;
-use serde::Serialize;
-use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent, TrayIconId};
@@ -310,39 +308,12 @@ fn request_snapshot(cache: State<SnapshotCache>) -> Option<String> {
     cache.0.lock().unwrap().clone()
 }
 
-#[derive(Serialize)]
-struct Stats {
-    turns: i64,
-    output_total: i64,
-    factor: f64,
-}
-
+/// Basic turn/output totals plus the calibration factor.
+/// All the SQL lives in `lumen-stats` so it can be tested without a Tauri build.
 #[tauri::command]
-async fn get_stats() -> Result<Stats, String> {
-    let pool = SqlitePoolOptions::new()
-        .connect(&{
-            let p = std::env::var("LUMEN_DB").unwrap_or_else(|_| "../../lumen.db".to_string());
-            format!("sqlite:{p}?mode=rwc")
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let (turns, output_total): (i64, i64) =
-        sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(output_tokens),0) FROM turns")
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    let factor: (Option<f64>,) = sqlx::query_as("SELECT factor FROM correction_factor")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(Stats {
-        turns,
-        output_total,
-        factor: factor.0.unwrap_or(1.0),
-    })
+async fn get_stats() -> Result<lumen_stats::Stats, String> {
+    let pool = lumen_stats::connect_default().await?;
+    lumen_stats::get_stats(&pool).await
 }
 
 #[tauri::command]
@@ -355,439 +326,31 @@ fn update_tray(app: tauri::AppHandle, percent: u8, status: String) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Usage & Cost aggregates (read-only, on demand). This is SEPARATE from the
-// live turn stream / snapshot — it just runs grouped SUMs over `turns`.
+// ──────────────────────────────────────────────────────────────────────────
+// Read-only aggregates (usage & cost, session history, optimizer savings).
 //
-// HONESTY: these are CONSUMPTION figures. Plan quota size / remaining / the
-// real reset are server-side and unknown locally, so nothing here is a
-// "% of limit" or "remaining". Dollar costs are NOT computed here — the
-// frontend applies the single RATE table to these token sums (one price
-// source of truth). `cache_read` over all-time feeds the reported
-// "Saved by caching" value = cache_read * (RATE.input − RATE.cacheRead).
-// ─────────────────────────────────────────────────────────────────────────
+// The queries, the wire structs and the honesty caveats all live in the
+// `lumen-stats` crate. They were moved out of this file so they can be unit
+// tested on every platform: this crate cannot build without bundled sidecar
+// binaries, which CI does not have.
+//
+// These commands are deliberately nothing but "open a pool, delegate".
+// ──────────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct TokenAgg {
-    turns: i64,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    total_tokens: i64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageReport {
-    rolling_5h: TokenAgg,
-    /// earliest turn inside the trailing 5h window (ISO-8601 UTC), or null
-    window_start: Option<String>,
-    /// PROXY reset = window_start + 5h. NOT the real server reset — "approx".
-    reset_approx: Option<String>,
-    rolling_7d_opus: TokenAgg,
-    rolling_7d_other: TokenAgg,
-    today: TokenAgg,
-    this_week: TokenAgg,
-    all_time: TokenAgg,
-}
-
-fn db_url() -> String {
-    let p = std::env::var("LUMEN_DB").unwrap_or_else(|_| "../../lumen.db".to_string());
-    format!("sqlite:{p}?mode=rwc")
-}
-
-/// Run the standard token-aggregate SELECT with a caller-supplied WHERE clause
-/// (pass "" for all-time). The `&'static str` bound is what makes the
-/// `AssertSqlSafe` below sound: no runtime value can reach the clause, so no
-/// user input is interpolated.
-async fn fetch_agg(
-    pool: &sqlx::SqlitePool,
-    where_clause: &'static str,
-) -> Result<TokenAgg, String> {
-    let sql = format!(
-        "SELECT COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(input_tokens + output_tokens
-                           + cache_read_input_tokens + cache_creation_input_tokens),0)
-         FROM turns {where_clause}"
-    );
-    let t: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(TokenAgg {
-        turns: t.0,
-        input: t.1,
-        output: t.2,
-        cache_read: t.3,
-        cache_write: t.4,
-        total_tokens: t.5,
-    })
+#[tauri::command]
+async fn get_usage() -> Result<lumen_stats::UsageReport, String> {
+    let pool = lumen_stats::connect_default().await?;
+    lumen_stats::get_usage(&pool).await
 }
 
 #[tauri::command]
-async fn get_usage() -> Result<UsageReport, String> {
-    let pool = SqlitePoolOptions::new()
-        .connect(&db_url())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // (a) Rolling 5h consumption. `ts` is ISO-8601 UTC ('…Z'); datetime()
-    //     normalizes both sides to canonical UTC so the comparison is correct.
-    //     reset_approx is a PROXY (window_start + 5h), not the server reset.
-    let r5: (i64, i64, i64, i64, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(input_tokens + output_tokens
-                           + cache_read_input_tokens + cache_creation_input_tokens),0),
-                MIN(ts),
-                datetime(MIN(ts), '+5 hours')
-         FROM turns
-         WHERE datetime(ts) >= datetime('now','-5 hours')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // (b) Rolling 7d consumption, split Opus vs other.
-    let rows: Vec<(String, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT CASE WHEN model LIKE '%opus%' THEN 'opus' ELSE 'other' END AS model_class,
-                COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(input_tokens + output_tokens
-                           + cache_read_input_tokens + cache_creation_input_tokens),0)
-         FROM turns
-         WHERE datetime(ts) >= datetime('now','-7 days')
-         GROUP BY model_class",
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let mut opus = TokenAgg::default();
-    let mut other = TokenAgg::default();
-    for (class, turns, input, output, cache_read, cache_write, total_tokens) in rows {
-        let agg = TokenAgg {
-            turns,
-            input,
-            output,
-            cache_read,
-            cache_write,
-            total_tokens,
-        };
-        if class == "opus" {
-            opus = agg;
-        } else {
-            other = agg;
-        }
-    }
-
-    // (c) Calendar rollups in LOCAL time. Week starts MONDAY (ISO-8601):
-    //     strftime('%w') is 0=Sun..6=Sat, so (%w + 6) % 7 = days since Monday.
-    let today = fetch_agg(
-        &pool,
-        "WHERE date(ts,'localtime') = date('now','localtime')",
-    )
-    .await?;
-    let this_week = fetch_agg(
-        &pool,
-        "WHERE date(ts,'localtime') >= \
-         date('now','localtime','-'||((strftime('%w','now','localtime')+6)%7)||' days')",
-    )
-    .await?;
-    let all_time = fetch_agg(&pool, "").await?;
-
-    Ok(UsageReport {
-        rolling_5h: TokenAgg {
-            turns: r5.0,
-            input: r5.1,
-            output: r5.2,
-            cache_read: r5.3,
-            cache_write: r5.4,
-            total_tokens: r5.5,
-        },
-        window_start: r5.6,
-        reset_approx: r5.7,
-        rolling_7d_opus: opus,
-        rolling_7d_other: other,
-        today,
-        this_week,
-        all_time,
-    })
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Session history (read-only, on demand). One summary row per session_id,
-// newest activity first. Reads straight from the DB, so it is independent of
-// the frontend's in-memory live-session cap and can list far more sessions.
-//
-// Dollar cost is NOT computed here — the frontend multiplies these token sums
-// by the single RATE table. `peak_cache_read` (MAX cache_read in the session)
-// is the peak-context-fill proxy, mirroring the live gauge's `fill`.
-// ─────────────────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionSummary {
-    session_id: String,
-    model: Option<String>,
-    first_ts: String,
-    last_ts: String,
-    turn_count: i64,
-    input: i64,
-    output: i64,
-    cache_read: i64,
-    cache_write: i64,
-    total_tokens: i64,
-    peak_cache_read: i64,
+async fn get_sessions() -> Result<Vec<lumen_stats::SessionSummary>, String> {
+    let pool = lumen_stats::connect_default().await?;
+    lumen_stats::get_sessions(&pool).await
 }
 
 #[tauri::command]
-async fn get_sessions() -> Result<Vec<SessionSummary>, String> {
-    let pool = SqlitePoolOptions::new()
-        .connect(&db_url())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // One row per session. `model` = the most recent non-null model seen in the
-    // session (sessions are normally single-model). Newest activity first.
-    let rows: Vec<(
-        String,
-        Option<String>,
-        String,
-        String,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    )> = sqlx::query_as(
-        "SELECT
-            session_id,
-            (SELECT t2.model FROM turns t2
-                WHERE t2.session_id = t.session_id AND t2.model IS NOT NULL
-                ORDER BY t2.ts DESC LIMIT 1)                                       AS model,
-            MIN(ts)                                                                AS first_ts,
-            MAX(ts)                                                                AS last_ts,
-            COUNT(*)                                                               AS turn_count,
-            COALESCE(SUM(input_tokens),0),
-            COALESCE(SUM(output_tokens),0),
-            COALESCE(SUM(cache_read_input_tokens),0),
-            COALESCE(SUM(cache_creation_input_tokens),0),
-            COALESCE(SUM(input_tokens + output_tokens
-                       + cache_read_input_tokens + cache_creation_input_tokens),0) AS total_tokens,
-            COALESCE(MAX(cache_read_input_tokens),0)                               AS peak_cache_read
-         FROM turns t
-         GROUP BY session_id
-         ORDER BY MAX(ts) DESC
-         LIMIT 100",
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| SessionSummary {
-            session_id: r.0,
-            model: r.1,
-            first_ts: r.2,
-            last_ts: r.3,
-            turn_count: r.4,
-            input: r.5,
-            output: r.6,
-            cache_read: r.7,
-            cache_write: r.8,
-            total_tokens: r.9,
-            peak_cache_read: r.10,
-        })
-        .collect())
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// E5 — Optimizer savings (CAUSED by Lumen). Distinct from "caching saved"
-// (REPORTED by Claude Code and stored in the turns table's cache_read column).
-//
-// routed_via IN ('smart_read','recall_file','compress_logs') = Lumen tool
-// calls that returned fewer tokens than the full file.  saved_tokens is exact
-// BPE measured per call.  Dollar conversion uses RATE.input (these are input
-// token reads); the frontend owns RATE and applies it so there is one price
-// source of truth.
-//
-// builtin_read rows have saved_tokens=0 and represent CLI-only "missed
-// optimizations" — they are surfaced honestly but NEVER counted as savings.
-// ─────────────────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ChannelBreakdown {
-    channel: String,
-    calls: i64,
-    saved_tokens: i64,
-    full_tokens: i64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ToolBreakdown {
-    tool: String,
-    calls: i64,
-    saved_tokens: i64,
-    full_tokens: i64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OptimizerReport {
-    /// SUM(saved_tokens) over lumen routes — CAUSED by Lumen, not reported.
-    /// Convert to USD in the frontend: lifetimeOptimizedTokens * RATE.input.
-    lifetime_optimized_tokens: i64,
-    /// SUM(full_tokens) over lumen routes — denominator for effectivenessPct.
-    lifetime_full_tokens: i64,
-    /// Calendar rollups (local time, same method as get_usage).
-    today_saved_tokens: i64,
-    this_week_saved_tokens: i64,
-    /// Per-channel breakdown (cli | vscode | unknown).
-    by_channel: Vec<ChannelBreakdown>,
-    /// Per-tool breakdown (smart_read | recall_file | compress_logs).
-    by_tool: Vec<ToolBreakdown>,
-    /// Channel of the most recent read_events row — proxy for active context.
-    current_channel: String,
-    /// CLI-only: reads that bypassed Lumen (builtin_read, channel=cli).
-    /// Label as "not optimized (read in full)". Never count as savings.
-    missed_calls: i64,
-    missed_full_tokens: i64,
-}
-
-#[tauri::command]
-async fn get_optimizer_stats() -> Result<OptimizerReport, String> {
-    let pool = SqlitePoolOptions::new()
-        .connect(&db_url())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // ── Lifetime totals ───────────────────────────────────────────────────────
-    let (lifetime_optimized_tokens, lifetime_full_tokens): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(saved_tokens),0), COALESCE(SUM(full_tokens),0)
-         FROM read_events
-         WHERE routed_via IN ('smart_read','recall_file','compress_logs')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // ── Calendar rollups (local time — same method as get_usage) ─────────────
-    let (today_saved_tokens,): (i64,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(saved_tokens),0)
-         FROM read_events
-         WHERE routed_via IN ('smart_read','recall_file','compress_logs')
-           AND date(ts,'localtime') = date('now','localtime')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // Week starts Monday (ISO-8601): (strftime('%w')+6)%7 = days since Monday.
-    let (this_week_saved_tokens,): (i64,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(saved_tokens),0)
-         FROM read_events
-         WHERE routed_via IN ('smart_read','recall_file','compress_logs')
-           AND date(ts,'localtime') >= date('now','localtime',
-               '-'||((strftime('%w','now','localtime')+6)%7)||' days')",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // ── Per-channel breakdown ─────────────────────────────────────────────────
-    let channel_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
-        "SELECT channel, COUNT(*),
-                COALESCE(SUM(saved_tokens),0), COALESCE(SUM(full_tokens),0)
-         FROM read_events
-         WHERE routed_via IN ('smart_read','recall_file','compress_logs')
-         GROUP BY channel
-         ORDER BY SUM(saved_tokens) DESC",
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let by_channel = channel_rows
-        .into_iter()
-        .map(
-            |(channel, calls, saved_tokens, full_tokens)| ChannelBreakdown {
-                channel,
-                calls,
-                saved_tokens,
-                full_tokens,
-            },
-        )
-        .collect();
-
-    // ── Per-tool breakdown ────────────────────────────────────────────────────
-    let tool_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
-        "SELECT routed_via, COUNT(*),
-                COALESCE(SUM(saved_tokens),0), COALESCE(SUM(full_tokens),0)
-         FROM read_events
-         WHERE routed_via IN ('smart_read','recall_file','compress_logs')
-         GROUP BY routed_via
-         ORDER BY SUM(saved_tokens) DESC",
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let by_tool = tool_rows
-        .into_iter()
-        .map(|(tool, calls, saved_tokens, full_tokens)| ToolBreakdown {
-            tool,
-            calls,
-            saved_tokens,
-            full_tokens,
-        })
-        .collect();
-
-    // ── Current channel (most recent event) ──────────────────────────────────
-    let current_channel: (Option<String>,) =
-        sqlx::query_as("SELECT channel FROM read_events ORDER BY ts DESC LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .unwrap_or((None,));
-
-    // ── CLI missed reads ──────────────────────────────────────────────────────
-    // builtin_read rows written by the CLI PostToolUse hook when the model used
-    // the built-in Read instead of lumen tools.  saved_tokens=0 always.
-    let (missed_calls, missed_full_tokens): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(full_tokens),0)
-         FROM read_events
-         WHERE routed_via = 'builtin_read' AND channel = 'cli'",
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(OptimizerReport {
-        lifetime_optimized_tokens,
-        lifetime_full_tokens,
-        today_saved_tokens,
-        this_week_saved_tokens,
-        by_channel,
-        by_tool,
-        current_channel: current_channel.0.unwrap_or_else(|| "unknown".to_string()),
-        missed_calls,
-        missed_full_tokens,
-    })
+async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
+    let pool = lumen_stats::connect_default().await?;
+    lumen_stats::get_optimizer_stats(&pool).await
 }

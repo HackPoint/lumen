@@ -25,6 +25,7 @@ tauri = { version = "2.11.2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-positioner = { version = "2.3.2", features = ["tray-icon"] }
 lumen-core = { path = "../../crates/lumen-core" }
+lumen-stats = { path = "../../crates/lumen-stats" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.30"

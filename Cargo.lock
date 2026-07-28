@@ -10,6 +10,7 @@ dependencies = [
  "futures-util",
  "log",
  "lumen-core",
+ "lumen-stats",
  "serde",
  "serde_json",
  "sqlx",
@@ -2725,6 +2726,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "lumen-stats"
+version = "1.0.0"
+dependencies = [
+ "lumen-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
