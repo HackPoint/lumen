@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.1.1] — 2026-07-28
+
+### Features
+- feat: start Lumen at login. Setup registers a login item — a LaunchAgent on
+  macOS, a Run key on Windows, an autostart `.desktop` on Linux. Lumen is a tray
+  app with no Dock icon and both windows hidden at startup, so previously it did
+  nothing until the user remembered to open it, and stayed silent after every
+  reboot. The Setup screen carries a toggle, and uninstall removes the login item.
+- feat(macos): launch the app once immediately after `brew install --cask`, with
+  `open -g` so it appears in the menu bar without taking focus from the terminal.
+  The cask now also quits the running app on uninstall and zaps the LaunchAgent.
+  No equivalent exists for the `.deb`: postinst runs as root with no user session,
+  so the first launch there is manual and autostart takes over afterwards.
+
+### Fixes
+- fix(release): update the Homebrew tap. It had been stale at 0.1.0 since June
+  because no cross-repo credential was ever configured and a skipped job still
+  reports success, so 1.0.0, 1.0.1 and 1.1.0 all shipped with Homebrew users left
+  behind. Authentication is now an SSH deploy key scoped to the tap alone rather
+  than a `repo`-scoped token with write access to everything; a missing credential
+  raises a warning annotation instead of passing quietly.
+- fix(release): allow `update-tap` to run on `workflow_dispatch`, so a tap left
+  stale can be brought up to date without cutting a new tag. All three hashes are
+  now computed from the published assets rather than passed between jobs, which
+  also means the formula cannot disagree with what is downloadable.
+- fix(release): mark hyphenated tags as prereleases. `v1.1.0-rc.1` would otherwise
+  have been published as Latest, pointing every `releases/latest` link and the
+  README download badge at a release candidate.
+- fix(release): give the Linux GUI job its own target triple. It inherited the
+  macOS `TRIPLE` and named its Linux binaries `*-aarch64-apple-darwin`, so
+  `tauri_build` found no sidecar and the build failed inside the build script.
+  `build-sidecar.sh` now refuses a triple that disagrees with the host.
+- fix(daemon): add `LUMEN_PROJECTS_DIR` so the e2e tests are hermetic on Windows.
+  They exported `HOME`, but `dirs::home_dir()` reads `%USERPROFILE%` there, so the
+  daemon watched the real user profile and all ten timed out.
+- fix(cask): use `depends_on macos: :ventura`. Homebrew deprecated the string
+  comparison form, which warned on every `brew info` and is slated to become an
+  error.
+- fix(linux): correct the package description, which called Lumen a "macOS
+  menu-bar app" in `apt show`, and stop duplicating the `.deb` dependencies that
+  Tauri already derives from the linked libraries.
+
+### Maintenance
+- ci: keep `cargo test` on one line — Windows steps default to PowerShell, where a
+  trailing backslash is not a line continuation. The command split in two and the
+  first half exited 0 having run zero tests, the stray backslash having been taken
+  as a test-name filter.
+
 ## [1.1.0] — 2026-07-28
 
 ### Features
