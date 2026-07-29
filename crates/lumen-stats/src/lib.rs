@@ -371,7 +371,7 @@ pub struct ToolBreakdown {
     pub full_tokens: i64,
 }
 
-#[derive(Serialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerReport {
     /// SUM(saved_tokens) over lumen routes — CAUSED by Lumen, not reported.
@@ -406,6 +406,25 @@ pub struct OptimizerReport {
     pub unverified_provenance_rows: i64,
     /// Total rows considered, so the frontend can render "N of M".
     pub provenance_total_rows: i64,
+
+    /// Net dollar value of interception: what the avoided tokens are worth, less what the
+    /// extra rounds cost.
+    ///
+    /// The headline from 1.4.0 on. The token ratio it replaces flattered the product — a
+    /// smaller reply that forces another round is a loss however good the ratio looks.
+    pub net_value_usd: f64,
+    pub gross_value_usd: f64,
+    pub round_cost_usd: f64,
+    /// Rounds a saving is assumed to keep paying for.
+    ///
+    /// Surfaced because the result is more sensitive to it than to anything else: the sign
+    /// holds across its plausible range but the magnitude moves by an order of magnitude,
+    /// so a UI that hid it would overstate its own precision. A per-call value needs the
+    /// transcript replay in `scripts/lumen_percall.py`; this is a measured constant.
+    pub value_rounds: f64,
+    /// Rounds each intercept actually costs. Measured at 1.604 — 60.4% of `smart_read`
+    /// calls are followed by a `recall_file` on the same file.
+    pub pair_multiplier: f64,
 }
 
 pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, String> {
@@ -555,6 +574,48 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     .await
     .map_err(|e| e.to_string())?;
 
+    // ── Net dollar value ─────────────────────────────────────────────────────
+    //
+    // Value of the tokens Lumen avoided, less the cost of the extra rounds interception
+    // forced. Computed here rather than in the frontend because it needs the context and
+    // output means from `turns`, and because one place computing it means one place to
+    // correct when per-call R lands.
+    //
+    // The context mean comes from this installation's own turns, excluding subagents:
+    // their context is not the context an interception adds to.
+    let (ctx_mean, out_mean, turn_count): (Option<f64>, Option<f64>, i64) = sqlx::query_as(
+        "SELECT AVG(cache_read_input_tokens), AVG(output_tokens), COUNT(*)
+         FROM turns WHERE COALESCE(is_subagent,0) = 0",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Lumen-route calls and the tokens they avoided.
+    let (lumen_calls, lumen_saved): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(saved_tokens),0) FROM read_events
+         WHERE routed_via IN ('smart_read','recall_file','compress_logs','ranked_outline')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // A saved token avoids one cache write and a cache read on each remaining round.
+    let value_per_token = (6.25 + 0.5 * VALUE_ROUNDS) / 1e6;
+    let gross = lumen_saved as f64 * value_per_token;
+
+    // With too few turns to average, the cost side is unknown — and reporting a gross
+    // figure with no cost against it is exactly the overstatement this replaces. Zero
+    // both, so the UI shows nothing rather than something flattering.
+    let round_cost = match (ctx_mean, out_mean) {
+        (Some(c), Some(o)) if turn_count >= 200 => {
+            let one_round = (c * 0.5 + o * 25.0) / 1e6;
+            lumen_calls as f64 * one_round * PAIR_MULTIPLIER
+        }
+        _ => 0.0,
+    };
+    let gross = if round_cost == 0.0 { 0.0 } else { gross };
+
     Ok(OptimizerReport {
         lifetime_optimized_tokens,
         lifetime_full_tokens,
@@ -568,5 +629,187 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
         unmeasurable_calls,
         unverified_provenance_rows,
         provenance_total_rows,
+        net_value_usd: gross - round_cost,
+        gross_value_usd: gross,
+        round_cost_usd: round_cost,
+        value_rounds: VALUE_ROUNDS,
+        pair_multiplier: PAIR_MULTIPLIER,
+    })
+}
+
+/// Rounds over which a saved token keeps paying, bounded by the next compaction.
+///
+/// Measured at a per-call median of 194–249 by replaying transcripts; the lower end is
+/// used so the published figure is the conservative one. Not the 65 assumed before 1.3.1,
+/// which was a session-length median rather than call-weighted — calls concentrate in long
+/// sessions.
+const VALUE_ROUNDS: f64 = 194.0;
+
+/// Rounds one intercept costs. 60.4% of `smart_read` calls are followed by a
+/// `recall_file` on the same file, so an intercept averages more than a single round.
+const PAIR_MULTIPLIER: f64 = 1.604;
+
+// ── Context diagnostics: where is this project's context actually going? ──────
+//
+// Diagnosis, not savings. This answers "where does your context go" and makes no claim
+// to have saved anything — it costs zero tokens, intercepts nothing and forces no rounds,
+// so unlike every other figure in the product it cannot be net-negative. Given that the
+// savings claim is the number that has been unstable, the diagnostic framing is the one
+// that survives contact with the data.
+
+/// How many files the report names. Enough to act on, short enough to read.
+const HOTSPOT_LIMIT: i64 = 15;
+
+/// A file that a meaningful share of the project's context has gone into.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHotspot {
+    pub path: String,
+    /// Basename, so the UI need not split paths.
+    pub name: String,
+    pub reads: i64,
+    pub total_tokens: i64,
+    /// Share of every token this project has read.
+    pub share_pct: f64,
+    /// Line count at the most recent read, when it was recorded.
+    pub lines: Option<i64>,
+    /// Re-reads where the file had not changed since the previous read of it.
+    ///
+    /// A proxy for context loss rather than new information: the bytes were identical, so
+    /// nothing was learned that a retained context would not already have held. The
+    /// direct signal would be "re-read after a compaction", but compaction is recorded in
+    /// the transcript and not in this database, and `file_mtime` equality answers the same
+    /// question from data that is here.
+    pub unchanged_rereads: i64,
+    /// Present only where the data warrants one.
+    pub recommendation: Option<String>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextReport {
+    pub total_tokens_read: i64,
+    pub distinct_files: i64,
+    pub top_files: Vec<FileHotspot>,
+    /// Share of all tokens read that sits in the ten largest files.
+    pub top10_share_pct: f64,
+    /// Re-reads of unchanged files, across every file.
+    pub total_unchanged_rereads: i64,
+}
+
+/// A recommendation, only where the numbers justify one.
+///
+/// Deliberately narrow. A suggestion attached to every row is noise, and the point of a
+/// diagnostic is that the reader trusts it — so this stays silent unless the case is
+/// clear, and it says what to do rather than restating the measurement.
+fn recommend(lines: Option<i64>, reads: i64, unchanged: i64, share: f64) -> Option<String> {
+    // A large file read many times: no read optimisation beats splitting it, because
+    // every read pays for the whole file however it is summarised.
+    if let Some(l) = lines
+        && l >= 1_000
+        && reads >= 20
+    {
+        return Some(format!(
+            "{l} lines read {reads} times — splitting it saves more than any read \
+             optimisation can, because every read pays for the whole file"
+        ));
+    }
+    // Mostly re-reads of an unchanged file: the content keeps being re-acquired.
+    if reads >= 10 && unchanged * 2 >= reads {
+        return Some(format!(
+            "{unchanged} of {reads} reads found the file unchanged — that context was \
+             re-acquired rather than retained"
+        ));
+    }
+    // A single file dominating the project's context.
+    if share >= 10.0 {
+        return Some(format!(
+            "{share:.0}% of everything this project has read is this one file"
+        ));
+    }
+    None
+}
+
+/// Where the project's context has gone.
+pub async fn get_context_report(pool: &SqlitePool) -> Result<ContextReport, String> {
+    let (total, distinct): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(full_tokens),0), COUNT(DISTINCT path) FROM read_events",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if total == 0 {
+        return Ok(ContextReport {
+            total_tokens_read: 0,
+            distinct_files: 0,
+            top_files: Vec::new(),
+            top10_share_pct: 0.0,
+            total_unchanged_rereads: 0,
+        });
+    }
+
+    // Re-reads that found the file unchanged, per path.
+    //
+    // Counted as "rows sharing a (path, file_mtime) beyond the first", which is why the
+    // subtraction is COUNT(*) - COUNT(DISTINCT file_mtime): a file read five times across
+    // two versions contributes three. Rows predating `file_mtime` are excluded rather
+    // than assumed unchanged.
+    let unchanged: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT path, COUNT(*) - COUNT(DISTINCT file_mtime)
+         FROM read_events
+         WHERE file_mtime IS NOT NULL
+         GROUP BY path",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let unchanged: std::collections::HashMap<String, i64> = unchanged.into_iter().collect();
+
+    let rows: Vec<(String, i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT path, COUNT(*), SUM(full_tokens), MAX(lines)
+         FROM read_events
+         GROUP BY path
+         ORDER BY SUM(full_tokens) DESC
+         LIMIT ?1",
+    )
+    .bind(HOTSPOT_LIMIT)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let top_files: Vec<FileHotspot> = rows
+        .into_iter()
+        .map(|(path, reads, tokens, lines)| {
+            let share = 100.0 * tokens as f64 / total as f64;
+            let u = unchanged.get(&path).copied().unwrap_or(0);
+            FileHotspot {
+                name: path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string(),
+                recommendation: recommend(lines, reads, u, share),
+                path,
+                reads,
+                total_tokens: tokens,
+                share_pct: share,
+                lines,
+                unchanged_rereads: u,
+            }
+        })
+        .collect();
+
+    let (top10,): (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(t),0) FROM (
+             SELECT SUM(full_tokens) AS t FROM read_events GROUP BY path
+             ORDER BY t DESC LIMIT 10)",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(ContextReport {
+        total_tokens_read: total,
+        distinct_files: distinct,
+        top_files,
+        top10_share_pct: 100.0 * top10 as f64 / total as f64,
+        total_unchanged_rereads: unchanged.values().sum(),
     })
 }

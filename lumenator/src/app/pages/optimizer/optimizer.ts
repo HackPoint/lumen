@@ -20,6 +20,37 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
 })
 export class Optimizer {
     /**
+     * The headline, in dollars, with its sign.
+     *
+     * Dollars rather than the token ratio because a ratio cannot be wrong in the
+     * direction that matters: returning 87% fewer tokens still loses money if the round
+     * it forced cost more than the tokens it avoided. The ratio stays on the page, below
+     * this, as the input it is.
+     */
+    readonly netUsd = computed(() => this.s.netValueUsd());
+    readonly netLabel = computed(() => {
+        const v = this.netUsd();
+        const abs = Math.abs(v);
+        const s = abs >= 100 ? abs.toFixed(0) : abs.toFixed(2);
+        return `${v < 0 ? '−' : '+'}$${s}`;
+    });
+    /** Break-even is reported as break-even, not rounded into a win. */
+    readonly netIsBreakEven = computed(() => Math.abs(this.netUsd()) < 1);
+    readonly netColor = computed(() =>
+        this.netIsBreakEven() ? '#8b949e' : this.netUsd() > 0 ? '#3fb950' : '#f85149',
+    );
+    readonly netSub = computed(() => {
+        if (!this.s.netValuePriced()) {
+            return 'Not enough recorded turns yet to price a round, so no net figure is claimed.';
+        }
+        const r = this.s.valueRounds();
+        return `Tokens avoided are worth $${this.s.grossValueUsd().toFixed(2)}; `
+             + `the extra rounds cost $${this.s.roundCostUsd().toFixed(2)}. `
+             + `Assumes a saving keeps paying for ${r} rounds — the figure is most `
+             + `sensitive to that.`;
+    });
+
+    /**
      * Wording for the effectiveness claim, qualified when provenance is unknown.
      *
      * The old copy said "measured to the token, never estimated" unconditionally.

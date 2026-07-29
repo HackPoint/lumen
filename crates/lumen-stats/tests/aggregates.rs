@@ -1030,3 +1030,335 @@ async fn session_json_uses_camel_case_for_the_frontend() {
         assert!(v.get(key).is_some(), "missing camelCase key: {key}");
     }
 }
+
+// ── Context diagnostics ──────────────────────────────────────────────────────
+
+/// Insert a read of `path` at `mtime` with `tokens`, `lines` long.
+async fn read_of(pool: &SqlitePool, path: &str, tokens: i64, lines: i64, mtime: i64) {
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,file_mtime)
+         VALUES(datetime('now'),'Read',?1,?2,?3,?3,0,'builtin_read','cli',?4)"
+            .to_string(),
+    ))
+    .bind(path)
+    .bind(lines)
+    .bind(tokens)
+    .bind(mtime)
+    .execute(pool)
+    .await
+    .expect("insert read");
+}
+
+#[tokio::test]
+async fn context_report_on_an_empty_db_is_all_zeros() {
+    let (_d, pool) = fixture().await;
+    let r = get_context_report(&pool).await.unwrap();
+    assert_eq!(r.total_tokens_read, 0);
+    assert_eq!(r.distinct_files, 0);
+    assert!(r.top_files.is_empty());
+    assert_eq!(r.top10_share_pct, 0.0);
+}
+
+#[tokio::test]
+async fn context_report_ranks_files_by_cumulative_tokens_and_computes_share() {
+    let (_d, pool) = fixture().await;
+    for _ in 0..3 {
+        read_of(&pool, "/p/hot.tsx", 1_000, 3_833, 1).await;
+    }
+    read_of(&pool, "/p/cool.rs", 500, 100, 1).await;
+
+    let r = get_context_report(&pool).await.unwrap();
+    assert_eq!(r.total_tokens_read, 3_500);
+    assert_eq!(r.distinct_files, 2);
+    assert_eq!(
+        r.top_files[0].name, "hot.tsx",
+        "ordered by cumulative tokens"
+    );
+    assert_eq!(r.top_files[0].reads, 3);
+    assert_eq!(r.top_files[0].total_tokens, 3_000);
+    assert!((r.top_files[0].share_pct - 85.714).abs() < 0.01);
+    assert_eq!(r.top_files[0].lines, Some(3_833));
+}
+
+/// The re-read signal must distinguish "the file changed" from "we lost it".
+#[tokio::test]
+async fn unchanged_rereads_count_only_reads_that_learned_nothing_new() {
+    let (_d, pool) = fixture().await;
+    // Four reads of one version, then two of a second version.
+    for _ in 0..4 {
+        read_of(&pool, "/p/a.rs", 100, 50, 1_000).await;
+    }
+    for _ in 0..2 {
+        read_of(&pool, "/p/a.rs", 100, 50, 2_000).await;
+    }
+    let r = get_context_report(&pool).await.unwrap();
+    let f = &r.top_files[0];
+    assert_eq!(f.reads, 6);
+    assert_eq!(
+        f.unchanged_rereads, 4,
+        "6 reads across 2 versions leaves 4 that found the file unchanged"
+    );
+}
+
+/// A file edited between every read learned something new each time, so nothing is a
+/// wasted re-read. This is the negative control for the count above.
+#[tokio::test]
+async fn a_file_changed_between_every_read_has_no_unchanged_rereads() {
+    let (_d, pool) = fixture().await;
+    for i in 0..5 {
+        read_of(&pool, "/p/b.rs", 100, 50, 1_000 + i).await;
+    }
+    let r = get_context_report(&pool).await.unwrap();
+    assert_eq!(r.top_files[0].unchanged_rereads, 0);
+    assert_eq!(r.total_unchanged_rereads, 0);
+}
+
+/// Rows predating `file_mtime` must not be assumed unchanged.
+#[tokio::test]
+async fn rows_without_an_mtime_are_excluded_rather_than_assumed_unchanged() {
+    let (_d, pool) = fixture().await;
+    for _ in 0..5 {
+        event(
+            &pool,
+            "datetime('now')",
+            "builtin_read",
+            "cli",
+            (100, 100, 0),
+        )
+        .await;
+    }
+    let r = get_context_report(&pool).await.unwrap();
+    assert_eq!(
+        r.total_unchanged_rereads, 0,
+        "a NULL mtime means unknown, not unchanged"
+    );
+}
+
+/// The worked example: a large file read many times gets the split recommendation,
+/// because no read optimisation can beat not reading it.
+#[tokio::test]
+async fn a_large_repeatedly_read_file_is_recommended_for_splitting() {
+    let (_d, pool) = fixture().await;
+    for i in 0..25 {
+        read_of(&pool, "/p/Run.tsx", 27_000, 3_833, 1_000 + i).await;
+    }
+    let r = get_context_report(&pool).await.unwrap();
+    let rec = r.top_files[0].recommendation.as_deref().unwrap_or("");
+    assert!(
+        rec.contains("3833 lines") && rec.contains("splitting"),
+        "expected a split recommendation, got {rec:?}"
+    );
+}
+
+/// And a small file read a few times gets none — a suggestion on every row is noise.
+#[tokio::test]
+async fn an_ordinary_file_gets_no_recommendation() {
+    let (_d, pool) = fixture().await;
+    read_of(&pool, "/p/small.rs", 100, 40, 1).await;
+    read_of(&pool, "/p/other.rs", 100, 40, 1).await;
+    let r = get_context_report(&pool).await.unwrap();
+    // Neither is large, neither is mostly re-reads; both are 50% share, so only the
+    // dominance rule could fire — assert it is the dominance text, not the others.
+    for f in &r.top_files {
+        if let Some(rec) = &f.recommendation {
+            assert!(
+                rec.contains("% of everything"),
+                "an ordinary small file must not get a split or re-read suggestion: {rec}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn top10_share_is_computed_over_all_files_not_just_the_reported_ones() {
+    let (_d, pool) = fixture().await;
+    // 12 files: the top 10 should be 10/12 of the tokens.
+    for i in 0..12 {
+        read_of(&pool, &format!("/p/f{i}.rs"), 100, 10, 1).await;
+    }
+    let r = get_context_report(&pool).await.unwrap();
+    assert!(
+        (r.top10_share_pct - 100.0 * 10.0 / 12.0).abs() < 0.01,
+        "expected {:.2}%, got {:.2}%",
+        100.0 * 10.0 / 12.0,
+        r.top10_share_pct
+    );
+}
+
+#[tokio::test]
+async fn context_report_json_uses_camel_case_for_the_frontend() {
+    let (_d, pool) = fixture().await;
+    read_of(&pool, "/p/a.rs", 100, 10, 1).await;
+    let r = get_context_report(&pool).await.unwrap();
+    let j = serde_json::to_value(&r).unwrap();
+    for k in [
+        "totalTokensRead",
+        "distinctFiles",
+        "topFiles",
+        "top10SharePct",
+        "totalUnchangedRereads",
+    ] {
+        assert!(j.get(k).is_some(), "missing camelCase key {k}");
+    }
+    let f = &j["topFiles"][0];
+    for k in ["totalTokens", "sharePct", "unchangedRereads"] {
+        assert!(f.get(k).is_some(), "missing camelCase key topFiles[].{k}");
+    }
+}
+
+// ── Net dollar value ─────────────────────────────────────────────────────────
+
+/// Populate enough turns for the cost side to be computable.
+async fn turns_for_cost(pool: &SqlitePool, n: i64, ctx: i64, out: i64) {
+    for i in 0..n {
+        turn(
+            pool,
+            &format!("nv{i}"),
+            "s",
+            "datetime('now')",
+            "claude-opus-5",
+            (0, out, ctx, 0),
+        )
+        .await;
+    }
+}
+
+/// With too few turns to average, the cost side is unknown — and a gross figure with no
+/// cost against it is exactly the overstatement the dollar headline replaces.
+#[tokio::test]
+async fn net_value_is_zero_when_there_are_too_few_turns_to_price_a_round() {
+    let (_d, pool) = fixture().await;
+    event(
+        &pool,
+        "datetime('now')",
+        "smart_read",
+        "cli",
+        (100, 5_000, 4_900),
+    )
+    .await;
+    turns_for_cost(&pool, 10, 300_000, 1_000).await;
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(o.round_cost_usd, 0.0);
+    assert_eq!(
+        o.gross_value_usd, 0.0,
+        "a gross figure with no cost beside it is the overstatement being removed"
+    );
+    assert_eq!(o.net_value_usd, 0.0);
+}
+
+#[tokio::test]
+async fn net_value_prices_saved_tokens_against_the_rounds_they_cost() {
+    let (_d, pool) = fixture().await;
+    // One call saving 100,000 tokens.
+    event(
+        &pool,
+        "datetime('now')",
+        "smart_read",
+        "cli",
+        (1_000, 101_000, 100_000),
+    )
+    .await;
+    turns_for_cost(&pool, 200, 100_000, 1_000).await;
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+
+    // gross = 100_000 x (6.25 + 0.5 x 194) / 1e6
+    let want_gross = 100_000.0 * (6.25 + 0.5 * 194.0) / 1e6;
+    assert!(
+        (o.gross_value_usd - want_gross).abs() < 1e-9,
+        "gross {} vs {want_gross}",
+        o.gross_value_usd
+    );
+
+    // cost = 1 call x ((100_000 x 0.5 + 1_000 x 25) / 1e6) x 1.604
+    let want_cost = ((100_000.0 * 0.5 + 1_000.0 * 25.0) / 1e6) * 1.604;
+    assert!(
+        (o.round_cost_usd - want_cost).abs() < 1e-9,
+        "cost {} vs {want_cost}",
+        o.round_cost_usd
+    );
+    assert!((o.net_value_usd - (want_gross - want_cost)).abs() < 1e-9);
+    assert_eq!(o.value_rounds, 194.0, "R must be surfaced, not hidden");
+    assert_eq!(o.pair_multiplier, 1.604);
+}
+
+/// A call that saves almost nothing must come out negative. This is the whole reason the
+/// headline changed: the token ratio would still have looked like a win.
+#[tokio::test]
+async fn a_call_that_saves_little_comes_out_negative() {
+    let (_d, pool) = fixture().await;
+    // 300 tokens saved out of 400 — an effectiveness ratio of 75%, and a loss.
+    event(
+        &pool,
+        "datetime('now')",
+        "smart_read",
+        "cli",
+        (100, 400, 300),
+    )
+    .await;
+    turns_for_cost(&pool, 200, 400_000, 1_200).await;
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    let ratio = 1.0
+        - (o.lifetime_full_tokens - o.lifetime_optimized_tokens) as f64
+            / o.lifetime_full_tokens as f64;
+    assert!(
+        ratio > 0.7,
+        "premise: the token ratio looks good ({ratio:.2})"
+    );
+    assert!(
+        o.net_value_usd < 0.0,
+        "and yet the call is a loss: net {}",
+        o.net_value_usd
+    );
+}
+
+/// Subagent turns carry their own context and must not price the main agent's rounds.
+#[tokio::test]
+async fn subagent_turns_do_not_price_the_round() {
+    let (_d, pool) = fixture().await;
+    event(
+        &pool,
+        "datetime('now')",
+        "smart_read",
+        "cli",
+        (100, 5_000, 4_900),
+    )
+    .await;
+    turns_for_cost(&pool, 200, 100_000, 1_000).await;
+    for i in 0..200 {
+        subagent_turn(
+            &pool,
+            &format!("sa{i}"),
+            "s",
+            "datetime('now')",
+            (0, 1_000, 1, 0),
+        )
+        .await;
+    }
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    let want = ((100_000.0 * 0.5 + 1_000.0 * 25.0) / 1e6) * 1.604;
+    assert!(
+        (o.round_cost_usd - want).abs() < 1e-9,
+        "subagent rows with a 1-token context dragged the round cost to {}",
+        o.round_cost_usd
+    );
+}
+
+#[tokio::test]
+async fn net_value_fields_are_camel_case_for_the_frontend() {
+    let (_d, pool) = fixture().await;
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    let j = serde_json::to_value(&o).unwrap();
+    for k in [
+        "netValueUsd",
+        "grossValueUsd",
+        "roundCostUsd",
+        "valueRounds",
+        "pairMultiplier",
+    ] {
+        assert!(j.get(k).is_some(), "missing camelCase key {k}");
+    }
+}

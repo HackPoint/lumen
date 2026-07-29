@@ -1,0 +1,129 @@
+/* Hotspots — a ranking, so the layout is a list of bars rather than tiles. */
+
+.hs__lede {
+    color: var(--text-dim, #8b949e);
+    font-size: 0.82rem;
+    margin: 0 0 1rem;
+    text-align: center;
+}
+
+.hs__empty {
+    color: var(--text-dim, #8b949e);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 2rem 1rem;
+    line-height: 1.5;
+}
+
+.hs__summary {
+    display: grid;
+    /* auto-fit rather than a fixed 3: at the main window's narrowest the three stats
+       wrap to two rows instead of squeezing their values onto a second line, which is
+       the failure the panel had. */
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 0.6rem;
+    margin-bottom: 1.25rem;
+}
+
+.hs__stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border, #30363d);
+    border-radius: 8px;
+    min-width: 0;
+}
+
+.hs__stat-label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+    font-size: 0.62rem;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--text-dim, #8b949e);
+}
+
+.hs__info { cursor: help; opacity: 0.6; }
+
+.hs__stat-value {
+    font-size: 1.35rem;
+    font-weight: 600;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.hs__stat-sub {
+    font-size: 0.68rem;
+    color: var(--text-dim, #8b949e);
+}
+
+.hs__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.hs__row {
+    position: relative;
+    border-radius: 6px;
+    overflow: hidden;
+    padding: 0.45rem 0.6rem;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+/* The bar sits behind the text rather than beside it: at this width a separate bar
+   column would leave the filename no room. */
+.hs__bar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: rgba(63, 185, 80, 0.14);
+    pointer-events: none;
+}
+
+.hs__body { position: relative; min-width: 0; }
+
+.hs__line {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.hs__name {
+    font-size: 0.82rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.hs__tok {
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    color: var(--accent, #3fb950);
+}
+
+.hs__meta {
+    font-size: 0.68rem;
+    color: var(--text-dim, #8b949e);
+    margin-top: 0.1rem;
+}
+
+/* A recommendation is advice, so it reads as a sentence rather than a metric. */
+.hs__rec {
+    font-size: 0.7rem;
+    line-height: 1.35;
+    margin-top: 0.3rem;
+    padding-left: 0.5rem;
+    border-left: 2px solid rgba(210, 153, 34, 0.6);
+    color: #d29922;
+}

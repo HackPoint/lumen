@@ -27,7 +27,8 @@ It watches your session files locally and surfaces things Claude Code doesn't sh
 | **Compaction warning** — amber at 80%, red at 95% | Tray popover · OS notification |
 | **Session cost** — input + output + cache tokens, priced | Main window cost tiles |
 | **Caching savings** — what Claude Code's cache actually saved | Optimizer screen (labeled "reported by Claude Code") |
-| **Optimizer effectiveness** — % fewer tokens per intercepted read | Optimizer screen hero metric |
+| **Net value of interception** — tokens saved, priced, less the round they cost | Optimizer screen hero metric |
+| **Context hotspots** — which files your context actually goes into | Hotspots screen |
 
 None of this leaves your machine. No account, no telemetry. See [Security & privacy](#security--privacy).
 
@@ -341,16 +342,28 @@ Monday-based week.
 
 #### Effectiveness %
 
-**The optimizer's hero metric.** For every read that Lumen intercepted, this is the
-ratio of tokens saved to tokens that a full read would have cost:
+**The optimizer's hero metric is dollars, not the token ratio.** The token ratio was the
+headline until 1.3.1, and it flattered the product. Returning 87% fewer tokens sounds
+decisive, but an intercepted read also *costs* something — the read was blocked, so the
+model spends an extra round calling a Lumen tool instead. The honest question is whether
+the tokens saved are worth more than the round they cost:
 
 ```text
-effectiveness = 1 − (returned_tokens / full_tokens)
+value of saving S tokens = S × (cache_write + cache_read × R) / 1e6
+cost of the extra round  = (context × cache_read + output × output_rate) / 1e6 × pairs
 ```
 
-On the author's machine this sits around 87%. Your number varies with your codebase —
-larger files with more structure produce higher ratios. Effectiveness is computed over
-*all intercepted reads*, so it stabilizes after a few sessions.
+`R` is how many rounds the saving keeps paying for, bounded by the next compaction. Both
+figures come from the same call, so neither is an average standing in for the other.
+
+Measured on the author's machine over 291 attributable calls: **net +$276, about +$0.95
+per call**, with 52–62% of calls paying for their own round. The token ratio still appears,
+below the dollar figure, because it is the input to it and not a conclusion.
+
+Two honest caveats, kept next to the number rather than in a footnote. The sign is robust
+— positive across every plausible `R` — but the **magnitude spans an order of magnitude**
+on that one input, from +$31 to +$368. And `smart_read` taken alone is roughly break-even;
+the surplus comes from `recall_file`.
 
 **Tool calls are measured to the token. Built-in `Read` events may not be.**
 
@@ -450,12 +463,17 @@ caching savings display.
 
 ## How much you save
 
-The hero metric on the Optimizer screen is **effectiveness %**: on average, every read
-that Lumen intercepts returns that many fewer tokens than reading the full file would.
-On the author's machine this sits around 87%. Your number varies with your codebase.
+The hero metric on the Optimizer screen is the **net dollar value** of interception: what
+the tokens Lumen avoided are worth, less what the extra round cost. On the author's
+machine that is **+$276 over 291 measured calls, about +$0.95 each**.
+
+The token ratio — 87% fewer tokens per intercepted read — is shown underneath it. It is
+real and measured to the token, but on its own it is not a result: a smaller reply that
+forces a second round is a loss however good the ratio looks.
 
 Every intercepted read reports `full_tokens` vs `returned_tokens`, measured by the same
-BPE tokenizer Claude uses. No estimation. No extrapolation.
+BPE tokenizer Claude uses. No estimation, no extrapolation — and the figure is **not
+scaled up** from the 291 calls that could be attributed to the 1,470 in the ledger.
 
 The Optimizer screen shows two clearly separated numbers:
 

@@ -337,6 +337,7 @@ pub fn run() {
             get_usage,
             get_sessions,
             get_optimizer_stats,
+            get_context_report,
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
             setup::lumen_uninstall,
@@ -411,6 +412,16 @@ async fn get_sessions() -> Result<Vec<lumen_stats::SessionSummary>, String> {
 async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
     let pool = lumen_stats::connect_default().await?;
     lumen_stats::get_optimizer_stats(&pool).await
+}
+
+/// Where this project's context has gone.
+///
+/// Diagnosis, not savings: it reads the ledger and returns nothing that claims a saving,
+/// which is why it is the one figure in the product that cannot be net-negative.
+#[tauri::command]
+async fn get_context_report() -> Result<lumen_stats::ContextReport, String> {
+    let pool = lumen_stats::connect_default().await?;
+    lumen_stats::get_context_report(&pool).await
 }
 
 #[cfg(test)]

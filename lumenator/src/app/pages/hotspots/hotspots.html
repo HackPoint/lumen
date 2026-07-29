@@ -1,0 +1,78 @@
+<main class="home">
+    <div class="home__inner">
+        <header class="home__head">
+            <lumen-firefly class="home__logo" mode="logo" state="full"></lumen-firefly>
+            <p class="brand__tag">Context &amp; cost for Claude Code</p>
+        </header>
+
+        <nav class="tab-nav" role="tablist" aria-label="Main navigation">
+            <a class="tab-nav__tab" routerLink="/" routerLinkActive="is-active"
+               [routerLinkActiveOptions]="{exact: true}" role="tab">Context</a>
+            <a class="tab-nav__tab" routerLink="/optimizer" routerLinkActive="is-active"
+               role="tab">Optimizer</a>
+            <a class="tab-nav__tab" routerLink="/hotspots" routerLinkActive="is-active"
+               role="tab">Hotspots</a>
+        </nav>
+
+        @if (!hasData()) {
+            <p class="hs__empty">
+                No reads recorded yet. Once Claude Code reads files in this project,
+                this screen shows where the context went.
+            </p>
+        } @else {
+            <p class="hs__lede">
+                Where your context goes. This is a measurement of what was read — not a
+                savings claim.
+            </p>
+
+            <div class="hs__summary">
+                <div class="hs__stat">
+                    <span class="hs__stat-label">Tokens read</span>
+                    <span class="hs__stat-value">{{ compact(s.contextTotalTokens()) }}</span>
+                    <span class="hs__stat-sub">across {{ fmt(s.contextDistinctFiles()) }} files</span>
+                </div>
+                <div class="hs__stat">
+                    <span class="hs__stat-label">
+                        Concentration
+                        <span class="hs__info" [lumenTooltip]="'Share of every token read that sits in just the ten largest files. A high number means a few files dominate your context.'">&#9432;</span>
+                    </span>
+                    <span class="hs__stat-value">{{ s.contextTop10Share().toFixed(0) }}%</span>
+                    <span class="hs__stat-sub">in the top 10 files</span>
+                </div>
+                <div class="hs__stat">
+                    <span class="hs__stat-label">
+                        Re-read unchanged
+                        <span class="hs__info" [lumenTooltip]="'Reads that found the file byte-identical to the previous read of it — context re-acquired rather than retained. Usually the aftermath of a compaction.'">&#9432;</span>
+                    </span>
+                    <span class="hs__stat-value">{{ fmt(s.contextUnchangedRereads()) }}</span>
+                    <span class="hs__stat-sub">reads learned nothing new</span>
+                </div>
+            </div>
+
+            <ol class="hs__list">
+                @for (f of files(); track f.path) {
+                    <li class="hs__row">
+                        <div class="hs__bar" [style.width.%]="barPct(f)"></div>
+                        <div class="hs__body">
+                            <div class="hs__line">
+                                <span class="hs__name" [title]="f.path">{{ f.name }}</span>
+                                <span class="hs__tok">{{ compact(f.totalTokens) }}</span>
+                            </div>
+                            <div class="hs__meta">
+                                {{ f.reads }} reads
+                                @if (f.lines !== null) { · {{ fmt(f.lines) }} lines }
+                                · {{ f.sharePct.toFixed(1) }}% of all context
+                                @if (f.unchangedRereads > 0) {
+                                    · {{ unchangedPct(f).toFixed(0) }}% unchanged
+                                }
+                            </div>
+                            @if (f.recommendation) {
+                                <div class="hs__rec">{{ f.recommendation }}</div>
+                            }
+                        </div>
+                    </li>
+                }
+            </ol>
+        }
+    </div>
+</main>

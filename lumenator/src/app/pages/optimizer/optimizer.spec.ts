@@ -278,4 +278,92 @@ describe('Optimizer', () => {
     await build(report({ lifetimeOptimizedTokens: 1_000, lifetimeFullTokens: 2_000 }));
     expect(text().toLowerCase()).not.toContain('remaining');
   });
+
+
+  // ── The dollar headline (1.4.0) ────────────────────────────────────────────
+  //
+  // Published per a pre-committed rule: whatever the number is, it renders. A metric
+  // that only displays well when it flatters is not a measurement, and the token ratio
+  // it replaced could not be wrong in the direction that mattered — a smaller reply
+  // that forces another round is a loss however good the ratio looks.
+
+  describe('net dollar value', () => {
+    it('leads with the dollar figure, not the token ratio', async () => {
+      await build(report({
+        lifetimeOptimizedTokens: 1_000_000,
+        lifetimeFullTokens: 1_200_000,
+        netValueUsd: 275.93,
+        grossValueUsd: 386.72,
+        roundCostUsd: 110.79,
+        valueRounds: 194,
+        pairMultiplier: 1.604,
+      }));
+      const hero = fixture.nativeElement.querySelector('.hero__num') as HTMLElement;
+      expect(hero.textContent).toContain('+$276');
+      expect(hero.textContent).not.toContain('%');
+      // The ratio is still on the page, demoted.
+      expect(fixture.nativeElement.querySelector('.hero__secondary')?.textContent)
+        .toContain('fewer tokens');
+    });
+
+    it('renders a negative result as negative, with no softening', async () => {
+      await build(report({
+        lifetimeOptimizedTokens: 300,
+        lifetimeFullTokens: 400,
+        netValueUsd: -42.5,
+        grossValueUsd: 10,
+        roundCostUsd: 52.5,
+        valueRounds: 194,
+      }));
+      const hero = fixture.nativeElement.querySelector('.hero__num') as HTMLElement;
+      expect(hero.textContent).toContain('−$42.50');
+      const t = text().toLowerCase();
+      for (const softener of ['but ', 'still', 'however', 'nonetheless', 'despite']) {
+        expect(t).not.toContain(softener);
+      }
+    });
+
+    it('says break-even rather than rounding it into a win', async () => {
+      // lifetime tokens must be non-zero or hasData() is false and the empty state
+      // renders instead of the hero — the test would then assert nothing.
+      await build(report({
+        lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000,
+        netValueUsd: 0.4, grossValueUsd: 50, roundCostUsd: 49.6, valueRounds: 194,
+      }));
+      expect(text()).toContain('roughly break-even');
+      expect(fixture.nativeElement.querySelector('.hero__label')?.textContent)
+        .not.toContain('net value');
+    });
+
+    it('claims no figure at all when a round cannot be priced', async () => {
+      await build(report({
+        lifetimeOptimizedTokens: 1_000,
+        lifetimeFullTokens: 2_000,
+        netValueUsd: 0,
+        grossValueUsd: 0,
+        roundCostUsd: 0,
+      }));
+      expect(text()).toContain('Not enough recorded turns yet to price a round');
+    });
+
+    it('surfaces R, because the result is most sensitive to it', async () => {
+      await build(report({
+        lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000,
+        netValueUsd: 100, grossValueUsd: 200, roundCostUsd: 100, valueRounds: 194,
+      }));
+      expect(text()).toContain('194 rounds');
+      expect(text()).toContain('sensitive');
+    });
+
+    it('still renders against a backend that predates the field', async () => {
+      // 1.3.x sends no netValueUsd at all; the page must not show NaN.
+      const r = report({ lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 });
+      const bare = r as unknown as Record<string, unknown>;
+      delete bare['netValueUsd'];
+      delete bare['roundCostUsd'];
+      await build(r);
+      expect(text()).not.toContain('NaN');
+      expect(text()).toContain('Not enough recorded turns yet to price a round');
+    });
+  });
 });

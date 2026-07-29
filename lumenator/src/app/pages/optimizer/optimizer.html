@@ -22,6 +22,12 @@
                role="tab">
                Optimizer
             </a>
+            <a class="tab-nav__tab"
+               routerLink="/hotspots"
+               routerLinkActive="is-active"
+               role="tab">
+               Hotspots
+            </a>
         </nav>
 
         <!-- ── Mode banner ── -->
@@ -39,16 +45,19 @@
 
         <!-- ── Hero: effectiveness % or empty state ── -->
         @if (hasData()) {
-            <section class="hero" aria-label="Optimizer effectiveness">
-                <div class="hero__ring" [style.--hero-color]="heroColor()">
-                    <span class="hero__num">{{ effectPct() }}<span class="hero__pct-sign">%</span></span>
+            <section class="hero" aria-label="Net value of interception">
+                <div class="hero__ring" [style.--hero-color]="netColor()">
+                    <span class="hero__num hero__num--usd">{{ netLabel() }}</span>
                     <span class="hero__label">
-                        effectiveness
+                        @if (netIsBreakEven()) { roughly break-even } @else { net value }
                         <button class="info-btn" type="button"
-                                [lumenTooltip]="provenanceTip()">ⓘ</button>
+                                [lumenTooltip]="'What the tokens Lumen avoided are worth, less what the extra round each interception forced actually cost. A smaller reply that triggers another round is a loss however good the token ratio looks.'">ⓘ</button>
                     </span>
                 </div>
-                <p class="hero__sub">
+                <p class="hero__sub">{{ netSub() }}</p>
+                <!-- The token ratio is kept, demoted. It is the input to the figure above,
+                     not a result: it cannot be wrong in the direction that matters. -->
+                <p class="hero__secondary">
                     Every intercepted read returns
                     <strong>{{ effectPct() }}% fewer tokens</strong>.
                     {{ provenanceNote() }}
