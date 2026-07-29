@@ -1,5 +1,97 @@
 # Changelog
 
+## [1.2.1] — 2026-07-29
+
+### Read this first: your "missed optimization" number will drop, and the old one was wrong
+
+Half of that figure was never real. Of 6,862,596 tokens attributed to reads that
+bypassed Lumen, **3,431,295 came from 117 binary files out of 2,749 rows** — and the
+six largest entries in the entire table were screenshots. `lumen-tok` cannot tokenize
+a PNG; it crashed, the meter read the crash as a broken tokenizer, and substituted
+`bytes ÷ 4`. For a screenshot that overstates the cost by roughly 44x. Three PNGs read
+during testing were recorded as 119,921 tokens against approximately 2,750 actual.
+
+That number is now computed without them, for history as well as for new rows, so
+expect it to fall by about half. The lower figure is the honest one. Nothing was
+deleted to achieve it — the rows are still there, still queryable, and the report
+script prints exactly what was excluded.
+
+This also retires the "opportunity" that a non-text interception feature was scoped
+against. It did not exist.
+
+### Fixes
+
+- **fix(daemon): an orphaned daemon squatted the WebSocket port across every upgrade,
+  so the GUI silently kept reading from the version you replaced.** The app bound the
+  spawned daemon to `_child` and dropped it; dropping a `CommandChild` does not
+  terminate the process. Every quit therefore left a daemon reparented to launchd and
+  still holding `127.0.0.1:9999`. After an upgrade the new app's daemon lost the bind
+  and spun in the restart loop that exists to absorb *transient* collisions — it
+  cannot tell one from a permanent squatter, so nothing was reported.
+
+  Caught by inode on a real 1.1.4 → 1.2.0 upgrade: the process holding the port was
+  inode 89539790 (the old binary, 8,835,200 bytes) while the newly spawned daemon was
+  inode 90122126 with **zero TCP descriptors**.
+
+  Two independent guards, because one is not enough. The app now kills the daemon on
+  exit, which covers an ordinary quit. The daemon also exits when its stdin reaches
+  EOF, which is what a dying parent looks like from the child's side — that covers a
+  crash, a force quit, or an installer killing the app outright, where no exit handler
+  runs at all. The watchdog is gated on `LUMEN_SUPERVISED=1`, set only by the app, so
+  running `lumen-daemon` by hand still behaves.
+
+- **fix(daemon): the daemon resolved an unset `LUMEN_DB` to the relative path
+  `lumen.db`.** This is the same fallback class that previously split the ledger into
+  two files accumulating real events in parallel. It now shares
+  `meter::resolve_db_path` with every other writer, or refuses to start.
+
+- **fix(hooks): Bash output was never actually measured.** The meter script has had a
+  `Bash)` branch since the instrumentation phase, but `Bash` was never registered
+  under `PostToolUse`, so the branch was unreachable and `bash_output` had **zero rows
+  in 51 days**. The test that covered this asserted the exact four-matcher list, so it
+  locked the gap in place rather than catching it.
+
+  Bash is now registered. Command **output** is tokenized; of the command line itself
+  only the program and subcommand are stored (`cargo test`, `git status`), with any
+  leading `VAR=value` dropped first, so `TOKEN=secret curl …` records `curl`. This is
+  observation only: no `PreToolUse` hook on Bash, nothing intercepted or wrapped, and
+  Lumen never executes anything from a payload. To opt out, delete the `Bash` entry
+  under `PostToolUse` in `~/.claude/settings.json`.
+
+- **fix(hooks): the three `mcp__lumen__*` `PostToolUse` matchers are removed.** Those
+  tools meter themselves in-process, so the hook script fell straight through to
+  `exit 0` — forking a bash and a python3 on every `smart_read`, `recall_file` and
+  `compress_logs` call to do nothing. Waste inside a tool whose purpose is removing
+  waste. Removal is surgical: a matcher shared with a hook you added keeps your hook.
+
+- **fix(tok): `lumen-tok` panicked on any input that was not valid UTF-8.** It now
+  exits 3, meaning "this is not text and has no token count", which the meter records
+  as `token_source = 'unsupported'` with no number. That is deliberately distinct from
+  a genuinely broken tokenizer, which still yields a row labelled `estimated` — a real
+  file whose count we could not take is not the same as a file that has no count.
+
+- **fix(setup): `LUMEN_DB` and `LUMEN_TOK` are overridable in the generated meter.**
+  They were fixed strings, which made the installed hook the one component in the
+  pipeline that could not be exercised without writing to your real ledger. It is now
+  covered by tests that run the actual generated script.
+
+### Notes
+
+- 24 tests added (460 Rust, 251 frontend). Every fix was falsified before being
+  accepted: disabling the watchdog fails two of three supervisor tests while the
+  negative control still passes; restoring the old `read_to_string().expect()` fails
+  two of six tokenizer tests; removing the metric filter fails the exclusion test but
+  not its control; unregistering Bash and re-hardcoding `LUMEN_DB` fails six setup
+  tests.
+- Historical rows cannot be separated by provenance: before this release a failed
+  tokenizer produced a `bytes ÷ 4` value labelled `estimated`, indistinguishable from a
+  broken tokenizer on real source. The correction therefore also matches known
+  unmeasurable extensions. That is a query-level filter, not a rewrite — the ledger
+  stays append-only.
+- The extension list is finite and will miss a binary file with an unusual suffix.
+  Rows written from this release forward are labelled at write time and do not depend
+  on it.
+
 ## [1.2.0] — 2026-07-29
 
 ### Fixes
