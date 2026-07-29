@@ -19,6 +19,36 @@ script prints exactly what was excluded.
 This also retires the "opportunity" that a non-text interception feature was scoped
 against. It did not exist.
 
+### Linux: the metering hook has recorded nothing since 1.1.5
+
+Two shell-dialect bugs, either one fatal, both invisible because the hook is required
+to exit 0 so it can never fail the tool call it observes. On Linux the hook wrote no
+rows at all — no `builtin_read`, no `bash_output`. MCP-written rows (`smart_read`,
+`recall_file`) were unaffected; those come from the Rust binary, not the shell.
+
+Both arrived in the same commit as 1.1.5 and are fixed here, so the exposure is 1.1.5
+and 1.2.0 — a few hours of the same day, not a long-standing regression.
+
+- `mktemp -t lumen_bash_out` — BSD accepts a bare prefix, **GNU requires at least
+  three X's and fails outright**. Verified against coreutils 9.1: `exit=1`, `too few
+  X's in template`. The temp path came back empty, `python3` raised `FileNotFoundError`
+  opening `""`, and a `|| exit 0` swallowed it.
+- `stat -f %m` — on BSD `-f` is "format"; **on GNU `-f` is "display filesystem
+  status"**. It does not fail, so the `||` fallback to `stat -c %Y` never ran. It
+  printed six lines of filesystem information into a newline-delimited field list,
+  shifting every field after it and making the insert throw.
+
+The second is the instructive one: the fallback was ordered on the assumption that the
+wrong dialect would *fail*. It succeeded with the wrong answer. Both are now settled by
+validating the output — the mtime helper requires a pure integer and tries the other
+dialect otherwise — rather than by trusting an exit code.
+
+Found by adding tests that execute the generated script instead of pattern-matching its
+text. There were none before this release, which is why hook logic could be entirely
+dead on a supported platform with the whole suite green. The first CI run of 1.2.1
+failed on Linux with exactly these tests; both bugs were then reproduced and the fixes
+confirmed against real GNU coreutils before this release was cut.
+
 ### Fixes
 
 - **fix(daemon): an orphaned daemon squatted the WebSocket port across every upgrade,
@@ -77,12 +107,18 @@ against. It did not exist.
 
 ### Notes
 
-- 24 tests added (460 Rust, 251 frontend). Every fix was falsified before being
+- 27 tests added (462 Rust, 251 frontend). Every fix was falsified before being
   accepted: disabling the watchdog fails two of three supervisor tests while the
   negative control still passes; restoring the old `read_to_string().expect()` fails
   two of six tokenizer tests; removing the metric filter fails the exclusion test but
   not its control; unregistering Bash and re-hardcoding `LUMEN_DB` fails six setup
-  tests.
+  tests. The two Linux fixes were red in CI before they were green.
+- The daemon's no-override path resolution is tested on Unix only. Reaching that branch
+  means letting the daemon resolve a home directory, and the only way to redirect that
+  is `HOME`, which `dirs::home_dir()` honours on Unix but ignores on Windows. Running
+  it unguarded there would have opened the real ledger, so it is gated rather than
+  quietly pointed at production; a separate test covers `LUMEN_DB` precedence on every
+  platform.
 - Historical rows cannot be separated by provenance: before this release a failed
   tokenizer produced a `bytes ÷ 4` value labelled `estimated`, indistinguishable from a
   broken tokenizer on real source. The correction therefore also matches known
