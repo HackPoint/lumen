@@ -150,6 +150,9 @@ pub struct RankedMeta {
     pub k_selected: Option<i64>,
     pub n_total: Option<i64>,
     pub coeff_version: Option<i64>,
+    /// What the outline was aiming to cost. Swept downward during the A/B, so a row
+    /// without it cannot be placed on the follow-up-rate curve.
+    pub target_outline: Option<i64>,
 }
 
 /// Thirteen parameters, and the alternative is worse.
@@ -253,9 +256,9 @@ pub fn insert_read_event_at(
         "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
          saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,\
          writer_hook,token_source,budget,s_min,econ_context,econ_rounds,econ_output,\
-         econ_source,k_selected,n_total,coeff_version) \
+         econ_source,k_selected,n_total,coeff_version,target_outline) \
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'lumen-mcp','measured',\
-                ?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
         params![
             ts,
             tool_name,
@@ -278,6 +281,7 @@ pub fn insert_read_event_at(
             meta.k_selected,
             meta.n_total,
             meta.coeff_version,
+            meta.target_outline,
         ],
     );
 

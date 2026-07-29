@@ -525,6 +525,7 @@ fn ranked_meta(d: &ranked::Decision, k: i64, n: i64) -> lumen_core::meter::Ranke
         k_selected: Some(k),
         n_total: Some(n),
         coeff_version: Some(d.coeff_version as i64),
+        target_outline: Some(lumen_core::econ::target_outline()),
     }
 }
 

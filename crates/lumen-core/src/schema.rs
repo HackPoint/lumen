@@ -90,6 +90,11 @@ pub const MIGRATIONS: &[&str] = &[
     // coeff_version — bumped on any change to weights, queries or ranking. Pooling rows
     //               across versions would make the A/B compare two things at once.
     "ALTER TABLE read_events ADD COLUMN coeff_version INTEGER",
+    // target_outline — what the outline was aiming to cost. A tuning parameter swept
+    //               downward during the A/B, so without it rows from different sweep
+    //               values would be pooled and the follow-up-rate curve would be the
+    //               average of several different experiments.
+    "ALTER TABLE read_events ADD COLUMN target_outline INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
      ON read_events(session_id, path, file_mtime)",
 ];
@@ -168,7 +173,8 @@ CREATE TABLE IF NOT EXISTS read_events (
     econ_source     TEXT,             -- observed | measured_defaults
     k_selected      INTEGER,
     n_total         INTEGER,
-    coeff_version   INTEGER
+    coeff_version   INTEGER,
+    target_outline  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch

@@ -1187,6 +1187,66 @@ fn caller(a: A) -> u8 { shared(a) }
         assert!(d.budget < 0);
     }
 
+    /// Phase A's whole purpose: the budget must actually bind, so the ranking selects.
+    ///
+    /// Before the fix `budget = full − S_min` gave a 39k-token file a budget of 33,897 and
+    /// every one of 222 definitions fitted — `k = n`, the ranking chose nothing, and the
+    /// A/B compared two unranked outlines. `S_min` is a floor on the *saving*; it cannot
+    /// bound the outline from below, because net value only rises as the outline shrinks.
+    #[test]
+    fn the_budget_is_capped_at_the_target_so_the_ranking_binds() {
+        let econ = Econ::default();
+        // A large file: affordable is enormous, but the target is what should apply.
+        let affordable = econ.budget(500_000).unwrap();
+        assert_eq!(
+            affordable,
+            crate::econ::DEFAULT_TARGET_OUTLINE,
+            "a large file's budget must be the target, not what it could afford"
+        );
+
+        // And on a real file the ranking must now leave something out.
+        let src: String = (0..300)
+            .map(|i| {
+                format!("/// Item {i}.\npub fn function_number_{i}(a: u32, b: &str) -> Result<Vec<String>, Error> {{\n    let mut v = Vec::new();\n    v.push(format!(\"{{}}\", a));\n    Ok(v)\n}}\n\n")
+            })
+            .collect();
+        let full = tok(&src);
+        let d = ranked_outline("wide.rs", &src, full, &econ, &tok);
+        let f = d
+            .outcome
+            .as_ref()
+            .expect("a file this size must be outlined");
+        assert!(
+            f.k < f.n,
+            "the budget did not bind: k={} of n={} — the ranking selected nothing and the \
+             A/B would compare two unranked outlines",
+            f.k,
+            f.n
+        );
+        assert!(f.k > 0, "but it must still return something useful");
+        assert!(
+            f.returned_tokens as i64 <= crate::econ::DEFAULT_TARGET_OUTLINE,
+            "the outline must respect the target: {} tokens",
+            f.returned_tokens
+        );
+    }
+
+    /// A small file is still refused — Phase A must not weaken the gate, which is the part
+    /// that pays.
+    #[test]
+    fn capping_the_budget_does_not_weaken_the_refusal() {
+        let econ = Econ::default();
+        for full in [125usize, 1_000, 3_216, 5_000] {
+            assert!(
+                econ.budget(full).unwrap() < MIN_USEFUL_OUTLINE,
+                "a {full}-token file must still be refused"
+            );
+        }
+        // The 3,216-token file that produced `ranked_not_worth_it` on the real install.
+        let d = ranked_outline("small.rs", "pub fn a() {}\n", 3_216, &econ, &tok);
+        assert_eq!(d.outcome.as_ref().err(), Some(&Decline::NotWorthIt));
+    }
+
     /// The budget guard must short-circuit BEFORE any parsing work.
     ///
     /// Asserting only "a small file declines" is not enough: `fit_budget` returns k=0 for
