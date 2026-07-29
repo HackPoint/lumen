@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "Lumen"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "dirs 6.0.0",
  "futures-util",
@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-cli"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "clap",
  "crossterm",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-core"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "once_cell",
  "rusqlite",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-daemon"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "dirs 6.0.0",
  "futures-util",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-mcp"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "lumen-core",
  "serde",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-stats"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "lumen-core",
  "serde",
