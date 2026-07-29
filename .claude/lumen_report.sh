@@ -9,9 +9,29 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
-LUMEN_DB="${LUMEN_DB:-${WORKSPACE_ROOT}/lumen.db}"
+# Resolve the DB the same way every writer does: LUMEN_DB, then the pointer file the
+# GUI writes, then the canonical per-OS location. It used to default to
+# <workspace>/lumen.db, which is the shadow ledger the metering writers created when
+# LUMEN_DB was unset — so this script reported on 195 events while the real ledger
+# held 4,140. Never guess a path from where the script happens to live.
+resolve_db() {
+    if [ -n "${LUMEN_DB:-}" ]; then printf '%s' "$LUMEN_DB"; return; fi
+    if [ -r "$HOME/.lumen_db_path" ]; then
+        local p; p=$(tr -d '\n' < "$HOME/.lumen_db_path")
+        if [ -n "$p" ]; then printf '%s' "$p"; return; fi
+    fi
+    case "$(uname -s)" in
+        Darwin) printf '%s' "$HOME/Library/Application Support/io.speedata.lumen/lumen.db" ;;
+        *)      printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/io.speedata.lumen/lumen.db" ;;
+    esac
+}
+LUMEN_DB="$(resolve_db)"
+
+if [ ! -r "$LUMEN_DB" ]; then
+    echo "No metering database at: $LUMEN_DB" >&2
+    echo "Set LUMEN_DB explicitly, or launch Lumen once so it writes the pointer file." >&2
+    exit 1
+fi
 
 # Optional time filter
 SINCE_CLAUSE=""
@@ -91,6 +111,33 @@ FROM  read_events
 ${SINCE_CLAUSE}
 ORDER BY full_tokens DESC
 LIMIT 5;
+SQL
+
+echo ""
+echo "── Token provenance ─────────────────────────────────────────────────────────"
+sqlite3 -column -header "$LUMEN_DB" <<SQL
+SELECT COALESCE(token_source,'unknown')  AS provenance,
+       COUNT(*)                          AS events,
+       SUM(full_tokens)                  AS tokens
+FROM read_events
+${SINCE_CLAUSE}
+GROUP BY provenance ORDER BY events DESC;
+SQL
+
+echo ""
+echo "── Negative savings (calls that cost more than they saved) ──────────────────"
+echo "Reported separately, never netted into the totals above: a loss is a"
+echo "measurement, and hiding it in an average is how the clamp went unnoticed."
+sqlite3 -column -header "$LUMEN_DB" <<SQL
+SELECT routed_via,
+       COUNT(*)            AS losses,
+       SUM(saved_tokens)   AS net_tokens,
+       MIN(saved_tokens)   AS worst,
+       CAST(AVG(full_tokens) AS INT) AS avg_file_tokens
+FROM read_events
+WHERE saved_tokens < 0 AND routed_via <> 'builtin_read'
+${SINCE_CLAUSE:+AND ${SINCE_CLAUSE#WHERE }}
+GROUP BY routed_via ORDER BY losses DESC;
 SQL
 
 echo ""
