@@ -9,6 +9,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+/// Write a line to stderr, ignoring failure.
+///
+/// Never `eprintln!` in this process. Its stderr is a pipe whose read end belongs to
+/// the GUI, so the moment the GUI dies every `eprintln!` becomes a panic — and one of
+/// them fires every two seconds from the WebSocket restart loop. A daemon must not die
+/// because it could not describe itself, and it must not be *kept alive* by a panic
+/// either: that is precisely how the orphan survived its own watchdog, which noticed
+/// the supervisor was gone, panicked announcing it, and unwound only its own thread.
+macro_rules! logline {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 /// Where the GUI and CLI expect to find the daemon.
 const DEFAULT_WS_ADDR: &str = "127.0.0.1:9999";
 
@@ -56,7 +71,19 @@ fn exit_when_supervisor_does() {
                 Ok(_) => continue,
             }
         }
-        eprintln!("lumen-daemon: supervisor exited, shutting down to free the port");
+        // Exit FIRST. The logline! macro cannot panic, but the ordering still matters.
+        //
+        // The supervisor owns the read end of this process's stderr as well as the
+        // write end of its stdin, so both die together. `eprintln!` panics when the
+        // write fails, and a panic on a spawned thread unwinds only that thread —
+        // so logging before exiting meant the watchdog noticed the EOF, panicked
+        // trying to announce it, and left the process running. The orphan survived
+        // for exactly the reason the log line was added: to explain itself.
+        //
+        // Verified on a real install: after SIGKILL of the app the daemon's fd 0 had
+        // no peer — the pipe was at EOF and the read had returned — yet the process
+        // was still holding 127.0.0.1:9999 twenty-four seconds later.
+        logline!("lumen-daemon: supervisor exited, shutting down to free the port");
         std::process::exit(0);
     });
 }
@@ -137,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             // Failing loudly beats inventing a path. A daemon that cannot name its
             // database would otherwise start a third ledger nobody reads.
-            eprintln!("lumen-daemon: cannot resolve a database path; set LUMEN_DB");
+            logline!("lumen-daemon: cannot resolve a database path; set LUMEN_DB");
             return Ok(());
         }
     };
@@ -146,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let conn = format!("sqlite:{db_path}?mode=rwc");
     let pool = SqlitePoolOptions::new().connect(&conn).await?;
-    eprintln!("lumen-daemon using db: {db_path}");
+    logline!("lumen-daemon using db: {db_path}");
 
     // init_schema, not raw DDL: DDL alone is CREATE TABLE IF NOT EXISTS, so on an
     // existing database it is a no-op and the is_subagent column added in 1.1.0
@@ -166,9 +193,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             loop {
                 if let Err(e) = ws_server(ws_pool.clone(), ws_tx.clone()).await {
-                    eprintln!("ws_server exited: {e}; restarting in 2s");
+                    logline!("ws_server exited: {e}; restarting in 2s");
                 } else {
-                    eprintln!("ws_server returned; restarting in 2s");
+                    logline!("ws_server returned; restarting in 2s");
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
@@ -178,11 +205,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base = match projects_dir() {
         Some(b) => b,
         None => {
-            eprintln!("cannot resolve a home directory; set LUMEN_PROJECTS_DIR");
+            logline!("cannot resolve a home directory; set LUMEN_PROJECTS_DIR");
             return Ok(());
         }
     };
-    eprintln!("lumen-daemon watching: {}", base.display());
+    logline!("lumen-daemon watching: {}", base.display());
     let offsets: Offsets = Arc::new(Mutex::new(HashMap::new()));
 
     // ── Initial pass ──────────────────────────────────────────────────────
@@ -194,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 offsets.lock().unwrap().insert(path, n);
             }
             Err(e) => {
-                eprintln!("init ingest {:?}: {e}", path);
+                logline!("init ingest {:?}: {e}", path);
             }
         }
     }
@@ -213,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             loop {
                 notify_watch_loop(&pool, &base, &tx, &offsets).await;
-                eprintln!("notify watcher channel closed; recreating in 2s...");
+                logline!("notify watcher channel closed; recreating in 2s...");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
@@ -246,7 +273,7 @@ async fn poll_all(
         let start = *offsets.lock().unwrap().get(&path).unwrap_or(&0);
         match ingest_from(pool, &path, start, tx, true).await {
             Ok(end) => advance_offset(offsets, path, end),
-            Err(e) => eprintln!("poll ingest {:?}: {e}", path),
+            Err(e) => logline!("poll ingest {:?}: {e}", path),
         }
     }
 }
@@ -290,14 +317,14 @@ async fn notify_watch_loop(
             }) {
                 Ok(w) => w,
                 Err(e) => {
-                    eprintln!("watcher create error: {e}");
+                    logline!("watcher create error: {e}");
                     return;
                 }
             };
 
         use notify::Watcher;
         if let Err(e) = watcher.watch(&base_owned, notify::RecursiveMode::Recursive) {
-            eprintln!("watcher watch error: {e}");
+            logline!("watcher watch error: {e}");
             return;
         }
 
@@ -318,7 +345,7 @@ async fn notify_watch_loop(
                 let start = *offsets.lock().unwrap().get(&path).unwrap_or(&0);
                 match ingest_from(pool, &path, start, tx, true).await {
                     Ok(end) => advance_offset(offsets, path, end),
-                    Err(e) => eprintln!("notify ingest {:?}: {e}", path),
+                    Err(e) => logline!("notify ingest {:?}: {e}", path),
                 }
             }
         }
@@ -471,7 +498,7 @@ async fn ws_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = ws_addr();
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        eprintln!("ws bind failed ({addr} in use?): {e}");
+        logline!("ws bind failed ({addr} in use?): {e}");
         e
     })?;
     println!("WebSocket server listening on ws://{addr}");
@@ -492,7 +519,7 @@ async fn serve_ws(
         let (stream, _) = match listener.accept().await {
             Ok(pair) => pair,
             Err(e) => {
-                eprintln!("ws accept error: {e}");
+                logline!("ws accept error: {e}");
                 continue;
             }
         };
