@@ -934,7 +934,19 @@ case "${CLAUDE_CODE_ENTRYPOINT:-}" in
 esac
 SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 
-OUT_FILE="$(mktemp -t lumen_bash_out)"
+# An explicit template, not `mktemp -t lumen_bash_out`. BSD mktemp accepts a bare
+# prefix and appends its own suffix; GNU mktemp requires at least three X's and
+# fails outright on a template without them. So on Linux OUT_FILE came back empty,
+# python3 raised FileNotFoundError opening "", the `|| exit 0` below swallowed it,
+# and the hook recorded nothing at all — silently, on every read, since 1.1.5. The
+# script-level tests that would have caught it did not exist until 1.2.1.
+OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/lumen_bash_out.XXXXXX" 2>/dev/null)"
+if [ -z "${OUT_FILE:-}" ] || [ ! -f "$OUT_FILE" ]; then
+    # Say so rather than disappearing. Still exit 0: a metering hook must never
+    # fail the tool call it is observing.
+    echo "lumen_meter: cannot create a temp file under ${TMPDIR:-/tmp}; skipping" >&2
+    exit 0
+fi
 trap 'rm -f "$OUT_FILE"' EXIT
 
 # One python call, not four: the old script spawned a fresh interpreter per field.
@@ -1012,6 +1024,23 @@ count_tokens() {
     printf '%s estimated\n' "$(wc -c < "$_f" | awk '{print int($1/4)}')"
 }
 
+# Modification time as a Unix timestamp, on both stat dialects.
+#
+# Validating the output instead of trusting the exit code, because the obvious
+# `stat -f %m "$f" || stat -c %Y "$f"` is wrong in a way that exit codes hide: on
+# BSD `-f` is "format", but on GNU `-f` is "display filesystem status". So on Linux
+# the first branch SUCCEEDED and printed six lines of filesystem information, the
+# fallback never ran, and that multi-line value was spliced into a newline-delimited
+# field list — shifting every field after it and making the insert throw. Requiring
+# a pure integer catches that regardless of which dialect is present or what it
+# returns.
+file_mtime() {
+    _m=$(stat -c %Y "$1" 2>/dev/null)
+    case "${_m:-x}" in *[!0-9]*) _m=$(stat -f %m "$1" 2>/dev/null) ;; esac
+    case "${_m:-x}" in *[!0-9]*) _m="" ;; esac
+    printf '%s' "$_m"
+}
+
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 case "$TOOL_NAME" in
@@ -1020,7 +1049,7 @@ Read)
     LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
     _r=$(count_tokens "$FILE_PATH")
     FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
-    MTIME=$(stat -f %m "$FILE_PATH" 2>/dev/null || stat -c %Y "$FILE_PATH" 2>/dev/null || echo "")
+    MTIME=$(file_mtime "$FILE_PATH")
     ROUTE="builtin_read"; REQ_KEY="$FILE_PATH"; RETURNED="$FULL_TOKENS"; TARGET="$FILE_PATH"
     ;;
 Bash)
@@ -3525,7 +3554,8 @@ mod tests {
                 "import sqlite3,sys\n\
                  for r in sqlite3.connect(sys.argv[1]).execute(\
                  'SELECT routed_via,token_source,full_tokens,tokens_returned,path,\
-                 COALESCE(req_key,\\'-\\'),COALESCE(session_id,\\'-\\') \
+                 COALESCE(req_key,\\'-\\'),COALESCE(session_id,\\'-\\'),\
+                 COALESCE(file_mtime,-1) \
                  FROM read_events ORDER BY rowid'):\n\
                  \x20   print('\\t'.join(str(c) for c in r))",
             )
@@ -3565,6 +3595,19 @@ mod tests {
         );
         assert_eq!(f[2], "4242", "the tokenizer's number, verbatim");
         assert_eq!(f[6], "sess-abc", "the session id must reach the row");
+
+        // The mtime is asserted because reading it is dialect-specific and the two
+        // dialects disagree in a way an exit code hides: BSD `stat -f` is "format",
+        // GNU `stat -f` is "display filesystem status". The GNU form succeeded and
+        // returned six lines of filesystem data, which shifted every field after it
+        // and made the insert throw — so this assertion is what tells us the value
+        // is a timestamp on whichever platform is running the test, rather than
+        // whatever else `stat` felt like printing.
+        let mtime: i64 = f[7].parse().expect("file_mtime must be an integer");
+        assert!(
+            mtime > 1_600_000_000,
+            "file_mtime must be a plausible Unix timestamp, got {mtime}"
+        );
     }
 
     /// Exit 3 means "not text". The row must say so and carry no invented count.
@@ -3681,6 +3724,47 @@ mod tests {
                 "{tool} must not be metered by the hook"
             );
         }
+    }
+
+    /// Two shell-dialect traps, each of which silently disabled the meter on Linux.
+    ///
+    /// The functional tests above are what actually catch these — they run on Linux in
+    /// CI, which is where both were found. These string assertions exist so the reason
+    /// is visible at the point where someone might reintroduce them, rather than only
+    /// as a puzzling row-count mismatch on another platform.
+    #[test]
+    fn the_meter_avoids_the_two_shell_dialect_traps() {
+        // Comment lines are stripped first. Both traps are *described* in the
+        // template's own comments, so a naive `contains` matches the explanation of
+        // the bug and not the bug — which is exactly what happened when this test was
+        // written.
+        let code: String = METER_TEMPLATE
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !code.contains("mktemp -t "),
+            "GNU mktemp rejects a -t template with fewer than three X's, so the temp \
+             file came back empty and the hook recorded nothing at all on Linux from \
+             1.1.5 to 1.2.0. Pass an explicit path template instead."
+        );
+        assert!(
+            code.contains("lumen_bash_out.XXXXXX"),
+            "the temp template needs its own X's; both dialects accept that form"
+        );
+        assert!(
+            !code.contains("stat -f %m \"$FILE_PATH\""),
+            "on GNU, `stat -f` is 'display filesystem status', not 'format' — it \
+             SUCCEEDS and prints six lines of filesystem data, so an `||` fallback \
+             never runs and the multi-line value shifts every field after it. \
+             Validate the output instead of trusting the exit code."
+        );
+        assert!(
+            code.contains("file_mtime()"),
+            "mtime must go through the dialect-validating helper"
+        );
     }
 
     /// The command label must not carry credentials into the database.
