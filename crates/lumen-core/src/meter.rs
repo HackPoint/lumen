@@ -40,22 +40,44 @@ pub fn db_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok();
-    resolve_db_path(
-        std::env::var("LUMEN_DB").ok().as_deref(),
-        home.as_deref(),
-        std::env::current_exe().ok().as_deref(),
-    )
+    resolve_db_path(std::env::var("LUMEN_DB").ok().as_deref(), home.as_deref())
+}
+
+/// Bundle identifier. Must match `identifier` in tauri.conf.json — the GUI, the
+/// daemon and the hooks all have to agree on one directory or they meter into
+/// different ledgers.
+pub const APP_ID: &str = "io.speedata.lumen";
+
+/// The per-OS application data directory.
+///
+/// Lives here, not in the GUI crate, because every writer needs it: two copies of
+/// this logic drifting apart is the same class of bug as the split ledger it
+/// prevents. `lumenator`'s `app_support_dir_in` delegates to this.
+pub fn app_data_dir_in(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support").join(APP_ID)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        home.join("AppData").join("Roaming").join(APP_ID)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home.join(".local").join("share").join(APP_ID)
+    }
+}
+
+/// The one database every component should use when nothing overrides it.
+pub fn canonical_db_path_in(home: &std::path::Path) -> std::path::PathBuf {
+    app_data_dir_in(home).join("lumen.db")
 }
 
 /// The precedence policy behind [`db_path`], with the environment passed in.
 ///
 /// Separated so the ordering can be tested directly: mutating LUMEN_DB / HOME in
 /// a test is racy across threads and `unsafe` in edition 2024.
-pub fn resolve_db_path(
-    lumen_db: Option<&str>,
-    home: Option<&str>,
-    current_exe: Option<&std::path::Path>,
-) -> Option<std::path::PathBuf> {
+pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
     // 1. Explicit env var.
     if let Some(p) = lumen_db
         && !p.is_empty()
@@ -72,17 +94,21 @@ pub fn resolve_db_path(
             }
         }
     }
-    // 3. Binary-relative: current_exe()/../../.. + /lumen.db
-    if let Some(exe) = current_exe
-        && let Some(root) = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-    {
-        let candidate = root.join("lumen.db");
-        return Some(candidate);
-    }
-    None
+    // 3. The canonical per-OS location.
+    //
+    // This used to be current_exe()/../../.. + lumen.db, and that is how the
+    // ledger split in two: for a development build at target/release/lumen-mcp,
+    // walking up three parents lands on the repository root, so lumen-mcp running
+    // without LUMEN_DB wrote to <repo>/lumen.db while everything else wrote to the
+    // application data directory. 195 events accumulated in the shadow ledger, 146
+    // of them duplicating rows in the real one, and nothing reported a problem —
+    // both writes succeeded, they simply went to different files.
+    //
+    // Resolving to the canonical path instead means a missing LUMEN_DB is no longer
+    // a fork in the road. If the home directory cannot be resolved we return None,
+    // and the caller logs and skips: losing a row is recoverable, silently writing
+    // it somewhere nobody reads is not.
+    home.map(|h| canonical_db_path_in(std::path::Path::new(h)))
 }
 
 /// Open (or create) the lumen SQLite DB, apply DDL + additive migrations.
@@ -111,6 +137,9 @@ pub fn insert_read_event(
     routed_via: &str,
     channel: &str,
     tool_name: &str,
+    session_id: Option<&str>,
+    file_mtime: Option<i64>,
+    req_key: Option<&str>,
 ) {
     let db = match db_path() {
         Some(p) => p,
@@ -131,6 +160,9 @@ pub fn insert_read_event(
         routed_via,
         channel,
         tool_name,
+        session_id,
+        file_mtime,
+        req_key,
     );
 }
 
@@ -149,6 +181,9 @@ pub fn insert_read_event_at(
     routed_via: &str,
     channel: &str,
     tool_name: &str,
+    session_id: Option<&str>,
+    file_mtime: Option<i64>,
+    req_key: Option<&str>,
 ) {
     let conn = match open_db(db) {
         Ok(c) => c,
@@ -177,10 +212,29 @@ pub fn insert_read_event_at(
 
     let lines_val: Option<i64> = lines;
 
+    // token_source is always 'measured' here: this crate tokenizes in-process with
+    // no fallback path, unlike the shell hook which can substitute bytes/4. Recording
+    // it explicitly is what lets the UI stop qualifying its accuracy claim — a NULL
+    // would count as unverified forever and the warning would never clear.
     let result = conn.execute(
-        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,saved_tokens,routed_via,channel)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-        params![ts, tool_name, path, lines_val, tokens_returned, full_tokens, saved_tokens, routed_via, channel],
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
+         saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,\
+         writer_hook,token_source) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'lumen-mcp','measured')",
+        params![
+            ts,
+            tool_name,
+            path,
+            lines_val,
+            tokens_returned,
+            full_tokens,
+            saved_tokens,
+            routed_via,
+            channel,
+            session_id,
+            file_mtime,
+            req_key
+        ],
     );
 
     if let Err(e) = result {
@@ -302,26 +356,21 @@ mod tests {
 
     #[test]
     fn lumen_db_wins_over_everything_else() {
-        let got = resolve_db_path(
-            Some("/explicit/lumen.db"),
-            Some("/some/home"),
-            Some(std::path::Path::new("/a/b/c/d/exe")),
-        );
+        let got = resolve_db_path(Some("/explicit/lumen.db"), Some("/some/home"));
         assert_eq!(got, Some(std::path::PathBuf::from("/explicit/lumen.db")));
     }
 
     #[test]
     fn an_empty_lumen_db_is_ignored_rather_than_used_as_a_path() {
         // An exported-but-blank LUMEN_DB must not resolve to "".
-        let got = resolve_db_path(Some(""), None, None);
-        assert_eq!(got, None);
+        assert_eq!(resolve_db_path(Some(""), None), None);
     }
 
     #[test]
     fn the_pointer_file_is_used_when_lumen_db_is_unset() {
         let home = TempDir::new().unwrap();
         std::fs::write(home.path().join(".lumen_db_path"), "/from/pointer.db\n").unwrap();
-        let got = resolve_db_path(None, Some(&home.path().to_string_lossy()), None);
+        let got = resolve_db_path(None, Some(&home.path().to_string_lossy()));
         assert_eq!(
             got,
             Some(std::path::PathBuf::from("/from/pointer.db")),
@@ -330,40 +379,68 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_pointer_file_falls_through() {
+    fn a_blank_pointer_file_falls_through_to_the_canonical_path() {
         let home = TempDir::new().unwrap();
         std::fs::write(home.path().join(".lumen_db_path"), "   \n\t ").unwrap();
-        let got = resolve_db_path(None, Some(&home.path().to_string_lossy()), None);
-        assert_eq!(got, None, "whitespace-only pointer is not a path");
-    }
-
-    #[test]
-    fn a_missing_pointer_file_falls_through_to_the_exe_path() {
-        let home = TempDir::new().unwrap();
-        let got = resolve_db_path(
-            None,
-            Some(&home.path().to_string_lossy()),
-            Some(std::path::Path::new("/w/target/release/lumen-mcp")),
-        );
+        let got = resolve_db_path(None, Some(&home.path().to_string_lossy()));
         assert_eq!(
             got,
-            Some(std::path::PathBuf::from("/w/lumen.db")),
-            "exe/../../.. + lumen.db"
+            Some(canonical_db_path_in(home.path())),
+            "a whitespace-only pointer is not a path, but the canonical location still is"
         );
     }
 
     #[test]
-    fn nothing_resolves_when_every_source_is_absent() {
-        assert_eq!(resolve_db_path(None, None, None), None);
+    fn a_missing_pointer_file_falls_through_to_the_canonical_path() {
+        let home = TempDir::new().unwrap();
+        let got = resolve_db_path(None, Some(&home.path().to_string_lossy()));
+        assert_eq!(got, Some(canonical_db_path_in(home.path())));
     }
 
     #[test]
-    fn a_shallow_exe_path_resolves_to_nothing() {
-        // Fewer than three parents to walk up — must return None, not panic.
-        assert_eq!(
-            resolve_db_path(None, None, Some(std::path::Path::new("/exe"))),
-            None
+    fn the_fallback_is_never_relative_to_the_executable() {
+        // THE SPLIT-LEDGER REGRESSION. The old third step was
+        // current_exe()/../../.. + lumen.db, so a development build at
+        // target/release/lumen-mcp resolved to <repo>/lumen.db while every other
+        // component used the application data directory. Both writes succeeded,
+        // to different files, and nothing reported it: 195 events accumulated in
+        // the shadow ledger, 146 duplicating rows in the real one.
+        let home = TempDir::new().unwrap();
+        let got = resolve_db_path(None, Some(&home.path().to_string_lossy())).unwrap();
+
+        assert!(
+            got.starts_with(home.path()),
+            "the fallback must live under the home directory, got {got:?}"
         );
+        assert!(
+            got.to_string_lossy().contains(APP_ID),
+            "the fallback must be the canonical per-app location, got {got:?}"
+        );
+        assert_ne!(
+            got,
+            home.path().join("lumen.db"),
+            "a bare <root>/lumen.db is the shadow-ledger shape that caused the split"
+        );
+    }
+
+    #[test]
+    fn every_component_resolves_to_the_same_file_without_an_override() {
+        // Divergence is only impossible if the answer is a pure function of the
+        // home directory — no cwd, no executable location, no per-crate copy.
+        let home = TempDir::new().unwrap();
+        let h = home.path().to_string_lossy().to_string();
+        let a = resolve_db_path(None, Some(&h));
+        let b = resolve_db_path(None, Some(&h));
+        assert_eq!(a, b);
+        assert_eq!(a, Some(canonical_db_path_in(home.path())));
+    }
+
+    #[test]
+    fn nothing_resolves_when_the_home_directory_is_unknown() {
+        // Loud failure. insert_read_event logs and skips rather than inventing a
+        // location, because losing a row is recoverable and writing it somewhere
+        // nobody reads is not.
+        assert_eq!(resolve_db_path(None, None), None);
     }
 
     #[test]
@@ -440,6 +517,9 @@ mod tests {
             "smart_read",
             "cli",
             "mcp__lumen__smart_read",
+            None,
+            None,
+            None,
         );
 
         let conn = connect_db(&path).unwrap();
@@ -498,6 +578,9 @@ mod tests {
             "compress_logs",
             "cli",
             "t",
+            None,
+            None,
+            None,
         );
         let conn = connect_db(&path).unwrap();
         let lines: Option<i64> = conn
@@ -511,7 +594,20 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("m.db");
         drop(connect_db(&path).unwrap());
-        insert_read_event_at(&path, "/p", None, 1, 2, 1, "smart_read", "cli", "t");
+        insert_read_event_at(
+            &path,
+            "/p",
+            None,
+            1,
+            2,
+            1,
+            "smart_read",
+            "cli",
+            "t",
+            None,
+            None,
+            None,
+        );
 
         let conn = connect_db(&path).unwrap();
         let ts: String = conn
@@ -545,6 +641,9 @@ mod tests {
                 "smart_read",
                 "cli",
                 "t",
+                None,
+                None,
+                None,
             );
         }
         let conn = connect_db(&path).unwrap();
@@ -564,6 +663,9 @@ mod tests {
             "smart_read",
             "cli",
             "t",
+            None,
+            None,
+            None,
         );
     }
 }

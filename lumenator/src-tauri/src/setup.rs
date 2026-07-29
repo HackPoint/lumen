@@ -274,7 +274,12 @@ pub fn lumen_set_autostart(app: AppHandle, enable: bool) -> Result<bool, String>
 }
 
 /// Bundle identifier, matching `identifier` in tauri.conf.json.
-const APP_ID: &str = "io.speedata.lumen";
+/// Re-exported from lumen-core, which owns the canonical value.
+// Only the tests read this now that app_support_dir_in delegates to lumen-core.
+// Kept because one of them pins it against tauri.conf.json's identifier, which is
+// the check that stops the bundle id and the data directory drifting apart.
+#[allow(dead_code)]
+const APP_ID: &str = lumen_core::meter::APP_ID;
 
 // ── Standard path helpers ─────────────────────────────────────────────────────
 //
@@ -358,18 +363,11 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 /// tempdir, and one env var reading differently in tests than in production is
 /// exactly the class of bug that costs more than it saves.
 fn app_support_dir_in(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support").join(APP_ID)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        home.join("AppData").join("Roaming").join(APP_ID)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        home.join(".local").join("share").join(APP_ID)
-    }
+    // Delegated to lumen-core so there is exactly one definition of where Lumen's
+    // data lives. Two copies of this would be the split-ledger bug in a new place:
+    // the GUI and the metering writers must agree on one directory, and a drift
+    // between them fails silently — both writes succeed, to different files.
+    lumen_core::meter::app_data_dir_in(home)
 }
 
 fn app_support_dir() -> PathBuf {

@@ -68,6 +68,19 @@ pub struct MeterRow {
     pub saved_tokens: i64,
     pub routed_via: String,
     pub tool_name: String,
+    /// Claude Code's session id, from CLAUDE_CODE_SESSION_ID. Claude Code exports it
+    /// to the MCP server it spawns, and because stdio servers are per-session the
+    /// value is stable and correct for the whole process lifetime. Without it a read
+    /// cannot be tied to the turn that caused it — second-precision timestamps are
+    /// ambiguous when several sessions run at once.
+    pub session_id: Option<String>,
+    /// File modification time at read time, so a re-read of an unchanged file is
+    /// distinguishable from a re-read after an edit.
+    pub file_mtime: Option<i64>,
+    /// Identity of the REQUEST, not the file: two recall_file calls on one file
+    /// asking for different items are different requests, so keying dedup on path
+    /// alone overstates the opportunity.
+    pub req_key: Option<String>,
 }
 
 impl MeterRow {
@@ -83,6 +96,9 @@ impl MeterRow {
             &self.routed_via,
             detect_channel(),
             &self.tool_name,
+            self.session_id.as_deref(),
+            self.file_mtime,
+            self.req_key.as_deref(),
         );
     }
 }
@@ -164,6 +180,50 @@ pub fn ok_result(text: String, full_tokens: usize, returned_tokens: usize) -> Va
 /// Build a metered success outcome: the JSON-RPC result plus the `read_events`
 /// row it earned.
 #[allow(clippy::too_many_arguments)]
+/// The session Claude Code told us about, if it did.
+fn session_id() -> Option<String> {
+    std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Modification time of `path` in unix seconds, or None when it is not a real file
+/// (compress_logs on inline text has no file behind it).
+fn file_mtime(path: &str) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// Stable identity for a request.
+///
+/// `smart_read` is identified by its path alone — there is one outline per file. A
+/// `recall_file` also depends on *what was asked for*, so the selector is folded in,
+/// with names sorted so argument order cannot produce two keys for one request.
+pub fn request_key(
+    path: &str,
+    names: &[String],
+    start: Option<usize>,
+    end: Option<usize>,
+) -> String {
+    if names.is_empty() && start.is_none() && end.is_none() {
+        return path.to_string();
+    }
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    format!(
+        "{path}#names={}&range={}-{}",
+        sorted.join(","),
+        start.map(|v| v.to_string()).unwrap_or_default(),
+        end.map(|v| v.to_string()).unwrap_or_default()
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn metered(
     text: String,
     full_tokens: usize,
@@ -172,6 +232,7 @@ fn metered(
     routed_via: &str,
     path: &str,
     lines: Option<i64>,
+    req_key: Option<String>,
 ) -> Outcome {
     // Signed for the same reason as ok_result above: a loss must be recordable.
     let saved = full_tokens as i64 - returned_tokens as i64;
@@ -185,6 +246,9 @@ fn metered(
             saved_tokens: saved,
             routed_via: routed_via.to_string(),
             tool_name: tool_name.to_string(),
+            session_id: session_id(),
+            file_mtime: file_mtime(path),
+            req_key: req_key.or_else(|| Some(path.to_string())),
         }),
     }
 }
@@ -365,6 +429,8 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
             "smart_read",
             path,
             Some(line_count as i64),
+            // One outline per file, so the path is the whole request identity.
+            None,
         );
     }
 
@@ -382,6 +448,7 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
         "smart_read",
         path,
         Some(line_count as i64),
+        None,
     )
 }
 
@@ -453,6 +520,12 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         .and_then(Value::as_u64)
         .map(|n| n as usize);
 
+    // Computed before `names` is consumed below. The key must reflect what was
+    // asked for, not just which file: two recall_file calls on one file requesting
+    // different items are different requests, and keying dedup on the path alone
+    // would count the second as redundant when it is not.
+    let req_key = request_key(path, names.as_deref().unwrap_or(&[]), start_line, end_line);
+
     let text = if let Some(queries) = names {
         // Name-based recall
         let lang = detect_lang(path);
@@ -487,6 +560,7 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                 "recall_file",
                 path,
                 Some(line_count as i64),
+                Some(req_key.clone()),
             );
         }
 
@@ -521,6 +595,7 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         "recall_file",
         path,
         Some(line_count as i64),
+        Some(req_key.clone()),
     )
 }
 
@@ -621,6 +696,7 @@ pub fn tool_compress_logs(args: &Value) -> Outcome {
         "compress_logs",
         &meter_path,
         Some(orig_lines),
+        None,
     )
 }
 
@@ -724,6 +800,89 @@ fn beta() {
         outcome.result().expect("ok result")["_meta"][key]
             .as_i64()
             .expect("numeric meta field")
+    }
+
+    // ── request_key ──────────────────────────────────────────────────────────
+    //
+    // This is the column that will discount the dedup ceiling to something real. The
+    // measured 969,799-token ceiling keys on (route, path), so two recall_file calls
+    // for *different items* in one file still count as a repeat. A key that includes
+    // the selector is what separates a genuine re-read from a different question.
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_same_request_always_produces_the_same_key() {
+        let a = request_key("/x.rs", &names(&["alpha", "beta"]), None, None);
+        let b = request_key("/x.rs", &names(&["alpha", "beta"]), None, None);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn argument_order_does_not_change_the_key() {
+        // The model may list names in any order; the same question must key alike.
+        assert_eq!(
+            request_key("/x.rs", &names(&["beta", "alpha"]), None, None),
+            request_key("/x.rs", &names(&["alpha", "beta"]), None, None),
+        );
+    }
+
+    #[test]
+    fn different_names_produce_different_keys() {
+        assert_ne!(
+            request_key("/x.rs", &names(&["alpha"]), None, None),
+            request_key("/x.rs", &names(&["beta"]), None, None),
+            "asking for a different item is a different request, not a repeat"
+        );
+    }
+
+    #[test]
+    fn a_subset_is_not_the_same_request_as_a_superset() {
+        assert_ne!(
+            request_key("/x.rs", &names(&["alpha"]), None, None),
+            request_key("/x.rs", &names(&["alpha", "beta"]), None, None),
+        );
+    }
+
+    #[test]
+    fn different_line_ranges_produce_different_keys() {
+        assert_ne!(
+            request_key("/x.rs", &[], Some(1), Some(50)),
+            request_key("/x.rs", &[], Some(51), Some(100)),
+        );
+    }
+
+    #[test]
+    fn a_whole_file_request_keys_on_the_path_alone() {
+        // No selector means one canonical request per file, so smart_read and an
+        // unqualified recall_file agree — which is what makes them comparable.
+        assert_eq!(request_key("/x.rs", &[], None, None), "/x.rs");
+    }
+
+    #[test]
+    fn a_name_request_is_never_confused_with_the_whole_file() {
+        assert_ne!(
+            request_key("/x.rs", &names(&["alpha"]), None, None),
+            request_key("/x.rs", &[], None, None),
+        );
+    }
+
+    #[test]
+    fn different_paths_never_share_a_key() {
+        assert_ne!(
+            request_key("/a.rs", &names(&["f"]), None, None),
+            request_key("/b.rs", &names(&["f"]), None, None),
+        );
+    }
+
+    #[test]
+    fn a_names_request_and_a_range_request_are_distinct() {
+        assert_ne!(
+            request_key("/x.rs", &names(&["alpha"]), None, None),
+            request_key("/x.rs", &[], Some(1), Some(9)),
+        );
     }
 
     // ── ok_result ────────────────────────────────────────────────────────────
