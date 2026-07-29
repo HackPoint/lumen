@@ -143,7 +143,13 @@ impl Outcome {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 pub fn ok_result(text: String, full_tokens: usize, returned_tokens: usize) -> Value {
-    let saved = full_tokens.saturating_sub(returned_tokens);
+    // Signed, deliberately. Both operands are usize, so saturating_sub floored at
+    // zero and the cast to i64 happened afterwards — a negative saving was
+    // structurally unrepresentable. 170 real events returned MORE than the file
+    // contained (full-mode reads, whole-file fallbacks, ranges covering most of a
+    // file) and every one of them was recorded as a saving of exactly 0, hiding
+    // 92,347 tokens of loss and inflating the reported averages.
+    let saved = full_tokens as i64 - returned_tokens as i64;
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false,
@@ -167,7 +173,8 @@ fn metered(
     path: &str,
     lines: Option<i64>,
 ) -> Outcome {
-    let saved = full_tokens.saturating_sub(returned_tokens) as i64;
+    // Signed for the same reason as ok_result above: a loss must be recordable.
+    let saved = full_tokens as i64 - returned_tokens as i64;
     Outcome {
         payload: Payload::Ok(ok_result(text, full_tokens, returned_tokens)),
         meter: Some(MeterRow {
@@ -600,9 +607,7 @@ pub fn tool_compress_logs(args: &Value) -> Outcome {
         comp_lines = result.compressed_lines,
         orig_tok = result.original_tokens,
         comp_tok = result.compressed_tokens,
-        saved = result
-            .original_tokens
-            .saturating_sub(result.compressed_tokens),
+        saved = result.original_tokens as i64 - result.compressed_tokens as i64,
     );
 
     let text = format!("{}{}", header, result.text);
@@ -710,9 +715,14 @@ fn beta() {
             .to_string()
     }
 
-    fn meta(outcome: &Outcome, key: &str) -> u64 {
+    /// i64, not u64: `saved_tokens` can now be negative, and `as_u64()` returns
+    /// None for a negative — so this helper was itself enforcing the clamp, and
+    /// every test reading through it failed with "numeric meta field" rather than
+    /// with a value mismatch. The clamp assumption was encoded in four places:
+    /// two write sites, the assertions, and here.
+    fn meta(outcome: &Outcome, key: &str) -> i64 {
         outcome.result().expect("ok result")["_meta"][key]
-            .as_u64()
+            .as_i64()
             .expect("numeric meta field")
     }
 
@@ -733,7 +743,14 @@ fn beta() {
     fn ok_result_saturates_when_returned_exceeds_full() {
         // Outline of a tiny file can be longer than the file; savings must not wrap.
         let v = ok_result("body".into(), 10, 400);
-        assert_eq!(v["_meta"]["saved_tokens"], 0, "must saturate, never wrap");
+        // Inverted: the whole point of E7's clamp fix is that a read returning more
+        // than the file contained reports a NEGATIVE saving instead of a flattering
+        // zero. If this ever reads 0 again, the clamp is back.
+        assert!(
+            v["_meta"]["saved_tokens"].as_i64().unwrap() < 0,
+            "returning more than the file contained is a loss, not a zero: {}",
+            v["_meta"]["saved_tokens"]
+        );
     }
 
     // ── safe_read ────────────────────────────────────────────────────────────
@@ -892,10 +909,12 @@ fn beta() {
     }
 
     #[test]
-    fn smart_read_reports_zero_savings_rather_than_inventing_them() {
-        // A file that is almost entirely declarations produces an outline as long
-        // as the source. The tool must report that honestly — saturating to zero
-        // — instead of claiming a saving it did not achieve.
+    fn smart_read_reports_a_loss_rather_than_a_flattering_zero() {
+        // A file that is almost entirely declarations produces an outline as long as
+        // the source. That is a real loss and must be reported as one. Reporting 0
+        // was the old behaviour: defensible against a wrapped huge number, but it
+        // made 170 real losses indistinguishable from "no saving" and inflated every
+        // average built on the column.
         let mut decls = String::new();
         for i in 0..60 {
             decls.push_str(&format!("fn f{i}() {{}}\n"));
@@ -907,10 +926,15 @@ fn beta() {
             returned > full,
             "this shape is expected to produce a larger outline ({returned} vs {full})"
         );
+        let saved = meta(&out, "saved_tokens");
         assert_eq!(
-            meta(&out, "saved_tokens"),
-            0,
-            "no savings must be reported as 0, never as a wrapped huge number"
+            saved,
+            full - returned,
+            "the loss must be the exact signed difference"
+        );
+        assert!(
+            saved < 0,
+            "a bigger outline than the file is a loss: {saved}"
         );
     }
 
@@ -944,8 +968,12 @@ fn beta() {
         assert_eq!(m.lines, Some(RUST_SRC.lines().count() as i64));
         // Saturating: a tiny file's outline can exceed the file, and the metered
         // saving must then be 0 rather than negative.
-        assert_eq!(m.saved_tokens, (m.full_tokens - m.returned_tokens).max(0));
-        assert!(m.saved_tokens >= 0, "a metered saving is never negative");
+        // Inverted: exact signed difference, no floor.
+        assert_eq!(
+            m.saved_tokens,
+            m.full_tokens - m.returned_tokens,
+            "the metered saving must be the exact signed difference"
+        );
     }
 
     #[test]
@@ -953,11 +981,13 @@ fn beta() {
         let (_d, path) = fixture("empty.rs", "");
         let out = tool_smart_read(&json!({ "path": &path }));
         assert_eq!(meta(&out, "full_tokens"), 0);
-        assert_eq!(
-            meta(&out, "saved_tokens"),
-            0,
-            "nothing to save from nothing"
-        );
+        // An empty file still gets an outline header, so the call costs a few tokens
+        // and returns nothing useful. Under the clamp that read as a clean 0; the
+        // truth is a small loss, and the whole point of E7 is to stop rounding
+        // losses towards the pleasant answer.
+        let saved = meta(&out, "saved_tokens");
+        assert_eq!(saved, 0 - meta(&out, "returned_tokens"));
+        assert!(saved <= 0, "an empty file cannot yield a saving: {saved}");
     }
 
     #[test]

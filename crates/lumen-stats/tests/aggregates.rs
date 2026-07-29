@@ -688,10 +688,13 @@ async fn optimizer_counts_builtin_reads_as_missed_not_saved() {
 }
 
 #[tokio::test]
-async fn optimizer_missed_reads_are_cli_only() {
+async fn optimizer_counts_missed_reads_in_every_channel() {
     let (_d, pool) = fixture().await;
-    // The PostToolUse hook only fires in the CLI, so vscode builtin_read rows
-    // are not counted as "missed" — documented behaviour, pinned here.
+    // Inverted. This test used to assert that a vscode builtin_read was NOT
+    // counted, on the documented premise that hooks fire only in the CLI. That
+    // premise is false: hooks demonstrably fire in the VS Code extension, and the
+    // meter hardcoded channel='cli' on every row anyway, so the filter it pinned
+    // matched everything and the "CLI-only" label described nothing real.
     event(
         &pool,
         "datetime('now')",
@@ -701,7 +704,10 @@ async fn optimizer_missed_reads_are_cli_only() {
     )
     .await;
     let o = get_optimizer_stats(&pool).await.unwrap();
-    assert_eq!(o.missed_calls, 0, "only channel='cli' counts as missed");
+    assert_eq!(
+        o.missed_calls, 1,
+        "a bypassed read is a bypassed read regardless of channel"
+    );
 }
 
 #[tokio::test]

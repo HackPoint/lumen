@@ -45,14 +45,27 @@
                     <span class="hero__label">
                         effectiveness
                         <button class="info-btn" type="button"
-                                [lumenTooltip]="'When Lumen intercepts a read, this is how many fewer tokens it returned — measured to the token, never estimated.'">ⓘ</button>
+                                [lumenTooltip]="provenanceTip()">ⓘ</button>
                     </span>
                 </div>
                 <p class="hero__sub">
                     Every intercepted read returns
-                    <strong>{{ effectPct() }}% fewer tokens</strong> —
-                    measured to the token, never estimated.
+                    <strong>{{ effectPct() }}% fewer tokens</strong>.
+                    {{ provenanceNote() }}
                 </p>
+                <!-- Shown only while some rows lack recorded provenance. Before 1.1.5
+                     a dead tokenizer path made the metering hook substitute bytes/4
+                     in silence, so an unqualified "measured to the token" would be a
+                     claim this data cannot support. -->
+                @if (s.unverifiedProvenanceRows() > 0) {
+                    <p class="hero__warn">
+                        {{ fmtTokens(s.unverifiedProvenanceRows()) }} of
+                        {{ fmtTokens(s.provenanceTotalRows()) }} metered events have
+                        unverified token provenance — recorded before Lumen tracked
+                        whether a count was measured or estimated. See the 1.1.5
+                        release notes.
+                    </p>
+                }
             </section>
         } @else {
             <section class="hero hero--empty" aria-label="Optimizer effectiveness">
@@ -86,7 +99,7 @@
                 <span class="savings-card__num">{{ fmtTokens(s.lifetimeOptimizedTokens()) }}</span>
                 <span class="savings-card__unit">tokens saved</span>
                 <span class="savings-card__usd">{{ fmtUsd(s.lifetimeOptimizedUsd()) }}</span>
-                <span class="savings-card__note">caused · measured · verifiable · grows with use</span>
+                <span class="savings-card__note">{{ savingsNote() }}</span>
             </div>
 
             <!-- vs divider -->

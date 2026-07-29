@@ -19,6 +19,33 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Optimizer {
+    /**
+     * Wording for the effectiveness claim, qualified when provenance is unknown.
+     *
+     * The old copy said "measured to the token, never estimated" unconditionally.
+     * That was false on any install whose baked tokenizer path had died: the hook
+     * substituted bytes/4 without recording that it had. The claim is now made only
+     * over data that can support it.
+     */
+    readonly provenanceNote = computed(() =>
+        this.s.unverifiedProvenanceRows() === 0
+            ? 'Counted to the token by a local tokenizer, never estimated.'
+            : 'Counts are exact for Lumen tool calls; some older events have unverified provenance.',
+    );
+
+    readonly provenanceTip = computed(() =>
+        this.s.unverifiedProvenanceRows() === 0
+            ? 'When Lumen intercepts a read, this is how many fewer tokens it returned — counted to the token.'
+            : 'When Lumen intercepts a read, this is how many fewer tokens it returned. '
+              + 'Events recorded before Lumen tracked token provenance may include estimates.',
+    );
+
+    readonly savingsNote = computed(() =>
+        this.s.unverifiedProvenanceRows() === 0
+            ? 'caused · measured · verifiable · grows with use'
+            : 'caused · partly unverified · grows with use',
+    );
+
     readonly s = inject(SessionService);
 
     // ── hero ──────────────────────────────────────────────────────────────────

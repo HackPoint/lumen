@@ -1,5 +1,74 @@
 # Changelog
 
+## [1.1.5] — 2026-07-29
+
+### If you installed 0.1.0 or 1.0.0 from the .dmg, your historical optimizer numbers have unverified provenance
+
+Setup baked a tokenizer path pointing **inside the mounted disk image**. Once that
+image was ejected the metering hook fell back to a `bytes ÷ 4` estimate **without
+saying so**, and no upgrade ever repaired it, because Setup only ever ran once.
+Lumen has described these figures as "measured to the token". On affected installs
+that claim was wrong.
+
+1.1.5 repairs the path, records provenance on every new row, and marks the
+unverified range in the Optimizer screen. It does **not** retroactively correct the
+old numbers — recovering them is impossible, and inventing them would be worse than
+admitting the gap. Rows written before 1.1.5 are labelled *unknown provenance*
+rather than reclassified: a boundary date was inferable from the evidence, but only
+2 of 2,549 affected rows were verifiable against git history, so no boundary was
+applied.
+
+Unaffected: fresh installs on 1.0.1 or later, and anyone who happened to re-run
+Setup after that release.
+
+### Features
+- feat: hook scripts now self-repair. They are compared against what the running
+  build would generate — with the version stamp excluded, so a release alone
+  rewrites nothing — and regenerated when they differ. Previously anything
+  reachable only from `run_setup` was unreachable forever once its marker existed,
+  which is how three separate bugs shipped: MCP paths (1.0.1), the login item
+  (1.1.2), and this tokenizer path.
+- feat: `read_events` records `session_id`, `file_mtime`, `req_key`, `writer_hook`
+  and `token_source`. Existing rows stay NULL; there is no honest way to backfill
+  provenance after the fact.
+- feat: Bash output volume is measured (`routed_via='bash_output'`). Observation
+  only — no PreToolUse hook on Bash, no interception, no execution wrapper.
+
+### Fixes
+- fix: negative savings are recorded instead of clamped to zero. `saturating_sub`
+  on `usize` floored at 0 before the `i64` cast, so 170 real events that returned
+  **more** than the file contained were logged as saving exactly nothing — hiding
+  92,347 tokens of loss and inflating every average built on the column.
+- fix: the metering hook detects its channel from `CLAUDE_CODE_ENTRYPOINT` instead
+  of writing the literal string `cli` on every row. The "By channel" breakdown has
+  been **removed** rather than repaired, because it was plotting a constant.
+- fix: `get_optimizer_stats`' "CLI missed reads" filtered `channel = 'cli'`, which
+  matched 2,694 of 2,694 rows. The filter is gone and the metric renamed.
+- fix: config writes are atomic (temp file, mode preserved with a required floor,
+  directory fsynced, symlinks followed rather than replaced). `fs::write` truncates
+  in place, so Claude Code could read a half-written `~/.claude.json`.
+- fix: the tokenizer fallback logs a warning and marks the row `estimated`. Silence
+  was the defect, not the fallback.
+
+### Documentation
+- docs: **hooks fire in the VS Code extension.** The README said they fire only in
+  the CLI and built a "Full mode vs Soft mode" distinction on it. Measured directly:
+  108 built-in `Read` events were recorded during one session whose `entrypoint` was
+  `claude-vscode`, and every file over the threshold in that session was intercepted.
+  The distinction, and "install the CLI for guaranteed optimization", are removed.
+- docs: the "missed optimization" baseline was **66% files Lumen cannot parse** —
+  87 PNGs, 37 Markdown files, and other formats `smart_read` has no outline for.
+  Reported as 6.53M; the honest residual is 2.20M.
+
+### Notes
+- `read_events.is_subagent` exists and migrates, but is **always 0**. Neither writer
+  can yet tell whether a read originated inside a subagent — nothing in the hook
+  payload or the MCP request context says so. It is a placeholder awaiting a source
+  of truth, not a measurement.
+- `~/.claude.json` and `~/.claude/settings.json` are **validated and reported, not
+  auto-repaired**. They are shared with Claude Code, and corrupting either would be
+  a worse failure than the one being fixed. Repair is on an explicit button press.
+
 ## [1.1.4] — 2026-07-28
 
 ### Fixes

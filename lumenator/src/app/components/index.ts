@@ -104,7 +104,10 @@ interface UsageReport {
 // E5 — Optimizer savings (raw token counts; frontend applies RATE.input for USD)
 //
 // HONEST LABELING:
-//   OptimizerReport = tokens CAUSED by Lumen (exact BPE measured per call).
+//   OptimizerReport = tokens CAUSED by Lumen. Exact for Lumen tool calls, which
+//   tokenize in-process with no fallback. Built-in Read events are counted by a
+//   shell hook that can fall back to bytes/4; token_source records which, and
+//   unverifiedProvenanceRows counts the rows that predate that tracking.
 //   This is distinct from "Saved by caching" (turns.cache_read * RATE diff),
 //   which is REPORTED by Claude Code, not caused by Lumen.
 //   Never merge the two numbers in the UI.
@@ -146,6 +149,10 @@ interface OptimizerReport {
     currentChannel: string;
     missedCalls: number;
     missedFullTokens: number;
+    /** Metered events with no recorded token provenance (rows predating 1.1.5). */
+    unverifiedProvenanceRows: number;
+    /** Total metered events, so the UI can say "N of M". */
+    provenanceTotalRows: number;
 }
 
 export type {

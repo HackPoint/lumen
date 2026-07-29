@@ -35,6 +35,34 @@ pub const MIGRATIONS: &[&str] = &[
     // so it is safe to re-run on every open.
     "UPDATE turns SET is_subagent = 1 \
      WHERE is_subagent = 0 AND source_file LIKE '%/subagents/%'",
+    // ── E7 instrumentation ───────────────────────────────────────────────────
+    // Existing rows stay NULL. There is no honest way to backfill provenance for
+    // events already recorded, and inventing it would be worse than admitting the
+    // gap: a NULL here means "unknown", which is the truth.
+    //
+    // session_id  — from CLAUDE_CODE_SESSION_ID, which Claude Code exports to both
+    //               hooks and the MCP server. Lets a read be tied to the turn that
+    //               caused it, which bare second-precision timestamps cannot do
+    //               when several sessions run at once.
+    "ALTER TABLE read_events ADD COLUMN session_id TEXT",
+    // file_mtime  — file modification time at read time, so a re-read of an
+    //               unchanged file is distinguishable from a re-read after an edit.
+    "ALTER TABLE read_events ADD COLUMN file_mtime INTEGER",
+    // req_key     — identity of the REQUEST, not the file. Two recall_file calls on
+    //               one file asking for different items are different requests, so
+    //               keying dedup on path alone overstates the opportunity.
+    "ALTER TABLE read_events ADD COLUMN req_key TEXT",
+    // is_subagent — mirrors the turns classification.
+    "ALTER TABLE read_events ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+    // writer_hook — which hook or binary wrote the row. Two hook installs were
+    //               live simultaneously and their rows were indistinguishable.
+    "ALTER TABLE read_events ADD COLUMN writer_hook TEXT",
+    // token_source— 'measured' | 'estimated'. A dead LUMEN_TOK fell back to
+    //               bytes/4 silently, so figures the README called "measured to
+    //               the token" were estimates and nothing recorded which.
+    "ALTER TABLE read_events ADD COLUMN token_source TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
+     ON read_events(session_id, path, file_mtime)",
 ];
 
 pub const DDL: &str = r#"
@@ -92,9 +120,22 @@ CREATE TABLE IF NOT EXISTS read_events (
     full_tokens     INTEGER NOT NULL,
     saved_tokens    INTEGER NOT NULL,
     routed_via      TEXT NOT NULL,  -- builtin_read | smart_read | recall_file | compress_logs
-    channel         TEXT NOT NULL DEFAULT 'unknown'  -- cli | vscode | unknown
+    channel         TEXT NOT NULL DEFAULT 'unknown',  -- cli | vscode | unknown
+    -- Declared in the order the ALTERs in MIGRATIONS add them, so a fresh database
+    -- and a migrated one agree on column order as well as on the column set.
+    session_id      TEXT,
+    file_mtime      INTEGER,
+    req_key         TEXT,
+    is_subagent     INTEGER NOT NULL DEFAULT 0,
+    writer_hook     TEXT,
+    token_source    TEXT              -- measured | estimated | NULL = unknown
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
+-- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch
+-- against a database that may predate E7, where session_id does not yet exist —
+-- the index would fail, and because init_schema propagates that with `?`, the
+-- whole migration would abort before a single ALTER ran. That is the 1.1.3 defect
+-- with a new trigger, and it would have taken the daemon down with it.
 "#;
 
 #[cfg(test)]
@@ -247,6 +288,170 @@ mod tests {
             vec![("main".to_string(), 0), ("sub".to_string(), 1)],
             "the subagent row must be backfilled from its source_file"
         );
+    }
+
+    /// `read_events` exactly as it existed before E7 — the 0.1.0-era shape plus
+    /// the `channel` column that 1.0.x added.
+    ///
+    /// Hand-written for the same reason as PRE_1_1_0_TURNS: generating it from the
+    /// current DDL would already contain the new columns and the test could never
+    /// fail.
+    const PRE_E7_READ_EVENTS: &str = "\
+        CREATE TABLE read_events ( \
+            ts TEXT NOT NULL, \
+            tool TEXT NOT NULL, \
+            path TEXT NOT NULL, \
+            lines INTEGER, \
+            tokens_returned INTEGER NOT NULL, \
+            full_tokens INTEGER NOT NULL, \
+            saved_tokens INTEGER NOT NULL, \
+            routed_via TEXT NOT NULL, \
+            channel TEXT NOT NULL DEFAULT 'unknown' \
+        )";
+
+    /// The six columns E7 adds, and the index over them.
+    const E7_COLUMNS: [&str; 6] = [
+        "session_id",
+        "file_mtime",
+        "req_key",
+        "is_subagent",
+        "writer_hook",
+        "token_source",
+    ];
+
+    async fn index_names(pool: &sqlx::SqlitePool, table: &str) -> Vec<String> {
+        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{table}'"
+        )))
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        rows.into_iter().map(|(n,)| n).collect()
+    }
+
+    #[tokio::test]
+    async fn a_pre_e7_database_gains_every_new_column_and_the_index() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(PRE_E7_READ_EVENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        init_schema(&pool).await.unwrap();
+
+        let cols = columns(&pool, "read_events").await;
+        for c in E7_COLUMNS {
+            assert!(
+                cols.contains(&c.to_string()),
+                "missing column {c}: {cols:?}"
+            );
+        }
+        assert!(
+            index_names(&pool, "read_events")
+                .await
+                .contains(&"idx_read_events_dedup".to_string()),
+            "the dedup index must exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pre_e7_database_accepts_the_insert_the_meter_performs() {
+        // Column presence is not enough — 1.1.3 was an insert failing on an
+        // unknown column while every report looked fine.
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(PRE_E7_READ_EVENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
+        init_schema(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
+             saved_tokens,routed_via,channel,session_id,file_mtime,req_key,\
+             is_subagent,writer_hook,token_source) \
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind("2026-01-01T00:00:00Z")
+        .bind("Read")
+        .bind("/x.rs")
+        .bind(10_i64)
+        .bind(5_i64)
+        .bind(9_i64)
+        .bind(4_i64)
+        .bind("builtin_read")
+        .bind("cli")
+        .bind("sess-1")
+        .bind(1_700_000_000_i64)
+        .bind("/x.rs")
+        .bind(0_i64)
+        .bind("lumen_meter.sh")
+        .bind("measured")
+        .execute(&pool)
+        .await
+        .expect("the meter's insert must succeed after migration");
+
+        let got: (String, i64, String, String) =
+            sqlx::query_as("SELECT session_id, file_mtime, req_key, token_source FROM read_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            got,
+            (
+                "sess-1".into(),
+                1_700_000_000,
+                "/x.rs".into(),
+                "measured".into()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_database_and_a_migrated_one_are_structurally_identical() {
+        // Compared by PRAGMA, not by .schema text. ALTER TABLE appends columns with
+        // SQLite's `, col TYPE)` style while DDL declares them inline, so the raw
+        // text necessarily differs even when the tables are equivalent.
+        let fresh_dir = TempDir::new().unwrap();
+        let fresh = pool_in(&fresh_dir).await;
+        init_schema(&fresh).await.unwrap();
+
+        let mig_dir = TempDir::new().unwrap();
+        let migrated = pool_in(&mig_dir).await;
+        sqlx::raw_sql(PRE_E7_READ_EVENTS)
+            .execute(&migrated)
+            .await
+            .unwrap();
+        init_schema(&migrated).await.unwrap();
+
+        assert_eq!(
+            columns(&fresh, "read_events").await,
+            columns(&migrated, "read_events").await,
+            "column sets and order must agree"
+        );
+        let mut a = index_names(&fresh, "read_events").await;
+        let mut b = index_names(&migrated, "read_events").await;
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "index sets must agree");
+    }
+
+    #[tokio::test]
+    async fn migrating_twice_changes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(PRE_E7_READ_EVENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        init_schema(&pool).await.unwrap();
+        let once = columns(&pool, "read_events").await;
+        init_schema(&pool).await.expect("second run must not error");
+        let twice = columns(&pool, "read_events").await;
+
+        assert_eq!(once, twice, "a second migration must be a no-op");
     }
 
     #[tokio::test]
