@@ -710,6 +710,141 @@ async fn optimizer_counts_missed_reads_in_every_channel() {
     );
 }
 
+/// Insert a builtin_read whose tokens could not be measured, as the meter records
+/// an image or other binary from 1.2.1 on.
+async fn unmeasurable_event(pool: &SqlitePool, path: &str) {
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,token_source)
+         VALUES(datetime('now'),'Read',?1,0,0,0,0,'builtin_read','vscode','unsupported')"
+            .to_string(),
+    ))
+    .bind(path)
+    .execute(pool)
+    .await
+    .expect("insert unmeasurable read_event");
+}
+
+/// A built-in Read of a PNG is not a missed optimization: there is no outline to
+/// return, so there was no saving available to miss. Counting it inflates the very
+/// number that is supposed to motivate switching tools.
+#[tokio::test]
+async fn optimizer_excludes_unmeasurable_reads_from_the_missed_metric() {
+    let (_d, pool) = fixture().await;
+    event(
+        &pool,
+        "datetime('now')",
+        "builtin_read",
+        "vscode",
+        (4000, 4000, 0),
+    )
+    .await;
+    unmeasurable_event(&pool, "/tmp/shot.png").await;
+    unmeasurable_event(&pool, "/tmp/other.png").await;
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(
+        o.missed_calls, 1,
+        "only the real text read is a missed optimization"
+    );
+    assert_eq!(
+        o.missed_full_tokens, 4000,
+        "and only its tokens count toward the opportunity"
+    );
+    assert_eq!(
+        o.unmeasurable_calls, 2,
+        "the excluded rows are reported, not silently dropped — a metric that \
+         discards part of its population reads as full coverage otherwise"
+    );
+}
+
+/// Rows written before 1.2.1 carry a bytes/4 estimate labelled `estimated`, so they
+/// cannot be recognised by provenance — only by extension. Half the historical missed
+/// total came from these, and every one of the six largest rows was a screenshot.
+#[tokio::test]
+async fn optimizer_excludes_pre_labelling_binary_reads_by_extension() {
+    let (_d, pool) = fixture().await;
+    // Exactly the shape of a real pre-1.2.1 row: a PNG with a bytes/4 estimate.
+    for (path, tokens) in [("/p/shot.png", 87_529), ("/p/logo.WEBP", 40_000)] {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                     saved_tokens,routed_via,channel,token_source)
+             VALUES(datetime('now'),'Read',?1,0,?2,?2,0,'builtin_read','cli','estimated')"
+                .to_string(),
+        ))
+        .bind(path)
+        .bind(tokens)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // A real source file, also 'estimated' — a broken tokenizer, not binary input.
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,token_source)
+         VALUES(datetime('now'),'Read','/p/main.rs',400,3000,3000,0,'builtin_read','cli','estimated')"
+            .to_string(),
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(
+        o.missed_calls, 1,
+        "only main.rs is a missed optimization; the PNG and the WEBP are not"
+    );
+    assert_eq!(o.missed_full_tokens, 3000, "and only its tokens");
+    assert_eq!(
+        o.unmeasurable_calls, 2,
+        "both binaries are reported as excluded, regardless of case in the extension"
+    );
+}
+
+/// Negative control for the filter above. Rows the meter *did* measure must still
+/// count; a filter keyed on the wrong value would zero the metric entirely.
+#[tokio::test]
+async fn optimizer_still_counts_measured_and_unlabelled_missed_reads() {
+    let (_d, pool) = fixture().await;
+    // token_source NULL: every row written before 1.1.5 looks like this.
+    event(
+        &pool,
+        "datetime('now')",
+        "builtin_read",
+        "cli",
+        (100, 100, 0),
+    )
+    .await;
+    // token_source 'measured'.
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,token_source)
+         VALUES(datetime('now'),'Read','/a.rs',10,200,200,0,'builtin_read','cli','measured')"
+            .to_string(),
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // token_source 'estimated': a broken tokenizer, but a real text file.
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,token_source)
+         VALUES(datetime('now'),'Read','/b.rs',10,300,300,0,'builtin_read','cli','estimated')"
+            .to_string(),
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(
+        o.missed_calls, 3,
+        "NULL, measured and estimated are all real reads of real text"
+    );
+    assert_eq!(o.missed_full_tokens, 600);
+    assert_eq!(o.unmeasurable_calls, 0);
+}
+
 #[tokio::test]
 async fn optimizer_breaks_down_by_channel_descending_by_saving() {
     let (_d, pool) = fixture().await;

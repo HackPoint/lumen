@@ -19,6 +19,35 @@ use sqlx::sqlite::SqlitePoolOptions;
 /// records a *missed* optimization and must never count as a saving.
 pub const LUMEN_ROUTES: [&str; 3] = ["smart_read", "recall_file", "compress_logs"];
 
+/// File extensions with no meaningful token count.
+///
+/// A built-in Read of one of these is not a missed optimization: there is no outline
+/// to return and no saving that was available to miss. From 1.2.1 the meter labels
+/// them `token_source = 'unsupported'`, but rows written earlier cannot be identified
+/// that way — a failing tokenizer produced a bytes/4 estimate labelled `estimated`,
+/// which is indistinguishable from a genuinely broken tokenizer on real source.
+///
+/// The distortion is not marginal. Half of the historical missed-optimization total
+/// (3,431,295 of 6,862,596 tokens) comes from 117 binary reads out of 2,749, and the
+/// six largest rows in the whole table are screenshots. Matching on the extension
+/// corrects the figure for all history; the alternative, rewriting those rows, would
+/// mutate a ledger that is otherwise append-only.
+pub const UNMEASURABLE_EXTS: [&str; 21] = [
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "pdf", "tiff", "tif", "zip", "gz", "tar",
+    "dmg", "woff", "woff2", "ttf", "so", "dylib", "o", "a",
+];
+
+/// `AND lower(path) NOT LIKE '%.ext'` for every unmeasurable extension.
+///
+/// Built from a compile-time list of literals, so nothing user-supplied reaches the
+/// SQL and the `AssertSqlSafe` at the call site stays sound.
+fn not_unmeasurable_clause() -> String {
+    UNMEASURABLE_EXTS
+        .iter()
+        .map(|e| format!(" AND lower(path) NOT LIKE '%.{e}'"))
+        .collect()
+}
+
 /// Resolve the metering DB into a sqlx connection URL.
 pub fn db_url() -> String {
     let p = std::env::var("LUMEN_DB").unwrap_or_else(|_| "../../lumen.db".to_string());
@@ -363,6 +392,10 @@ pub struct OptimizerReport {
     /// Label as "not optimized (read in full)". Never count as savings.
     pub missed_calls: i64,
     pub missed_full_tokens: i64,
+    /// Built-in Reads of files with no token count — images, binaries. Excluded
+    /// from `missed_calls` because no optimization was available to miss, and
+    /// reported separately so the exclusion is visible rather than implied.
+    pub unmeasurable_calls: i64,
     /// How many rows in the lifetime window have no recorded token provenance.
     ///
     /// Rows written before 1.1.5 carry no `token_source`, and on installs whose
@@ -489,11 +522,35 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     // never a CLI-only population to filter for. The meter now records the real
     // channel from CLAUDE_CODE_ENTRYPOINT; until enough rows carry it, splitting
     // by channel would describe the hardcoded past, not the present.
-    let (missed_calls, missed_full_tokens): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(full_tokens),0)
-         FROM read_events
-         WHERE routed_via = 'builtin_read'",
-    )
+    //
+    // Rows whose token count could not be measured are excluded. A built-in Read of
+    // a PNG is not a missed optimization: there is no outline to return and no
+    // saving available, so counting it inflates the very number it is supposed to
+    // motivate. Worse, until 1.2.1 those rows carried a bytes/4 estimate — three
+    // screenshots were recorded as 119,921 tokens against roughly 2,750 actual, a
+    // ~44x overstatement, which is how a fabricated multi-million-token
+    // "opportunity" came to be presented as a reason to build a feature.
+    //
+    // The excluded rows are counted rather than dropped: a metric that quietly
+    // discards part of its population reads as complete coverage when it is not.
+    let exclude = not_unmeasurable_clause();
+    let (missed_calls, missed_full_tokens): (i64, i64) =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*), COALESCE(SUM(full_tokens),0)
+             FROM read_events
+             WHERE routed_via = 'builtin_read'
+               AND COALESCE(token_source, '') <> 'unsupported'{exclude}"
+        )))
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (unmeasurable_calls,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM read_events
+         WHERE routed_via = 'builtin_read'
+           AND (COALESCE(token_source, '') = 'unsupported'
+                OR NOT (1=1{exclude}))"
+    )))
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -508,6 +565,7 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
         current_channel: current_channel.0.unwrap_or_else(|| "unknown".to_string()),
         missed_calls,
         missed_full_tokens,
+        unmeasurable_calls,
         unverified_provenance_rows,
         provenance_total_rows,
     })

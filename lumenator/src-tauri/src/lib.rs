@@ -8,13 +8,22 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent, TrayIconId};
 use tauri::{Emitter, Manager, State, WindowEvent};
 use tauri_plugin_positioner::{Position, WindowExt};
-use tauri_plugin_shell::process::CommandEvent;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// Holds the most recent snapshot JSON received from the daemon, so the
 /// frontend can fetch it on demand (avoids the connect-before-listen race).
 #[derive(Default)]
 struct SnapshotCache(Mutex<Option<String>>);
+
+/// The spawned daemon, kept so it can be killed when the app exits.
+///
+/// This used to be bound to `_child` and dropped immediately. Dropping a
+/// `CommandChild` does not terminate the process, so every quit left a daemon
+/// running, reparented to launchd and still holding 127.0.0.1:9999 — after an
+/// upgrade the new app's daemon could not bind and the GUI silently kept reading
+/// from the previous build's daemon.
+struct DaemonChild(Mutex<Option<CommandChild>>);
 
 async fn connect_daemon(app: tauri::AppHandle) {
     loop {
@@ -226,12 +235,17 @@ pub fn run() {
             }
 
             // spawn the bundled daemon as a sidecar, passing the DB path via env
+            // LUMEN_SUPERVISED tells the daemon to exit when this process does. The
+            // sidecar's stdin is a pipe held by the app, so the daemon sees EOF even
+            // when the app is killed outright and no exit handler runs.
             let sidecar = app
                 .shell()
                 .sidecar("lumen-daemon")
                 .expect("sidecar lumen-daemon not found")
-                .env("LUMEN_DB", &db_path);
-            let (mut rx, _child) = sidecar.spawn().expect("failed to spawn daemon");
+                .env("LUMEN_DB", &db_path)
+                .env("LUMEN_SUPERVISED", "1");
+            let (mut rx, child) = sidecar.spawn().expect("failed to spawn daemon");
+            app.manage(DaemonChild(Mutex::new(Some(child))));
 
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
@@ -331,8 +345,19 @@ pub fn run() {
             setup::lumen_set_autostart,
             setup::lumen_artifact_health
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Kill the daemon on the way out. The daemon's own stdin watchdog covers
+            // the case where this never runs (SIGKILL, force quit); this covers the
+            // ordinary quit, and does it before the process image goes away so the
+            // port is free by the time a replacement app launches.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(child) = app.state::<DaemonChild>().0.lock().unwrap().take() {
+                    let _ = child.kill();
+                }
+            }
+        });
 }
 
 /// Return the cached daemon snapshot JSON (or null if not received yet).

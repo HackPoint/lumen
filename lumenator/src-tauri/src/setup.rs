@@ -909,8 +909,12 @@ const METER_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # Reads no file contents beyond tokenizing the file that was already read, writes
 # only to the local SQLite DB, makes no network calls, and executes nothing from
 # the payload.
-LUMEN_DB="__LUMEN_DB__"
-LUMEN_TOK="__LUMEN_TOK__"
+# Both are overridable. The generated path is the default, not a constant: with it
+# hardcoded there was no way to exercise this script without writing to the real
+# ledger, so the installed hook — the one that actually runs — was the only part of
+# the pipeline that could not be tested.
+LUMEN_DB="${LUMEN_DB:-__LUMEN_DB__}"
+LUMEN_TOK="${LUMEN_TOK:-__LUMEN_TOK__}"
 
 set -uo pipefail
 
@@ -955,7 +959,22 @@ elif isinstance(tr, str):
 with open(os.environ["LUMEN_OUT"], "w") as f:
     f.write(out)
 clean = lambda s: s.replace("\t", " ").replace("\n", " ")
-sys.stdout.write("\t".join([tool, clean(path), clean(cmd)[:200]]))
+
+def cmd_label(s):
+    # Program and subcommand only — "cargo test", "git status", "npm run".
+    #
+    # Not the whole command line. A command line routinely carries credentials
+    # (curl -H "Authorization: Bearer ...", psql "postgres://u:p@host") and this
+    # value is stored in a database that gets backed up and shipped around. The
+    # measurement is output volume by kind of command, which two tokens answer
+    # fully. Leading VAR=value assignments are dropped first so that
+    # `TOKEN=secret curl ...` records "curl" rather than the secret.
+    toks = clean(s).split()
+    while toks and "=" in toks[0] and not toks[0].startswith("-"):
+        toks.pop(0)
+    return " ".join(toks[:2])[:60]
+
+sys.stdout.write("\t".join([tool, clean(path), cmd_label(cmd)]))
 ') || exit 0
 [ -n "${FIELDS:-}" ] || exit 0
 
@@ -963,21 +982,34 @@ TOOL_NAME=$(printf '%s' "$FIELDS" | cut -f1)
 FILE_PATH=$(printf '%s' "$FIELDS" | cut -f2)
 COMMAND=$(printf '%s' "$FIELDS" | cut -f3)
 
-# Count tokens. A dead LUMEN_TOK used to fall back to bytes/4 in silence, so the
-# Optimizer screen showed estimates while the README promised measurements. The
-# fallback stays — a row beats no row — but it is now labelled and logged.
-# Emits "<count> <measured|estimated>" on one line. The provenance must travel
-# with the value: an earlier version set a TOKEN_SOURCE variable inside the
-# function, but every call site is a command substitution — a subshell — so the
-# assignment was discarded and estimates were recorded as "measured". That is
-# worse than no label, because it launders an estimate as a measurement, which is
-# the exact defect this release exists to remove.
+# Count the tokens in the file named by $1. Emits "<count> <provenance>" on one
+# line, where provenance is measured | unsupported | estimated.
+#
+# The provenance must travel with the value. An earlier version set a TOKEN_SOURCE
+# variable inside the function, but every call site is a command substitution — a
+# subshell — so the assignment was discarded and estimates were recorded as
+# "measured". Laundering an estimate as a measurement is worse than no label.
+#
+# Takes a path rather than reading stdin. With `count_tokens < "$f"` the tokenizer
+# and the fallback shared one file descriptor and therefore one offset, so whatever
+# the tokenizer consumed before failing was missing from the fallback's count. Each
+# redirect below opens the file independently.
 count_tokens() {
+    _f="$1"
     if [ -x "$LUMEN_TOK" ]; then
-        _c=$("$LUMEN_TOK" 2>/dev/null) && { printf '%s measured\n' "$_c"; return 0; }
+        _c=$("$LUMEN_TOK" < "$_f" 2>/dev/null)
+        _rc=$?
+        [ "$_rc" -eq 0 ] && { printf '%s measured\n' "$_c"; return 0; }
+        # Exit 3 means the input is not text. A PNG has no token count, and
+        # inventing one is not a lesser error than admitting it: bytes/4 overstates
+        # a screenshot by ~40x, and that fabricated number is what put a 4.3M-token
+        # "optimization opportunity" in front of a feature decision.
+        [ "$_rc" -eq 3 ] && { printf '0 unsupported\n'; return 0; }
     fi
+    # A genuinely broken tokenizer still gets a row — a row beats no row — but the
+    # estimate is labelled and logged rather than passed off as a measurement.
     echo "lumen_meter: LUMEN_TOK unusable at $LUMEN_TOK — recording an estimate" >&2
-    printf '%s estimated\n' "$(wc -c | awk '{print int($1/4)}')"
+    printf '%s estimated\n' "$(wc -c < "$_f" | awk '{print int($1/4)}')"
 }
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -986,18 +1018,19 @@ case "$TOOL_NAME" in
 Read)
     [ -n "$FILE_PATH" ] && [ -f "$FILE_PATH" ] || exit 0
     LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
-    _r=$(count_tokens < "$FILE_PATH")
+    _r=$(count_tokens "$FILE_PATH")
     FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
     MTIME=$(stat -f %m "$FILE_PATH" 2>/dev/null || stat -c %Y "$FILE_PATH" 2>/dev/null || echo "")
     ROUTE="builtin_read"; REQ_KEY="$FILE_PATH"; RETURNED="$FULL_TOKENS"; TARGET="$FILE_PATH"
     ;;
 Bash)
     # Observation only. No PreToolUse on Bash, no interception, no wrapper.
-    _r=$(count_tokens < "$OUT_FILE")
+    _r=$(count_tokens "$OUT_FILE")
     FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
     LINE_COUNT=""; MTIME=""
     ROUTE="bash_output"; REQ_KEY=""; RETURNED=0; TARGET="$COMMAND"
-    # Nothing measurable means nothing worth a row.
+    # Nothing measurable means nothing worth a row. Unlike a Read, where the event
+    # itself is the datum, a Bash call with no output carries no information.
     [ "${FULL_TOKENS:-0}" -gt 0 ] || exit 0
     ;;
 *)
@@ -1315,14 +1348,27 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
     // PreToolUse: Read intercept
     merge_hook_entry(&mut root["hooks"]["PreToolUse"], "Read", &intercept);
 
-    // PostToolUse: meter for Read + three lumen tools
+    // PostToolUse: meter for Read (the missed-optimization baseline) and Bash
+    // (output volume, observation only).
+    //
+    // Bash was missing until 1.2.1. The meter script has had a `Bash)` branch since
+    // E7, but nothing ever routed Bash to it, so the branch was unreachable and
+    // `bash_output` had zero rows in 51 days — a deliverable that measured nothing.
+    for matcher in &["Read", "Bash"] {
+        merge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher, &meter);
+    }
+
+    // The three mcp__lumen__* matchers registered through 1.2.0 are removed. The
+    // lumen tools meter themselves in-process, so the meter script's `case` fell
+    // straight through to `exit 0` for them — every smart_read/recall_file/
+    // compress_logs call forked a bash and a python3 to do nothing. Waste in a
+    // tool whose entire purpose is removing waste.
     for matcher in &[
-        "Read",
         "mcp__lumen__smart_read",
         "mcp__lumen__recall_file",
         "mcp__lumen__compress_logs",
     ] {
-        merge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher, &meter);
+        unmerge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher);
     }
 
     match serde_json::to_string_pretty(&root) {
@@ -1380,6 +1426,32 @@ fn merge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str, cmd: &str) {
         }
     } else {
         arr.push(entry);
+    }
+}
+
+/// Remove Lumen's hook from `matcher`, leaving anything else in place.
+///
+/// Deliberately narrower than `remove_lumen_hooks`, which drops a whole matcher
+/// entry once it finds a lumen command in it. Here the entry may be shared with
+/// another tool's hook, so only the lumen command is pulled and the entry is
+/// dropped just when nothing is left. Removing a user's unrelated hook while
+/// tidying up our own registration would be a far worse bug than the waste this
+/// is cleaning up.
+fn unmerge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str) {
+    let Some(arr) = arr_val.as_array_mut() else {
+        return;
+    };
+    let Some(i) = arr
+        .iter()
+        .position(|e| e["matcher"].as_str() == Some(matcher))
+    else {
+        return;
+    };
+    if let Some(hooks) = arr[i]["hooks"].as_array_mut() {
+        hooks.retain(|h| !h["command"].as_str().is_some_and(|c| c.contains("lumen_")));
+        if hooks.is_empty() {
+            arr.remove(i);
+        }
     }
 }
 
@@ -3210,7 +3282,7 @@ mod tests {
     // ── step_install_hooks_in ────────────────────────────────────────────────
 
     #[test]
-    fn installing_hooks_registers_the_intercept_and_all_four_meters() {
+    fn installing_hooks_registers_the_intercept_and_the_read_and_bash_meters() {
         let h = TempDir::new().unwrap();
         let step = step_install_hooks_in(h.path());
         assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
@@ -3235,13 +3307,392 @@ mod tests {
             .collect();
         assert_eq!(
             matchers,
-            vec![
-                "Read",
-                "mcp__lumen__smart_read",
-                "mcp__lumen__recall_file",
-                "mcp__lumen__compress_logs"
-            ],
-            "the built-in Read plus all three lumen tools must be metered"
+            vec!["Read", "Bash"],
+            "the meter handles exactly Read and Bash; the mcp__lumen__* tools meter \
+             themselves in-process, so registering them only forked a bash and a \
+             python3 per call to reach `exit 0`"
+        );
+        for e in post {
+            assert!(
+                e["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("lumen_meter.sh"),
+                "every PostToolUse matcher points at the meter"
+            );
+        }
+    }
+
+    /// Bash must be routed to the meter, or the script's `Bash)` branch is dead code.
+    ///
+    /// It was exactly that from E7 until 1.2.1: the branch existed, nothing invoked
+    /// it, and `bash_output` had zero rows in 51 days. The old version of this test
+    /// asserted the four-matcher list and so actively locked the gap in place, which
+    /// is why this assertion is separate and named for the consequence.
+    #[test]
+    fn the_bash_branch_of_the_meter_is_actually_reachable() {
+        let h = TempDir::new().unwrap();
+        step_install_hooks_in(h.path());
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+
+        let post = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert!(
+            post.iter().any(|e| e["matcher"] == "Bash"),
+            "Bash is not registered, so METER_TEMPLATE's `Bash)` arm can never run"
+        );
+        assert!(
+            METER_TEMPLATE.contains("\nBash)"),
+            "the meter must still have a Bash arm for the registration to reach"
+        );
+    }
+
+    /// Upgrading an install that carries the pre-1.2.1 matchers must clean them up.
+    #[test]
+    fn upgrading_replaces_the_dead_mcp_matchers_with_bash() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        let meter = lumen_dir_in(h.path())
+            .join("lumen_meter.sh")
+            .to_string_lossy()
+            .to_string();
+        // Exactly what 1.2.0 left behind.
+        std::fs::write(
+            global_settings_path_in(h.path()),
+            serde_json::to_string(&serde_json::json!({
+                "hooks": {"PostToolUse": [
+                    {"matcher": "Read", "hooks": [{"type": "command", "command": meter}]},
+                    {"matcher": "mcp__lumen__smart_read", "hooks": [{"type": "command", "command": meter}]},
+                    {"matcher": "mcp__lumen__recall_file", "hooks": [{"type": "command", "command": meter}]},
+                    {"matcher": "mcp__lumen__compress_logs", "hooks": [{"type": "command", "command": meter}]},
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        step_install_hooks_in(h.path());
+
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_settings_path_in(h.path())).unwrap(),
+        )
+        .unwrap();
+        let matchers: Vec<&str> = v["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            matchers,
+            vec!["Read", "Bash"],
+            "an upgrade must drop the three dead matchers and add Bash"
+        );
+    }
+
+    /// The cleanup must not take a user's own hook with it.
+    ///
+    /// `remove_lumen_hooks` drops a whole matcher entry once it spots a lumen
+    /// command; reusing it here would delete a co-registered third-party hook. This
+    /// is the negative control for that mistake.
+    #[test]
+    fn removing_our_matcher_leaves_a_foreign_hook_on_it_alone() {
+        let mut arr = serde_json::json!([
+            {"matcher": "mcp__lumen__smart_read", "hooks": [
+                {"type": "command", "command": "/x/lumen_meter.sh"},
+                {"type": "command", "command": "/opt/someone-elses-tool.sh"}
+            ]},
+            {"matcher": "mcp__lumen__recall_file", "hooks": [
+                {"type": "command", "command": "/x/lumen_meter.sh"}
+            ]}
+        ]);
+
+        unmerge_hook_entry(&mut arr, "mcp__lumen__smart_read");
+        unmerge_hook_entry(&mut arr, "mcp__lumen__recall_file");
+
+        let a = arr.as_array().unwrap();
+        assert_eq!(
+            a.len(),
+            1,
+            "the entry with a foreign hook survives; the lumen-only entry is removed"
+        );
+        assert_eq!(a[0]["matcher"], "mcp__lumen__smart_read");
+        let hooks = a[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1, "only the lumen hook was pulled");
+        assert_eq!(hooks[0]["command"], "/opt/someone-elses-tool.sh");
+    }
+
+    /// A hardcoded DB path made the installed hook the one component that could not
+    /// be exercised without writing to the user's real ledger.
+    #[test]
+    fn the_generated_meter_lets_lumen_db_be_overridden() {
+        let script = desired_meter_script("/tmp/generated.db", "/tmp/generated-tok");
+        assert!(
+            script.contains(r#"LUMEN_DB="${LUMEN_DB:-"#),
+            "LUMEN_DB must default to the generated path, not be fixed to it"
+        );
+        assert!(
+            script.contains(r#"LUMEN_TOK="${LUMEN_TOK:-"#),
+            "LUMEN_TOK likewise, so a test can point at a stub tokenizer"
+        );
+    }
+
+    // ── The generated meter, executed ────────────────────────────────────────
+    //
+    // Everything above inspects the template as text. These run it. The whole class
+    // of bug this release fixes lived in the gap between the two: a `Bash)` arm that
+    // was never reached, a TOKEN_SOURCE assignment swallowed by a subshell, a
+    // fallback that shared a file offset with the tokenizer it was replacing. None
+    // of those are visible in a string comparison.
+    //
+    // A stub tokenizer stands in for lumen-tok so the exit-code branches can be
+    // driven directly and the test needs no built binary. `tok_cli.rs` covers the
+    // real binary's side of the same contract.
+
+    /// Build a meter script wired to `db` and a stub tokenizer, and a temp home.
+    fn meter_harness(stub: &str) -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let h = TempDir::new().unwrap();
+        let db = h.path().join("ledger.db");
+        let tok = h.path().join("stub-tok");
+        std::fs::write(&tok, stub).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Real schema, so a column the meter inserts but the schema lacks fails here
+        // rather than silently in production.
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import sqlite3,sys; sqlite3.connect(sys.argv[1]).executescript(sys.argv[2])")
+            .arg(&db)
+            .arg(lumen_core::schema::DDL)
+            .output()
+            .expect("python3 must be present; the meter itself requires it");
+        assert!(
+            out.status.success(),
+            "schema setup failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let script = h.path().join("lumen_meter.sh");
+        std::fs::write(
+            &script,
+            desired_meter_script(&db.to_string_lossy(), &tok.to_string_lossy()),
+        )
+        .unwrap();
+        (h, script, db)
+    }
+
+    /// Feed `payload` to `script`; return the rows it wrote as tab-joined strings.
+    fn run_meter(
+        script: &std::path::Path,
+        db: &std::path::Path,
+        payload: &str,
+        env: &[(&str, &str)],
+    ) -> Vec<String> {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().expect("spawn bash");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "the meter must always exit 0 so it never fails a tool call: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let q = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import sqlite3,sys\n\
+                 for r in sqlite3.connect(sys.argv[1]).execute(\
+                 'SELECT routed_via,token_source,full_tokens,tokens_returned,path,\
+                 COALESCE(req_key,\\'-\\'),COALESCE(session_id,\\'-\\') \
+                 FROM read_events ORDER BY rowid'):\n\
+                 \x20   print('\\t'.join(str(c) for c in r))",
+            )
+            .arg(db)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&q.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn read_payload(path: &str) -> String {
+        format!(
+            r#"{{"tool_name":"Read","tool_input":{{"file_path":"{path}"}},"tool_response":"ok"}}"#
+        )
+    }
+
+    #[test]
+    fn a_measured_read_is_recorded_as_measured() {
+        let (h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 4242\n");
+        let target = h.path().join("some.rs");
+        std::fs::write(&target, "fn main() {}\n").unwrap();
+
+        let rows = run_meter(
+            &script,
+            &db,
+            &read_payload(&target.to_string_lossy()),
+            &[("CLAUDE_CODE_SESSION_ID", "sess-abc")],
+        );
+        assert_eq!(rows.len(), 1, "one Read, one row: {rows:?}");
+        let f: Vec<&str> = rows[0].split('\t').collect();
+        assert_eq!(f[0], "builtin_read");
+        assert_eq!(
+            f[1], "measured",
+            "a zero exit from the tokenizer is a measurement"
+        );
+        assert_eq!(f[2], "4242", "the tokenizer's number, verbatim");
+        assert_eq!(f[6], "sess-abc", "the session id must reach the row");
+    }
+
+    /// Exit 3 means "not text". The row must say so and carry no invented count.
+    #[test]
+    fn an_unreadable_binary_is_recorded_as_unsupported_with_no_count() {
+        // Exits 3 like the real lumen-tok on a PNG. Note it prints nothing.
+        let (h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\nexit 3\n");
+        let target = h.path().join("shot.png");
+        std::fs::write(&target, [0x89u8, b'P', b'N', b'G', 0xFF, 0xFE, 0x80]).unwrap();
+
+        let rows = run_meter(&script, &db, &read_payload(&target.to_string_lossy()), &[]);
+        assert_eq!(rows.len(), 1, "the read still gets a row: {rows:?}");
+        let f: Vec<&str> = rows[0].split('\t').collect();
+        assert_eq!(f[1], "unsupported", "provenance must name the reason");
+        assert_eq!(
+            f[2], "0",
+            "no count exists for a PNG; bytes/4 would overstate it ~40x"
+        );
+    }
+
+    /// A genuinely broken tokenizer still yields a row, labelled as an estimate.
+    /// This is the negative control for the test above: if the script treated every
+    /// nonzero exit as 'unsupported', this would fail.
+    #[test]
+    fn a_broken_tokenizer_is_recorded_as_an_estimate_not_as_unsupported() {
+        let (h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\nexit 1\n");
+        let target = h.path().join("some.rs");
+        // 40 bytes -> bytes/4 = 10.
+        std::fs::write(&target, "0123456789012345678901234567890123456789").unwrap();
+
+        let rows = run_meter(&script, &db, &read_payload(&target.to_string_lossy()), &[]);
+        let f: Vec<&str> = rows[0].split('\t').collect();
+        assert_eq!(
+            f[1], "estimated",
+            "exit 1 is a broken tokenizer, which is not the same as unmeasurable input"
+        );
+        assert_eq!(
+            f[2], "10",
+            "the fallback must see the whole file: it reads the path, not a file \
+             descriptor whose offset the tokenizer already advanced"
+        );
+    }
+
+    /// The fix for the hardcoded path, proven by where the row lands.
+    #[test]
+    fn lumen_db_in_the_environment_redirects_the_row() {
+        let (h, script, generated_db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 7\n");
+        let elsewhere = h.path().join("redirected.db");
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import sqlite3,sys; sqlite3.connect(sys.argv[1]).executescript(sys.argv[2])")
+            .arg(&elsewhere)
+            .arg(lumen_core::schema::DDL)
+            .output()
+            .unwrap();
+
+        let target = h.path().join("some.rs");
+        std::fs::write(&target, "fn main() {}\n").unwrap();
+        let payload = read_payload(&target.to_string_lossy());
+
+        let rows = run_meter(
+            &script,
+            &elsewhere,
+            &payload,
+            &[("LUMEN_DB", &elsewhere.to_string_lossy())],
+        );
+        assert_eq!(rows.len(), 1, "the override target received the row");
+        assert!(
+            run_meter(&script, &generated_db, "{}", &[]).is_empty(),
+            "and the generated default stayed empty"
+        );
+    }
+
+    /// The arm that was unreachable until 1.2.1.
+    #[test]
+    fn a_bash_call_is_metered_from_its_output() {
+        let (_h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 99\n");
+        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"AWS_SECRET=hunter2 cargo test --workspace --all-targets"},"tool_response":{"stdout":"lots of output\n","stderr":""}}"#;
+
+        let rows = run_meter(&script, &db, payload, &[]);
+        assert_eq!(rows.len(), 1, "Bash must produce a row now: {rows:?}");
+        let f: Vec<&str> = rows[0].split('\t').collect();
+        assert_eq!(f[0], "bash_output");
+        assert_eq!(f[2], "99", "full_tokens is the output's token count");
+        assert_eq!(f[3], "0", "observation only: nothing was saved");
+        assert_eq!(
+            f[4], "cargo test",
+            "only the program and subcommand are stored, with the leading \
+             VAR=value assignment dropped so the secret never reaches the database"
+        );
+    }
+
+    /// A Bash call that produced nothing carries no information and gets no row.
+    #[test]
+    fn a_bash_call_with_no_output_is_not_recorded() {
+        let (_h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 0\n");
+        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":"","stderr":""}}"#;
+        assert!(run_meter(&script, &db, payload, &[]).is_empty());
+    }
+
+    /// The lumen tools meter themselves; the script must not double-count them.
+    #[test]
+    fn an_mcp_tool_call_writes_nothing() {
+        let (_h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 5\n");
+        for tool in [
+            "mcp__lumen__smart_read",
+            "mcp__lumen__recall_file",
+            "mcp__lumen__compress_logs",
+        ] {
+            let payload =
+                format!(r#"{{"tool_name":"{tool}","tool_input":{{}},"tool_response":"x"}}"#);
+            assert!(
+                run_meter(&script, &db, &payload, &[]).is_empty(),
+                "{tool} must not be metered by the hook"
+            );
+        }
+    }
+
+    /// The command label must not carry credentials into the database.
+    #[test]
+    fn the_meter_records_only_the_program_and_subcommand() {
+        assert!(
+            METER_TEMPLATE.contains("def cmd_label("),
+            "the command must be reduced to a label, not stored whole"
+        );
+        assert!(
+            !METER_TEMPLATE.contains("clean(cmd)[:200]"),
+            "storing 200 characters of a command line captures tokens and passwords"
         );
     }
 

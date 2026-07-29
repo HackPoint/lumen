@@ -529,7 +529,7 @@ If interception is not happening in the CLI:
 # confirm hooks are registered
 python3 -c "import json; d=json.load(open('/Users/$USER/.claude/settings.json')); \
   [print(p, e.get('matcher')) for p,arr in d.get('hooks',{}).items() for e in arr]"
-# expected: PreToolUse Read  and  PostToolUse Read
+# expected: PreToolUse Read, PostToolUse Read, PostToolUse Bash
 
 # confirm hook scripts exist and are executable
 ls -la ~/.claude/lumen/
@@ -551,9 +551,30 @@ Here is exactly what Lumen's hooks do:
 file is large, writes a redirect message to stderr for Claude to act on. It reads no
 file contents, writes nothing to disk, and makes no network calls.
 
-`lumen_meter.sh` (PostToolUse, CLI only) — a shell script that fires after a `Read`
-completes. It counts the tokens in the file using `lumen-tok` (a local BPE tokenizer,
-no network) and inserts one row into a local SQLite database.
+`lumen_meter.sh` (PostToolUse) — a shell script that fires after a `Read` or a `Bash`
+call completes. It inserts one row into a local SQLite database and makes no network
+calls. What it records differs by tool:
+
+- **After a `Read`** it counts the tokens in the file that was just read, using
+  `lumen-tok` (a local BPE tokenizer, no network), and stores the file's path, line
+  count and modification time. Files that are not text — images, binaries — get a row
+  with no token count and a provenance of `unsupported`; Lumen does not guess a number
+  for them.
+- **After a `Bash`** call it counts the tokens in the output the command already
+  produced, to measure how much of your context goes to command output rather than to
+  files. This is **observation only**: there is no `PreToolUse` hook on `Bash`, nothing
+  is intercepted, blocked, or wrapped, and no command is ever executed by Lumen.
+
+  Of the command line itself, only the program and its subcommand are stored — `cargo
+  test`, `git status` — never the full text. Command lines routinely carry credentials
+  in flags and URLs, and a leading `VAR=value` assignment is dropped before the label
+  is taken, so `TOKEN=secret curl …` is recorded as `curl`. Command **output** is
+  tokenized in a temporary file that is deleted when the hook exits, and its contents
+  are never stored — only the resulting count.
+
+If you would rather not record `Bash` output at all, remove the `Bash` entry under
+`PostToolUse` in `~/.claude/settings.json`. Everything else keeps working; re-running
+Setup will add it back.
 
 ### The database
 

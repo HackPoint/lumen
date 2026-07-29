@@ -25,6 +25,42 @@ fn ws_addr() -> String {
     }
 }
 
+/// Exit when the process supervising this daemon goes away.
+///
+/// The GUI spawns the daemon as a sidecar with a piped stdin and sets
+/// `LUMEN_SUPERVISED=1`. When the GUI dies — Quit, a crash, or the app being
+/// replaced by `brew upgrade` — the write end of that pipe closes and the read
+/// below returns 0 bytes.
+///
+/// Without this the daemon is reparented to launchd and keeps holding
+/// 127.0.0.1:9999. The *next* app launch then cannot bind: its own daemon spins
+/// in the supervised restart loop below forever while the GUI talks to the
+/// orphan from the previous build. That is a silent version skew on every
+/// upgrade, and it is silent precisely because the retry loop was designed to
+/// recover from a *transient* collision and cannot tell one from a permanent
+/// squatter.
+///
+/// Gated on the env var, not applied unconditionally: an unsupervised run has no
+/// such pipe. `lumen-daemon < /dev/null` would see an immediate EOF and exit
+/// instantly, which would break running the daemon by hand.
+fn exit_when_supervisor_does() {
+    if std::env::var("LUMEN_SUPERVISED").as_deref() != Ok("1") {
+        return;
+    }
+    std::thread::spawn(|| {
+        let mut buf = [0u8; 64];
+        loop {
+            // Anything actually sent on stdin is ignored; only EOF matters.
+            match std::io::stdin().lock().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+        eprintln!("lumen-daemon: supervisor exited, shutting down to free the port");
+        std::process::exit(0);
+    });
+}
+
 /// Resolve the directory of Claude Code transcripts to watch.
 ///
 /// Overridable via `LUMEN_PROJECTS_DIR` so the e2e tests can point the daemon at
@@ -83,7 +119,31 @@ type Offsets = Arc<Mutex<HashMap<PathBuf, u64>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = std::env::var("LUMEN_DB").unwrap_or_else(|_| "lumen.db".to_string());
+    exit_when_supervisor_does();
+
+    // Resolve exactly as every other writer does. The old fallback was the string
+    // "lumen.db" — relative to the working directory — which is the bug that split
+    // the ledger in two: a daemon started with LUMEN_DB unset created a second
+    // database wherever it happened to be launched from, and both files then
+    // accumulated real events. Sharing meter::resolve_db_path is what keeps the
+    // GUI, the MCP server, the hook and the daemon pointed at one file by
+    // construction rather than by four copies of the same convention.
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().to_string());
+    let db_path = match lumen_core::meter::resolve_db_path(
+        std::env::var("LUMEN_DB").ok().as_deref(),
+        home.as_deref(),
+    ) {
+        Some(p) => p.to_string_lossy().to_string(),
+        None => {
+            // Failing loudly beats inventing a path. A daemon that cannot name its
+            // database would otherwise start a third ledger nobody reads.
+            eprintln!("lumen-daemon: cannot resolve a database path; set LUMEN_DB");
+            return Ok(());
+        }
+    };
+    if let Some(parent) = Path::new(&db_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let conn = format!("sqlite:{db_path}?mode=rwc");
     let pool = SqlitePoolOptions::new().connect(&conn).await?;
     eprintln!("lumen-daemon using db: {db_path}");

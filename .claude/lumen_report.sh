@@ -101,6 +101,41 @@ ${SINCE_CLAUSE};
 
 SELECT '' AS '';
 
+-- ── Unmeasurable reads ───────────────────────────────────────────────────────
+-- Built-in Reads of files with no token count: images, binaries. These are
+-- excluded from the missed-optimization metric because no optimization was
+-- available to miss, and printed here so the exclusion is auditable rather than
+-- implied. Rows written before 1.2.1 are NOT in this count: back then a failing
+-- tokenizer produced a bytes/4 estimate labelled 'estimated', indistinguishable
+-- from a genuinely broken tokenizer on a text file. Compare 'estimated' below
+-- against the extension breakdown before trusting any historical total.
+SELECT
+    COALESCE(token_source, '(unlabelled)')                    AS token_source,
+    COUNT(*)                                                  AS events,
+    SUM(full_tokens)                                          AS full_tokens
+FROM  read_events
+WHERE routed_via = 'builtin_read'
+GROUP BY 1
+ORDER BY events DESC;
+
+SELECT '' AS '';
+
+-- Extension breakdown of everything still labelled 'estimated', which is where a
+-- pre-1.2.1 binary read hides.
+SELECT
+    CASE WHEN path LIKE '%.%'
+         THEN lower(replace(path, rtrim(path, replace(path, '.', '')), ''))
+         ELSE '(none)' END                                    AS ext,
+    COUNT(*)                                                  AS events,
+    SUM(full_tokens)                                          AS full_tokens_recorded
+FROM  read_events
+WHERE routed_via = 'builtin_read' AND token_source = 'estimated'
+GROUP BY 1
+ORDER BY full_tokens_recorded DESC
+LIMIT 12;
+
+SELECT '' AS '';
+
 -- ── Top 5 files by full_tokens (missed vs captured) ─────────────────────────
 SELECT
     path,
