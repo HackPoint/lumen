@@ -2759,10 +2759,13 @@ name = "lumen-mcp"
 version = "1.4.0"
 dependencies = [
  "lumen-core",
+ "lumen-stats",
  "rusqlite",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
