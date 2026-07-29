@@ -1,5 +1,102 @@
 # Changelog
 
+## [1.3.0] — 2026-07-29
+
+### Ranked, budget-aware outline — implemented, shipped **off**, and measured
+
+`smart_read`'s outline can now be sized by the economics of the call instead of by a fixed
+format. An intercepted read costs exactly one extra round, so an outline is worth returning
+only when it saves more than that round costs:
+
+```
+S_min = (C × 0.5 + O × 25) / (6.25 + 0.5·R)      budget = full_tokens − S_min
+```
+
+`C` and `O` come from your own `turns` history when there is enough of it, and the row
+records which. Files that cannot clear the bar are refused, with the refusal and the
+numbers behind it written to the ledger.
+
+Enable with `LUMEN_RANKED_OUTLINE=on`, or `=ab` to run both arms split by a stable hash of
+the path. **Unset — the default — changes nothing.** Anything unrecognised is also off: a
+typo must not enable an experiment.
+
+### Read this before enabling it: the ranking is not the win
+
+Measured across this repository, the ranked outline returns **73% more** tokens than the
+outline it replaces — 10,759 against 6,205 over the files that qualify. It captures nested
+definitions the old outline never did, and the budget is usually generous enough that
+nothing is trimmed at all: **52 of 56** definitions included at the measured context, **37
+of 37** at 100k. The ranking machinery is close to inert at current economics.
+
+What pays is the **refusal**. Replaying the ledger, declining calls that cannot clear
+`S_min` would have moved `smart_read` from **−$24.41 to +$15.09** and `recall_file` from
+**+$90.29 to +$159.24** — about **+$108** by not making 831 of 1,470 calls. That is a gate,
+not a trimmer, and its proper home is the `PreToolUse` threshold rather than `smart_read`:
+by the time `smart_read` runs, the extra round is already spent. That threshold is
+deliberately untouched here.
+
+Also worth correcting: the premise that outlines cost ~1,300–1,600 tokens is `recall_file`'s
+figure. `smart_read`'s median return is **418** tokens, and it has **zero** net-negative
+rows in 421 calls. The losses were dollar-negative — a saving worth less than the round it
+forced — not token-negative.
+
+### Upstream tag queries turned out to be the wrong tool
+
+They index symbols for jump-to-definition, not scope for outlining.
+
+- **TypeScript**: upstream captures only declaration forms, so ordinary `class`,
+  `function`, `method_definition` and every call yield nothing — measured at **0
+  definitions in a 652-line Angular service** and 0 in a 57-line component. A ranked
+  outline of the frontend would have been empty.
+- **Rust**: `impl` blocks are `@reference.implementation`, leaving every method with no
+  container — `fn new` with nothing saying what it constructs.
+
+Both are supplemented by queries authored in-repo rather than copied, which satisfies the
+reason upstream was preferred (staying MIT-clean; copying from an Apache-2.0 source is what
+that ruled out). That service went from 0 to **56** definitions.
+
+### Fixes and deviations found while building it
+
+- **`Query::new` compiles the pattern set** and cost 9–16 ms of a 10 ms budget, so the
+  feature timed out on any file worth outlining. Compiled once per process now: the whole
+  pipeline is 2 ms at 421 lines, 7 ms at 1,433, 17 ms at 4,198 — parse-dominated.
+- **The wall-clock ceiling is 50 ms, not 10.** What it guards against is returning the
+  whole file, which costs the model far more than 50 ms in latency and tokens; 10 ms
+  rejected exactly the large files an outline helps most. Ten times that in debug builds,
+  whose constant factor is 3–5× and is not what the ceiling is calibrated against.
+- **The A/B split was 100/0.** FNV-1a's lowest bit is close to the XOR of its input bytes,
+  so on structured paths `hash % 2` put **every one of 4,000 generated paths in the same
+  arm** while reporting a 50/50 design. A splitmix64 finalizer brings it to 0.509, and the
+  assignment of four real paths is pinned so a future hash change fails a test instead of
+  silently re-randomising an experiment in flight.
+- **The inflation guard is unreachable.** `budget = full − S_min` with `S_min > 0` and the
+  fit never exceeding budget means `returned < full` by construction. It is kept as a
+  backstop against a future change to the budget rule, and the test asserts that invariant
+  rather than faking a trigger.
+- **The cache key omits the budget**, departing from the specification. Bucketing the
+  budget was meant to stop context fluctuations thrashing the cache — but what is cached is
+  the tag extraction, which does not depend on the budget at all, so including it would
+  cause the very thrashing it was meant to prevent. `mtime` **and** `size` are both in the
+  key: this runs inside a tool call where a file can be written and re-read within one
+  second, which second-resolution mtime cannot see.
+
+### Notes
+
+- 519 Rust tests (+18 in this release), 251 frontend. Red-then-green on the export prior;
+  the budget-guard test initially passed with the guard deleted — `fit_budget` returns k=0
+  for a non-positive budget and reports the same verdict — and now asserts the ordering
+  property only the guard provides.
+- Nine columns added to `read_events`: `budget`, `s_min`, `econ_context`, `econ_rounds`,
+  `econ_output`, `econ_source`, `k_selected`, `n_total`, `coeff_version`. NULL on every row
+  not produced by this path, including all hook-written rows — a zero would claim a
+  decision was made.
+- `k_selected = n_total` on a row is the signal that the budget did not bind and the
+  ranking had no effect. That is the number to watch if you run the experiment.
+- `R` is still the measured default of 65, not derived per call. Doing that needs the
+  `(R, round cost)` pairing `req_key` was added to make possible.
+- `MIN_USEFUL_OUTLINE = 120` tokens is an unmeasured constant introduced here, and it
+  decides the positive-but-too-small band.
+
 ## [1.2.4] — 2026-07-29
 
 ### Setup reported healthy hooks while the Bash meter was not installed

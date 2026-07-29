@@ -9,6 +9,7 @@
 use lumen_core::{
     compress::compress_logs,
     meter::{detect_channel, insert_read_event},
+    ranked,
     structure::{CodeItem, detect_lang, outline},
     tokenizer::count_tokens,
 };
@@ -59,7 +60,11 @@ pub struct RpcError {
 
 /// One `read_events` row, deferred so the caller can write it *after* the
 /// JSON-RPC frame has already gone out on stdout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, not `Eq`: the ranked decision carries the f64 economics inputs it
+/// was computed from, and floats have no total equality. Comparing rows in tests is what
+/// this derive is for, and `PartialEq` serves that.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MeterRow {
     pub path: String,
     pub lines: Option<i64>,
@@ -81,6 +86,9 @@ pub struct MeterRow {
     /// asking for different items are different requests, so keying dedup on path
     /// alone overstates the opportunity.
     pub req_key: Option<String>,
+    /// Ranked-outline decision inputs. Empty for the legacy arm, which has no decision
+    /// to record — a zero there would claim one was made.
+    pub ranked: lumen_core::meter::RankedMeta,
 }
 
 impl MeterRow {
@@ -99,6 +107,7 @@ impl MeterRow {
             self.session_id.as_deref(),
             self.file_mtime,
             self.req_key.as_deref(),
+            &self.ranked,
         );
     }
 }
@@ -234,6 +243,31 @@ fn metered(
     lines: Option<i64>,
     req_key: Option<String>,
 ) -> Outcome {
+    metered_with(
+        text,
+        full_tokens,
+        returned_tokens,
+        tool_name,
+        routed_via,
+        path,
+        lines,
+        req_key,
+        lumen_core::meter::RankedMeta::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metered_with(
+    text: String,
+    full_tokens: usize,
+    returned_tokens: usize,
+    tool_name: &str,
+    routed_via: &str,
+    path: &str,
+    lines: Option<i64>,
+    req_key: Option<String>,
+    ranked: lumen_core::meter::RankedMeta,
+) -> Outcome {
     // Signed for the same reason as ok_result above: a loss must be recordable.
     let saved = full_tokens as i64 - returned_tokens as i64;
     Outcome {
@@ -249,6 +283,7 @@ fn metered(
             session_id: session_id(),
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
+            ranked,
         }),
     }
 }
@@ -434,7 +469,15 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
         );
     }
 
-    // outline mode
+    // outline mode. Which implementation depends on the rollout flag; `Off` is the
+    // default and reaches nothing below.
+    let arm = ranked::arm_for(ranked::mode_from_env(), path);
+    if arm == ranked::Arm::Ranked
+        && let Some(o) = ranked_arm(path, &src, full_tokens, line_count)
+    {
+        return o;
+    }
+
     let lang = detect_lang(path);
     let items = outline(&src, lang);
     let text = format_outline(path, line_count, full_tokens, &items);
@@ -450,6 +493,88 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
         Some(line_count as i64),
         None,
     )
+}
+
+/// Economics for this process, resolved once.
+///
+/// Once, not per call: `Econ::observed` opens the ledger and averages `turns`, which is
+/// far too much work to repeat inside a synchronous tool call. An MCP server is
+/// per-session and short-lived enough that the means cannot drift meaningfully within
+/// one process.
+fn econ() -> &'static lumen_core::econ::Econ {
+    static ECON: std::sync::OnceLock<lumen_core::econ::Econ> = std::sync::OnceLock::new();
+    ECON.get_or_init(|| match lumen_core::meter::db_path() {
+        Some(db) => lumen_core::econ::Econ::observed(&db),
+        None => lumen_core::econ::Econ::default(),
+    })
+}
+
+/// Record the decision inputs whether or not an outline was produced.
+///
+/// A decline is the more interesting row: it says the budget refused a call that would
+/// otherwise have happened, and without it the ledger would show only the calls that
+/// went ahead — which is the population that makes any gate look unnecessary.
+fn ranked_meta(d: &ranked::Decision, k: i64, n: i64) -> lumen_core::meter::RankedMeta {
+    lumen_core::meter::RankedMeta {
+        budget: Some(d.budget),
+        s_min: Some(d.s_min),
+        econ_context: Some(d.econ.context_tokens),
+        econ_rounds: Some(d.econ.rounds_remaining),
+        econ_output: Some(d.econ.output_tokens),
+        econ_source: Some(d.econ.source.as_str().to_string()),
+        k_selected: Some(k),
+        n_total: Some(n),
+        coeff_version: Some(d.coeff_version as i64),
+    }
+}
+
+/// The ranked arm. `None` means it declined and the caller should fall back.
+///
+/// A decline returns `None` rather than an error: the model asked for an outline and must
+/// get one. The fallback is the legacy outline rather than the truncation the
+/// specification names — truncation would be a regression against what already ships,
+/// and the decline is still visible because the fallback row carries the decline's route.
+fn ranked_arm(path: &str, src: &str, full_tokens: usize, line_count: usize) -> Option<Outcome> {
+    let e = econ();
+    let stamp = ranked::FileStamp::of(path);
+    let d = ranked::ranked_outline_cached(path, src, full_tokens, e, &count_tokens, stamp);
+
+    match &d.outcome {
+        Ok(f) => {
+            let meta = ranked_meta(&d, f.k as i64, f.n as i64);
+            Some(metered_with(
+                f.text.clone(),
+                full_tokens,
+                f.returned_tokens,
+                "mcp__lumen__smart_read",
+                ranked::ROUTE_RANKED,
+                path,
+                Some(line_count as i64),
+                None,
+                meta,
+            ))
+        }
+        Err(decline) => {
+            // Fall through to the legacy outline, but record that the ranked arm refused
+            // and why, on its own route.
+            let lang = detect_lang(path);
+            let items = outline(src, lang);
+            let text = format_outline(path, line_count, full_tokens, &items);
+            let returned = count_tokens(&text);
+            let meta = ranked_meta(&d, 0, 0);
+            Some(metered_with(
+                text,
+                full_tokens,
+                returned,
+                "mcp__lumen__smart_read",
+                decline.route(),
+                path,
+                Some(line_count as i64),
+                None,
+                meta,
+            ))
+        }
+    }
 }
 
 pub fn format_outline(
