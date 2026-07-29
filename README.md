@@ -209,8 +209,15 @@ The tray icon pulses with ring animations; its color reflects context fill statu
 ## How to run the CLI (`lumen`)
 
 The `lumen` terminal command is a **live dashboard** — the same data as the GUI,
-rendered in your terminal. It is also the path to **Full mode** optimization:
-hooks fire only in the Claude Code CLI, not the VS Code extension.
+rendered in your terminal.
+
+> **Correction.** Earlier versions of this document said hooks fire only in the
+> Claude Code CLI and not in the VS Code extension, and built a "Full mode vs Soft
+> mode" distinction on it. That is false: hooks fire in the VS Code extension too.
+> Measured directly — 108 built-in `Read` events were recorded by the PostToolUse
+> hook during a single session whose `entrypoint` was `claude-vscode`, and in the
+> same session every file over the line threshold was intercepted and redirected.
+> Interception does not depend on which client you use.
 
 ### Install
 
@@ -345,9 +352,19 @@ On the author's machine this sits around 87%. Your number varies with your codeb
 larger files with more structure produce higher ratios. Effectiveness is computed over
 *all intercepted reads*, so it stabilizes after a few sessions.
 
-**This is measured to the token, never estimated.** Both `full_tokens` and
-`returned_tokens` are counted by `lumen-tok`, a local BPE tokenizer, at the moment
-of each read.
+**Tool calls are measured to the token. Built-in `Read` events may not be.**
+
+`smart_read`, `recall_file` and `compress_logs` count tokens in-process with a BPE
+tokenizer and have no estimation path, so their figures are exact.
+
+Built-in `Read` events are counted by a shell hook that shells out to `lumen-tok`.
+If that binary is unreachable the hook falls back to `bytes ÷ 4`. Before 1.1.5 it did
+so **silently**, and on installs set up from a mounted `.dmg` before 1.0.1 the baked
+path pointed inside the disk image — so once it was ejected, every built-in `Read`
+figure became an estimate while this document claimed otherwise. Each row now records
+`token_source` (`measured` / `estimated`), the fallback logs a warning, and rows
+predating 1.1.5 are marked as unverified provenance rather than reclassified, because
+there is no honest way to recover it after the fact.
 
 #### Lumen optimized (caused)
 
@@ -370,17 +387,20 @@ reads are being intercepted and which file types are generating the most savings
 
 #### By channel
 
-**Full mode (CLI)** — reads intercepted by the PreToolUse hook in the Claude Code CLI.
-Interception is enforced: every large-file Read call is blocked and redirected before
-it runs.
+Reads intercepted by the PreToolUse hook, in either client. Interception is
+enforced wherever hooks run: a Read of a file over the line threshold is blocked and
+redirected before it executes.
 
-**Soft mode (VS Code)** — reads that Claude routed through a Lumen tool opportunistically,
-without hook enforcement. See [CLI vs VS Code](#cli-vs-vs-code--full-mode-vs-soft-mode)
-for why interception is unavailable in the VS Code extension.
+> The channel breakdown that used to appear here has been removed rather than
+> repaired. Until 1.1.5 the meter wrote the literal string `cli` on every built-in
+> `Read` row, so the chart plotted a constant and the "CLI missed reads" metric
+> filtered on a value that matched every row. Real channel detection landed in 1.1.5;
+> the breakdown returns once enough rows carry a measured channel to make it mean
+> something.
 
 #### Not optimized (read in full)
 
-*CLI / Full mode only.* Reads on files ≥ 300 lines where Claude used the built-in
+*Both clients.* Reads on files ≥ 300 lines where Claude used the built-in
 `Read` tool instead of a Lumen tool — i.e., the hook fired but Claude did not follow
 the redirect, or the file was excluded. These are tracked as context (never as savings)
 so you can see the true adoption rate. A high "not optimized" count in Full mode
@@ -418,7 +438,11 @@ but interception is not enforced — Claude routes to optimized reads opportunis
 not on every large-file read. Only reads that actually went through a Lumen tool appear
 on the Optimizer screen.
 
-**Use the CLI for guaranteed, measurable optimization.**
+**The CLI is a dashboard, not a precondition for optimization.**
+
+Interception works in both clients, so installing the CLI does not enable or
+guarantee anything the extension lacks. The earlier claim that it did was based on
+the same false premise as the Full/Soft mode distinction above.
 The VS Code extension still gives you the full context gauge, cost tracking, and
 caching savings display.
 

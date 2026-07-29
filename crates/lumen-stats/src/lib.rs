@@ -359,10 +359,20 @@ pub struct OptimizerReport {
     pub by_tool: Vec<ToolBreakdown>,
     /// Channel of the most recent read_events row — proxy for active context.
     pub current_channel: String,
-    /// CLI-only: reads that bypassed Lumen (builtin_read, channel=cli).
+    /// Reads that bypassed Lumen (builtin_read, any channel).
     /// Label as "not optimized (read in full)". Never count as savings.
     pub missed_calls: i64,
     pub missed_full_tokens: i64,
+    /// How many rows in the lifetime window have no recorded token provenance.
+    ///
+    /// Rows written before 1.1.5 carry no `token_source`, and on installs whose
+    /// baked tokenizer path was dead the hook silently substituted `bytes / 4`.
+    /// The UI must not present those as exact while any remain, so it reports the
+    /// count instead of the claim. Deliberately "unverified", not "estimated":
+    /// asserting they are all estimates would be its own unmeasured claim.
+    pub unverified_provenance_rows: i64,
+    /// Total rows considered, so the frontend can render "N of M".
+    pub provenance_total_rows: i64,
 }
 
 pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, String> {
@@ -447,6 +457,19 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
         })
         .collect();
 
+    // ── Token provenance ─────────────────────────────────────────────────────
+    // Counted over every metered row, not just lumen routes: a user's confidence in
+    // the effectiveness figure depends on the whole ledger being measured.
+    let (unverified_provenance_rows, provenance_total_rows): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(CASE WHEN token_source IS NULL OR token_source <> 'measured'
+                                  THEN 1 ELSE 0 END),0),
+                COUNT(*)
+         FROM read_events",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // ── Current channel (most recent event) ──────────────────────────────────
     let current_channel: (Option<String>,) =
         sqlx::query_as("SELECT channel FROM read_events ORDER BY ts DESC LIMIT 1")
@@ -454,13 +477,22 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
             .await
             .unwrap_or((None,));
 
-    // ── CLI missed reads ─────────────────────────────────────────────────────
-    // builtin_read rows written by the CLI PostToolUse hook when the model used
-    // the built-in Read instead of lumen tools. saved_tokens=0 always.
+    // ── Missed reads ─────────────────────────────────────────────────────────
+    // builtin_read rows: the model used the built-in Read instead of a lumen tool.
+    // saved_tokens = 0 always.
+    //
+    // The `AND channel = 'cli'` that used to be here was a no-op dressed as a
+    // filter. The meter hardcoded channel='cli' on every row it wrote, so the
+    // clause matched 2,694 of 2,694 rows and the metric was mislabelled as
+    // CLI-only. Hooks fire in the VS Code extension too — verified by 108 rows
+    // written during a session whose entrypoint was claude-vscode — so there was
+    // never a CLI-only population to filter for. The meter now records the real
+    // channel from CLAUDE_CODE_ENTRYPOINT; until enough rows carry it, splitting
+    // by channel would describe the hardcoded past, not the present.
     let (missed_calls, missed_full_tokens): (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COALESCE(SUM(full_tokens),0)
          FROM read_events
-         WHERE routed_via = 'builtin_read' AND channel = 'cli'",
+         WHERE routed_via = 'builtin_read'",
     )
     .fetch_one(pool)
     .await
@@ -476,5 +508,7 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
         current_channel: current_channel.0.unwrap_or_else(|| "unknown".to_string()),
         missed_calls,
         missed_full_tokens,
+        unverified_provenance_rows,
+        provenance_total_rows,
     })
 }

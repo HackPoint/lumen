@@ -304,6 +304,7 @@ fn global_settings_path_in(home: &Path) -> PathBuf {
     home.join(".claude/settings.json")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn lumen_dir() -> PathBuf {
     lumen_dir_in(&home())
 }
@@ -428,57 +429,617 @@ fn db_path_in(home: &Path) -> String {
         .to_string()
 }
 
+// ── Atomic, mode-preserving writes ────────────────────────────────────────────
+
+/// The file's current permission bits, or a private default when it is absent.
+///
+/// Defaulting to 0o600 rather than 0o644 keeps a newly created config private;
+/// callers that need an executable bit pass it as `mode_floor` below.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o600)
+}
+
+#[cfg(not(unix))]
+fn mode_of(_path: &Path) -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Flush the directory entry so the rename itself survives a crash.
+///
+/// Syncing the temp file only guarantees its *contents*; the rename is a
+/// directory operation and needs the directory synced to be durable.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Write `contents` to `path` so a concurrent reader never sees a partial file.
+///
+/// `fs::write` truncates in place, so Claude Code — which may read
+/// ~/.claude.json or settings.json at any moment, including while Setup runs —
+/// can observe a half-written file. Writing to a temp file and renaming over the
+/// target is atomic within a directory: a reader sees either the old file or the
+/// new one, never a truncated one. A corrupted MCP config would be a worse bug
+/// than the truncation window it replaces.
+///
+/// `mode_floor` is OR-ed into the existing mode rather than replacing it. Exact
+/// preservation would perpetuate breakage — a script that already lost its exec
+/// bit would stay dead — while ignoring the existing mode would discard a
+/// deliberately tightened permission. Pass 0 when no bit is functionally
+/// required.
+fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result<()> {
+    // Resolve symlinks first. Users who keep ~/.claude.json in a dotfile repo
+    // symlink it, and renaming onto the link would replace it with a regular
+    // file and silently detach their config. The temp must also live in the
+    // *resolved* directory: a rename across filesystems fails with EXDEV, which
+    // is exactly the case a dotfile repo on another volume produces.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = match target.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return Err(std::io::Error::other("target has no parent directory")),
+    };
+    std::fs::create_dir_all(&dir)?;
+
+    let mode = mode_of(&target) | mode_floor;
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "lumen".to_string());
+    let tmp = dir.join(format!(".{name}.lumen-tmp"));
+
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    // Mode before rename, so the file is never visible at the target path with
+    // the wrong permissions.
+    set_mode(&tmp, mode)?;
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    sync_dir(&dir);
+    Ok(())
+}
+
+// ── Artifact freshness ────────────────────────────────────────────────────────
+
+/// Diagnostic marker naming the version that generated an artifact.
+///
+/// Deliberately excluded from the comparison below. If the version were part of
+/// the compared content, every release would rewrite every artifact on every
+/// machine — reintroducing the install-base-wide blast radius that generating
+/// from content is meant to avoid.
+const GENERATOR_PREFIX: &str = "# lumen-generator:";
+
+fn stamp_line() -> String {
+    format!("{GENERATOR_PREFIX} {}\n", env!("CARGO_PKG_VERSION"))
+}
+
+/// An artifact's content with the diagnostic stamp and trailing blanks removed.
+fn functional(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with(GENERATOR_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
+/// What a report-only artifact check concluded.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactStatus {
+    pub id: String,
+    /// True when the artifact is present and everything baked into it resolves.
+    pub healthy: bool,
+    pub detail: String,
+}
+
+/// Bring the hook scripts back into line with this build, if they have drifted.
+///
+/// Scripts auto-repair; `mcp` and `hooks` deliberately do not. The scripts live in
+/// `~/.claude/lumen/` and are Lumen's own, so a bad write damages nothing else —
+/// whereas `~/.claude.json` holds every MCP server the user has, and corrupting it
+/// would break Claude Code itself rather than just Lumen. Those two are validated
+/// and reported, and repaired only on an explicit button press.
+///
+/// This is also what unblocks E7: the meter must be regenerated before it can
+/// record session_id, req_key, file_mtime or token_source. Without this, the
+/// migration would add the columns and a stale meter would write NULL into them
+/// forever, while every report looked successful.
+///
+/// Returns a description of what it repaired, or None when nothing was needed.
+pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str) -> Option<String> {
+    let dir = lumen_dir_in(home);
+    // Absent directory means setup never ran; that is not drift, and creating
+    // scripts for someone who never set Lumen up would be unasked-for.
+    if !dir.exists() {
+        return None;
+    }
+
+    let mut repaired = Vec::new();
+    for (name, desired) in [
+        ("lumen_meter.sh", desired_meter_script(db, tok)),
+        ("lumen_read_intercept.sh", desired_intercept_script()),
+    ] {
+        let path = dir.join(name);
+        if !script_needs_refresh(&path, &desired) {
+            continue;
+        }
+        match write_atomic(&path, &desired, 0o755) {
+            Ok(()) => repaired.push(name),
+            Err(e) => log::warn!("could not refresh {name}: {e}"),
+        }
+    }
+
+    if repaired.is_empty() {
+        None
+    } else {
+        Some(format!("refreshed {}", repaired.join(", ")))
+    }
+}
+
+/// Repair drifted hook scripts against the real home, resolving the same paths
+/// Setup would bake. Called once at startup.
+pub fn ensure_scripts_fresh() -> Option<String> {
+    let tok = stable_binary("lumen-tok")
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if tok.is_empty() {
+        // Nothing to bake, so regenerating would write a script that cannot count
+        // tokens. Leave the existing one and let validation report it.
+        log::warn!("lumen-tok not found; leaving hook scripts untouched");
+        return None;
+    }
+    ensure_scripts_fresh_in(&home(), &db_path(), &tok)
+}
+
+/// The reported artifacts, against the real home. Exposed to the Setup screen.
+#[tauri::command]
+pub fn lumen_artifact_health() -> Vec<ArtifactStatus> {
+    validate_reported_artifacts_in(&home())
+}
+
+/// Check the artifacts that are *not* auto-repaired, for reporting only.
+///
+/// Nothing here writes. A user acts on the result via the Setup screen.
+pub fn validate_reported_artifacts_in(home: &Path) -> Vec<ArtifactStatus> {
+    // Iterating PERSISTED_ARTIFACTS rather than hardcoding a list is what makes the
+    // registry load-bearing: add an artifact and forget to handle it here, and the
+    // wildcard arm reports it as unchecked instead of silently omitting it.
+    PERSISTED_ARTIFACTS
+        .iter()
+        .map(|id| match *id {
+            "scripts" => validate_scripts_in(home),
+            "mcp" => validate_mcp_in(home),
+            "hooks" => validate_hooks_in(home),
+            "autostart" => ArtifactStatus {
+                id: "autostart".into(),
+                healthy: true,
+                detail: "user-owned; repaired by its own staleness check".into(),
+            },
+            "cli" => validate_cli(),
+            other => ArtifactStatus {
+                id: other.into(),
+                healthy: false,
+                detail: "no validator wired for this artifact".into(),
+            },
+        })
+        .collect()
+}
+
+/// Are the hook scripts current with this build?
+fn validate_scripts_in(home: &Path) -> ArtifactStatus {
+    let dir = lumen_dir_in(home);
+    if !dir.exists() {
+        return ArtifactStatus {
+            id: "scripts".into(),
+            healthy: false,
+            detail: "not installed — run Setup".into(),
+        };
+    }
+    let tok = stable_binary("lumen-tok")
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stale: Vec<&str> = [
+        ("lumen_meter.sh", desired_meter_script(&db_path(), &tok)),
+        ("lumen_read_intercept.sh", desired_intercept_script()),
+    ]
+    .into_iter()
+    .filter(|(name, want)| script_needs_refresh(&dir.join(name), want))
+    .map(|(name, _)| name)
+    .collect();
+    if stale.is_empty() {
+        ArtifactStatus {
+            id: "scripts".into(),
+            healthy: true,
+            detail: "current with this build".into(),
+        }
+    } else {
+        ArtifactStatus {
+            id: "scripts".into(),
+            healthy: false,
+            detail: format!("stale: {} (repaired on next launch)", stale.join(", ")),
+        }
+    }
+}
+
+/// The CLI symlink. Never rewritten when Homebrew owns it — two managers fighting
+/// over one path would be a new bug of the class this release closes.
+fn validate_cli() -> ArtifactStatus {
+    let link = cli_symlink_path();
+    let expected = find_binary("lumen-cli").unwrap_or_default();
+    let resolve = |p: &Path| std::fs::canonicalize(p).ok();
+    let detail = match classify_cli(&link, &expected, &resolve) {
+        CliState::Absent => "not installed (optional)".to_string(),
+        CliState::Homebrew => "managed by Homebrew — left alone".to_string(),
+        CliState::Current => "points at this build".to_string(),
+        CliState::Stale => format!("stale target — re-run Install CLI ({})", link.display()),
+    };
+    let healthy = !detail.starts_with("stale");
+    ArtifactStatus {
+        id: "cli".into(),
+        healthy,
+        detail,
+    }
+}
+
+fn validate_mcp_in(home: &Path) -> ArtifactStatus {
+    let claude_json = claude_json_path_in(home);
+    let mcp = std::fs::read_to_string(&claude_json)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("mcpServers")?.get("lumen").cloned());
+    match mcp {
+        None => ArtifactStatus {
+            id: "mcp".into(),
+            healthy: false,
+            detail: "no lumen entry in ~/.claude.json — run Setup".into(),
+        },
+        Some(entry) => {
+            let mut dead: Vec<String> = Vec::new();
+            if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
+                if !Path::new(cmd).exists() {
+                    dead.push(format!("command {cmd}"));
+                }
+            }
+            if let Some(env) = entry.get("env").and_then(|e| e.as_object()) {
+                for (k, v) in env {
+                    if let Some(p) = v.as_str() {
+                        // LUMEN_DB is created on demand, so its absence is normal.
+                        if k != "LUMEN_DB" && p.starts_with('/') && !Path::new(p).exists() {
+                            dead.push(format!("{k} {p}"));
+                        }
+                    }
+                }
+            }
+            if dead.is_empty() {
+                ArtifactStatus {
+                    id: "mcp".into(),
+                    healthy: true,
+                    detail: "registered, all paths resolve".into(),
+                }
+            } else {
+                ArtifactStatus {
+                    id: "mcp".into(),
+                    healthy: false,
+                    detail: format!("dangling: {}", dead.join("; ")),
+                }
+            }
+        }
+    }
+}
+
+fn validate_hooks_in(home: &Path) -> ArtifactStatus {
+    // hooks: valid when every lumen hook command points at a file that exists.
+    // It carries no stamp of its own — settings.json's schema is Claude Code's,
+    // and injecting an unknown key risks rejection by a validator we do not own.
+    // Its freshness derives from the stamped scripts it points at.
+    let settings = global_settings_path_in(home);
+    let mut missing: Vec<String> = Vec::new();
+    let mut found = 0usize;
+    if let Some(v) = std::fs::read_to_string(&settings)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    {
+        for phase in ["PreToolUse", "PostToolUse"] {
+            if let Some(arr) = v["hooks"][phase].as_array() {
+                for entry in arr {
+                    if let Some(hs) = entry["hooks"].as_array() {
+                        for h in hs {
+                            if let Some(c) = h["command"].as_str() {
+                                if c.contains("lumen_") {
+                                    found += 1;
+                                    if !Path::new(c).exists() {
+                                        missing.push(c.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if found == 0 {
+        ArtifactStatus {
+            id: "hooks".into(),
+            healthy: false,
+            detail: "no lumen hooks registered — run Setup".into(),
+        }
+    } else if missing.is_empty() {
+        ArtifactStatus {
+            id: "hooks".into(),
+            healthy: true,
+            detail: format!("{found} hook commands, all present"),
+        }
+    } else {
+        ArtifactStatus {
+            id: "hooks".into(),
+            healthy: false,
+            detail: format!("dangling: {}", missing.join("; ")),
+        }
+    }
+}
+
+/// Every artifact setup persists outside the app bundle.
+///
+/// This list exists so a fourth instance of the same bug becomes impossible
+/// rather than merely unlikely. Three shipped already — MCP paths (1.0.1),
+/// autostart (1.1.2), the tokenizer path (1.1.5) — and all three had the same
+/// shape: logic reachable only from `run_setup`, which never runs again once its
+/// marker exists. `every_step_run_setup_emits_is_accounted_for` fails if a new
+/// step appears here or in [`NON_PERSISTING`] without a freshness check.
+pub const PERSISTED_ARTIFACTS: &[&str] = &["scripts", "mcp", "hooks", "autostart", "cli"];
+
+/// Steps that persist nothing and so need no freshness check.
+///
+/// "detect" — not "claude": the id comes from `step_detect_claude`'s own
+/// `SetupStep::ok("detect", …)`. The registry test below caught this the first
+/// time it ran, which is the behaviour it exists for.
+// Consumed by the coverage test, not by production code: the contract is enforced
+// at test time, which is what makes forgetting it a build failure rather than a
+// silent omission.
+#[allow(dead_code)]
+pub const NON_PERSISTING: &[&str] = &["detect"];
+
+/// Artifacts whose very existence is a user decision.
+///
+/// Repair them if present; never create them, never re-enable them. Creating one
+/// unasked is the 1.1.2 bug wearing a different hat — a refresh that silently
+/// switched a login item back on for someone who had turned it off.
+#[allow(dead_code)]
+pub const USER_OWNED: &[&str] = &["autostart", "cli"];
+
+/// Is this path managed by Homebrew?
+///
+/// Lumen and `brew` must not both own `bin/lumen`. If the symlink resolves into a
+/// Homebrew prefix then brew installed it, brew will re-link it on upgrade, and a
+/// repair loop fighting brew would be a new bug of exactly the class this release
+/// closes. Detected by path rather than by shelling out to `brew`, which may not
+/// exist on the machine being repaired.
+fn is_homebrew_managed(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.contains("/Cellar/")
+        || s.starts_with("/opt/homebrew/")
+        || s.starts_with("/usr/local/Homebrew/")
+        || s.starts_with("/home/linuxbrew/")
+}
+
+/// What a `cli` artifact check concluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliState {
+    /// No symlink. The user never asked for one; do nothing.
+    Absent,
+    /// Managed by Homebrew. Validate and report, never rewrite.
+    Homebrew,
+    /// Ours and pointing where it should.
+    Current,
+    /// Ours but pointing somewhere stale — 1.1.4 shipped one aimed at the GUI
+    /// binary because the CLI sidecar had been overwritten.
+    Stale,
+}
+
+/// Classify the CLI symlink without touching it.
+///
+/// `resolve` is injected so the decision table is testable without creating real
+/// symlinks in a real PATH directory.
+pub fn classify_cli(
+    link: &Path,
+    expected_target: &Path,
+    resolve: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> CliState {
+    match resolve(link) {
+        None => CliState::Absent,
+        Some(actual) if is_homebrew_managed(&actual) => CliState::Homebrew,
+        Some(actual) if actual == expected_target => CliState::Current,
+        Some(_) => CliState::Stale,
+    }
+}
+
+/// Does the script on disk differ from what this build would generate?
+///
+/// This is the check that closes the staleness hole. A 0.1.0-era script whose
+/// baked paths happen to still resolve passes every liveness test, so anything
+/// keyed on "do the paths work" leaves it in place forever — and for E7 that
+/// means a meter that never learned to record session_id, req_key or
+/// token_source, writing NULLs while the migration reports success. Comparing
+/// generated content against the file catches it, because the body differs.
+///
+/// A missing or unreadable file counts as needing refresh: absence must be loud,
+/// which is the lesson of the 1.1.3 regression.
+fn script_needs_refresh(path: &Path, desired: &str) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(actual) => functional(&actual) != functional(desired),
+        Err(_) => true,
+    }
+}
+
 // ── Script templates ──────────────────────────────────────────────────────────
 //
 // The meter script is embedded with two path placeholders substituted at
 // install time.  The intercept script has no path dependencies.
 
 const METER_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# lumen_meter.sh — installed by Lumen Setup. Re-run Setup in the Lumen app to refresh.
+# lumen_meter.sh — installed by Lumen Setup. Regenerated automatically when it
+# drifts from the running build; do not hand-edit.
+#
+# PostToolUse hook. Records built-in Read events (the "missed optimization"
+# baseline) and Bash output volume. mcp__lumen__* tools self-meter in-process.
+#
+# Reads no file contents beyond tokenizing the file that was already read, writes
+# only to the local SQLite DB, makes no network calls, and executes nothing from
+# the payload.
 LUMEN_DB="__LUMEN_DB__"
 LUMEN_TOK="__LUMEN_TOK__"
 
-set -euo pipefail
+set -uo pipefail
 
 INPUT=$(cat)
 
 if [ "${LUMEN_DEBUG:-}" = "1" ]; then
-    echo "$INPUT" > /tmp/lumen_hook_dump.json
+    printf '%s' "$INPUT" > /tmp/lumen_hook_dump.json
 fi
 
-TOOL_NAME=$(python3 -c "
-import sys, json
-d = json.loads(sys.argv[1])
-print(d.get('tool_name', ''))
-" "$INPUT" 2>/dev/null || echo "")
+# Channel comes from the environment Claude Code exports, not a hardcoded string.
+# It used to be the literal 'cli' on every row, which made the "By channel"
+# breakdown a constant dressed up as a measurement.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    *vscode*) CHANNEL="vscode" ;;
+    "")       CHANNEL="unknown" ;;
+    *)        CHANNEL="cli" ;;
+esac
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 
-if [ "$TOOL_NAME" != "Read" ]; then
-    exit 0
-fi
+OUT_FILE="$(mktemp -t lumen_bash_out)"
+trap 'rm -f "$OUT_FILE"' EXIT
 
-FILE_PATH=$(python3 -c "
-import sys, json
-d = json.loads(sys.argv[1])
-print(d.get('tool_input', {}).get('file_path', ''))
-" "$INPUT" 2>/dev/null || echo "")
+# One python call, not four: the old script spawned a fresh interpreter per field.
+# Fields are TAB-separated so no value needs shell quoting. Any Bash output is
+# written to OUT_FILE rather than passed through the shell.
+FIELDS=$(printf '%s' "$INPUT" | LUMEN_OUT="$OUT_FILE" python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+tool = d.get("tool_name") or ""
+ti = d.get("tool_input") or {}
+tr = d.get("tool_response")
+path = ti.get("file_path") or ""
+cmd = ti.get("command") or ""
+out = ""
+if isinstance(tr, dict):
+    out = (tr.get("stdout") or "") + (tr.get("stderr") or "")
+elif isinstance(tr, str):
+    out = tr
+with open(os.environ["LUMEN_OUT"], "w") as f:
+    f.write(out)
+clean = lambda s: s.replace("\t", " ").replace("\n", " ")
+sys.stdout.write("\t".join([tool, clean(path), clean(cmd)[:200]]))
+') || exit 0
+[ -n "${FIELDS:-}" ] || exit 0
 
-if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
-    exit 0
-fi
+TOOL_NAME=$(printf '%s' "$FIELDS" | cut -f1)
+FILE_PATH=$(printf '%s' "$FIELDS" | cut -f2)
+COMMAND=$(printf '%s' "$FIELDS" | cut -f3)
+
+# Count tokens. A dead LUMEN_TOK used to fall back to bytes/4 in silence, so the
+# Optimizer screen showed estimates while the README promised measurements. The
+# fallback stays — a row beats no row — but it is now labelled and logged.
+# Emits "<count> <measured|estimated>" on one line. The provenance must travel
+# with the value: an earlier version set a TOKEN_SOURCE variable inside the
+# function, but every call site is a command substitution — a subshell — so the
+# assignment was discarded and estimates were recorded as "measured". That is
+# worse than no label, because it launders an estimate as a measurement, which is
+# the exact defect this release exists to remove.
+count_tokens() {
+    if [ -x "$LUMEN_TOK" ]; then
+        _c=$("$LUMEN_TOK" 2>/dev/null) && { printf '%s measured\n' "$_c"; return 0; }
+    fi
+    echo "lumen_meter: LUMEN_TOK unusable at $LUMEN_TOK — recording an estimate" >&2
+    printf '%s estimated\n' "$(wc -c | awk '{print int($1/4)}')"
+}
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
 
-if [ -x "$LUMEN_TOK" ]; then
-    FULL_TOKENS=$("$LUMEN_TOK" < "$FILE_PATH" 2>/dev/null || echo 0)
-else
-    FULL_TOKENS=$(( $(wc -c < "$FILE_PATH") / 4 ))
-fi
+case "$TOOL_NAME" in
+Read)
+    [ -n "$FILE_PATH" ] && [ -f "$FILE_PATH" ] || exit 0
+    LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
+    _r=$(count_tokens < "$FILE_PATH")
+    FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
+    MTIME=$(stat -f %m "$FILE_PATH" 2>/dev/null || stat -c %Y "$FILE_PATH" 2>/dev/null || echo "")
+    ROUTE="builtin_read"; REQ_KEY="$FILE_PATH"; RETURNED="$FULL_TOKENS"; TARGET="$FILE_PATH"
+    ;;
+Bash)
+    # Observation only. No PreToolUse on Bash, no interception, no wrapper.
+    _r=$(count_tokens < "$OUT_FILE")
+    FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
+    LINE_COUNT=""; MTIME=""
+    ROUTE="bash_output"; REQ_KEY=""; RETURNED=0; TARGET="$COMMAND"
+    # Nothing measurable means nothing worth a row.
+    [ "${FULL_TOKENS:-0}" -gt 0 ] || exit 0
+    ;;
+*)
+    exit 0
+    ;;
+esac
 
-sqlite3 "$LUMEN_DB" \
-    "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,saved_tokens,routed_via,channel)
-     VALUES('${TS}','Read','${FILE_PATH//\'/\'\'}',${LINE_COUNT},${FULL_TOKENS},${FULL_TOKENS},0,'builtin_read','cli');" \
-    2>/dev/null || true
+# Bind every value as a parameter. tool_input.command is attacker-influenced text
+# and must never be interpolated into SQL.
+LUMEN_ARGS="$LUMEN_DB
+$TS
+$TOOL_NAME
+$TARGET
+$LINE_COUNT
+$RETURNED
+$FULL_TOKENS
+$ROUTE
+$CHANNEL
+$SESSION_ID
+$MTIME
+$REQ_KEY
+$TOKEN_SOURCE"
+printf '%s' "$LUMEN_ARGS" | python3 -c '
+import sqlite3, sys
+f = sys.stdin.read().split("\n")
+if len(f) < 13:
+    sys.exit(0)
+db, ts, tool, path, lines, ret, full, route, chan, sid, mtime, req, tsrc = f[:13]
+n = lambda v: int(v) if v not in ("", None) else None
+con = sqlite3.connect(db, timeout=5)
+con.execute(
+    "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,"
+    "saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,"
+    "writer_hook,token_source) VALUES(?,?,?,?,?,?,0,?,?,?,?,?,0,?,?)",
+    (ts, tool, path, n(lines), n(ret), n(full), route, chan,
+     sid or None, n(mtime), req or None, "lumen_meter.sh", tsrc),
+)
+con.commit()
+con.close()
+' 2>/dev/null || true
 
 exit 0
 "#;
@@ -581,10 +1142,6 @@ fn which_claude() -> bool {
         .unwrap_or(false)
 }
 
-fn step_install_scripts(db: &str, tok: &str) -> SetupStep {
-    step_install_scripts_in(&home(), db, tok)
-}
-
 fn step_install_scripts_in(home: &Path, db: &str, tok: &str) -> SetupStep {
     let dir = lumen_dir_in(home);
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -595,35 +1152,27 @@ fn step_install_scripts_in(home: &Path, db: &str, tok: &str) -> SetupStep {
         );
     }
 
-    // Backup existing scripts to .bak if they're ours and paths changed
     let meter_path = dir.join("lumen_meter.sh");
     let intercept_path = dir.join("lumen_read_intercept.sh");
 
-    let meter_content = METER_TEMPLATE
-        .replace("__LUMEN_DB__", db)
-        .replace("__LUMEN_TOK__", tok);
-
-    if let Err(e) = std::fs::write(&meter_path, &meter_content) {
-        return SetupStep::err(
-            "scripts",
-            "Install hook scripts",
-            &format!("write lumen_meter.sh: {e}"),
-        );
-    }
-    if let Err(e) = std::fs::write(&intercept_path, INTERCEPT_SCRIPT) {
-        return SetupStep::err(
-            "scripts",
-            "Install hook scripts",
-            &format!("write lumen_read_intercept.sh: {e}"),
-        );
-    }
-
-    // chmod +x
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&meter_path, std::fs::Permissions::from_mode(0o755));
-        let _ = std::fs::set_permissions(&intercept_path, std::fs::Permissions::from_mode(0o755));
+    // 0o755: the exec bit is a functional requirement, not a user preference —
+    // a script without it stops firing silently, which is worse than the
+    // truncation window write_atomic closes.
+    for (path, content, what) in [
+        (&meter_path, desired_meter_script(db, tok), "lumen_meter.sh"),
+        (
+            &intercept_path,
+            desired_intercept_script(),
+            "lumen_read_intercept.sh",
+        ),
+    ] {
+        if let Err(e) = write_atomic(path, &content, 0o755) {
+            return SetupStep::err(
+                "scripts",
+                "Install hook scripts",
+                &format!("write {what}: {e}"),
+            );
+        }
     }
 
     SetupStep::ok(
@@ -633,8 +1182,35 @@ fn step_install_scripts_in(home: &Path, db: &str, tok: &str) -> SetupStep {
     )
 }
 
-fn step_register_mcp(mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
-    step_register_mcp_in(&home(), mcp_bin, db, tok)
+/// Insert the diagnostic stamp *after* the shebang.
+///
+/// It cannot go first: `#!` is only honoured on line 1, so a stamp above it
+/// turns the script into a plain text file and the hook stops firing with no
+/// error anywhere — the exact silent-failure mode this release exists to remove.
+fn with_stamp(script: &str) -> String {
+    match script.split_once('\n') {
+        Some((first, rest)) if first.starts_with("#!") => {
+            format!("{first}\n{}{rest}", stamp_line())
+        }
+        // No shebang to protect, so position does not matter.
+        _ => format!("{}{script}", stamp_line()),
+    }
+}
+
+/// The meter script this build would install, stamped for diagnostics.
+fn desired_meter_script(db: &str, tok: &str) -> String {
+    with_stamp(
+        &METER_TEMPLATE
+            .replace("__LUMEN_DB__", db)
+            .replace("__LUMEN_TOK__", tok),
+    )
+}
+
+/// The intercept script this build would install. No path substitutions — it
+/// reads no files and resolves no binaries, which is what keeps the README's
+/// security claim about it true.
+fn desired_intercept_script() -> String {
+    with_stamp(INTERCEPT_SCRIPT)
 }
 
 fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
@@ -691,10 +1267,6 @@ fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> Setu
         },
         Err(e) => SetupStep::err("mcp", "Register MCP server", &format!("serialize: {e}")),
     }
-}
-
-fn step_install_hooks() -> SetupStep {
-    step_install_hooks_in(&home())
 }
 
 fn step_install_hooks_in(home: &Path) -> SetupStep {
@@ -816,6 +1388,12 @@ fn merge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str, cmd: &str) {
 // ── Main orchestration ────────────────────────────────────────────────────────
 
 fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
+    run_setup_in(&home(), autostart)
+}
+
+/// Setup against an explicit home, so the step list can be asserted in a test
+/// without touching the developer's real ~/.claude.
+fn run_setup_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
     let mut steps = Vec::new();
 
     // 1. Detect Claude Code
@@ -859,7 +1437,7 @@ fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
             "lumen-tok binary not found — rebuild sidecars with build-sidecar.sh",
         ));
     } else {
-        steps.push(step_install_scripts(&db_str, &tok_str));
+        steps.push(step_install_scripts_in(home, &db_str, &tok_str));
     }
 
     // 4. Register MCP (needs mcp path)
@@ -870,7 +1448,7 @@ fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
             "lumen-mcp binary not found — rebuild sidecars with build-sidecar.sh",
         ));
     } else {
-        steps.push(step_register_mcp(&mcp_str, &db_str, &tok_str));
+        steps.push(step_register_mcp_in(home, &mcp_str, &db_str, &tok_str));
     }
 
     // 5. Install hooks (needs scripts installed first)
@@ -878,7 +1456,7 @@ fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
         .iter()
         .any(|s| s.id == "scripts" && s.status == StepStatus::Ok);
     if scripts_ok {
-        steps.push(step_install_hooks());
+        steps.push(step_install_hooks_in(home));
     } else {
         steps.push(SetupStep::skip(
             "hooks",
@@ -897,8 +1475,8 @@ fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
         .iter()
         .all(|s| s.status == StepStatus::Ok || s.status == StepStatus::Warn);
     if all_good {
-        let _ = std::fs::create_dir_all(lumen_dir());
-        let _ = std::fs::write(marker_path(), "");
+        let _ = std::fs::create_dir_all(lumen_dir_in(home));
+        let _ = std::fs::write(marker_path_in(home), "");
     }
 
     steps
@@ -1166,6 +1744,333 @@ mod tests {
 
     /// Stands in for the app's own executable path in autostart assertions.
     const EXE: &str = "/Applications/Lumen.app/Contents/MacOS/Lumen";
+
+    // ── Artifact freshness: the hole that would have defeated E7 ─────────────
+    //
+    // The first test here is the important one. An earlier design fingerprinted
+    // setup's *inputs* and only repaired artifacts whose baked paths had stopped
+    // resolving. A 0.1.0-era script with valid paths passes that check, so it
+    // would have been blessed with a current fingerprint and never regenerated —
+    // silently writing NULL for every column E7 adds, while the migration
+    // reported success. Comparing generated content is what catches it.
+
+    /// A meter script as 0.1.0 shipped it: valid paths, but an old body that
+    /// records none of the columns added since.
+    fn legacy_script(db: &str, tok: &str) -> String {
+        format!(
+            "#!/usr/bin/env bash\n\
+             LUMEN_DB=\"{db}\"\n\
+             LUMEN_TOK=\"{tok}\"\n\
+             INPUT=$(cat)\n\
+             sqlite3 \"$LUMEN_DB\" \"INSERT INTO read_events(ts,tool) VALUES('x','Read');\"\n"
+        )
+    }
+
+    #[test]
+    fn a_legacy_script_with_valid_paths_is_still_refreshed() {
+        let h = TempDir::new().unwrap();
+        // Paths that genuinely resolve, so no liveness check can flag this.
+        let db = h.path().join("lumen.db");
+        let tok = h.path().join("lumen-tok");
+        std::fs::write(&db, "").unwrap();
+        std::fs::write(&tok, "").unwrap();
+        let script = h.path().join("lumen_meter.sh");
+        std::fs::write(
+            &script,
+            legacy_script(&db.to_string_lossy(), &tok.to_string_lossy()),
+        )
+        .unwrap();
+
+        let desired = METER_TEMPLATE
+            .replace("__LUMEN_DB__", &db.to_string_lossy())
+            .replace("__LUMEN_TOK__", &tok.to_string_lossy());
+
+        assert!(
+            script_needs_refresh(&script, &desired),
+            "a 0.1.0 script with working paths must still be regenerated — this is \
+             the case an input fingerprint blesses forever, and it is how a stale \
+             meter would write NULLs while E7's migration looked successful"
+        );
+    }
+
+    #[test]
+    fn a_current_script_is_left_alone() {
+        // Negative control: the repair must not rewrite a healthy artifact.
+        let h = TempDir::new().unwrap();
+        let script = h.path().join("lumen_meter.sh");
+        let desired = METER_TEMPLATE
+            .replace("__LUMEN_DB__", "/tmp/x.db")
+            .replace("__LUMEN_TOK__", "/tmp/lumen-tok");
+        std::fs::write(&script, &desired).unwrap();
+        assert!(!script_needs_refresh(&script, &desired));
+    }
+
+    #[test]
+    fn a_version_bump_alone_does_not_trigger_a_rewrite() {
+        // If the stamp were part of the comparison, every release would rewrite
+        // every artifact on every machine.
+        let h = TempDir::new().unwrap();
+        let script = h.path().join("lumen_meter.sh");
+        let desired = METER_TEMPLATE
+            .replace("__LUMEN_DB__", "/tmp/x.db")
+            .replace("__LUMEN_TOK__", "/tmp/lumen-tok");
+        std::fs::write(&script, with_stamp(&desired)).unwrap();
+        assert!(
+            !script_needs_refresh(&script, &with_stamp(&desired)),
+            "only the stamp differs, so nothing functional changed"
+        );
+    }
+
+    #[test]
+    fn the_stamp_never_displaces_the_shebang() {
+        // A stamp on line 1 makes the kernel ignore #! and the hook silently
+        // stops firing — a regression worse than anything this release fixes.
+        for script in [
+            desired_meter_script("/tmp/db", "/tmp/tok"),
+            desired_intercept_script(),
+        ] {
+            assert!(
+                script.starts_with("#!/usr/bin/env bash\n"),
+                "shebang must remain line 1, got: {:?}",
+                script.lines().next()
+            );
+            assert!(
+                script
+                    .lines()
+                    .nth(1)
+                    .unwrap_or("")
+                    .starts_with(GENERATOR_PREFIX),
+                "the stamp belongs on line 2"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_script_needs_refresh() {
+        let h = TempDir::new().unwrap();
+        assert!(script_needs_refresh(
+            &h.path().join("absent.sh"),
+            "anything"
+        ));
+    }
+
+    #[test]
+    fn a_hand_edited_script_needs_refresh() {
+        // Inputs unchanged, so an input fingerprint matches; the content does not.
+        let h = TempDir::new().unwrap();
+        let script = h.path().join("lumen_meter.sh");
+        let desired = METER_TEMPLATE
+            .replace("__LUMEN_DB__", "/tmp/x.db")
+            .replace("__LUMEN_TOK__", "/tmp/lumen-tok");
+        std::fs::write(&script, desired.replace("exit 0", "exit 1")).unwrap();
+        assert!(script_needs_refresh(&script, &desired));
+    }
+
+    // ── Artifact registry ────────────────────────────────────────────────────
+
+    #[test]
+    fn every_step_run_setup_emits_is_accounted_for() {
+        // The test that makes a fourth instance of the run_setup-only bug
+        // impossible. Add a step and forget its freshness check, and its id is
+        // unaccounted for here.
+        let h = TempDir::new().unwrap();
+        let emitted: std::collections::BTreeSet<String> =
+            run_setup_in(h.path(), &FakeAutoStart::default())
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+        let accounted: std::collections::BTreeSet<String> = PERSISTED_ARTIFACTS
+            .iter()
+            .chain(NON_PERSISTING.iter())
+            .map(|s| s.to_string())
+            .collect();
+
+        let unaccounted: Vec<_> = emitted.difference(&accounted).collect();
+        assert!(
+            unaccounted.is_empty(),
+            "these run_setup steps have no freshness check: {unaccounted:?} — add \
+             each to PERSISTED_ARTIFACTS (with a validator) or to NON_PERSISTING"
+        );
+    }
+
+    #[test]
+    fn cli_is_in_the_registry_even_though_run_setup_does_not_emit_it() {
+        // It is installed by its own command, which is exactly why it was missed
+        // the first time. 1.1.4 shipped a symlink pointing at the GUI binary.
+        assert!(PERSISTED_ARTIFACTS.contains(&"cli"));
+        assert!(USER_OWNED.contains(&"cli"));
+    }
+
+    #[test]
+    fn user_owned_artifacts_are_a_subset_of_persisted_ones() {
+        for a in USER_OWNED {
+            assert!(
+                PERSISTED_ARTIFACTS.contains(a),
+                "{a} is user-owned but not persisted"
+            );
+        }
+    }
+
+    // ── CLI classification ───────────────────────────────────────────────────
+
+    fn resolver(map: &[(&str, &str)]) -> impl Fn(&Path) -> Option<PathBuf> + use<> {
+        let owned: Vec<(PathBuf, PathBuf)> = map
+            .iter()
+            .map(|(k, v)| (PathBuf::from(k), PathBuf::from(v)))
+            .collect();
+        move |p: &Path| owned.iter().find(|(k, _)| k == p).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn an_absent_cli_symlink_is_left_alone() {
+        // The user never clicked Install CLI; creating one would be unasked-for.
+        let r = resolver(&[]);
+        assert_eq!(
+            classify_cli(
+                Path::new("/usr/local/bin/lumen"),
+                Path::new("/A/lumen-cli"),
+                &r
+            ),
+            CliState::Absent
+        );
+    }
+
+    #[test]
+    fn a_homebrew_managed_cli_is_reported_not_rewritten() {
+        // Real state on the development machine: brew owns bin/lumen.
+        let r = resolver(&[(
+            "/opt/homebrew/bin/lumen",
+            "/opt/homebrew/Cellar/lumen-cli/1.1.4/bin/lumen",
+        )]);
+        assert_eq!(
+            classify_cli(
+                Path::new("/opt/homebrew/bin/lumen"),
+                Path::new("/Applications/Lumen.app/Contents/MacOS/lumen-cli"),
+                &r
+            ),
+            CliState::Homebrew,
+            "two managers must not fight over one path"
+        );
+    }
+
+    #[test]
+    fn a_cli_pointing_at_the_current_bundle_is_current() {
+        let want = "/Applications/Lumen.app/Contents/MacOS/lumen-cli";
+        let r = resolver(&[("/usr/local/bin/lumen", want)]);
+        assert_eq!(
+            classify_cli(Path::new("/usr/local/bin/lumen"), Path::new(want), &r),
+            CliState::Current
+        );
+    }
+
+    #[test]
+    fn a_cli_pointing_at_the_gui_binary_is_stale() {
+        // Precisely what 1.1.4 shipped: the CLI sidecar had been overwritten by
+        // the GUI on a case-insensitive filesystem, so the symlink aimed at it.
+        let r = resolver(&[(
+            "/usr/local/bin/lumen",
+            "/Applications/Lumen.app/Contents/MacOS/Lumen",
+        )]);
+        assert_eq!(
+            classify_cli(
+                Path::new("/usr/local/bin/lumen"),
+                Path::new("/Applications/Lumen.app/Contents/MacOS/lumen-cli"),
+                &r
+            ),
+            CliState::Stale
+        );
+    }
+
+    #[test]
+    fn homebrew_detection_covers_the_known_prefixes() {
+        for p in [
+            "/opt/homebrew/bin/lumen",
+            "/opt/homebrew/Cellar/lumen-cli/1.1.4/bin/lumen",
+            "/usr/local/Homebrew/bin/lumen",
+            "/home/linuxbrew/.linuxbrew/bin/lumen",
+        ] {
+            assert!(is_homebrew_managed(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/usr/local/bin/lumen",
+            "/Users/me/.local/bin/lumen",
+            "/Applications/Lumen.app/Contents/MacOS/lumen-cli",
+        ] {
+            assert!(!is_homebrew_managed(Path::new(p)), "{p}");
+        }
+    }
+
+    // ── write_atomic ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn write_atomic_unions_the_mode_floor_so_a_lost_exec_bit_is_restored() {
+        // Exact preservation would keep a broken hook broken.
+        let h = TempDir::new().unwrap();
+        let f = h.path().join("lumen_meter.sh");
+        std::fs::write(&f, "old").unwrap();
+        set_mode(&f, 0o644).unwrap(); // exec bit lost by some earlier bug
+        write_atomic(&f, "new", 0o755).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&f) & 0o111, 0o111, "exec bit must be restored");
+    }
+
+    #[test]
+    fn write_atomic_preserves_a_tightened_mode_when_no_floor_is_required() {
+        // ~/.claude.json is 0600; a naive temp+rename would leave it 0600 by luck
+        // and settings.json (0644) tightened. Preservation must be deliberate.
+        let h = TempDir::new().unwrap();
+        let f = h.path().join("settings.json");
+        std::fs::write(&f, "{}").unwrap();
+        set_mode(&f, 0o600).unwrap();
+        write_atomic(&f, "{\"a\":1}", 0).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            mode_of(&f),
+            0o600,
+            "a deliberately private file stays private"
+        );
+    }
+
+    #[test]
+    fn write_atomic_writes_through_a_symlink_without_replacing_it() {
+        // Dotfile-repo users symlink ~/.claude.json. Renaming onto the link would
+        // replace it with a regular file and detach their config.
+        let h = TempDir::new().unwrap();
+        let real = h.path().join("real.json");
+        let link = h.path().join("claude.json");
+        std::fs::write(&real, "{}").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, "{\"kept\":true}", 0).unwrap();
+
+        #[cfg(unix)]
+        {
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the symlink must survive"
+            );
+            assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"kept\":true}");
+        }
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_temp_file_behind() {
+        let h = TempDir::new().unwrap();
+        let f = h.path().join("x.json");
+        write_atomic(&f, "{}", 0).unwrap();
+        let strays: Vec<_> = std::fs::read_dir(h.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("lumen-tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp files left behind: {strays:?}");
+    }
 
     // ── Autostart test double ────────────────────────────────────────────────
 

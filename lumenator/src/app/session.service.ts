@@ -430,6 +430,21 @@ export class SessionService {
   }
 
   /** Total tokens saved by Lumen across all time (CAUSED, not reported). */
+  /**
+   * Metered events whose token provenance was never recorded.
+   *
+   * Rows predating 1.1.5 carry no `token_source`, and on installs whose baked
+   * tokenizer path had died the hook substituted bytes/4 silently. While any
+   * remain, the Optimizer screen qualifies its accuracy claim instead of asserting
+   * an exactness the data cannot support.
+   */
+  readonly unverifiedProvenanceRows = computed(
+      () => this.optimizerStats()?.unverifiedProvenanceRows ?? 0,
+  );
+  readonly provenanceTotalRows = computed(
+      () => this.optimizerStats()?.provenanceTotalRows ?? 0,
+  );
+
   readonly lifetimeOptimizedTokens = computed(
       () => this.optimizerStats()?.lifetimeOptimizedTokens ?? 0,
   );

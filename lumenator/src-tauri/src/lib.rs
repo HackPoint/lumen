@@ -301,6 +301,16 @@ pub fn run() {
                 log::info!("registered Lumen as a login item");
             }
 
+            // Repair hook scripts that have drifted from this build. Scripts only:
+            // they are Lumen's own files, so a bad write harms nothing else, whereas
+            // ~/.claude.json holds every MCP server the user has and is reported
+            // rather than rewritten. This is also what keeps the meter current — a
+            // script from an older release silently records nothing for columns
+            // added since, while every report still looks healthy.
+            if let Some(what) = setup::ensure_scripts_fresh() {
+                log::info!("hook scripts were stale: {what}");
+            }
+
             // connect to the daemon WS and forward to the frontend
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connect_daemon(handle));
@@ -318,7 +328,8 @@ pub fn run() {
             setup::lumen_uninstall,
             setup::lumen_install_cli,
             setup::lumen_autostart_enabled,
-            setup::lumen_set_autostart
+            setup::lumen_set_autostart,
+            setup::lumen_artifact_health
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
