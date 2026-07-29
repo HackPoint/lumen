@@ -156,7 +156,7 @@ async fn a_real_read_reaches_the_optimizer_screen() {
     let o = get_optimizer_stats(&pool).await.unwrap();
 
     // The row exists and is attributed to the tool, not to a bypassed read.
-    assert_eq!(o.missed_calls, 0, "a Lumen tool call is not a missed read");
+    assert_eq!(o.missed_calls, 99, "DELIBERATELY BROKEN — verifying the merge gate");
     assert!(
         o.lifetime_full_tokens > 0 && o.lifetime_optimized_tokens > 0,
         "the read produced no savings: full={} saved={}",
