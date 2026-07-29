@@ -23,6 +23,10 @@ type Row = (
 );
 
 fn smart_read(mode: Option<&str>, target: &str) -> (Vec<Row>, String) {
+    smart_read_with(mode, target, &[])
+}
+
+fn smart_read_with(mode: Option<&str>, target: &str, extra: &[(&str, &str)]) -> (Vec<Row>, String) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("ledger.db");
     assert!(
@@ -46,12 +50,20 @@ fn smart_read(mode: Option<&str>, target: &str) -> (Vec<Row>, String) {
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"));
     cmd.env("LUMEN_DB", &db)
+        // A wall-clock deadline is a property of the machine, not of the code. Left at
+        // its default these tests declined as `TooSlow` on CI runners and passed
+        // locally, which is a test measuring the runner. The TooSlow path has its own
+        // test below, where the budget is pinned to zero.
+        .env("LUMEN_RANKED_TIME_BUDGET_MS", "60000")
         .env_remove("LUMEN_RANKED_OUTLINE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(m) = mode {
         cmd.env("LUMEN_RANKED_OUTLINE", m);
+    }
+    for (k, v) in extra {
+        cmd.env(k, v);
     }
     let mut child = cmd.spawn().expect("spawn lumen-mcp");
     child
@@ -238,5 +250,27 @@ fn the_ab_mode_assigns_a_stable_arm_to_a_given_path() {
     assert!(
         first == "smart_read" || first.starts_with("ranked"),
         "unexpected route {first}"
+    );
+}
+
+/// The timeout path, made deterministic by pinning the budget to zero rather than by
+/// hoping a machine is slow enough.
+#[test]
+fn exceeding_the_time_budget_declines_on_its_own_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = big_rust_file(dir.path());
+    let (rows, stdout) =
+        smart_read_with(Some("on"), &target, &[("LUMEN_RANKED_TIME_BUDGET_MS", "0")]);
+    assert_eq!(
+        rows[0].0, "ranked_too_slow",
+        "a zero budget must always be exceeded, on any machine"
+    );
+    assert!(
+        rows[0].1.unwrap() > 0,
+        "premise: the budget was affordable, so time is the reason for the decline"
+    );
+    assert!(
+        stdout.contains("outline"),
+        "and the caller still gets an outline"
     );
 }

@@ -820,21 +820,35 @@ pub struct Decision {
     pub outcome: Result<Fitted, Decline>,
 }
 
-/// Wall-clock ceiling. A slow outline inside a synchronous hook is worse than a crude one.
+/// Wall-clock ceiling for the whole pipeline.
 ///
-/// 50 ms, not the 10 ms the specification names. Measured in release with the query
-/// compiled once, the whole pipeline is 2 ms at 421 lines, 7 ms at 1,433 and 17 ms at
-/// 4,198 — parse-dominated — so a 10 ms ceiling rejected precisely the large files an
-/// outline helps most. What the ceiling guards against is returning the entire file
-/// instead, which costs the model far more than 50 ms in latency and in tokens.
+/// 50 ms, not the 10 ms originally specified. Measured in release with the query compiled
+/// once, the pipeline is 2 ms at 421 lines, 7 ms at 1,433 and 17 ms at 4,198 —
+/// parse-dominated — so 10 ms rejected precisely the large files an outline helps most.
+/// What the ceiling guards against is returning the entire file instead, which costs the
+/// model far more than 50 ms in both latency and tokens.
 #[cfg(not(debug_assertions))]
-const TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+const DEFAULT_TIME_BUDGET_MS: u64 = 50;
 
-/// Ten times the release ceiling, because a debug build's constant factor is 3–5x and is
-/// not what the ceiling is calibrated against. Without this the tests decline every file
-/// as `TooSlow` and assert nothing about the path they exist to cover.
+/// Ten times the release ceiling: a debug build's constant factor is 3–5x and is not what
+/// the ceiling is calibrated against.
 #[cfg(debug_assertions)]
-const TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+const DEFAULT_TIME_BUDGET_MS: u64 = 500;
+
+/// The ceiling, overridable by `LUMEN_RANKED_TIME_BUDGET_MS`.
+///
+/// The override exists because a wall-clock deadline is not a property of the code — it is
+/// a property of the machine. Tests that assert on which branch was taken were flaky
+/// across CI runners without it, declining as `TooSlow` on a slower host and passing on a
+/// faster one, which is a test measuring the runner rather than the feature. It is also
+/// the honest escape hatch for a genuinely slow machine.
+fn time_budget() -> std::time::Duration {
+    let ms = std::env::var("LUMEN_RANKED_TIME_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TIME_BUDGET_MS);
+    std::time::Duration::from_millis(ms)
+}
 
 /// Produce a ranked outline, or say why not.
 ///
@@ -866,6 +880,7 @@ where
     F: Fn(&str) -> usize,
 {
     let started = std::time::Instant::now();
+    let deadline = time_budget();
     let s_min = econ.s_min().map(|s| s.ceil() as i64).unwrap_or(i64::MAX);
     let budget = econ.budget(full_tokens).unwrap_or(i64::MIN);
     let mk = |outcome| Decision {
@@ -889,7 +904,7 @@ where
     if defs.is_empty() {
         return mk(Err(Decline::NoDefs));
     }
-    if started.elapsed() > TIME_BUDGET {
+    if started.elapsed() > deadline {
         return mk(Err(Decline::TooSlow));
     }
 
@@ -910,7 +925,7 @@ where
     if fitted.returned_tokens >= full_tokens {
         return mk(Err(Decline::WouldInflate));
     }
-    if started.elapsed() > TIME_BUDGET {
+    if started.elapsed() > deadline {
         return mk(Err(Decline::TooSlow));
     }
     mk(Ok(fitted))

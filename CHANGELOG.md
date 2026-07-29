@@ -64,6 +64,9 @@ that ruled out). That service went from 0 to **56** definitions.
   whole file, which costs the model far more than 50 ms in latency and tokens; 10 ms
   rejected exactly the large files an outline helps most. Ten times that in debug builds,
   whose constant factor is 3–5× and is not what the ceiling is calibrated against.
+  Overridable with `LUMEN_RANKED_TIME_BUDGET_MS`: a deadline is a property of the machine,
+  not of the code, and without the override the tests declined as `TooSlow` on CI runners
+  while passing locally — a test measuring the runner rather than the feature.
 - **The A/B split was 100/0.** FNV-1a's lowest bit is close to the XOR of its input bytes,
   so on structured paths `hash % 2` put **every one of 4,000 generated paths in the same
   arm** while reporting a 50/50 design. A splitmix64 finalizer brings it to 0.509, and the
