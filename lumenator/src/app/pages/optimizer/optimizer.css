@@ -455,3 +455,19 @@
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: none; }
 }
+
+/* The dollar headline is wider than "87%", so it cannot be sized like a percentage. */
+.hero__num--usd {
+    font-size: clamp(1.6rem, 7vw, 2.6rem);
+    letter-spacing: -0.5px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The token ratio, demoted below the dollar figure. */
+.hero__secondary {
+    font-size: 0.74rem;
+    color: var(--text-dim, #8b949e);
+    margin: 0.4rem 0 0;
+    line-height: 1.4;
+}

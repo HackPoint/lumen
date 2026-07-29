@@ -3,6 +3,7 @@ import { Observable, scan, startWith, merge, from, filter } from 'rxjs';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { RATE } from './components';
 import { TauriBridge } from './tauri-bridge';
+import type { ContextReport } from './components/index';
 import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
@@ -428,6 +429,36 @@ export class SessionService {
         .then((r) => this.optimizerStats.set(r))
         .catch(() => { /* not in Tauri / db not ready — ignore */ });
   }
+
+  /** Net dollar value of interception. 0 when the backend cannot price a round. */
+  readonly netValueUsd = computed(() => this.optimizerStats()?.netValueUsd ?? 0);
+  readonly grossValueUsd = computed(() => this.optimizerStats()?.grossValueUsd ?? 0);
+  readonly roundCostUsd = computed(() => this.optimizerStats()?.roundCostUsd ?? 0);
+  readonly valueRounds = computed(() => this.optimizerStats()?.valueRounds ?? 0);
+  /** True once the backend has enough turns to price a round at all. */
+  readonly netValuePriced = computed(() => (this.optimizerStats()?.roundCostUsd ?? 0) > 0);
+
+  // ── Context diagnostics ───────────────────────────────────────────────────
+  //
+  // Where the project's context has actually gone. Kept separate from the optimizer
+  // signals on purpose: those make a savings claim and this one does not.
+
+  /** Raw report from get_context_report. Null until first fetch resolves. */
+  readonly contextReport = signal<ContextReport | null>(null);
+
+  /** Re-fetch the context diagnostics. */
+  refreshContextReport(): void {
+    this.bridge.invoke<ContextReport>('get_context_report')
+        .then((r) => this.contextReport.set(r))
+        .catch(() => { /* not in Tauri / db not ready — ignore */ });
+  }
+
+  readonly contextTotalTokens = computed(() => this.contextReport()?.totalTokensRead ?? 0);
+  readonly contextFiles = computed(() => this.contextReport()?.topFiles ?? []);
+  readonly contextDistinctFiles = computed(() => this.contextReport()?.distinctFiles ?? 0);
+  readonly contextTop10Share = computed(() => this.contextReport()?.top10SharePct ?? 0);
+  readonly contextUnchangedRereads = computed(
+      () => this.contextReport()?.totalUnchangedRereads ?? 0);
 
   /** Total tokens saved by Lumen across all time (CAUSED, not reported). */
   /**

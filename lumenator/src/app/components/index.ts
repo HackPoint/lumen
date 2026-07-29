@@ -160,6 +160,21 @@ interface OptimizerReport {
     unverifiedProvenanceRows: number;
     /** Total metered events, so the UI can say "N of M". */
     provenanceTotalRows: number;
+    /**
+     * Net dollar value of interception: the avoided tokens priced, less the extra rounds
+     * they cost. The headline from 1.4.0 on.
+     *
+     * The token ratio it replaces flattered the product — a smaller reply that forces
+     * another round is a loss however good the ratio looks. Optional so a 1.3.x backend
+     * still renders.
+     */
+    netValueUsd?: number;
+    grossValueUsd?: number;
+    roundCostUsd?: number;
+    /** Rounds a saving keeps paying for. Surfaced because the result is most sensitive to it. */
+    valueRounds?: number;
+    /** Rounds each intercept costs — 1.604 measured. */
+    pairMultiplier?: number;
 }
 
 export type {
@@ -176,3 +191,37 @@ export type {
     OptimizerReport,
 };
 export { RATE };
+
+/**
+ * One file that a meaningful share of the project's context has gone into.
+ *
+ * Diagnosis, not savings. Nothing here claims to have saved anything, which is why it
+ * is the one figure in the product that cannot be net-negative: it costs no tokens,
+ * intercepts nothing and forces no rounds.
+ */
+export interface FileHotspot {
+    path: string;
+    /** Basename, so the view need not split paths. */
+    name: string;
+    reads: number;
+    totalTokens: number;
+    /** Share of every token this project has read. */
+    sharePct: number;
+    lines: number | null;
+    /**
+     * Re-reads where the file had not changed since the previous read of it — context
+     * re-acquired rather than retained.
+     */
+    unchangedRereads: number;
+    /** Present only where the numbers warrant one. */
+    recommendation: string | null;
+}
+
+export interface ContextReport {
+    totalTokensRead: number;
+    distinctFiles: number;
+    topFiles: FileHotspot[];
+    /** Share of all tokens read that sits in the ten largest files. */
+    top10SharePct: number;
+    totalUnchangedRereads: number;
+}

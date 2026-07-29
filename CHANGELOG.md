@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.4.0] — 2026-07-29
+
+### The headline is dollars now, and the token ratio is demoted to an input
+
+87% fewer tokens per intercepted read was the hero metric, and it flattered the product.
+A ratio cannot be wrong in the direction that matters: an intercepted read is a *blocked*
+read, so the model spends an extra round calling a Lumen tool instead, and a smaller reply
+that forces another round is a loss however good the ratio looks.
+
+The Optimizer screen now leads with the net dollar value — the tokens avoided, priced,
+less the rounds they cost — and keeps the token ratio underneath it. The README's 87%
+figure is replaced the same way.
+
+The regression test for this is a call that saves 300 of 400 tokens: a 75% ratio, and a
+dollar loss. It would have rendered as a success under the old headline.
+
+**Published under a pre-committed rule: whatever the number is, it renders.** A negative
+result shows as negative with no softening — asserted by a test that fails if the words
+"but", "still", "however", "nonetheless" or "despite" appear near it. A result within a
+dollar of zero says *roughly break-even* rather than rounding into a win. And when there
+are too few recorded turns to price a round, no figure is claimed at all, because a gross
+figure with no cost beside it is the exact overstatement being removed.
+
+Measured on the author's machine: **+$276 over 291 attributable calls, about +$0.95 each.**
+The sign is robust across every plausible value of `R`; the magnitude is not, spanning
++$31 to +$368 on that one input, so `R` is shown in the UI rather than hidden. `smart_read`
+taken alone is roughly break-even — the surplus comes from `recall_file`.
+
+### Hotspots: where your context actually goes
+
+A new screen answering a question Lumen could always have answered and never did. Top
+files by cumulative tokens read, with read counts, share of all context, and how much of
+each file's reading found it **unchanged** since the previous read — context re-acquired
+rather than retained.
+
+On this repository: `Run.tsx`, **139 reads, 3.83M tokens, 20.8% of everything read**, and
+the top ten files account for 40.1% of 18.4M tokens across 1,189 files. Where the numbers
+warrant it the screen says what to do — a 3,833-line file read 139 times is a refactor
+candidate, and no read optimisation beats splitting it.
+
+It is framed as diagnosis, not savings, and the framing is load-bearing. It costs zero
+tokens, intercepts nothing and forces no rounds, so it is the only figure in the product
+that cannot come out negative. A test enforces the copy: the screen may not claim to have
+saved anything.
+
+The unchanged-read signal is a proxy, and labelled as one. The direct measure would be
+"re-read after a compaction", but compaction is recorded in the transcript rather than the
+database; `file_mtime` equality answers the same question from data that is present. Rows
+predating `file_mtime` are excluded rather than assumed unchanged.
+
+### Notes
+
+- 537 Rust tests, 268 frontend.
+- `R` is a measured constant (194) in the UI, not per-call. Per-call `R` needs the
+  transcript replay in `scripts/lumen_percall.py`, which cannot run inside a tool call.
+- The published figure covers the 291 calls that could be attributed, and is **not scaled
+  up** to the 1,470 in the ledger.
+- The measurement window has not started: it needs the `Bash` matcher registered (a Setup
+  press) and MCP-side `req_key` flowing (a Claude Code restart). Both were still absent at
+  release, so no A/B data exists yet and none is claimed.
+
 ## [1.3.1] — 2026-07-29
 
 ### The budget was a floor mistaken for a target, which disabled the ranking
