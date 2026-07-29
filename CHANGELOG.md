@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.2.3] — 2026-07-29
+
+### The orphan-daemon fix in 1.2.1 did not work, and its test could not tell
+
+1.2.1 added a watchdog so the daemon exits when the GUI dies, freeing
+`127.0.0.1:9999` instead of squatting it across an upgrade. Verified on a real install,
+it did not work: after force-killing the app, the daemon was still holding the port
+twenty-four seconds later. `lsof` showed its stdin had **no peer** — the pipe was at
+EOF and the watchdog's read had already returned.
+
+The watchdog logged before exiting:
+
+```
+eprintln!("lumen-daemon: supervisor exited, ...");
+std::process::exit(0);
+```
+
+The daemon's stderr is a pipe whose read end also belongs to the GUI, so it breaks at
+the same instant as stdin. **`eprintln!` panics when the write fails**, and a panic on a
+spawned thread unwinds only that thread — so `exit(0)` was never reached. The orphan
+survived for exactly the reason the log line existed: to announce itself.
+
+The test could not catch it, because it wired the daemon's stderr to `Stdio::null()`,
+where every write succeeds. It reproduced the EOF but not the broken pipe, which is a
+strictly easier situation than production. It now closes stdout and stderr alongside
+stdin, and with the old code restored it fails — 2 of 3, with the negative control
+still passing.
+
+Every `eprintln!` in the daemon is now a non-panicking `logline!`. This was a class, not
+an instance: fourteen other call sites had the same hazard, and the WebSocket restart
+loop reaches one of them every two seconds. A daemon must not die because it could not
+describe itself — nor be kept alive by the attempt.
+
+### Notes
+
+- On the install where this was found, the orphan was still present after upgrading
+  1.2.0 → 1.2.2. That is expected and not a further bug: the process that must kill the
+  daemon is the one being replaced, so an upgrade *away from* a version without the fix
+  cannot benefit from it. Upgrades from 1.2.3 onward are covered. To clear a stale one
+  now: quit Lumen, `pkill -f 'MacOS/lumen-daemon'`, then reopen it.
+- Verified on the real install after this fix, not only in tests: an ordinary quit and a
+  `kill -9` of the app both leave zero daemons and free the port.
+- 462 Rust tests, 251 frontend.
+
 ## [1.2.2] — 2026-07-29
 
 ### Linux: the metering hook wrote nothing, in two independent ways

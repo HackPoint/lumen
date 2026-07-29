@@ -45,8 +45,15 @@ fn spawn(supervised: bool) -> Fixture {
         .env("LUMEN_WS_ADDR", "127.0.0.1:0")
         .env_remove("LUMEN_SUPERVISED")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // Piped, not null. This mirrors the app, which reads the daemon's stderr to
+        // forward it into its own log, and it is load-bearing: with `Stdio::null()`
+        // every write to stderr succeeds, so an earlier version of this test passed
+        // while the shipped daemon did not shut down at all. The watchdog logged
+        // before exiting, `eprintln!` panicked on the broken pipe once the supervisor
+        // was gone, the panic unwound only the watchdog thread, and the orphan lived.
+        // Against /dev/null that failure mode cannot occur.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if supervised {
         cmd.env("LUMEN_SUPERVISED", "1");
     }
@@ -62,6 +69,24 @@ fn spawn(supervised: bool) -> Fixture {
     );
 
     Fixture { _dir: dir, child }
+}
+
+/// Simulate the supervisor dying: close every pipe it owned.
+///
+/// Order matters and mirrors a real death. The app holds the write end of the
+/// daemon's stdin *and* the read end of its stdout/stderr, and a killed process loses
+/// all of them at once — so the daemon faces EOF on stdin and a broken pipe on stderr
+/// simultaneously. Dropping only stdin would leave the daemon able to log, which is a
+/// strictly easier situation than production and is precisely the gap that let a
+/// broken watchdog pass its own test.
+///
+/// These are dropped only after startup, because while the app is alive it *does* read
+/// the daemon's stderr; breaking that pipe from the beginning would have the daemon
+/// panicking on its ordinary startup logging instead of on shutdown.
+fn supervisor_dies(child: &mut Child) {
+    drop(child.stdin.take().expect("piped stdin"));
+    drop(child.stdout.take());
+    drop(child.stderr.take());
 }
 
 /// Wait for exit, returning whether it happened inside `GRACE`.
@@ -80,9 +105,7 @@ fn exited_within_grace(child: &mut Child) -> bool {
 fn a_supervised_daemon_exits_when_its_stdin_closes() {
     let mut f = spawn(true);
 
-    // Closing the pipe is what the app dying looks like from here: the write end goes
-    // away and the daemon's read returns 0.
-    drop(f.child.stdin.take().expect("piped stdin"));
+    supervisor_dies(&mut f.child);
 
     let exited = exited_within_grace(&mut f.child);
     if !exited {
@@ -103,7 +126,7 @@ fn a_supervised_daemon_exits_when_its_stdin_closes() {
 fn an_unsupervised_daemon_ignores_a_closed_stdin() {
     let mut f = spawn(false);
 
-    drop(f.child.stdin.take().expect("piped stdin"));
+    supervisor_dies(&mut f.child);
 
     let exited = exited_within_grace(&mut f.child);
     let _ = f.child.kill();
@@ -122,17 +145,16 @@ fn traffic_on_stdin_does_not_end_a_supervised_daemon() {
     let mut f = spawn(true);
 
     {
-        let mut stdin = f.child.stdin.take().expect("piped stdin");
+        let stdin = f.child.stdin.as_mut().expect("piped stdin");
         stdin.write_all(b"ping\n").unwrap();
         stdin.flush().unwrap();
-
-        std::thread::sleep(Duration::from_secs(2));
-        assert!(
-            f.child.try_wait().unwrap().is_none(),
-            "bytes on stdin are not EOF and must not trigger shutdown"
-        );
-        // Now drop it, and the daemon should go.
     }
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        f.child.try_wait().unwrap().is_none(),
+        "bytes on stdin are not EOF and must not trigger shutdown"
+    );
+    supervisor_dies(&mut f.child);
 
     let exited = exited_within_grace(&mut f.child);
     if !exited {

@@ -1,6 +1,6 @@
 [package]
 name = "lumen-mcp"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2024"
 
 # Request handling lives in the lib so it can be unit-tested; the binaries are
