@@ -14,8 +14,15 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.9rem 1rem 0.85rem;
+    gap: 0.55rem;
+    padding: 0.8rem 0.9rem 0.75rem;
+    /* The popover is a fixed 320x400 window, but the rows below the gauge are
+       conditional: the project label and the compaction badge appear only
+       sometimes, and together they add 48px. Without a hard clip plus a
+       shrinkable child, that growth pushed the cost tiles past the bottom edge
+       and the second figure was cut in half. */
+    overflow: hidden;
+    min-height: 0;
     border-radius: 16px;
     background: var(--lumen-panel-bg);
     -webkit-backdrop-filter: blur(30px) saturate(180%);
@@ -73,12 +80,24 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
     gap: 0.2rem;
     cursor: default;
+    /* The designated shrink target. Everything else in the panel is text that
+       must stay legible, so when optional rows appear the firefly gives up space
+       rather than the numbers being clipped. min-height:0 is required or a flex
+       item refuses to shrink below its content. */
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .panel__fly {
-    font-size: 7rem; /* ~112px — fills the center of the 304px-wide card */
+    /* Was a flat 7rem (112px), which is 44% of the window height and left no
+       room once the badge and project rows appeared. Tied to viewport height so
+       it yields on a short window and still fills a tall one. */
+    font-size: min(7rem, 22vh);
+    flex-shrink: 1;
+    min-height: 0;
 }
 
 /* ── Large percentage: same status color as the fill ── */
@@ -112,7 +131,11 @@
 .panel__tokens {
     font-family: var(--lumen-font-mono);
     font-variant-numeric: tabular-nums;
-    font-size: 0.84rem;
+    /* clamp, not a fixed size: a 1M window is 19 characters and must stay on one
+       line at 272px of content width. */
+    font-size: clamp(0.72rem, 4.2vw, 0.84rem);
+    white-space: nowrap;
+    max-width: 100%;
     font-weight: 600;
     color: var(--lumen-text);
     letter-spacing: 0.2px;
@@ -131,6 +154,8 @@
 }
 
 .panel__flag {
+    white-space: nowrap;
+    max-width: 100%;
     font-size: 0.67rem;
     font-weight: 600;
     padding: 0.18rem 0.5rem;

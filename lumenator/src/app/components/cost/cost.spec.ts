@@ -139,4 +139,70 @@ describe('Cost', () => {
     fixture.detectChanges();
     expect(c.totalCost()).toBeCloseTo(before * 2, 10);
   });
+
+  // ── Popover fit: figures must not outgrow their column ────────────────────
+  //
+  // Measured with a real browser at 320x400 (the popover's actual size): each
+  // tile gets a 111px content column, and "$1134.87" needed the full width while
+  // "SAVED BY CACHING ⓘ" needed 107px inside a 106.6px box and wrapped to two
+  // lines, pushing the second tile 7.9px below the window so its figure was cut.
+  //
+  // jsdom has no layout engine, so these assert the length logic that drives the
+  // size classes. The geometry itself is verified by browser measurement, not
+  // here — see the 1.2.0 notes.
+
+  it('leaves short figures at full size', () => {
+    const c = build({});
+    for (const s of ['$0.00', '$1.50', '$158.65']) {
+      expect(c.isLong(s)).toBe(false);
+      expect(c.isXLong(s)).toBe(false);
+    }
+  });
+
+  it('shrinks a figure once it reaches the width of its column', () => {
+    // $1134.87 is 8 characters, which is exactly where 1.15rem stops fitting.
+    const c = build({});
+    expect(c.isLong('$1134.87')).toBe(true);
+    expect(c.isXLong('$1134.87')).toBe(false);
+  });
+
+  it('shrinks further for figures that would overflow even at the reduced size', () => {
+    const c = build({});
+    expect(c.isXLong('$123456.78')).toBe(true);
+    expect(c.isLong('$123456.78')).toBe(false);
+  });
+
+  it('never reports a figure as both long and extra-long', () => {
+    // The two classes set conflicting font sizes, so they must be exclusive.
+    const c = build({});
+    for (let n = 0; n <= 14; n++) {
+      const s = '$' + '1'.repeat(n);
+      expect(c.isLong(s) && c.isXLong(s)).toBe(false);
+    }
+  });
+
+  it('applies the size class to the rendered figure', () => {
+    // A large cache saving is the case from the report: cacheRead priced at the
+    // input rate minus the cache rate yields a four-figure sum.
+    const c = build({ cacheRead: 300_000_000 });
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    const values = [...el.querySelectorAll('.tile__value')];
+    const saving = values[1];
+    expect(c.fmt(c.cacheSavings()).length).toBeGreaterThanOrEqual(8);
+    expect(
+      saving.classList.contains('tile__value--long') ||
+        saving.classList.contains('tile__value--xlong'),
+    ).toBe(true);
+    expect(saving.classList.contains('tile__value')).toBe(true);
+  });
+
+  it('keeps the info button inside the label so it cannot wrap away from it', () => {
+    // The icon on its own line was the visible symptom; the fix is structural —
+    // label and button are one nowrap flex row.
+    const el = (build({}), fixture.nativeElement as HTMLElement);
+    for (const label of el.querySelectorAll('.tile__label')) {
+      expect(label.querySelector('.info-btn')).not.toBeNull();
+    }
+  });
 });

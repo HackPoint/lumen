@@ -24,6 +24,22 @@ export class Cost {
         () => this.costInput() + this.costOutput() + this.costCacheRead() + this.costCacheWrite(),
     );
 
+    /**
+     * Whether a formatted figure needs a reduced size to fit its column.
+     *
+     * CSS cannot size text by its own character count, and the popover column is
+     * only ~107px wide, so `$1134.87` sat flush against the edge and anything
+     * longer overflowed. Measured thresholds rather than guessed: 8 characters is
+     * where the default 1.15rem stops fitting.
+     */
+    isLong(formatted: string): boolean {
+        return formatted.length >= 8 && formatted.length < 10;
+    }
+
+    isXLong(formatted: string): boolean {
+        return formatted.length >= 10;
+    }
+
     // --- the savings story ---
     // What the cache-read tokens WOULD have cost at full input price, vs what they did cost.
     readonly cacheReadFullPrice = computed(() => this.totals().cacheRead * RATE.input);
