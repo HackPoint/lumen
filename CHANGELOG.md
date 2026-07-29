@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.2.0] — 2026-07-29
+
+### Fixes
+- fix(panel): the popover clipped its own cost figures. Measured in a browser at the
+  popover's real 320x400: with a seven-digit context, a project label and a
+  compaction badge all present, the content needed 413px inside 382px, so the second
+  tile ran 7.9px past the bottom edge and `$1134.87` was cut in half.
+
+  Three separate causes, each fixed structurally rather than by nudging a constant:
+
+  - **"SAVED BY CACHING ⓘ" wrapped to two lines.** It needed 107px inside a 106.6px
+    column, so the icon fell to its own row and stole 14px from the tiles below. The
+    label and its icon are now one `nowrap` flex row, and the panel-scoped type is
+    tightened until it fits with slack — so it cannot wrap regardless of translation
+    or font fallback.
+  - **Nothing could yield when the optional rows appeared.** The project label and
+    the badge add 48px between them and are conditional, so the layout was only ever
+    correct without them. The firefly is now the designated shrink target
+    (`flex: 1 1 auto; min-height: 0`, size tied to viewport height), so growth
+    squeezes the illustration instead of clipping the numbers.
+  - **Long figures had no way to shrink.** CSS cannot size text by its own character
+    count, so the component now picks a size class by length: eight characters is
+    where the default stops fitting, ten where the reduced size does.
+
+  Also: the token row and badge no longer wrap, grid items get `min-width: 0` so a
+  long figure cannot widen its column, and the panel clips as a last resort.
+
+  Verified at an extreme well past the report — `1,000,000 / 1,000,000`,
+  `$123456.78`, a 28-character project name and a dated model id — with zero
+  clipping and no horizontal overflow on any element.
+
+### Notes
+- **Non-text file interception was investigated and rejected.** The plan was to block
+  reads of images above a size threshold, on the evidence that 87 PNGs accounted for
+  4.3M "missed optimization" tokens. Both premises turned out to be wrong.
+
+  Attribution through the transcript chain showed **39 of 45 traceable image reads
+  (87%) were the agent reading back a screenshot it had just taken itself** — the
+  visual verification loop behind prompts like "run it on local let's see how it
+  looks". Blocking those does not remove waste, it blinds the agent on work the user
+  asked for. Only 6 reads touched a pre-existing file.
+
+  The token figure was also an artefact of the metering bug 1.1.5 fixed: image costs
+  were recorded as `bytes / 4` of binary data by a hook whose tokenizer path was
+  dead, or as 0 where the tokenizer panicked on non-UTF-8. Real cost scales with
+  pixels, and for these screenshots is roughly 150k tokens — about 22x smaller than
+  recorded, on the order of cents across 51 days.
+
+  Not shipped, and not shipped disabled-by-default either: a feature that would break
+  a working capability to save a rounding error should not exist. What remains worth
+  doing is making `lumen-tok` report honestly on binary input instead of panicking,
+  and excluding unparseable file types from the missed-optimization metric — that
+  metric is what manufactured this opportunity.
+
 ## [1.1.5] — 2026-07-29
 
 ### If you installed 0.1.0 or 1.0.0 from the .dmg, your historical optimizer numbers have unverified provenance

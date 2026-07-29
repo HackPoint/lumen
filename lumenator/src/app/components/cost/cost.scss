@@ -32,10 +32,18 @@
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  /* The label and its ⓘ are one unit. Allowing a break put the icon alone on a
+     second line, which both looked broken and stole 14px of vertical space from
+     the tiles below. */
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
 }
 
 .tile__value {
   margin-top: 0.3rem;
+  white-space: nowrap;
   color: var(--lumen-text);
   font-family: var(--lumen-font-mono);
   font-variant-numeric: tabular-nums;
@@ -102,18 +110,37 @@
 }
 
 :host-context(.panel) .tile--hero {
-  padding: 0.5rem 0.7rem;
+  padding: 0.45rem 0.6rem;
+  /* A grid item's default min-width:auto refuses to shrink below its content,
+     which is how a long figure widened the tile past its column. */
+  min-width: 0;
 }
 
 :host-context(.panel) .tile__label {
-  font-size: 0.6rem;
-  letter-spacing: 0.5px;
+  /* Measured: "SAVED BY CACHING" plus the icon needed 107px inside a 106.6px
+     box at 0.6rem/0.5px, so it wrapped every time. Tightened until it fits with
+     slack, and nowrap above makes it structural rather than a lucky fit. */
+  font-size: 0.55rem;
+  letter-spacing: 0.2px;
+  gap: 1px;
 }
 
 :host-context(.panel) .tile__value {
   font-size: 1.15rem;
   font-weight: 600;
   margin-top: 0.15rem;
+}
+
+/* Length-driven, because CSS cannot size text by its own character count. The
+   component sets this when a formatted figure passes into four digits, which is
+   where $1134.87 began touching the edge of its 106.6px column. */
+:host-context(.panel) .tile__value--long {
+  font-size: 0.98rem;
+  letter-spacing: -0.6px;
+}
+:host-context(.panel) .tile__value--xlong {
+  font-size: 0.84rem;
+  letter-spacing: -0.7px;
 }
 
 :host-context(.panel) .tile__sub {

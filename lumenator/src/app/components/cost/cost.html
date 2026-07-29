@@ -7,7 +7,9 @@
                 <button class="info-btn" type="button"
                         [lumenTooltip]="'Cost of the active session — input, output, and cache tokens priced at the published Anthropic rate table.'">ⓘ</button>
             </div>
-            <div class="tile__value">{{ fmt(totalCost()) }}</div>
+            <div class="tile__value"
+                 [class.tile__value--long]="isLong(fmt(totalCost()))"
+                 [class.tile__value--xlong]="isXLong(fmt(totalCost()))">{{ fmt(totalCost()) }}</div>
         </div>
 
         <div class="tile tile--hero tile--save">
@@ -16,7 +18,9 @@
                 <button class="info-btn" type="button"
                         [lumenTooltip]="'Reported by Claude Code — tokens served from cache. NOT caused by Lumen.'">ⓘ</button>
             </div>
-            <div class="tile__value">{{ fmt(cacheSavings()) }}</div>
+            <div class="tile__value"
+                 [class.tile__value--long]="isLong(fmt(cacheSavings()))"
+                 [class.tile__value--xlong]="isXLong(fmt(cacheSavings()))">{{ fmt(cacheSavings()) }}</div>
             <div class="tile__sub">{{ fmtPct(cacheHitRate()) }} cache hit rate</div>
         </div>
     </div>
