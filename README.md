@@ -588,6 +588,10 @@ server:
 | `on` | every file uses the ranked outline |
 | `ab` | half of files, split by a stable hash of the path, so a given file always takes the same arm |
 
+`LUMEN_RANKED_TIME_BUDGET_MS` overrides the pipeline's wall-clock ceiling (50 ms by
+default). Raise it on a slow machine; a file that exceeds it falls back to the ordinary
+outline and records `ranked_too_slow`.
+
 An intercepted read costs one extra round, so the outline is only worth returning when it
 saves more than that round costs. Lumen computes the minimum saving from your own `turns`
 history and refuses files that cannot clear it, recording the refusal and the numbers
