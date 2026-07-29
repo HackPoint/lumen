@@ -23,6 +23,13 @@ serde_json = "1.0"
 lumen-core = { path = "../lumen-core" }
 
 [dev-dependencies]
+# The read-path e2e test asserts on the aggregates the GUI renders, so it needs the
+# same query layer the GUI uses rather than a hand-written copy of those sums. It lives
+# in this crate because CARGO_BIN_EXE_lumen-mcp is only defined for tests of the crate
+# that defines the binary, and the test must drive the real binary.
+lumen-stats = { path = "../lumen-stats" }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 # The metering tests read back the row the binary wrote, so they need a SQLite
 # client of their own; the production crate reaches the DB only through lumen-core.

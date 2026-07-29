@@ -79,6 +79,54 @@ jobs:
   # Rust. SQLite is compiled from source (rusqlite `bundled`), so no system
   # libsqlite3 is needed on any OS. The GUI is covered by its own jobs: macOS in
   # `check`, Linux in `gui-linux` below.
+  # ── End-to-end gate ─────────────────────────────────────────────────────────
+  #
+  # A separate job so it is a named status check that branch protection can require.
+  # These tests also run inside `cargo test --all-targets` in the jobs above, but a
+  # protection rule can require a job, not a subset of one — and the point of this gate
+  # is that "the chain from a file on disk to the figure on screen still works" cannot be
+  # merged past.
+  #
+  # Two chains, both driving real binaries with no stubs between the ends:
+  #   read path   — a source file -> the lumen-mcp binary over stdio -> SQLite ->
+  #                 the Optimizer and Hotspots aggregates the GUI renders
+  #   ingest path — a Claude Code transcript line -> the lumen-daemon binary ->
+  #                 SQLite + a live WebSocket frame -> the same aggregates
+  #
+  # Ubuntu rather than macOS: it is the cheapest runner, and nothing in either chain is
+  # platform-specific. The per-OS jobs above already prove the code compiles and passes
+  # everywhere.
+  e2e:
+    name: E2E (read path + ingest path)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      # The read-path test spawns the real lumen-mcp binary; the ingest-path test spawns
+      # the real lumen-daemon. Building them first makes a compile failure read as a
+      # build error rather than as a mysterious spawn failure inside a test.
+      - name: Build the binaries under test
+        run: cargo build -p lumen-mcp -p lumen-daemon
+
+      - name: E2E — read path (file -> MCP binary -> ledger -> screen)
+        run: cargo test -p lumen-mcp --test e2e_read_to_screen -- --nocapture
+
+      - name: E2E — ingest path (transcript -> daemon -> ledger + websocket)
+        run: cargo test -p lumen-daemon --test e2e_pipeline -- --nocapture
+
+      # The metering contract the A/B depends on: every decision column written, a
+      # decline recorded on its own route, the flag off by default.
+      - name: E2E — decision metering
+        run: cargo test -p lumen-mcp --test ranked_metering -- --nocapture
+
   test:
     name: Test (${{ matrix.os }})
     strategy:
