@@ -128,6 +128,36 @@ pub fn connect_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Provenance of a ranked-outline decision, recorded alongside the row.
+///
+/// All-NULL by default, which is what every other writer produces: the hook and the
+/// non-ranked path have no decision to record, and a zero would claim they did.
+///
+/// Every input is stored, not just the budget, because `S_min` is derived from measured
+/// means that will be re-derived once per-call `(R, round cost)` pairs exist. A row
+/// carrying only its budget could not be compared against one scored under different
+/// coefficients, which is exactly what the A/B has to do.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RankedMeta {
+    pub budget: Option<i64>,
+    pub s_min: Option<i64>,
+    pub econ_context: Option<f64>,
+    pub econ_rounds: Option<f64>,
+    pub econ_output: Option<f64>,
+    pub econ_source: Option<String>,
+    /// Definitions included. Equal to `n_total` means the budget never bound and the
+    /// ranking had no effect — the distinction between a gate and a trimmer.
+    pub k_selected: Option<i64>,
+    pub n_total: Option<i64>,
+    pub coeff_version: Option<i64>,
+}
+
+/// Thirteen parameters, and the alternative is worse.
+///
+/// Nine of the columns are already collapsed into [`RankedMeta`]; the rest are the
+/// event's own identity. Wrapping those in a struct too would move the argument list to
+/// the call site without removing anything, and this has exactly one production caller.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_read_event(
     path: &str,
     lines: Option<i64>,
@@ -140,6 +170,7 @@ pub fn insert_read_event(
     session_id: Option<&str>,
     file_mtime: Option<i64>,
     req_key: Option<&str>,
+    meta: &RankedMeta,
 ) {
     let db = match db_path() {
         Some(p) => p,
@@ -163,6 +194,7 @@ pub fn insert_read_event(
         session_id,
         file_mtime,
         req_key,
+        meta,
     );
 }
 
@@ -184,6 +216,7 @@ pub fn insert_read_event_at(
     session_id: Option<&str>,
     file_mtime: Option<i64>,
     req_key: Option<&str>,
+    meta: &RankedMeta,
 ) {
     let conn = match open_db(db) {
         Ok(c) => c,
@@ -219,8 +252,10 @@ pub fn insert_read_event_at(
     let result = conn.execute(
         "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
          saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,\
-         writer_hook,token_source) \
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'lumen-mcp','measured')",
+         writer_hook,token_source,budget,s_min,econ_context,econ_rounds,econ_output,\
+         econ_source,k_selected,n_total,coeff_version) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'lumen-mcp','measured',\
+                ?13,?14,?15,?16,?17,?18,?19,?20,?21)",
         params![
             ts,
             tool_name,
@@ -233,7 +268,16 @@ pub fn insert_read_event_at(
             channel,
             session_id,
             file_mtime,
-            req_key
+            req_key,
+            meta.budget,
+            meta.s_min,
+            meta.econ_context,
+            meta.econ_rounds,
+            meta.econ_output,
+            meta.econ_source.as_deref(),
+            meta.k_selected,
+            meta.n_total,
+            meta.coeff_version,
         ],
     );
 
@@ -520,6 +564,7 @@ mod tests {
             None,
             None,
             None,
+            &RankedMeta::default(),
         );
 
         let conn = connect_db(&path).unwrap();
@@ -581,6 +626,7 @@ mod tests {
             None,
             None,
             None,
+            &RankedMeta::default(),
         );
         let conn = connect_db(&path).unwrap();
         let lines: Option<i64> = conn
@@ -607,6 +653,7 @@ mod tests {
             None,
             None,
             None,
+            &RankedMeta::default(),
         );
 
         let conn = connect_db(&path).unwrap();
@@ -644,6 +691,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &RankedMeta::default(),
             );
         }
         let conn = connect_db(&path).unwrap();
@@ -666,6 +714,7 @@ mod tests {
             None,
             None,
             None,
+            &RankedMeta::default(),
         );
     }
 }

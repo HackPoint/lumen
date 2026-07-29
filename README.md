@@ -576,6 +576,31 @@ If you would rather not record `Bash` output at all, remove the `Bash` entry und
 `PostToolUse` in `~/.claude/settings.json`. Everything else keeps working; re-running
 Setup will add it back.
 
+### Experimental: ranked outline (1.3.0, off by default)
+
+`smart_read`'s outline can be sized by the economics of the call rather than by a fixed
+format. Set `LUMEN_RANKED_OUTLINE` in the environment Claude Code passes to the MCP
+server:
+
+| value | behaviour |
+|---|---|
+| unset, or anything unrecognised | **off** — the outline that has always shipped |
+| `on` | every file uses the ranked outline |
+| `ab` | half of files, split by a stable hash of the path, so a given file always takes the same arm |
+
+An intercepted read costs one extra round, so the outline is only worth returning when it
+saves more than that round costs. Lumen computes the minimum saving from your own `turns`
+history and refuses files that cannot clear it, recording the refusal and the numbers
+behind it. Every decision is written to `read_events` — `budget`, `s_min`, the context,
+rounds and output figures used, `k_selected` of `n_total`, and `coeff_version` — so the
+two arms can be compared afterwards rather than trusted.
+
+**Measured caveat before you enable it.** On this repository the ranked outline returns
+*more* tokens than the current one (10,759 vs 6,205 across the files that qualify),
+because it captures nested definitions the old outline never did and because the budget is
+usually large enough that nothing gets trimmed. The saving comes from the refusals, not
+from the ranking. Treat `on` as an experiment, not an optimisation.
+
 ### The database
 
 All session and usage data is stored locally at:

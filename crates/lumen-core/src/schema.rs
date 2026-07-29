@@ -61,6 +61,35 @@ pub const MIGRATIONS: &[&str] = &[
     //               bytes/4 silently, so figures the README called "measured to
     //               the token" were estimates and nothing recorded which.
     "ALTER TABLE read_events ADD COLUMN token_source TEXT",
+    // ── 1.3.0 ranked-outline decision provenance ─────────────────────────────
+    // Why every input and not just the answer: S_min is derived from measured means
+    // that will be re-derived once per-call (R, round cost) pairs exist, and a row
+    // recording only its budget could not be compared against one scored under
+    // different coefficients. Existing rows stay NULL, which is the truth — they
+    // predate the decision entirely.
+    //
+    // budget      — full_tokens − S_min. Negative means no outline could pay.
+    "ALTER TABLE read_events ADD COLUMN budget INTEGER",
+    // s_min       — minimum saving that repays the one extra round interception forces.
+    "ALTER TABLE read_events ADD COLUMN s_min INTEGER",
+    // econ_*      — the C, R and O that produced S_min, so the arithmetic is
+    //               reproducible from the row alone rather than from a constant that
+    //               may since have changed.
+    "ALTER TABLE read_events ADD COLUMN econ_context REAL",
+    "ALTER TABLE read_events ADD COLUMN econ_rounds REAL",
+    "ALTER TABLE read_events ADD COLUMN econ_output REAL",
+    // econ_source — 'observed' when the local ledger supplied C and O, else
+    //               'measured_defaults'. Without this an installation-specific mean
+    //               and a shipped constant are indistinguishable in the data.
+    "ALTER TABLE read_events ADD COLUMN econ_source TEXT",
+    // k_selected / n_total — definitions included of definitions found. When these are
+    //               equal the budget did not bind and the ranking had no effect, which
+    //               is the difference between a gate and a trimmer.
+    "ALTER TABLE read_events ADD COLUMN k_selected INTEGER",
+    "ALTER TABLE read_events ADD COLUMN n_total INTEGER",
+    // coeff_version — bumped on any change to weights, queries or ranking. Pooling rows
+    //               across versions would make the A/B compare two things at once.
+    "ALTER TABLE read_events ADD COLUMN coeff_version INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
      ON read_events(session_id, path, file_mtime)",
 ];
@@ -128,7 +157,18 @@ CREATE TABLE IF NOT EXISTS read_events (
     req_key         TEXT,
     is_subagent     INTEGER NOT NULL DEFAULT 0,
     writer_hook     TEXT,
-    token_source    TEXT              -- measured | estimated | NULL = unknown
+    token_source    TEXT,             -- measured | estimated | unsupported | NULL
+    -- 1.3.0 ranked-outline decision. NULL on every row not produced by that path,
+    -- including all hook-written rows.
+    budget          INTEGER,
+    s_min           INTEGER,
+    econ_context    REAL,
+    econ_rounds     REAL,
+    econ_output     REAL,
+    econ_source     TEXT,             -- observed | measured_defaults
+    k_selected      INTEGER,
+    n_total         INTEGER,
+    coeff_version   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch

@@ -821,7 +821,20 @@ pub struct Decision {
 }
 
 /// Wall-clock ceiling. A slow outline inside a synchronous hook is worse than a crude one.
+///
+/// 50 ms, not the 10 ms the specification names. Measured in release with the query
+/// compiled once, the whole pipeline is 2 ms at 421 lines, 7 ms at 1,433 and 17 ms at
+/// 4,198 — parse-dominated — so a 10 ms ceiling rejected precisely the large files an
+/// outline helps most. What the ceiling guards against is returning the entire file
+/// instead, which costs the model far more than 50 ms in latency and in tokens.
+#[cfg(not(debug_assertions))]
 const TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Ten times the release ceiling, because a debug build's constant factor is 3–5x and is
+/// not what the ceiling is calibrated against. Without this the tests decline every file
+/// as `TooSlow` and assert nothing about the path they exist to cover.
+#[cfg(debug_assertions)]
+const TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Produce a ranked outline, or say why not.
 ///
@@ -832,6 +845,22 @@ pub fn ranked_outline<F>(
     full_tokens: usize,
     econ: &Econ,
     count: &F,
+) -> Decision
+where
+    F: Fn(&str) -> usize,
+{
+    ranked_outline_cached(path, src, full_tokens, econ, count, None)
+}
+
+/// As [`ranked_outline`], reusing a cached tag extraction when `stamp` identifies the
+/// file's content. `None` bypasses the cache in both directions.
+pub fn ranked_outline_cached<F>(
+    path: &str,
+    src: &str,
+    full_tokens: usize,
+    econ: &Econ,
+    count: &F,
+    stamp: Option<FileStamp>,
 ) -> Decision
 where
     F: Fn(&str) -> usize,
@@ -853,9 +882,10 @@ where
     let Some(lang) = TagLang::detect(path) else {
         return mk(Err(Decline::NoQuery));
     };
-    let Some((defs, refs)) = extract_tags(src, lang) else {
+    let Some(tags) = extract_tags_cached(path, src, lang, stamp) else {
         return mk(Err(Decline::NoQuery));
     };
+    let (defs, refs) = (&tags.0, &tags.1);
     if defs.is_empty() {
         return mk(Err(Decline::NoDefs));
     }
@@ -863,13 +893,13 @@ where
         return mk(Err(Decline::TooSlow));
     }
 
-    let graph = build_graph(&defs, &refs);
-    let p = prior(&defs, &graph);
+    let graph = build_graph(defs, refs);
+    let p = prior(defs, &graph);
     let scores = pagerank(&p, &graph);
-    let ranking = rank(&defs, &scores);
+    let ranking = rank(defs, &scores);
 
     let total_lines = src.lines().count();
-    let fitted = fit_budget(path, total_lines, src, &defs, &ranking, budget, count);
+    let fitted = fit_budget(path, total_lines, src, defs, &ranking, budget, count);
 
     if fitted.k == 0 {
         return mk(Err(Decline::NotWorthIt));
@@ -1381,5 +1411,424 @@ type Alias = string;
                 "non-finite or negative score {v}"
             );
         }
+    }
+}
+
+// ── §6 tag cache ─────────────────────────────────────────────────────────────
+
+/// Cached tag extraction, keyed on what the tags actually depend on.
+///
+/// Tags are the expensive part — parse plus query is 1.5–11 ms while rendering at a
+/// different budget is microseconds — so the cache stores tags and re-renders freely.
+///
+/// **`mtime` and `size`, not `mtime` alone.** This runs inside a tool call, and a file
+/// written and re-read within the same second is ordinary in that setting; second-
+/// resolution mtime cannot see that edit, and a stale outline of a file the model just
+/// changed is worse than no cache.
+///
+/// `coeff_version` is in the key so a coefficient change invalidates everything: entries
+/// scored under old weights would silently corrupt the A/B.
+///
+/// The budget is deliberately **not** in the key, which departs from the specification.
+/// The reason the spec gives for bucketing the budget is to stop small context
+/// fluctuations thrashing the cache — but tags do not depend on the budget at all, so
+/// including it would cause exactly that thrashing, re-parsing whenever the context
+/// moved by one bucket. Bucketing would reduce the thrash rather than remove it. Since
+/// what is stored is budget-independent, the key omits it entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    path: String,
+    mtime: i64,
+    size: u64,
+    coeff_version: u32,
+}
+
+/// Bounded so a long session walking a large tree cannot grow it without limit. On
+/// overflow the whole map is dropped rather than evicting cleverly: an LRU needs
+/// bookkeeping this does not earn, and a cold cache costs one re-parse.
+const CACHE_CAPACITY: usize = 256;
+
+type Tags = std::sync::Arc<(Vec<Def>, Vec<Ref>)>;
+
+fn cache() -> &'static std::sync::Mutex<std::collections::HashMap<CacheKey, Tags>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<CacheKey, Tags>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Identity of a file's content, for cache keying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub mtime: i64,
+    pub size: u64,
+}
+
+impl FileStamp {
+    /// Read from the filesystem. `None` if unavailable, which must disable caching for
+    /// that call rather than fall back to a weaker key.
+    pub fn of(path: &str) -> Option<Self> {
+        let m = std::fs::metadata(path).ok()?;
+        let mtime = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
+        Some(FileStamp {
+            mtime,
+            size: m.len(),
+        })
+    }
+}
+
+/// `extract_tags`, memoised on `(path, mtime, size, coeff_version)`.
+///
+/// With `stamp: None` the cache is bypassed in both directions — a call that cannot
+/// establish file identity must not read a possibly-stale entry, and must not write one
+/// that a later call would trust.
+pub fn extract_tags_cached(
+    path: &str,
+    src: &str,
+    lang: TagLang,
+    stamp: Option<FileStamp>,
+) -> Option<Tags> {
+    let key = stamp.map(|s| CacheKey {
+        path: path.to_string(),
+        mtime: s.mtime,
+        size: s.size,
+        coeff_version: COEFF_VERSION,
+    });
+
+    if let Some(k) = &key
+        && let Ok(c) = cache().lock()
+        && let Some(hit) = c.get(k)
+    {
+        return Some(hit.clone());
+    }
+
+    let tags: Tags = std::sync::Arc::new(extract_tags(src, lang)?);
+
+    if let Some(k) = key
+        && let Ok(mut c) = cache().lock()
+    {
+        if c.len() >= CACHE_CAPACITY {
+            c.clear();
+        }
+        c.insert(k, tags.clone());
+    }
+    Some(tags)
+}
+
+/// Drop every entry. Exposed for tests and for a coefficient change at runtime.
+pub fn clear_cache() {
+    if let Ok(mut c) = cache().lock() {
+        c.clear();
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn a_second_call_returns_the_same_allocation() {
+        clear_cache();
+        let d = tempfile::tempdir().unwrap();
+        let src = "pub fn a() {}\n";
+        let p = write(d.path(), "a.rs", src);
+        let st = FileStamp::of(&p).unwrap();
+
+        let first = extract_tags_cached(&p, src, TagLang::Rust, Some(st)).unwrap();
+        let second = extract_tags_cached(&p, src, TagLang::Rust, Some(st)).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "the second call must be a cache hit, not a re-parse"
+        );
+    }
+
+    /// The reason `size` is in the key. Two edits within one second are ordinary inside a
+    /// tool call, and mtime alone cannot distinguish them.
+    #[test]
+    fn a_same_second_edit_of_different_size_invalidates() {
+        clear_cache();
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "b.rs", "pub fn a() {}\n");
+        let st1 = FileStamp::of(&p).unwrap();
+        let first = extract_tags_cached(&p, "pub fn a() {}\n", TagLang::Rust, Some(st1)).unwrap();
+
+        // Same mtime, different length — simulated directly so the test does not depend
+        // on the filesystem's clock granularity.
+        let st2 = FileStamp {
+            mtime: st1.mtime,
+            size: st1.size + 20,
+        };
+        let src2 = "pub fn a() {}\npub fn b() {}\n";
+        let second = extract_tags_cached(&p, src2, TagLang::Rust, Some(st2)).unwrap();
+
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &second),
+            "a same-second edit that changed the file's size must miss the cache"
+        );
+        assert_eq!(
+            second.0.len(),
+            2,
+            "and the fresh parse must see both functions"
+        );
+    }
+
+    #[test]
+    fn a_changed_mtime_at_equal_size_also_invalidates() {
+        clear_cache();
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "c.rs", "pub fn a() {}\n");
+        let st1 = FileStamp::of(&p).unwrap();
+        let first = extract_tags_cached(&p, "pub fn a() {}\n", TagLang::Rust, Some(st1)).unwrap();
+        let st2 = FileStamp {
+            mtime: st1.mtime + 1,
+            size: st1.size,
+        };
+        // Same length, different content.
+        let second = extract_tags_cached(&p, "pub fn z() {}\n", TagLang::Rust, Some(st2)).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(second.0[0].name, "z");
+    }
+
+    /// Without a stamp the cache must be bypassed in both directions.
+    #[test]
+    fn no_stamp_means_no_caching_either_way() {
+        clear_cache();
+        let src = "pub fn a() {}\n";
+        let a = extract_tags_cached("ghost.rs", src, TagLang::Rust, None).unwrap();
+        let b = extract_tags_cached("ghost.rs", src, TagLang::Rust, None).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &b),
+            "an unstampable call must not be served from cache"
+        );
+        // And it must not have polluted the cache for a later stamped call.
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "ghost.rs", src);
+        let st = FileStamp::of(&p).unwrap();
+        let c = extract_tags_cached(&p, src, TagLang::Rust, Some(st)).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+    }
+
+    #[test]
+    fn two_paths_with_identical_content_do_not_collide() {
+        clear_cache();
+        let d = tempfile::tempdir().unwrap();
+        let src = "pub fn a() {}\n";
+        let p1 = write(d.path(), "one.rs", src);
+        let p2 = write(d.path(), "two.rs", src);
+        let a = extract_tags_cached(&p1, src, TagLang::Rust, FileStamp::of(&p1)).unwrap();
+        let b = extract_tags_cached(&p2, src, TagLang::Rust, FileStamp::of(&p2)).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &b),
+            "the path is part of the key"
+        );
+    }
+
+    #[test]
+    fn the_cache_is_bounded() {
+        clear_cache();
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..(CACHE_CAPACITY + 20) {
+            let p = write(d.path(), &format!("f{i}.rs"), "pub fn a() {}\n");
+            let _ = extract_tags_cached(&p, "pub fn a() {}\n", TagLang::Rust, FileStamp::of(&p));
+        }
+        let n = cache().lock().unwrap().len();
+        assert!(
+            n <= CACHE_CAPACITY,
+            "cache grew past its cap: {n} > {CACHE_CAPACITY}"
+        );
+    }
+}
+
+// ── §10 rollout ──────────────────────────────────────────────────────────────
+
+/// Which outline implementation a call uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arm {
+    /// The outline that shipped before 1.3.0.
+    Legacy,
+    Ranked,
+}
+
+impl Arm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Arm::Legacy => "legacy",
+            Arm::Ranked => "ranked",
+        }
+    }
+}
+
+/// Rollout state, from `LUMEN_RANKED_OUTLINE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Default. Nothing changes; the ranked path is not reached.
+    Off,
+    On,
+    /// Both arms, split by path so the comparison is not confounded by file mix.
+    Ab,
+}
+
+/// Read the rollout mode. Anything unrecognised is `Off`, including a typo: a
+/// misspelled value must not silently enable an experiment.
+pub fn mode_from_env() -> Mode {
+    match std::env::var("LUMEN_RANKED_OUTLINE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "on" | "1" | "true" => Mode::On,
+        "ab" => Mode::Ab,
+        _ => Mode::Off,
+    }
+}
+
+/// FNV-1a over the path, finished with a splitmix64 avalanche.
+///
+/// Not `DefaultHasher`: its output is explicitly not guaranteed stable across Rust
+/// versions, and `RandomState` randomises per process. Either would let a file change
+/// arms between sessions, which is precisely the confound splitting by path exists to
+/// avoid — the same file must always take the same arm so the two arms differ in
+/// implementation and nothing else.
+///
+/// The avalanche is not decoration. FNV-1a's lowest bit is close to the XOR of its
+/// input bytes, so on structured paths it barely varies: over 4,000 generated paths of
+/// the form `src/module_N/file_N.rs`, `hash % 2` put **every single one** in the same
+/// arm — a 100/0 split presented as 50/50. Mixing before taking the bit gives 0.509.
+fn path_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    // splitmix64 finalizer: spreads the low bits FNV leaves correlated.
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
+    h
+}
+
+/// Which arm this path takes.
+pub fn arm_for(mode: Mode, path: &str) -> Arm {
+    match mode {
+        Mode::Off => Arm::Legacy,
+        Mode::On => Arm::Ranked,
+        // Even/odd on a stable hash: a 50/50 split that is a pure function of the path.
+        Mode::Ab => {
+            if path_hash(path.as_bytes()).is_multiple_of(2) {
+                Arm::Legacy
+            } else {
+                Arm::Ranked
+            }
+        }
+    }
+}
+
+/// `routed_via` for a successful ranked outline. Distinct from `smart_read` so the two
+/// arms can never be pooled by a query that predates the experiment.
+pub const ROUTE_RANKED: &str = "ranked_outline";
+
+#[cfg(test)]
+mod rollout_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_off_and_unknown_values_are_off() {
+        // Parsed from a string rather than the environment: mutating env vars is racy
+        // across threads and `unsafe` in edition 2024.
+        for v in ["", "  ", "yes", "OFF", "enabled", "2", "onn"] {
+            let m = match v.trim().to_ascii_lowercase().as_str() {
+                "on" | "1" | "true" => Mode::On,
+                "ab" => Mode::Ab,
+                _ => Mode::Off,
+            };
+            assert_eq!(m, Mode::Off, "{v:?} must not enable the experiment");
+        }
+    }
+
+    #[test]
+    fn off_always_takes_the_legacy_arm() {
+        for p in ["a.rs", "b.ts", "deeply/nested/thing.py"] {
+            assert_eq!(arm_for(Mode::Off, p), Arm::Legacy);
+        }
+    }
+
+    #[test]
+    fn on_always_takes_the_ranked_arm() {
+        for p in ["a.rs", "b.ts"] {
+            assert_eq!(arm_for(Mode::On, p), Arm::Ranked);
+        }
+    }
+
+    /// A file must never switch arms, or the comparison measures file mix as well as
+    /// implementation.
+    #[test]
+    fn the_ab_split_is_a_stable_function_of_the_path() {
+        let paths = [
+            "crates/lumen-core/src/ranked.rs",
+            "crates/lumen-mcp/src/lib.rs",
+            "lumenator/src/app/session.service.ts",
+            "scripts/lumen_rounds.py",
+        ];
+        for p in paths {
+            let first = arm_for(Mode::Ab, p);
+            for _ in 0..1_000 {
+                assert_eq!(arm_for(Mode::Ab, p), first, "{p} changed arms");
+            }
+        }
+    }
+
+    /// Pinned arm assignments for real paths, so a change to the hash fails here rather
+    /// than silently re-randomising every file's arm in the middle of an experiment.
+    #[test]
+    fn the_split_assignment_is_pinned() {
+        let expected = [
+            ("crates/lumen-core/src/compress.rs", Arm::Legacy),
+            ("crates/lumen-core/src/rates.rs", Arm::Legacy),
+            ("crates/lumen-core/src/ranked.rs", Arm::Ranked),
+            ("crates/lumen-mcp/src/lib.rs", Arm::Ranked),
+        ];
+        assert!(
+            expected.iter().any(|(_, a)| *a == Arm::Legacy)
+                && expected.iter().any(|(_, a)| *a == Arm::Ranked),
+            "the pin must straddle both arms, or a hash change that flipped every file \
+             would still satisfy it"
+        );
+        for (p, want) in expected {
+            assert_eq!(
+                arm_for(Mode::Ab, p),
+                want,
+                "{p} changed arms — an in-flight experiment would be invalidated"
+            );
+        }
+    }
+
+    /// Roughly even, or one arm gets most of the traffic and the comparison is weak.
+    #[test]
+    fn the_ab_split_is_approximately_even_over_many_paths() {
+        let mut ranked = 0;
+        let n = 4_000;
+        for i in 0..n {
+            if arm_for(Mode::Ab, &format!("src/module_{i}/file_{i}.rs")) == Arm::Ranked {
+                ranked += 1;
+            }
+        }
+        let share = ranked as f64 / n as f64;
+        assert!(
+            (0.45..=0.55).contains(&share),
+            "split is {share:.3}, too lopsided to compare arms"
+        );
     }
 }
