@@ -750,13 +750,25 @@ fn validate_mcp_in(home: &Path) -> ArtifactStatus {
 }
 
 fn validate_hooks_in(home: &Path) -> ArtifactStatus {
-    // hooks: valid when every lumen hook command points at a file that exists.
-    // It carries no stamp of its own — settings.json's schema is Claude Code's,
-    // and injecting an unknown key risks rejection by a validator we do not own.
-    // Its freshness derives from the stamped scripts it points at.
+    // hooks: valid when the registered matcher set matches what this build wants AND
+    // every lumen hook command points at a file that exists.
+    //
+    // The matcher comparison is the half that was missing. Checking only for dangling
+    // paths meant an install carrying the pre-1.2.1 matcher set reported "5 hook
+    // commands, all present — healthy" while `Bash` was not registered at all, so the
+    // meter's Bash arm could never run and the Setup screen said nothing was wrong.
+    // Hooks are validate-and-report rather than auto-repaired, which makes an accurate
+    // report the entire mechanism: a validator that cannot see a stale desired-state
+    // silently withholds the one prompt the user needs.
+    //
+    // It carries no stamp of its own — settings.json's schema is Claude Code's, and
+    // injecting an unknown key risks rejection by a validator we do not own — so the
+    // desired state is compared directly instead.
     let settings = global_settings_path_in(home);
-    let mut missing: Vec<String> = Vec::new();
+    let mut dangling: Vec<String> = Vec::new();
     let mut found = 0usize;
+    let mut registered: Vec<(&str, String)> = Vec::new();
+
     if let Some(v) = std::fs::read_to_string(&settings)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -764,13 +776,15 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
         for phase in ["PreToolUse", "PostToolUse"] {
             if let Some(arr) = v["hooks"][phase].as_array() {
                 for entry in arr {
+                    let matcher = entry["matcher"].as_str().unwrap_or("").to_string();
                     if let Some(hs) = entry["hooks"].as_array() {
                         for h in hs {
                             if let Some(c) = h["command"].as_str() {
                                 if c.contains("lumen_") {
                                     found += 1;
+                                    registered.push((phase, matcher.clone()));
                                     if !Path::new(c).exists() {
-                                        missing.push(c.to_string());
+                                        dangling.push(c.to_string());
                                     }
                                 }
                             }
@@ -780,26 +794,82 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
             }
         }
     }
+
     if found == 0 {
-        ArtifactStatus {
+        return ArtifactStatus {
             id: "hooks".into(),
             healthy: false,
             detail: "no lumen hooks registered — run Setup".into(),
-        }
-    } else if missing.is_empty() {
+        };
+    }
+
+    let has = |phase: &str, m: &str| registered.iter().any(|(p, r)| *p == phase && r == m);
+
+    let mut problems: Vec<String> = Vec::new();
+    if !dangling.is_empty() {
+        problems.push(format!("dangling: {}", dangling.join("; ")));
+    }
+    let absent: Vec<&str> = METER_MATCHERS
+        .iter()
+        .copied()
+        .filter(|m| !has("PostToolUse", m))
+        .collect();
+    if !absent.is_empty() {
+        problems.push(format!("PostToolUse not registered: {}", absent.join(", ")));
+    }
+    if !has("PreToolUse", INTERCEPT_MATCHER) {
+        problems.push(format!("PreToolUse not registered: {INTERCEPT_MATCHER}"));
+    }
+    let stale: Vec<&str> = RETIRED_MATCHERS
+        .iter()
+        .copied()
+        .filter(|m| has("PostToolUse", m))
+        .collect();
+    if !stale.is_empty() {
+        problems.push(format!("retired, still registered: {}", stale.join(", ")));
+    }
+
+    if problems.is_empty() {
         ArtifactStatus {
             id: "hooks".into(),
             healthy: true,
-            detail: format!("{found} hook commands, all present"),
+            detail: format!("{found} hook commands, all present and current"),
         }
     } else {
         ArtifactStatus {
             id: "hooks".into(),
             healthy: false,
-            detail: format!("dangling: {}", missing.join("; ")),
+            detail: problems.join("; "),
         }
     }
 }
+
+/// Tools whose PostToolUse events the meter must receive.
+///
+/// One source of truth for the installer and the validator, deliberately. When
+/// `step_install_hooks_in` held this list privately, changing it left
+/// `validate_hooks_in` measuring the old contract — so an install missing `Bash`
+/// reported itself healthy and the user was never prompted to repair it. Hooks are
+/// validate-and-report rather than auto-repaired, which makes the report the whole
+/// mechanism.
+///
+/// `Bash` is observation only: output volume, no PreToolUse hook, nothing intercepted.
+const METER_MATCHERS: [&str; 2] = ["Read", "Bash"];
+
+/// The tool the PreToolUse intercept applies to.
+const INTERCEPT_MATCHER: &str = "Read";
+
+/// Matchers earlier versions registered that must now be removed.
+///
+/// The `mcp__lumen__*` tools meter themselves in-process, so the meter script's `case`
+/// fell straight through to `exit 0` for them — every `smart_read`, `recall_file` and
+/// `compress_logs` call forked a bash and a python3 to do nothing. Their continued
+/// presence is a defect the validator reports, not merely untidiness.
+const RETIRED_MATCHERS: [&str; 3] = [
+    "mcp__lumen__smart_read",
+    "mcp__lumen__recall_file",
+    "mcp__lumen__compress_logs",
+];
 
 /// Every artifact setup persists outside the app bundle.
 ///
@@ -1374,29 +1444,16 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
         root["hooks"] = serde_json::json!({});
     }
 
-    // PreToolUse: Read intercept
-    merge_hook_entry(&mut root["hooks"]["PreToolUse"], "Read", &intercept);
+    merge_hook_entry(
+        &mut root["hooks"]["PreToolUse"],
+        INTERCEPT_MATCHER,
+        &intercept,
+    );
 
-    // PostToolUse: meter for Read (the missed-optimization baseline) and Bash
-    // (output volume, observation only).
-    //
-    // Bash was missing until 1.2.1. The meter script has had a `Bash)` branch since
-    // E7, but nothing ever routed Bash to it, so the branch was unreachable and
-    // `bash_output` had zero rows in 51 days — a deliverable that measured nothing.
-    for matcher in &["Read", "Bash"] {
+    for matcher in METER_MATCHERS {
         merge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher, &meter);
     }
-
-    // The three mcp__lumen__* matchers registered through 1.2.0 are removed. The
-    // lumen tools meter themselves in-process, so the meter script's `case` fell
-    // straight through to `exit 0` for them — every smart_read/recall_file/
-    // compress_logs call forked a bash and a python3 to do nothing. Waste in a
-    // tool whose entire purpose is removing waste.
-    for matcher in &[
-        "mcp__lumen__smart_read",
-        "mcp__lumen__recall_file",
-        "mcp__lumen__compress_logs",
-    ] {
+    for matcher in RETIRED_MATCHERS {
         unmerge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher);
     }
 
@@ -2104,18 +2161,20 @@ mod tests {
     #[test]
     fn healthy_hooks_are_reported_healthy_and_settings_is_untouched() {
         let h = TempDir::new().unwrap();
-        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
-        let script = h.path().join("lumen_meter.sh");
-        std::fs::write(&script, "#!/usr/bin/env bash\n").unwrap();
+        // The full current matcher set. This fixture used to be a single PostToolUse
+        // "Read", which the validator accepted because it only looked for dangling
+        // paths; it now also compares the matcher set, so a partial registration is
+        // correctly unhealthy and would make this test's own premise false.
+        settings_with_matchers(h.path(), &[INTERCEPT_MATCHER], &METER_MATCHERS);
         let settings = global_settings_path_in(h.path());
-        std::fs::write(
-            &settings,
-            format!(
-                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"Read","hooks":[{{"type":"command","command":"{}"}}]}}]}},"permissions":{{"allow":["Bash"]}}}}"#,
-                script.display()
-            ),
-        )
-        .unwrap();
+
+        // A key Lumen does not own, to prove validation leaves the rest of the file
+        // alone. The helper writes only `hooks`, so it is added here.
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        root["permissions"] = serde_json::json!({"allow": ["Bash"]});
+        std::fs::write(&settings, serde_json::to_string(&root).unwrap()).unwrap();
+
         let before = fingerprint(&settings);
 
         assert!(status(&validate_reported_artifacts_in(h.path()), "hooks").healthy);
@@ -3724,6 +3783,112 @@ mod tests {
                 "{tool} must not be metered by the hook"
             );
         }
+    }
+
+    /// Write a settings.json with the given lumen matchers, and touch the scripts so
+    /// the dangling-path check passes and only the matcher comparison is under test.
+    fn settings_with_matchers(home: &Path, pre: &[&str], post: &[&str]) {
+        std::fs::create_dir_all(lumen_dir_in(home)).unwrap();
+        let meter = lumen_dir_in(home).join("lumen_meter.sh");
+        let intercept = lumen_dir_in(home).join("lumen_read_intercept.sh");
+        std::fs::write(&meter, "#!/bin/sh\n").unwrap();
+        std::fs::write(&intercept, "#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+
+        let entry = |m: &str, cmd: &Path| {
+            serde_json::json!({
+                "matcher": m,
+                "hooks": [{"type": "command", "command": cmd.to_string_lossy()}]
+            })
+        };
+        std::fs::write(
+            global_settings_path_in(home),
+            serde_json::to_string(&serde_json::json!({"hooks": {
+                "PreToolUse":  pre.iter().map(|m| entry(m, &intercept)).collect::<Vec<_>>(),
+                "PostToolUse": post.iter().map(|m| entry(m, &meter)).collect::<Vec<_>>(),
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The state of a real 1.2.3 install: every script present and current, but the
+    /// matcher set left over from 1.2.0.
+    ///
+    /// This reported `healthy: true` with the detail "5 hook commands, all present",
+    /// because the validator only checked for dangling paths. Hooks are not
+    /// auto-repaired, so that report was the only signal the user would ever get — and
+    /// it said nothing was wrong while the Bash meter was not installed.
+    #[test]
+    fn a_stale_matcher_set_is_reported_even_when_every_script_exists() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(
+            h.path(),
+            &["Read"],
+            &[
+                "Read",
+                "mcp__lumen__smart_read",
+                "mcp__lumen__recall_file",
+                "mcp__lumen__compress_logs",
+            ],
+        );
+
+        let st = validate_hooks_in(h.path());
+        assert!(
+            !st.healthy,
+            "an install without the Bash matcher is not healthy, got: {}",
+            st.detail
+        );
+        assert!(
+            st.detail.contains("Bash"),
+            "the report must name the missing matcher so repair is actionable: {}",
+            st.detail
+        );
+        assert!(
+            st.detail.contains("mcp__lumen__smart_read"),
+            "and name the retired matchers still registered: {}",
+            st.detail
+        );
+    }
+
+    /// What `step_install_hooks_in` produces must validate as healthy. This is the pair
+    /// that keeps the installer and the validator from drifting apart again: if either
+    /// side changes alone, one of these two tests fails.
+    #[test]
+    fn what_setup_installs_validates_as_current() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(lumen_dir_in(h.path())).unwrap();
+        std::fs::write(lumen_dir_in(h.path()).join("lumen_meter.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            lumen_dir_in(h.path()).join("lumen_read_intercept.sh"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+
+        step_install_hooks_in(h.path());
+
+        let st = validate_hooks_in(h.path());
+        assert!(
+            st.healthy,
+            "setup's own output must satisfy the validator: {}",
+            st.detail
+        );
+    }
+
+    /// A dangling command is still caught, alongside the new matcher check.
+    #[test]
+    fn a_missing_script_is_still_reported() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(h.path(), &["Read"], &["Read", "Bash"]);
+        std::fs::remove_file(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
+
+        let st = validate_hooks_in(h.path());
+        assert!(!st.healthy);
+        assert!(
+            st.detail.contains("dangling"),
+            "expected a dangling report, got: {}",
+            st.detail
+        );
     }
 
     /// Two shell-dialect traps, each of which silently disabled the meter on Linux.

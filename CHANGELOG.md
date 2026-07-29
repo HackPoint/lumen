@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.2.4] — 2026-07-29
+
+### Setup reported healthy hooks while the Bash meter was not installed
+
+Verifying 1.2.3 on a real install turned up the gap. `~/.claude/settings.json` still
+carried the pre-1.2.1 matcher set — no `Bash`, and all three retired `mcp__lumen__*`
+entries — and the Setup screen called it **healthy: "5 hook commands, all present"**.
+
+Two things combined. Hooks are validate-and-report rather than auto-repaired, which is
+deliberate: rewriting a user's Claude Code settings without being asked is worse than
+telling them to press a button. But that makes the report the entire mechanism, and the
+validator only checked that each lumen hook command pointed at a file that exists. It
+never compared *which* matchers were registered, so it could not see a stale desired
+state — the one thing it needed to see for the button to ever be pressed.
+
+The matcher set now lives in one place that the installer and the validator both read
+(`METER_MATCHERS`, `INTERCEPT_MATCHER`, `RETIRED_MATCHERS`). Previously the installer
+held the list privately, so changing it in 1.2.1 left the validator measuring the old
+contract. The report now names what is missing and what is stale, so the repair is
+actionable rather than a bare "unhealthy".
+
+**If you upgraded from 1.2.0 or earlier, open Setup and run it once** to pick up the
+`Bash` matcher and drop the retired ones. Everything else self-repairs.
+
+### Notes
+
+- Paired tests keep the two sides from drifting again: one asserts a stale matcher set
+  is reported, the other asserts what `step_install_hooks_in` writes validates as
+  current. Changing either side alone fails one of them.
+- The dangling-path check is unchanged and still covered.
+- 465 Rust tests, 251 frontend.
+
 ## [1.2.3] — 2026-07-29
 
 ### The orphan-daemon fix in 1.2.1 did not work, and its test could not tell
