@@ -149,6 +149,13 @@ interface OptimizerReport {
     currentChannel: string;
     missedCalls: number;
     missedFullTokens: number;
+    /**
+     * Built-in Reads of files with no token count — images, binaries. Excluded from
+     * missedCalls because there was no optimization available to miss, and carried
+     * separately so the exclusion stays visible. Optional: a 1.2.0 or earlier backend
+     * does not send it.
+     */
+    unmeasurableCalls?: number;
     /** Metered events with no recorded token provenance (rows predating 1.1.5). */
     unverifiedProvenanceRows: number;
     /** Total metered events, so the UI can say "N of M". */
