@@ -1864,6 +1864,268 @@ mod tests {
         assert!(script_needs_refresh(&script, &desired));
     }
 
+    // ── Per-artifact validation, with negative controls ──────────────────────
+    //
+    // The 1.1.5 class fix rests on detection working for every artifact, and it was
+    // proven on one of five. Each artifact gets a break-it test and a leave-it-alone
+    // test: proving a repair fires is half the job, proving it does not fire on a
+    // healthy artifact is the other half.
+
+    fn status<'a>(v: &'a [ArtifactStatus], id: &str) -> &'a ArtifactStatus {
+        v.iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("no status for {id:?}"))
+    }
+
+    /// Snapshot enough of a file to prove a later check did not rewrite it.
+    fn fingerprint(p: &Path) -> (String, std::time::SystemTime) {
+        let meta = std::fs::metadata(p).expect("metadata");
+        (
+            std::fs::read_to_string(p).expect("read"),
+            meta.modified().expect("mtime"),
+        )
+    }
+
+    fn write_claude_json(home: &Path, body: &str) {
+        std::fs::create_dir_all(home).unwrap();
+        std::fs::write(claude_json_path_in(home), body).unwrap();
+    }
+
+    // ── mcp ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_dangling_mcp_command_is_reported_unhealthy() {
+        // The exact shape of the 1.0.1 bug: entry present, JSON valid, path gone.
+        let h = TempDir::new().unwrap();
+        write_claude_json(
+            h.path(),
+            r#"{"mcpServers":{"lumen":{"command":"/nonexistent/lumen-mcp","env":{}}}}"#,
+        );
+        let s = validate_reported_artifacts_in(h.path());
+        let mcp = status(&s, "mcp");
+        assert!(!mcp.healthy);
+        assert!(
+            mcp.detail.contains("/nonexistent/lumen-mcp"),
+            "{}",
+            mcp.detail
+        );
+    }
+
+    #[test]
+    fn a_dangling_env_path_in_the_mcp_entry_is_reported() {
+        // This is the tokenizer bug itself: LUMEN_TOK pointing into an ejected DMG.
+        let h = TempDir::new().unwrap();
+        let real = h.path().join("lumen-mcp");
+        std::fs::write(&real, "").unwrap();
+        write_claude_json(
+            h.path(),
+            &format!(
+                r#"{{"mcpServers":{{"lumen":{{"command":"{}","env":{{"LUMEN_TOK":"/Volumes/dmg.gone/lumen-tok"}}}}}}}}"#,
+                real.display()
+            ),
+        );
+        let s = validate_reported_artifacts_in(h.path());
+        assert!(!status(&s, "mcp").healthy);
+        assert!(status(&s, "mcp").detail.contains("LUMEN_TOK"));
+    }
+
+    #[test]
+    fn a_missing_lumen_db_path_is_not_treated_as_dangling() {
+        // The database is created on demand, so its absence is normal and must not
+        // be reported as breakage — a false alarm trains users to ignore the report.
+        let h = TempDir::new().unwrap();
+        let real = h.path().join("lumen-mcp");
+        std::fs::write(&real, "").unwrap();
+        write_claude_json(
+            h.path(),
+            &format!(
+                r#"{{"mcpServers":{{"lumen":{{"command":"{}","env":{{"LUMEN_DB":"/not/created/yet.db"}}}}}}}}"#,
+                real.display()
+            ),
+        );
+        assert!(status(&validate_reported_artifacts_in(h.path()), "mcp").healthy);
+    }
+
+    #[test]
+    fn a_healthy_mcp_entry_is_reported_healthy_and_left_byte_identical() {
+        // Negative control. ~/.claude.json holds every MCP server the user has, so
+        // validation must never write to it — that is why it is validate-only.
+        let h = TempDir::new().unwrap();
+        let real = h.path().join("lumen-mcp");
+        std::fs::write(&real, "").unwrap();
+        write_claude_json(
+            h.path(),
+            &format!(
+                r#"{{"mcpServers":{{"lumen":{{"command":"{}","env":{{}}}},"other":{{"command":"/bin/sh"}}}}}}"#,
+                real.display()
+            ),
+        );
+        let path = claude_json_path_in(h.path());
+        let before = fingerprint(&path);
+
+        assert!(status(&validate_reported_artifacts_in(h.path()), "mcp").healthy);
+
+        let after = fingerprint(&path);
+        assert_eq!(
+            before.0, after.0,
+            "validation must not rewrite ~/.claude.json"
+        );
+        assert_eq!(before.1, after.1, "not even the mtime may change");
+        assert!(
+            after.0.contains("\"other\""),
+            "a foreign server must survive"
+        );
+    }
+
+    #[test]
+    fn a_missing_mcp_entry_is_reported_rather_than_silently_ignored() {
+        let h = TempDir::new().unwrap();
+        write_claude_json(h.path(), r#"{"numStartups":3}"#);
+        assert!(!status(&validate_reported_artifacts_in(h.path()), "mcp").healthy);
+    }
+
+    // ── hooks ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_hook_pointing_at_a_deleted_script_is_reported() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        std::fs::write(
+            global_settings_path_in(h.path()),
+            r#"{"hooks":{"PostToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/gone/lumen_meter.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let s = validate_reported_artifacts_in(h.path());
+        assert!(!status(&s, "hooks").healthy);
+        assert!(status(&s, "hooks").detail.contains("/gone/lumen_meter.sh"));
+    }
+
+    #[test]
+    fn healthy_hooks_are_reported_healthy_and_settings_is_untouched() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        let script = h.path().join("lumen_meter.sh");
+        std::fs::write(&script, "#!/usr/bin/env bash\n").unwrap();
+        let settings = global_settings_path_in(h.path());
+        std::fs::write(
+            &settings,
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"Read","hooks":[{{"type":"command","command":"{}"}}]}}]}},"permissions":{{"allow":["Bash"]}}}}"#,
+                script.display()
+            ),
+        )
+        .unwrap();
+        let before = fingerprint(&settings);
+
+        assert!(status(&validate_reported_artifacts_in(h.path()), "hooks").healthy);
+
+        let after = fingerprint(&settings);
+        assert_eq!(
+            before.0, after.0,
+            "validation must not rewrite settings.json"
+        );
+        assert_eq!(before.1, after.1);
+        assert!(after.0.contains("permissions"), "foreign keys must survive");
+    }
+
+    #[test]
+    fn settings_with_no_lumen_hooks_is_reported_as_not_installed() {
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        std::fs::write(
+            global_settings_path_in(h.path()),
+            r#"{"hooks":{"PostToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/opt/other/tool.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let s = validate_reported_artifacts_in(h.path());
+        assert!(!status(&s, "hooks").healthy);
+        assert!(status(&s, "hooks").detail.contains("no lumen hooks"));
+    }
+
+    // ── the 1.1.2 case: a refresh must not undo an opt-out ────────────────────
+
+    #[test]
+    fn a_forced_mismatch_does_not_re_enable_an_autostart_the_user_turned_off() {
+        // 1.1.2 was precisely this: a repair that silently switched a login item
+        // back on for someone who had switched it off. The staleness check exists to
+        // fix a wrong PATH, not to overrule a decision.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        // Recorded under a path that no longer matches -> forced mismatch.
+        std::fs::write(&marker, "/Applications/Lumen.app/Contents/MacOS/lumen").unwrap();
+        let a = FakeAutoStart::default(); // user turned it OFF
+
+        let acted = ensure_autostart_once(&a, &marker, EXE);
+
+        assert!(!acted, "nothing should have been registered");
+        assert!(
+            !a.enabled.get(),
+            "the opt-out must survive a forced mismatch"
+        );
+        assert_eq!(
+            a.enable_calls.get(),
+            0,
+            "enable() must not be called at all"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            EXE,
+            "the stale path is still corrected, so this is not re-evaluated forever"
+        );
+    }
+
+    #[test]
+    fn a_forced_mismatch_does_refresh_an_autostart_that_is_still_on() {
+        // The positive control for the test above: staleness must still be repaired
+        // when the user has not opted out, or the fix does nothing.
+        let h = TempDir::new().unwrap();
+        let marker = h.path().join(".claude/lumen/.autostart_done");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "/old/path/lumen").unwrap();
+        let a = FakeAutoStart::on();
+
+        assert!(ensure_autostart_once(&a, &marker, EXE));
+        assert_eq!(a.enable_calls.get(), 1);
+        assert!(a.enabled.get());
+    }
+
+    // ── cli ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_absent_cli_is_reported_healthy_because_it_is_optional() {
+        // Never installed is not broken. Reporting it as breakage would push users
+        // to install something they deliberately skipped.
+        let r = resolver(&[]);
+        assert_eq!(
+            classify_cli(
+                Path::new("/usr/local/bin/lumen"),
+                Path::new("/A/lumen-cli"),
+                &r
+            ),
+            CliState::Absent
+        );
+    }
+
+    #[test]
+    fn a_homebrew_cli_is_never_rewritten_even_when_it_points_elsewhere() {
+        // brew relinks on upgrade; a repair loop against it would be a new bug of
+        // exactly the class 1.1.5 closes.
+        let r = resolver(&[(
+            "/opt/homebrew/bin/lumen",
+            "/opt/homebrew/Cellar/lumen-cli/9.9.9/bin/lumen",
+        )]);
+        assert_eq!(
+            classify_cli(
+                Path::new("/opt/homebrew/bin/lumen"),
+                Path::new("/Applications/Lumen.app/Contents/MacOS/lumen-cli"),
+                &r
+            ),
+            CliState::Homebrew,
+            "a mismatched target under a brew prefix is still brew's to manage"
+        );
+    }
+
     // ── Artifact registry ────────────────────────────────────────────────────
 
     #[test]
