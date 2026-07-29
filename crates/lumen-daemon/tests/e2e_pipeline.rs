@@ -77,6 +77,12 @@ async fn start_daemon() -> Fixture {
     let home = TempDir::new().expect("home tempdir");
     let dbdir = TempDir::new().expect("db tempdir");
     let db = dbdir.path().join("e2e.db");
+    // See the note in the MCP harness: a forgotten LUMEN_DB now resolves to the
+    // user's real metering database, so the redirection is asserted, not assumed.
+    assert!(
+        db.starts_with(std::env::temp_dir()),
+        "the metering DB must live in a temp dir, got {db:?}"
+    );
     let projects = home.path().join(".claude/projects/test-project");
     std::fs::create_dir_all(&projects).expect("create projects dir");
 

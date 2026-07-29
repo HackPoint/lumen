@@ -2,3 +2,4 @@
 1883343fcabc18f074a9262462716c89d4606a9b9ea4c2fb0ee6e06bd35749b7  docs/e7-ledger-backups/repo_before_e7.db
 c207a5d99d016f9d972af039e7176e4cfbb0c9529e88cd421ea3665c4e144dc1  /Users/gshmunik/Library/Application Support/io.speedata.lumen/lumen.db
 19e82835c46deef8d0e2004c9c3c5eaa9f7cb072c4476f3060f3f2183fe72fd5  /Users/gshmunik/Library/Application Support/io.speedata.lumen/lumen.db
+34d5dbc9f42db8c32f288545ab68b07114ffc873b4690ce092c5e83b4bda66cb  /Users/gshmunik/Library/Application Support/io.speedata.lumen/lumen.db

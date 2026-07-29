@@ -23,6 +23,16 @@ impl Server {
     fn start() -> Self {
         // Point metering at a throwaway DB so tests never write to a real one.
         let db = TempDir::new().expect("tempdir");
+        // Isolation is load-bearing, not a convenience. Since the DB fallback became
+        // the canonical per-OS path, a forgotten LUMEN_DB no longer lands in the
+        // repository root — it lands in the user's real ledger. A test that pollutes
+        // production data is worse than one that fails, so assert the redirection
+        // rather than trusting it.
+        assert!(
+            db.path().starts_with(std::env::temp_dir()),
+            "the metering DB must live in a temp dir, got {:?}",
+            db.path()
+        );
         let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"))
             .env("LUMEN_DB", db.path().join("test.db"))
             .stdin(Stdio::piped())
