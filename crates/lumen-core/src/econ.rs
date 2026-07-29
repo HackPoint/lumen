@@ -56,6 +56,28 @@ impl EconSource {
     }
 }
 
+/// What an outline should aim to cost, in tokens.
+///
+/// Below the legacy outline's 1,439 and above anything measured as sufficient. A tuning
+/// parameter rather than a constant: it comes down while follow-up rate is flat, and the
+/// first rise reverts it. Overridable via `LUMEN_TARGET_OUTLINE` so the sweep needs no
+/// rebuild, and recorded on every row so rows produced under different targets are not
+/// silently pooled.
+pub const DEFAULT_TARGET_OUTLINE: i64 = 800;
+
+/// The current target, from `LUMEN_TARGET_OUTLINE`.
+///
+/// A value below `ranked::MIN_USEFUL_OUTLINE` would refuse every file, so it is floored
+/// there — a mistyped sweep value must not look like a feature that stopped working.
+pub fn target_outline() -> i64 {
+    std::env::var("LUMEN_TARGET_OUTLINE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_TARGET_OUTLINE)
+        .max(crate::ranked::MIN_USEFUL_OUTLINE)
+}
+
 /// Fewer turns than this and a per-installation mean is noise, so the defaults win.
 const MIN_TURNS_FOR_OBSERVED: i64 = 200;
 
@@ -123,12 +145,25 @@ impl Econ {
         s.is_finite().then_some(s)
     }
 
-    /// Tokens available for the outline: what the file costs, less what must be saved.
+    /// Tokens the outline may spend.
     ///
-    /// Negative means no outline of any size pays for itself.
+    /// `full_tokens − S_min` alone was wrong, and wrong in a way that quietly disabled the
+    /// ranking. `S_min` is a **floor on the saving**: it says what the outline must not
+    /// exceed if the call is to pay for itself. It says nothing about what the outline
+    /// should aim for, because net value rises monotonically as the outline shrinks — a
+    /// cost formula can never bound an outline from below. On a 39k-token file it produced
+    /// a budget of 33,897, so every one of 222 definitions fit and `k = n`: the budget
+    /// never bound and the ranking never chose anything.
+    ///
+    /// The real lower bound is **sufficiency** — too little context and the model needs a
+    /// follow-up round, which costs more than the entire per-call saving. That is
+    /// empirical, not derivable, which is what the follow-up-rate measurement is for. So
+    /// the target is a tuning parameter, lowered while follow-up rate stays flat and
+    /// reverted on the first rise.
     pub fn budget(&self, full_tokens: usize) -> Option<i64> {
         let s_min = self.s_min()?;
-        Some(full_tokens as i64 - s_min.ceil() as i64)
+        let affordable = full_tokens as i64 - s_min.ceil() as i64;
+        Some(affordable.min(target_outline()))
     }
 
     /// Read the local ledger for this installation's own means.

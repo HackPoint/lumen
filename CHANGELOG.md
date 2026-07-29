@@ -1,5 +1,88 @@
 # Changelog
 
+## [1.3.1] — 2026-07-29
+
+### The budget was a floor mistaken for a target, which disabled the ranking
+
+`budget = full_tokens − S_min` was wrong. `S_min` is a floor on the **saving** — what the
+outline must not exceed if the call is to pay for itself. It says nothing about what the
+outline should aim for, because net value rises monotonically as the outline shrinks: a
+cost formula cannot bound an outline from below.
+
+The consequence was not subtle. On a 39,281-token file the budget came out at 33,897, so
+all 222 definitions fitted and `k = n` — the ranking selected nothing, and the A/B would
+have compared two unranked outlines. The same file now produces **785 tokens at k=46/222**.
+Across the repository the budget binds in **9 of 12** qualifying files; the three where it
+does not are files whose entire outline already fits, which is correct.
+
+```
+budget = min(full_tokens − S_min, target_outline)     target_outline = 800
+```
+
+The real lower bound is sufficiency, which is empirical, not derivable — hence a tuning
+parameter, lowered while follow-up rate stays flat and reverted on the first rise. Set it
+with `LUMEN_TARGET_OUTLINE`; it is recorded on every row, so rows produced under different
+sweep values are never pooled.
+
+**One correction to the target's justification.** 1,439 tokens is the *largest* legacy
+outline (`setup.rs`), not a typical one. The legacy median across qualifying files is ~401
+tokens and the mean ~550, so 800 starts the sweep *above* the status quo, not below it. That
+is still the safe direction — begin generous and come down — but at 800 the ranked arm
+costs about 13% more than legacy (7,450 vs 6,595 tokens across 12 files), so the first
+sweep step should be expected to close a gap rather than open a lead.
+
+The refusal arm is untouched: `3,216 → 294, refused` is the part that pays.
+
+### Per-call economics, measured jointly — and the follow-up rate
+
+`scripts/lumen_percall.py` computes `(R, round cost)` as a **joint pair per call**, both
+from the same position in the same session, which retires the mean-versus-median question:
+no average has to be chosen when every call carries its own.
+
+Two findings changed the picture.
+
+**R is bounded by compaction, and that is worth a factor of three.** A saved token stops
+paying the moment the context is rebuilt. Counting to the end of the session gave a
+call-weighted median R of **658**; bounding it at the next `isCompactSummary` gives
+**194–249**. Both are far above the 65 previously assumed, which was a session-length
+median rather than a call-weighted one — calls concentrate in long sessions.
+
+**60.4% of `smart_read` calls are followed by a `recall_file` on the same file**, at a
+median gap of 3 rounds. The pair multiplier is therefore **1.604 rounds per intercept**, and
+the cost side now carries it.
+
+That 60.4% needs reading carefully: outline-then-fetch is Lumen's *documented* workflow —
+`smart_read`'s own tool description says to follow it with `recall_file`. So a follow-up is
+not by itself a failure, and the A/B question is not "does trimming cause follow-ups" but
+"does trimming push the rate above the baseline the two-step design already implies."
+
+### The dollar figure
+
+Net over the 291 attributable calls, with each call's own R and its own round cost, times
+the measured pair multiplier:
+
+| route | calls | gross | round cost | **net** | paid for its own round |
+|---|---|---|---|---|---|
+| `smart_read` | 53 | $39.83 | $14.93 | **+$24.90** | 62.3% |
+| `recall_file` | 238 | $346.72 | $95.69 | **+$251.04** | 51.7% |
+| | | | | **+$275.93** | |
+
+About **+$0.95 per call**. The sign is robust: positive at every plausible R, from +$31 at
+R=65 to +$368 at R=249. The magnitude is not — it spans an order of magnitude on that one
+input, and `smart_read` taken alone is break-even to slightly negative at the low end.
+
+### Notes
+
+- **Only 291 of 1,470 ledger calls are attributable.** The transcripts on disk are a subset,
+  so this is a per-call figure over what can be attributed, not a total. It is not scaled up.
+- **One approximation, stated rather than buried.** Ledger savings and transcript economics
+  are the same calls seen from two sides but cannot be joined without `req_key`, so each
+  call's saving is matched to a call's economics at the same quantile.
+- The compaction marker is a `user` record carrying `isCompactSummary` with no assistant
+  message id, so an id lookup finds zero of them. It is located by file order instead — the
+  first attempt silently measured no compactions at all.
+- 522 Rust tests, 251 frontend.
+
 ## [1.3.0] — 2026-07-29
 
 ### Ranked, budget-aware outline — implemented, shipped **off**, and measured
