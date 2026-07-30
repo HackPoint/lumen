@@ -1451,22 +1451,43 @@ fn open_in_browser(ep: &Endpoints, url: &str) -> Result<(), String> {
             Err(format!("{cmd} exited with {status}"))
         };
     }
-    let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
-        ("open", vec![url])
-    } else if cfg!(target_os = "windows") {
-        // `start` is a shell builtin, and its first quoted argument is the window title.
-        ("cmd", vec!["/C", "start", "", url])
-    } else {
-        ("xdg-open", vec![url])
-    };
-    let status = std::process::Command::new(cmd)
-        .args(&args)
-        .status()
-        .map_err(|e| format!("cannot run {cmd}: {e}"))?;
-    if !status.success() {
-        return Err(format!("{cmd} exited with {status}"));
+    // Windows needs a hand-built command line. `start` is a cmd.exe builtin, and cmd
+    // treats `&` as a command separator — every prefilled URL contains `&body=`, so
+    // passing it as an ordinary argument made cmd try to run the second half as a command
+    // and exit 1. Rust's normal argument quoting follows the MSVC convention, which
+    // cmd.exe does not honour, so `raw_arg` is the only way to get the quotes cmd needs.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // A URL cannot legally contain a double quote, so quoting it is unambiguous.
+        // The empty "" is `start`'s window-title argument, which it requires before a URL.
+        let status = std::process::Command::new("cmd")
+            .raw_arg(format!("/C start \"\" \"{url}\""))
+            .status()
+            .map_err(|e| format!("cannot run cmd: {e}"))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("cmd exited with {status}"))
+        };
     }
-    Ok(())
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let cmd = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let status = std::process::Command::new(cmd)
+            .arg(url)
+            .status()
+            .map_err(|e| format!("cannot run {cmd}: {e}"))?;
+        if !status.success() {
+            return Err(format!("{cmd} exited with {status}"));
+        }
+        Ok(())
+    }
 }
 
 /// `gh` reads `--body-file -` from stdin, which `Command::output` cannot supply without
