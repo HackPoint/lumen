@@ -467,7 +467,7 @@
 /* The token ratio, demoted below the dollar figure. */
 .hero__secondary {
     font-size: 0.74rem;
-    color: var(--text-dim, #8b949e);
+    color: var(--lumen-text-dim);
     margin: 0.4rem 0 0;
     line-height: 1.4;
 }
