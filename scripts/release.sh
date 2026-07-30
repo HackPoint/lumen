@@ -53,6 +53,11 @@ PY
 
 update_ruby_version() {
     local file="$1" new="$2"
+    # A missing file used to abort the script midway through the bump, leaving some
+    # versions changed and others not. The cask was renamed in 239ce54 and this
+    # reference was not, so every release since shipped a stale cask.
+    [[ -f "$file" ]] || die "version file not found: $file"
+    grep -qE '^  version "' "$file" || die "no version line to bump in $file"
     sed -i '' "s/^  version \"[^\"]*\"/  version \"${new}\"/" "$file"
 }
 
@@ -110,8 +115,8 @@ echo "  ✓ lumenator/src-tauri/tauri.conf.json"
 update_ruby_version Formula/lumen-cli.rb "$NEW"
 echo "  ✓ Formula/lumen-cli.rb  (sha256 updated by CI after build)"
 
-update_ruby_version Casks/lumen.rb "$NEW"
-echo "  ✓ Casks/lumen.rb  (sha256 updated by CI after build)"
+update_ruby_version Casks/lumen-app.rb "$NEW"
+echo "  ✓ Casks/lumen-app.rb  (sha256 updated by CI after build)"
 
 # Regenerate Cargo.lock so the workspace stays consistent
 echo ""
@@ -179,7 +184,7 @@ git add \
     lumenator/package.json \
     lumenator/src-tauri/tauri.conf.json \
     Formula/lumen-cli.rb \
-    Casks/lumen.rb \
+    Casks/lumen-app.rb \
     Cargo.lock \
     CHANGELOG.md
 
