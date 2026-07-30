@@ -90,11 +90,15 @@ git tag | grep -qx "$TAG" && die "tag $TAG already exists"
 echo ""
 echo "Updating version files…"
 
+# Every workspace member with its own version, plus the Tauri crate. lumen-stats was
+# absent from this list, so no release ever bumped it and it only stayed in step when
+# someone noticed by hand. Adding a crate means adding it here.
 CARGO_TOML_FILES=(
     crates/lumen-core/Cargo.toml
     crates/lumen-cli/Cargo.toml
     crates/lumen-daemon/Cargo.toml
     crates/lumen-mcp/Cargo.toml
+    crates/lumen-stats/Cargo.toml
     lumenator/src-tauri/Cargo.toml
 )
 
