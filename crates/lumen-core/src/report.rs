@@ -886,12 +886,28 @@ pub fn marker(fp: &str) -> String {
     format!("<!-- lumen-fault: {fp} -->")
 }
 
-/// What filing did, so the caller can report it without re-deriving it.
+/// What filing did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Filed {
     Created(String),
     /// Commented on an existing issue rather than opening a duplicate.
     Commented(String),
+    /// A prefilled form was opened in the browser. **Nothing is published yet** — the
+    /// human still has to press Submit. Callers must not report this as filed.
+    Handoff(String),
+}
+
+/// The outcome plus which route produced it.
+#[derive(Debug)]
+pub struct Filing {
+    pub outcome: Filed,
+    /// The route that worked: `gh`, `api` or `browser`.
+    pub route: &'static str,
+    /// Why each earlier route was passed over, in order. Empty when the first worked.
+    ///
+    /// Kept and surfaced rather than swallowed: "filing failed" with no history is
+    /// unfixable, and a silent fallback hides that the preferred route is broken.
+    pub fell_back: Vec<String>,
 }
 
 fn gh(args: &[&str]) -> Result<String, String> {
@@ -909,12 +925,113 @@ fn gh(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Find an open issue already carrying this fingerprint.
+/// A token for the REST route. Never read from a file or a keychain here — only the
+/// environment, so this cannot quietly acquire credentials the user did not offer.
+fn api_token() -> Option<String> {
+    for k in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(k) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Percent-encode for a query string. Unreserved set per RFC 3986; everything else is
+/// escaped, including the spaces and newlines a rendered report is full of.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// One HTTPS request via `curl`, returning `(status, body)`.
 ///
-/// Bodies are fetched and matched locally rather than handed to `gh issue list --search`:
+/// curl rather than an HTTP crate: the workspace has no HTTP client, and adding one
+/// pulls in a TLS stack for three requests. This shells out the way the `git` and `gh`
+/// calls already do. curl ships with macOS, every mainstream Linux, and Windows 10+.
+///
+/// The token goes in a `--config` file, never in argv: arguments are readable by any
+/// process on the machine via `ps`, and a leaked token is worse than a failed filing.
+fn curl(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+) -> Result<(u16, String), String> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let cfg_path = dir.join(format!("lumen-curl-{pid}.cfg"));
+    let body_path = dir.join(format!("lumen-curl-{pid}.json"));
+
+    let mut cfg = String::new();
+    cfg.push_str("silent\nshow-error\n");
+    cfg.push_str(&format!("request = {method}\n"));
+    cfg.push_str("header = \"Accept: application/vnd.github+json\"\n");
+    cfg.push_str("header = \"X-GitHub-Api-Version: 2022-11-28\"\n");
+    cfg.push_str("header = \"User-Agent: lumen\"\n");
+    if let Some(t) = token {
+        cfg.push_str(&format!("header = \"Authorization: Bearer {t}\"\n"));
+    }
+    if let Some(b) = body {
+        std::fs::write(&body_path, b).map_err(|e| format!("cannot stage request body: {e}"))?;
+        cfg.push_str(&format!("data-binary = @{}\n", body_path.display()));
+    }
+    cfg.push_str(&format!("url = {url}\n"));
+    cfg.push_str("write-out = \"\\n%{http_code}\"\n");
+
+    write_private(&cfg_path, &cfg)?;
+    let out = std::process::Command::new("curl")
+        .arg("--config")
+        .arg(&cfg_path)
+        .output();
+    let _ = std::fs::remove_file(&cfg_path);
+    let _ = std::fs::remove_file(&body_path);
+
+    let out = out.map_err(|e| format!("cannot run curl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() && text.is_empty() {
+        return Err(format!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // write-out appended the status after a newline.
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
+    let code: u16 = code.trim().parse().unwrap_or(0);
+    Ok((code, body.to_string()))
+}
+
+/// Write a file only the owner can read. The curl config carries a bearer token.
+fn write_private(path: &Path, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|e| format!("cannot stage curl config: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Find an open issue already carrying this fingerprint, and its number + URL.
+///
+/// Bodies are fetched and matched locally rather than handed to a search query:
 /// GitHub's search index does not reliably match text inside an HTML comment, and a
 /// dedupe that silently misses is worse than no dedupe — it opens a duplicate every run.
-pub fn find_existing(repo: &str, fp: &str) -> Result<Option<u64>, String> {
+///
+/// Tries `gh`, then the REST API. The read works unauthenticated on a public repo, so
+/// dedupe survives on a machine with neither `gh` nor a token.
+pub fn find_existing(repo: &str, fp: &str) -> Result<Option<(u64, String)>, String> {
+    let limit = DEDUPE_SCAN_LIMIT.to_string();
     let json = gh(&[
         "issue",
         "list",
@@ -923,13 +1040,23 @@ pub fn find_existing(repo: &str, fp: &str) -> Result<Option<u64>, String> {
         "--state",
         "open",
         "--limit",
-        &DEDUPE_SCAN_LIMIT.to_string(),
+        &limit,
         "--json",
-        "number,body",
-    ])?;
+        "number,body,url",
+    ])
+    .or_else(|_| {
+        let url = format!("https://api.github.com/repos/{repo}/issues?state=open&per_page={limit}");
+        curl("GET", &url, api_token().as_deref(), None).and_then(|(code, body)| {
+            if code == 200 {
+                Ok(body)
+            } else {
+                Err(format!("GET issues returned {code}"))
+            }
+        })
+    })?;
 
     let issues: Vec<serde_json::Value> =
-        serde_json::from_str(&json).map_err(|e| format!("cannot parse gh output: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| format!("cannot parse issue list: {e}"))?;
     if issues.len() == DEDUPE_SCAN_LIMIT {
         eprintln!(
             "lumen report: scanned only the {DEDUPE_SCAN_LIMIT} most recent open issues; \
@@ -945,20 +1072,206 @@ pub fn find_existing(repo: &str, fp: &str) -> Result<Option<u64>, String> {
                 .and_then(|b| b.as_str())
                 .is_some_and(|b| b.contains(&needle))
         })
-        .and_then(|i| i.get("number"))
-        .and_then(|n| n.as_u64()))
+        .and_then(|i| {
+            let n = i.get("number")?.as_u64()?;
+            let url = i
+                .get("url")
+                .or_else(|| i.get("html_url"))
+                .and_then(|u| u.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Some((n, url))
+        }))
 }
 
-/// Comment on the existing issue for this fingerprint, or open a new one.
-pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filed, String> {
-    if let Some(number) = find_existing(repo, fp)? {
+/// File the report, trying each route in turn until one works.
+///
+/// `gh` first because it is the only route that can *comment* on an existing issue
+/// without a human, and a maintainer on a terminal already has it. Then the REST API,
+/// which needs a token. Then the browser, which needs nothing but cannot finish the job
+/// on its own — it hands a prefilled form to the user.
+///
+/// Every failure is collected. A caller that reports only the last one would say
+/// "cannot open a browser" on a machine whose real problem is an expired token.
+pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filing, String> {
+    let mut fell_back: Vec<String> = Vec::new();
+
+    // The dedupe read has its own fallbacks; if every one fails, file anyway rather than
+    // lose the report, and say so.
+    let existing = match find_existing(repo, fp) {
+        Ok(e) => e,
+        Err(e) => {
+            fell_back.push(format!(
+                "dedupe check unavailable ({e}); may open a duplicate"
+            ));
+            None
+        }
+    };
+
+    match via_gh(repo, title, body, existing.as_ref()) {
+        Ok(outcome) => {
+            return Ok(Filing {
+                outcome,
+                route: "gh",
+                fell_back,
+            });
+        }
+        Err(e) => fell_back.push(format!("gh: {e}")),
+    }
+
+    match via_api(repo, title, body, existing.as_ref()) {
+        Ok(outcome) => {
+            return Ok(Filing {
+                outcome,
+                route: "api",
+                fell_back,
+            });
+        }
+        Err(e) => fell_back.push(format!("api: {e}")),
+    }
+
+    match via_browser(repo, title, body, existing.as_ref()) {
+        Ok(outcome) => {
+            return Ok(Filing {
+                outcome,
+                route: "browser",
+                fell_back,
+            });
+        }
+        Err(e) => fell_back.push(format!("browser: {e}")),
+    }
+
+    Err(format!(
+        "every filing route failed:\n  - {}",
+        fell_back.join("\n  - ")
+    ))
+}
+
+fn via_gh(
+    repo: &str,
+    title: &str,
+    body: &str,
+    existing: Option<&(u64, String)>,
+) -> Result<Filed, String> {
+    if let Some((number, _)) = existing {
         let n = number.to_string();
-        let url = gh(&["issue", "comment", &n, "--repo", repo, "--body-file", "-"])
-            .or_else(|_| write_via_tempfile(&["issue", "comment", &n, "--repo", repo], body))?;
+        let url = write_via_tempfile(&["issue", "comment", &n, "--repo", repo], body)?;
         return Ok(Filed::Commented(url.trim().to_string()));
     }
     let url = write_via_tempfile(&["issue", "create", "--repo", repo, "--title", title], body)?;
     Ok(Filed::Created(url.trim().to_string()))
+}
+
+fn via_api(
+    repo: &str,
+    title: &str,
+    body: &str,
+    existing: Option<&(u64, String)>,
+) -> Result<Filed, String> {
+    let token = api_token().ok_or("no GITHUB_TOKEN or GH_TOKEN in the environment")?;
+
+    let (url, payload, commenting) = match existing {
+        Some((number, _)) => (
+            format!("https://api.github.com/repos/{repo}/issues/{number}/comments"),
+            serde_json::json!({ "body": body }),
+            true,
+        ),
+        None => (
+            format!("https://api.github.com/repos/{repo}/issues"),
+            serde_json::json!({ "title": title, "body": body }),
+            false,
+        ),
+    };
+
+    let (code, resp) = curl("POST", &url, Some(&token), Some(&payload.to_string()))?;
+    if !(200..300).contains(&code) {
+        let msg = serde_json::from_str::<serde_json::Value>(&resp)
+            .ok()
+            .and_then(|v| {
+                v.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| resp.chars().take(160).collect());
+        return Err(format!("POST returned {code}: {msg}"));
+    }
+
+    let html = serde_json::from_str::<serde_json::Value>(&resp)
+        .ok()
+        .and_then(|v| {
+            v.get("html_url")
+                .and_then(|u| u.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Ok(if commenting {
+        Filed::Commented(html)
+    } else {
+        Filed::Created(html)
+    })
+}
+
+/// Longest prefilled URL attempted. Browsers and intermediaries start truncating well
+/// before this; past it, open the blank form so the body is not silently cut in half.
+const PREFILL_URL_CAP: usize = 6000;
+
+fn via_browser(
+    repo: &str,
+    title: &str,
+    body: &str,
+    existing: Option<&(u64, String)>,
+) -> Result<Filed, String> {
+    // An existing issue cannot be commented on from a URL, so go to the issue itself
+    // rather than opening a form that would create a duplicate.
+    if let Some((number, url)) = existing {
+        let target = if url.is_empty() {
+            format!("https://github.com/{repo}/issues/{number}")
+        } else {
+            url.clone()
+        };
+        open_in_browser(&target)?;
+        return Ok(Filed::Handoff(target));
+    }
+
+    let full = format!(
+        "https://github.com/{repo}/issues/new?title={}&body={}",
+        percent_encode(title),
+        percent_encode(body)
+    );
+    let target = if full.len() <= PREFILL_URL_CAP {
+        full
+    } else {
+        // Truncating the body would file a half report that looks complete.
+        let path = std::env::temp_dir().join("lumen-issue-body.md");
+        std::fs::write(&path, body).map_err(|e| format!("cannot stage the body: {e}"))?;
+        eprintln!(
+            "lumen report: the report is too long to prefill; its text is at {} — \
+             paste it into the form that just opened",
+            path.display()
+        );
+        format!("https://github.com/{repo}/issues/new")
+    };
+    open_in_browser(&target)?;
+    Ok(Filed::Handoff(target))
+}
+
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
+        ("open", vec![url])
+    } else if cfg!(target_os = "windows") {
+        // `start` is a shell builtin, and its first quoted argument is the window title.
+        ("cmd", vec!["/C", "start", "", url])
+    } else {
+        ("xdg-open", vec![url])
+    };
+    let status = std::process::Command::new(cmd)
+        .args(&args)
+        .status()
+        .map_err(|e| format!("cannot run {cmd}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{cmd} exited with {status}"));
+    }
+    Ok(())
 }
 
 /// `gh` reads `--body-file -` from stdin, which `Command::output` cannot supply without
@@ -1429,6 +1742,145 @@ mod tests {
         assert!(
             err.contains("does_not_exist.json"),
             "error lost the path: {err}"
+        );
+    }
+    // ── Filing fallback chain ───────────────────────────────────────────────────
+    //
+    // gh first, then the REST API, then a prefilled browser form. The chain exists
+    // because `gh` is an undocumented dependency that virtually no end user has, so a
+    // filing path that only tries it works for the maintainer and nobody else.
+    //
+    // These test the parts that do not need a network: the token source, the encoder the
+    // browser route depends on, and that Handoff is a distinct outcome from Created.
+    // The routes themselves are exercised by hand against a scratch repo.
+
+    #[test]
+    fn a_handoff_is_not_a_filing() {
+        // The browser route opens a form; nothing is published until a human submits.
+        // Callers match on this, so it must never collapse into Created.
+        assert_ne!(
+            Filed::Handoff("https://x/issues/new".into()),
+            Filed::Created("https://x/issues/new".into())
+        );
+    }
+
+    #[test]
+    fn percent_encoding_escapes_everything_a_report_contains() {
+        // A rendered body is full of newlines, spaces, pipes, hashes and backticks; any
+        // one of them unescaped truncates the prefilled body at that character.
+        assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(percent_encode("x\ny"), "x%0Ay");
+        assert_eq!(percent_encode("### t"), "%23%23%23%20t");
+        assert_eq!(percent_encode("a|b"), "a%7Cb");
+        assert_eq!(percent_encode("`c`"), "%60c%60");
+        assert_eq!(percent_encode("&q=1"), "%26q%3D1");
+        // Unreserved characters must survive, or every URL doubles in length.
+        assert_eq!(percent_encode("Aa0-_.~"), "Aa0-_.~");
+        // Multi-byte input is encoded per UTF-8 byte.
+        assert_eq!(percent_encode("≥"), "%E2%89%A5");
+    }
+
+    #[test]
+    fn a_marker_survives_a_round_trip_through_the_url_encoder() {
+        // The dedupe key rides in the body. If the encoder mangled it, a browser-filed
+        // issue would never be found again and every report would open a duplicate.
+        let m = marker("ffd15312");
+        let encoded = percent_encode(&m);
+        assert!(
+            !encoded.contains('<'),
+            "raw angle bracket would break the query"
+        );
+        let decoded: String = {
+            let b = encoded.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'%' {
+                    out.push(
+                        u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap(), 16)
+                            .unwrap(),
+                    );
+                    i += 3;
+                } else {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(decoded, m);
+    }
+
+    #[test]
+    fn the_token_comes_only_from_the_environment() {
+        // SAFETY: single-threaded within this test, and no other test reads these.
+        unsafe {
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::remove_var("GH_TOKEN");
+        }
+        assert!(api_token().is_none(), "no token must mean no api route");
+
+        unsafe { std::env::set_var("GH_TOKEN", "   ") };
+        assert!(api_token().is_none(), "whitespace is not a token");
+
+        unsafe { std::env::set_var("GH_TOKEN", " abc ") };
+        assert_eq!(api_token().as_deref(), Some("abc"), "trimmed");
+
+        // GITHUB_TOKEN is checked first.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "primary") };
+        assert_eq!(api_token().as_deref(), Some("primary"));
+
+        unsafe {
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::remove_var("GH_TOKEN");
+        }
+    }
+
+    /// A prefilled URL for the current report shape must stay under the cap, or the
+    /// browser route silently degrades to a blank form on every single call.
+    #[test]
+    fn a_typical_report_fits_in_a_prefilled_url() {
+        let body = render(
+            &load("faults_mixed.json"),
+            &test_env(),
+            &RenderOpts::default(),
+        )
+        .unwrap();
+        let url = format!(
+            "https://github.com/{DEFAULT_REPO}/issues/new?title={}&body={}",
+            percent_encode(&title_from(&body)),
+            percent_encode(&body)
+        );
+        assert!(
+            url.len() <= PREFILL_URL_CAP,
+            "prefill URL is {} bytes, over the {PREFILL_URL_CAP} cap",
+            url.len()
+        );
+    }
+
+    /// The failure message has to name every route. "Filing failed" with no history is
+    /// unfixable, and the last error is usually the least informative one.
+    #[test]
+    fn total_failure_reports_every_route_it_tried() {
+        // SAFETY: single-threaded; PATH is restored before returning.
+        let saved = std::env::var("PATH").unwrap_or_default();
+        unsafe {
+            std::env::set_var("PATH", "/nonexistent-bin");
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::remove_var("GH_TOKEN");
+        }
+
+        let err = file_issue("owner/repo", "t", "b", "deadbeef").unwrap_err();
+
+        unsafe { std::env::set_var("PATH", saved) };
+
+        assert!(err.contains("every filing route failed"), "{err}");
+        for route in ["gh:", "api:", "browser:"] {
+            assert!(err.contains(route), "missing {route} in: {err}");
+        }
+        assert!(
+            err.contains("GITHUB_TOKEN") || err.contains("GH_TOKEN"),
+            "the api failure should say what was missing: {err}"
         );
     }
 }

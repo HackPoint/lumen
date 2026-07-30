@@ -586,6 +586,34 @@ Claude with no way to read the file at all:
 It also stats the `lumen-mcp` binary to check the server it would redirect to actually
 exists. Set `LUMEN_HOOK_ENABLED=0` to disable interception entirely.
 
+### Filing a fault report
+
+Nothing is sent until you ask for it — via `lumen report --yes`, or the **File issue**
+button under **Report a fault** on the Hotspots screen. You see the exact text first,
+and it is the text that gets sent; it is never re-generated at send time.
+
+Three routes are tried in order, and the first that works wins:
+
+| order | route | needs | can comment on an existing issue |
+| --- | --- | --- | --- |
+| 1 | GitHub CLI — `gh issue create` / `gh issue comment` | `gh` installed and authenticated | yes |
+| 2 | REST API — `POST /repos/{repo}/issues` | `GITHUB_TOKEN` or `GH_TOKEN` in the environment | yes |
+| 3 | Prefilled browser form | a browser | no — it opens the existing issue instead |
+
+The browser route is a **handoff, not a filing**: it opens GitHub's new-issue form with
+the body already filled in, and nothing exists on the tracker until you press Submit.
+Lumen says so rather than reporting it as filed.
+
+Why a chain: `gh` is the only route that can post a follow-up comment without a human,
+but almost nobody running the app has it. The browser route needs nothing at all, so
+there is always a way to report a fault. When a route is skipped, the reason is shown —
+a silent fallback would hide that your preferred one is broken.
+
+Reports are deduplicated on a fingerprint of `(kind, variant, version)` carried in the
+body as an HTML comment. A second report of the same fault comments on the existing
+issue instead of opening a duplicate. The lookup reads the tracker over HTTPS and works
+without any credentials on a public repository; a token is only ever needed to *write*.
+
 `lumen_meter.sh` (PostToolUse) — a shell script that fires after a `Read` or a `Bash`
 call completes. It inserts one row into a local SQLite database and makes no network
 calls. What it records differs by tool:

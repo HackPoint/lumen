@@ -40,7 +40,10 @@
                     @if (report()) {
                         <button class="fr__btn fr__btn--primary" type="button" (click)="file()"
                                 [disabled]="filing() || alreadyFiled()">
-                            {{ filing() ? 'Filing…' : alreadyFiled() ? 'Filed' : 'File issue' }}
+                            {{ filing() ? 'Filing…'
+                               : published() ? 'Filed'
+                               : alreadyFiled() ? 'Opened'
+                               : 'File issue' }}
                         </button>
                         <button class="fr__btn fr__btn--ghost" type="button" (click)="dismiss()"
                                 [disabled]="filing()">Dismiss</button>
@@ -56,10 +59,27 @@
                 <p class="fr__error" role="alert">{{ reportError() }}</p>
             }
 
-            @if (filedUrl()) {
-                <p class="fr__note fr__note--filed">
-                    Filed: <a [href]="filedUrl()" target="_blank" rel="noreferrer noopener">{{ filedUrl() }}</a>
-                </p>
+            @if (filed(); as f) {
+                <!-- A handoff opened a prefilled form and published nothing, so it must
+                     not be reported as filed. -->
+                @if (f.handoff) {
+                    <p class="fr__note">
+                        Opened a prefilled form in your browser — <strong>submit it there</strong>
+                        to file. Nothing has been posted yet.
+                        <a [href]="f.url" target="_blank" rel="noreferrer noopener">{{ f.url }}</a>
+                    </p>
+                } @else {
+                    <p class="fr__note fr__note--filed">
+                        {{ f.commented ? 'Commented on the existing issue' : 'Filed' }}
+                        via <code>{{ f.route }}</code>:
+                        <a [href]="f.url" target="_blank" rel="noreferrer noopener">{{ f.url }}</a>
+                    </p>
+                }
+                <!-- Which routes were passed over. A silent fallback hides that the
+                     preferred one is broken. -->
+                @for (step of f.fellBack; track step) {
+                    <p class="fr__note">Fell back — {{ step }}</p>
+                }
             }
 
             @if (report(); as r) {

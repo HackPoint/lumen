@@ -4,7 +4,7 @@ import { Hotspots } from './hotspots';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { FakeTauriBridge } from '../../tauri-bridge.fake';
-import type { ContextReport, FaultReport, FileHotspot } from '../../components/index';
+import type { ContextReport, FaultReport, FilingResult, FileHotspot } from '../../components/index';
 
 /**
  * Hotspots is the one screen that makes no savings claim, and that is its whole
@@ -211,6 +211,17 @@ describe('Hotspots', () => {
    * drains the whole chain, and awaiting `whenStable()` is not an option — SessionService
    * holds a live daemon subscription, so the fixture is never stable.
    */
+  function filingResult(over: Partial<FilingResult> = {}): FilingResult {
+    return {
+      url: 'https://github.com/HackPoint/lumen/issues/1',
+      route: 'gh',
+      handoff: false,
+      commented: false,
+      fellBack: [],
+      ...over,
+    };
+  }
+
   async function tick(): Promise<void> {
     for (let i = 0; i < 6; i++) await Promise.resolve();
     fixture.detectChanges();
@@ -247,7 +258,7 @@ describe('Hotspots', () => {
     await mount(report());
     const r = faultReport();
     bridge.responses.set('get_fault_report', r);
-    bridge.responses.set('file_fault_report', 'https://github.com/HackPoint/lumen/issues/1');
+    bridge.responses.set('file_fault_report', filingResult());
 
     button('Check for faults')!.click();
     await tick();
@@ -268,7 +279,7 @@ describe('Hotspots', () => {
   it('will not file the same report twice', async () => {
     await mount(report());
     bridge.responses.set('get_fault_report', faultReport());
-    bridge.responses.set('file_fault_report', 'https://example.test/1');
+    bridge.responses.set('file_fault_report', filingResult({ url: 'https://example.test/1' }));
 
     button('Check for faults')!.click();
     await tick();
@@ -342,5 +353,47 @@ describe('Hotspots', () => {
     // Below a ten-row list in an 800x600 window it needs scrolling to find, which is
     // how it went unnoticed.
     expect(html.indexOf('Report a fault')).toBeLessThan(html.indexOf('hs__list'));
+  });
+  it('does not call a browser handoff "filed" — nothing is posted yet', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', faultReport());
+    bridge.responses.set('file_fault_report', filingResult({
+      url: 'https://github.com/HackPoint/lumen/issues/new?title=x',
+      route: 'browser',
+      handoff: true,
+    }));
+
+    button('Check for faults')!.click();
+    await tick();
+    button('File issue')!.click();
+    await tick();
+
+    const t = text();
+    expect(t).toContain('submit it there');
+    expect(t).toContain('Nothing has been posted yet');
+    expect(t).not.toContain('Filed via');
+    // The button must not claim it either.
+    expect(button('Filed')).toBeUndefined();
+    expect(button('Opened')).toBeDefined();
+  });
+
+  it('names the route and shows any fallbacks it went through', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', faultReport());
+    bridge.responses.set('file_fault_report', filingResult({
+      route: 'api',
+      fellBack: ['gh: cannot run gh (is the GitHub CLI installed?)'],
+    }));
+
+    button('Check for faults')!.click();
+    await tick();
+    button('File issue')!.click();
+    await tick();
+
+    const t = text();
+    expect(t).toContain('Filed');
+    expect(t).toContain('api');
+    // A silent fallback would hide that the preferred route is broken.
+    expect(t).toContain('cannot run gh');
   });
 });

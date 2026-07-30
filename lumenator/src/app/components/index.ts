@@ -227,6 +227,23 @@ export interface ContextReport {
 }
 
 /**
+ * What filing did, and which route did it.
+ *
+ * `handoff` is the field that matters. The browser route opens a prefilled form and
+ * nothing exists on the tracker until the user submits it, so the UI must not report a
+ * handoff as filed — that would claim something that has not happened.
+ */
+export interface FilingResult {
+    url: string;
+    /** `gh`, `api` or `browser`. */
+    route: string;
+    handoff: boolean;
+    commented: boolean;
+    /** Why each earlier route was passed over. Surfaced so a degraded setup is visible. */
+    fellBack: string[];
+}
+
+/**
  * A rendered fault report, ready to show and then file.
  *
  * `body` is the whole issue text, already redacted by the backend: metadata only, no file

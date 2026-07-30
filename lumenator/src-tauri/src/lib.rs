@@ -516,6 +516,22 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// What filing did, and which route did it.
+///
+/// `handoff` is the field that matters: the browser route opens a prefilled form and
+/// nothing is published until the user submits it, so the UI must not say "Filed".
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilingResult {
+    pub url: String,
+    /// `gh`, `api` or `browser`.
+    pub route: String,
+    pub handoff: bool,
+    pub commented: bool,
+    /// Why each earlier route was passed over. Shown so a degraded setup is visible.
+    pub fell_back: Vec<String>,
+}
+
 /// File a previously-rendered body, commenting on the existing issue if this fingerprint
 /// has already been reported.
 ///
@@ -527,12 +543,21 @@ async fn file_fault_report(
     title: String,
     fingerprint: String,
     repo: String,
-) -> Result<String, String> {
+) -> Result<FilingResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        match lumen_core::report::file_issue(&repo, &title, &body, &fingerprint)? {
-            lumen_core::report::Filed::Created(url) => Ok(url),
-            lumen_core::report::Filed::Commented(url) => Ok(url),
-        }
+        let filing = lumen_core::report::file_issue(&repo, &title, &body, &fingerprint)?;
+        let (url, handoff, commented) = match filing.outcome {
+            lumen_core::report::Filed::Created(u) => (u, false, false),
+            lumen_core::report::Filed::Commented(u) => (u, false, true),
+            lumen_core::report::Filed::Handoff(u) => (u, true, false),
+        };
+        Ok(FilingResult {
+            url,
+            route: filing.route.to_string(),
+            handoff,
+            commented,
+            fell_back: filing.fell_back,
+        })
     })
     .await
     .map_err(|e| format!("filing task failed: {e}"))?
