@@ -3,7 +3,7 @@ import { Observable, scan, startWith, merge, from, filter } from 'rxjs';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { RATE } from './components';
 import { TauriBridge } from './tauri-bridge';
-import type { ContextReport, FaultReport } from './components/index';
+import type { ContextReport, FaultReport, FilingResult } from './components/index';
 import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
@@ -464,8 +464,13 @@ export class SessionService {
   readonly faultsNone = signal(false);
   readonly faultReportLoading = signal(false);
   readonly faultFiling = signal(false);
-  /** URL of the issue this report was filed to, once it has been. */
-  readonly faultFiledUrl = signal<string | null>(null);
+  /**
+   * Outcome of the last filing attempt, or null if it has not been tried.
+   *
+   * The whole result, not just a URL: the browser route only opens a prefilled form, so
+   * the view has to know whether anything was actually published.
+   */
+  readonly faultFiled = signal<FilingResult | null>(null);
   readonly faultError = signal<string | null>(null);
 
   /**
@@ -493,7 +498,7 @@ export class SessionService {
   refreshFaultReport(): void {
     this.faultReportLoading.set(true);
     this.faultError.set(null);
-    this.faultFiledUrl.set(null);
+    this.faultFiled.set(null);
     this.bridge.invoke<FaultReport | null>('get_fault_report')
         .then((r) => {
           this.faultReport.set(r ?? null);
@@ -517,13 +522,13 @@ export class SessionService {
 
     this.faultFiling.set(true);
     this.faultError.set(null);
-    this.bridge.invoke<string>('file_fault_report', {
+    this.bridge.invoke<FilingResult>('file_fault_report', {
           body: report.body,
           title: report.title,
           fingerprint: report.fingerprint,
           repo: report.repo,
         })
-        .then((url) => this.faultFiledUrl.set(url))
+        .then((r) => this.faultFiled.set(r))
         .catch((e: unknown) => this.faultError.set(this.message(e)))
         .finally(() => this.faultFiling.set(false));
   }
@@ -533,7 +538,7 @@ export class SessionService {
     this.faultReport.set(null);
     this.faultsNone.set(false);
     this.faultError.set(null);
-    this.faultFiledUrl.set(null);
+    this.faultFiled.set(null);
   }
 
   private message(e: unknown): string {

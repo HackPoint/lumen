@@ -202,12 +202,24 @@ fn run_report(
 
     let fp = report::fingerprint(&faults, &env);
     match report::file_issue(repo, &report::title_from(&body), &body, &fp) {
-        Ok(report::Filed::Created(url)) => {
-            println!("opened {url}");
-            0
-        }
-        Ok(report::Filed::Commented(url)) => {
-            println!("commented on existing issue for this fingerprint: {url}");
+        Ok(filing) => {
+            // Every fallback is reported, not just the winner: a run that silently
+            // switched routes hides that the preferred one is broken.
+            for step in &filing.fell_back {
+                eprintln!("lumen report: {step}");
+            }
+            match filing.outcome {
+                report::Filed::Created(url) => println!("opened {url} (via {})", filing.route),
+                report::Filed::Commented(url) => println!(
+                    "commented on the existing issue for this fingerprint: {url} (via {})",
+                    filing.route
+                ),
+                // Not filed. Saying "opened" here would claim something that has not
+                // happened yet -- the form is waiting on a human.
+                report::Filed::Handoff(url) => println!(
+                    "opened a prefilled form in your browser -- submit it there to file: {url}"
+                ),
+            }
             0
         }
         Err(e) => {

@@ -77,11 +77,16 @@ export class Hotspots implements OnInit {
     readonly reportLoading = computed(() => this.s.faultReportLoading());
     readonly reportNone = computed(() => this.s.faultsNone());
     readonly filing = computed(() => this.s.faultFiling());
-    readonly filedUrl = computed(() => this.s.faultFiledUrl());
+    readonly filed = computed(() => this.s.faultFiled());
+    /** True once something actually exists on the tracker — a handoff does not count. */
+    readonly published = computed(() => {
+        const f = this.filed();
+        return f !== null && !f.handoff;
+    });
     readonly reportError = computed(() => this.s.faultError());
 
-    /** Whether the body on screen has already been filed — filing twice is pointless. */
-    readonly alreadyFiled = computed(() => this.filedUrl() !== null);
+    /** Whether this body has already been sent somewhere — sending twice is pointless. */
+    readonly alreadyFiled = computed(() => this.filed() !== null);
 
     preview(): void {
         this.s.refreshFaultReport();
