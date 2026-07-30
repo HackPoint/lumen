@@ -93,21 +93,28 @@ component, so Hotspots painted no background at all — near-white text on a whi
 had no navigation styling, and sat flush against the window edge. The app shell is now
 defined once, globally.
 
-### Homebrew has been installing 1.2.0 since July
+### `release.sh` has been failing halfway through since July
 
-`release.sh` bumps `Casks/lumen.rb`. That file was renamed to `Casks/lumen-app.rb` on
-28 July and the script was not updated, so the bump failed under `set -e` and the script
-aborted partway — after the manifests, before the tag. v1.3.0, v1.3.1 and v1.4.0 were cut
-some other way and the cask was never bumped.
+The script bumps `Casks/lumen.rb`. That file was renamed to `Casks/lumen-app.rb` on
+28 July — to stop an unqualified `brew install --cask lumen` fetching an unrelated
+brightness tool — and the script was not updated. The `sed` then failed under `set -e`
+and the script aborted partway: after the Cargo manifests and the formula, before the
+changelog, the commit or the tag. v1.3.0, v1.3.1 and v1.4.0 were cut some other way.
 
-The cask interpolates its version into its download URL, so `brew install --cask lumen-app`
-has been fetching `Lumen_1.2.0_aarch64.dmg` for three releases. Anyone who installed the
-menu-bar app through Homebrew since 28 July got 1.2.0. Fixed, and `release.sh` now refuses
-a missing version file instead of failing mid-bump — half-applied bumps are how this stayed
-invisible.
+So the in-repo cask template drifted to `1.2.0`, and `crates/lumen-stats` — absent from
+the script's list of crates entirely — was never bumped by any release and only stayed in
+step when someone noticed by hand. Both are fixed, and `update_ruby_version` now refuses
+a missing file or one with no version line instead of failing mid-bump. A run that does
+most of its job and stops is how this went unnoticed.
 
-`lumen-stats` was also missing from the script's list of crates to bump, so no release ever
-touched it and it only stayed in step when someone noticed by hand. Both gaps are closed.
+**Correction.** An earlier draft of this entry, and the commit message of `30be13c`,
+claimed the stale template meant `brew install --cask lumen-app` had been fetching
+`Lumen_1.2.0_aarch64.dmg` for three releases. That is wrong, and no user was affected.
+The tap is generated, not authored: CI copies these files into `HackPoint/homebrew-tap`
+and then stamps the version from the resolved tag and the sha256 from the published
+assets. The tap's own history shows a correct bump for every release — v1.2.4, v1.3.0,
+v1.3.1, v1.4.0 — so the in-repo drift never reached anyone. The bug was real; the
+consequence asserted was not.
 
 ### Notes
 
