@@ -133,18 +133,25 @@ fn stub_opener(dir: &std::path::Path) -> (Vec<String>, std::path::PathBuf) {
 
     #[cfg(windows)]
     {
-        let script = dir.join("open.bat");
-        // `%*` is every argument. The URL is the last one, and it is the only one this
-        // stub is ever given.
+        // PowerShell, not a .bat via cmd. A prefilled URL contains `&`, which cmd treats
+        // as a command separator, so the stub exited 1 before recording anything — the
+        // same defect the production Windows path had. PowerShell gets the argument whole.
+        let script = dir.join("open.ps1");
         std::fs::write(
             &script,
-            format!("@echo off\r\n>>\"{}\" echo %*\r\n", log.display()),
+            format!(
+                "param([string]$Url)\r\nAdd-Content -LiteralPath '{}' -Value $Url\r\n",
+                log.display()
+            ),
         )
         .expect("write stub");
         return (
             vec![
-                "cmd".to_string(),
-                "/C".to_string(),
+                "powershell".to_string(),
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
                 script.to_string_lossy().into_owned(),
             ],
             log,
