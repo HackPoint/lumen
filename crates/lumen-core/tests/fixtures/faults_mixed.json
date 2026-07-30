@@ -54,10 +54,20 @@
     "count": 1
   },
   {
-    "kind": "daemon_watchdog_exit",
-    "detail": "watchdog fired after 3 missed heartbeats",
+    "kind": "ws_restart",
+    "detail": "Address already in use (os error 48)",
     "first_seen": "2026-07-29T22:14:00Z",
     "last_seen": "2026-07-30T05:31:00Z",
-    "count": 3
+    "count": 3,
+    "variant": "error"
+  },
+  {
+    "kind": "ingest_failed",
+    "variant": "poll",
+    "path": "/Users/testuser/.claude/projects/acme-billing/session.jsonl",
+    "detail": "no such column: is_subagent",
+    "first_seen": "2026-07-30T04:10:00Z",
+    "last_seen": "2026-07-30T04:55:00Z",
+    "count": 12
   }
 ]

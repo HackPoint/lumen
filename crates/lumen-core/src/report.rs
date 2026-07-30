@@ -261,15 +261,39 @@ struct Group {
     details: Vec<String>,
 }
 
+/// Every fault kind this build can emit.
+///
+/// The renderer has to know all of them: an unknown kind renders as "Unclassified
+/// fault" and sorts last, which is what the first real report filed from the app did
+/// because the daemon's kinds were added without teaching the renderer about them.
+/// `every_emitted_kind_is_classified` fails if that happens again.
+pub const FAULT_KINDS: &[&str] = &[
+    "hook_fail_open",
+    "schema_drift",
+    "ingest_failed",
+    "reporter_degraded",
+    "ws_restart",
+    "ranked_decline",
+];
+
+/// The impact line used for a kind the renderer does not recognise.
+const UNCLASSIFIED: &str = "Unclassified fault. See the table below.";
+
 /// Sort order for the table and for picking the headline. A fired fail-open guard
 /// outranks everything: it means the routing contract broke in the field.
 fn kind_priority(kind: &str) -> u8 {
     match kind {
         "hook_fail_open" => 0,
         "schema_drift" => 1,
-        "daemon_watchdog_exit" => 2,
-        "ranked_decline" => 3,
-        _ => 4,
+        // Silent data loss: the daemon logged and continued, so the gauge is wrong and
+        // nothing said so. Ranks above the two that merely retry.
+        "ingest_failed" => 2,
+        // The report itself is incomplete. Not the fault being reported, but it changes
+        // how much the rest of the report can be trusted.
+        "reporter_degraded" => 3,
+        "ws_restart" => 4,
+        "ranked_decline" => 5,
+        _ => 6,
     }
 }
 
@@ -284,16 +308,26 @@ fn impact(kind: &str) -> &'static str {
             "The database's `read_events` columns do not match the set this build expects. \
              Metering rows may be dropped or written to the wrong column."
         }
-        "daemon_watchdog_exit" => {
-            "The daemon's watchdog terminated the process. Live metering stops until it is \
-             restarted; hook-written rows continue."
+        "ingest_failed" => {
+            "The daemon could not ingest a transcript and carried on. Those turns are \
+             missing from the ledger, so the gauge and the cost figures are low by \
+             whatever they contained — and nothing else reports it."
+        }
+        "ws_restart" => {
+            "The daemon's WebSocket server exited and was restarted. The live stream \
+             drops for a couple of seconds each time; a repeating count usually means \
+             the port is held by an orphaned daemon from a previous build."
+        }
+        "reporter_degraded" => {
+            "One of this report's own sources could not be read, so the report is \
+             incomplete. What is listed is still real; what is missing is unknown."
         }
         "ranked_decline" => {
             "The ranked outline refused and fell back to the legacy outline. Not a failure \
              on its own, but a high rate on one language or file shape points at a gap in \
              the ranking path."
         }
-        _ => "Unclassified fault. See the table below.",
+        _ => UNCLASSIFIED,
     }
 }
 
@@ -456,7 +490,12 @@ fn headline(top: &Group, version: &str) -> String {
             if files == 1 { "" } else { "s" }
         ),
         "schema_drift" => "read_events schema drift".to_string(),
-        "daemon_watchdog_exit" => format!("daemon watchdog exited {}×", top.count),
+        "ingest_failed" => format!(
+            "ingest failed {}× ({}) — turns missing from the ledger",
+            top.count, top.variant
+        ),
+        "ws_restart" => format!("the daemon's WebSocket server restarted {}×", top.count),
+        "reporter_degraded" => "this report is incomplete".to_string(),
         other => format!("{} ×{}", humanize(other), top.count),
     };
     format!("lumen {version} — {body}")
@@ -1882,5 +1921,44 @@ mod tests {
             err.contains("GITHUB_TOKEN") || err.contains("GH_TOKEN"),
             "the api failure should say what was missing: {err}"
         );
+    }
+    /// The test that would have caught it: the first fault report ever filed from the app
+    /// read "Unclassified fault" because the daemon's kinds were added without teaching
+    /// the renderer about them. A kind that reaches a user unclassified is a bug.
+    #[test]
+    fn every_emitted_kind_is_classified() {
+        for kind in FAULT_KINDS {
+            assert_ne!(
+                impact(kind),
+                UNCLASSIFIED,
+                "{kind} has no impact line — it would render as an unclassified fault"
+            );
+            assert!(
+                kind_priority(kind) < 6,
+                "{kind} falls into the catch-all priority and would sort below everything"
+            );
+            let f = Fault {
+                kind: (*kind).to_string(),
+                ..Default::default()
+            };
+            let body = render(&[f], &test_env(), &RenderOpts::default())
+                .unwrap_or_else(|| panic!("{kind} rendered nothing"));
+            assert!(
+                !body.contains(UNCLASSIFIED),
+                "{kind} still renders the unclassified impact line"
+            );
+        }
+    }
+
+    /// Priorities must be distinct, or the table order is decided by count alone and the
+    /// headline picks an arbitrary kind.
+    #[test]
+    fn every_kind_has_its_own_priority() {
+        let mut seen = std::collections::BTreeMap::new();
+        for kind in FAULT_KINDS {
+            if let Some(other) = seen.insert(kind_priority(kind), *kind) {
+                panic!("{kind} and {other} share priority {}", kind_priority(kind));
+            }
+        }
     }
 }
