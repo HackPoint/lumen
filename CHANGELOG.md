@@ -1,5 +1,74 @@
 # Changelog
 
+## [Unreleased]
+
+### The Read intercept could deadlock a session
+
+The intercept blocked every Read of a ≥300-line source or log file and redirected the
+model to the Lumen MCP tools — without ever checking that those tools could run. When the
+MCP server was absent or its tools were denied, the model had no way to read the file at
+all: the built-in Read was blocked and the replacement was unreachable. The documented
+escape, `LUMEN_HOOK_ENABLED=0`, has to be set before Claude Code launches, so nothing
+inside a running session could recover.
+
+Observed in the field as an agent that retried the same routing about fifteen times and
+then abandoned the task, reporting that it could not read the files it needed.
+
+Two fail-open guards now make blocking conditional on the redirect being viable. If
+`lumen-mcp` is not on the machine, the hook does not block. And a file is redirected at
+most once per session — a model coming back to the built-in Read has already been told to
+use Lumen, so if it is asking again the Lumen route failed for it, and the Read is
+released. The block message now says so explicitly, which is what breaks the retry loop:
+*"If the lumen tools are unavailable to you, retry this exact Read — it will be allowed
+through."*
+
+Both guards sit below the extension and line-count checks, so a file that was never going
+to be intercepted is never counted as a routing failure.
+
+Also fixed: `smart_read`'s tool description advertised "files ≥100 lines" while the hook
+and `CLAUDE.md` both said 300. The model was reading one threshold and meeting another.
+
+### `lumen report` — faults become a filed issue
+
+A fired fail-open guard is the highest-signal fault Lumen has: it means routing degraded
+on a real machine, and nothing was recorded about it. `lumen report` now renders that and
+four other fault kinds as a GitHub issue body, and files it.
+
+Writers append to a JSONL spool; nobody writes to SQLite. The intercept sits on the path
+that decides whether the model may read a file, so a lock acquisition there is not
+acceptable — `lumen report` does the database work later, draining the spool into a new
+`faults` table. A drain renames before reading, so a hook writing during a drain lands in
+the fresh spool rather than being lost, and an interrupted drain is recovered on the next
+run instead of discarded.
+
+Captured: both intercept guards, the daemon's three ingest-error paths (previously logged
+and dropped — the silent data loss that froze the gauge in 1.1.0), and its WS restart
+loop. Ranked declines needed no writer: they were already in `read_events.routed_via`.
+Schema drift is checked live against the column set the build expects. The daemon's
+supervisor-exit path is deliberately *not* captured: it is documented as exit-first for a
+reason, and adding I/O there would reintroduce the orphan bug from 1.2.2.
+
+Every read degrades instead of aborting, because a stale database is exactly what the
+report exists to describe.
+
+Filing is deduplicated on a fingerprint of `(kind, variant, version)` carried in the body
+as an HTML comment — a second run comments on the existing issue instead of opening a
+duplicate. Bodies are matched locally rather than through GitHub search, which does not
+reliably index HTML comments; a dedupe that silently misses would open a duplicate every
+run. Filing needs an explicit `--yes`.
+
+**The tracker is public and Lumen reads your source files, so redaction is the feature.**
+Bodies are metadata-only: extension, line count, and a content hash that identifies a file
+without shipping it. Paths outside the workspace are reduced to their extension — a
+basename like `acme_client_billing.ts` leaks on its own. Path-valued environment overrides
+are reduced to `<path>`, because collapsing `$HOME` still leaves `clients/acme` visible.
+`--include-source` opts into embedding in-workspace file bodies and prints a manifest of
+exactly what it will send first. A test asserts no absolute path, home directory, username,
+or source token survives rendering, so a change that starts leaking fails CI.
+
+Ships with `/lumen-report`, a `.claude-plugin` manifest, and an issue template matching the
+generated shape so hand-written and generated reports are diffable.
+
 ## [1.4.0] — 2026-07-29
 
 ### The headline is dollars now, and the token ratio is demoted to an input

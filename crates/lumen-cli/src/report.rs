@@ -1,0 +1,1413 @@
+//! `lumen report` — render a fault report, and file it as a GitHub issue.
+//!
+//! Three sources feed one renderer: rows drained from the JSONL fault spool into
+//! `faults`, ranked declines already metered in `read_events`, and a live schema check.
+//! Every one of them degrades rather than aborting — a stale or damaged database is
+//! exactly what this report exists to describe, so a reporter that dies on one fails
+//! precisely when it is needed.
+//!
+//! `--faults <file>` renders a fixture instead, and is deliberately permanent: it is the
+//! only way to snapshot-test the renderer without standing up a database.
+//!
+//! Redaction is the load-bearing property here, not the formatting. The repository is
+//! public and Lumen's whole job is reading the user's source files, so the renderer
+//! emits metadata only — extension, line count, content hash — and never a file's
+//! contents, an absolute path, a filename from outside the workspace, or the value of a
+//! path-valued environment override. `--include-source` opts into embedding
+//! in-workspace file bodies, and prints a manifest of what it will embed first.
+//!
+//! Filing is deduplicated on a fingerprint of `(kind, variant, version)`, carried in the
+//! body as an HTML comment: a second run comments on the existing issue instead of
+//! opening a duplicate.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+/// Longest free-form detail rendered before truncation, in lines. A decline detail
+/// is a couple of lines; a schema diff can be dozens, and would bury the table.
+const DETAIL_LINE_CAP: usize = 12;
+
+/// Stand-in for a kind that has no sub-kind (`schema_drift` has no route or guard).
+/// Part of the fingerprint, so the sentinel is a stable string, not a formatting choice.
+const NO_VARIANT: &str = "-";
+
+/// One recorded fault, already aggregated over its occurrences.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Fault {
+    pub kind: String,
+    /// `routed_via` for a ranked decline — `ranked_too_slow`, `ranked_no_defs`, …
+    #[serde(default)]
+    pub route: Option<String>,
+    /// Which fail-open guard in the Read intercept released the call.
+    #[serde(default)]
+    pub guard: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub lines: Option<i64>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default = "default_count")]
+    pub count: u64,
+    #[serde(default)]
+    pub first_seen: Option<String>,
+    #[serde(default)]
+    pub last_seen: Option<String>,
+}
+
+fn default_count() -> u64 {
+    1
+}
+
+/// Hand-written rather than derived so `count` agrees with the serde default. A derived
+/// `Default` would give 0, and a `..Default::default()` construction would then silently
+/// contribute nothing to any total.
+impl Default for Fault {
+    fn default() -> Self {
+        Self {
+            kind: String::new(),
+            route: None,
+            guard: None,
+            path: None,
+            lines: None,
+            detail: None,
+            count: default_count(),
+            first_seen: None,
+            last_seen: None,
+        }
+    }
+}
+
+impl Fault {
+    /// The sub-kind that distinguishes two faults sharing a `kind`. Part of the
+    /// fingerprint, so it must not vary per user or per run.
+    fn variant(&self) -> &str {
+        self.route
+            .as_deref()
+            .or(self.guard.as_deref())
+            .unwrap_or(NO_VARIANT)
+    }
+
+    /// Set an already-resolved sub-kind, as stored in `faults.variant`.
+    fn with_variant(mut self, variant: String) -> Self {
+        // Into `guard`: `variant()` reads route first, and a stored variant must not
+        // masquerade as a decline route when the kind is not a decline.
+        self.guard = Some(variant);
+        self
+    }
+}
+
+/// Host facts a maintainer needs, and that the reporter can actually know.
+///
+/// Built by [`Environment::collect`] in real use and constructed literally in tests,
+/// so a snapshot does not move when the host does.
+#[derive(Debug, Clone, Default)]
+pub struct Environment {
+    pub lumen_version: String,
+    pub git_sha: Option<String>,
+    pub os: String,
+    pub arch: String,
+    pub channel: String,
+    pub mcp_scope: String,
+    pub mcp_json_servers: Option<usize>,
+    pub hooks_digest: Option<String>,
+    pub read_events_cols: Option<usize>,
+    pub env_overrides: Vec<(String, String)>,
+    /// Workspace root, used to relativise paths. Never rendered.
+    pub workspace_root: Option<PathBuf>,
+    /// Home directory, scrubbed from all rendered text. Never rendered.
+    pub home: Option<PathBuf>,
+}
+
+impl Environment {
+    pub fn collect() -> Self {
+        let workspace_root = workspace_root();
+        let home = dirs::home_dir();
+
+        let mut env_overrides: Vec<(String, String)> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("LUMEN_"))
+            .collect();
+        env_overrides.sort();
+
+        Self {
+            lumen_version: env!("CARGO_PKG_VERSION").to_string(),
+            git_sha: git_sha(workspace_root.as_deref()),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            channel: "cli".to_string(),
+            mcp_scope: mcp_scope(workspace_root.as_deref()),
+            mcp_json_servers: mcp_json_servers(workspace_root.as_deref()),
+            hooks_digest: hooks_digest(workspace_root.as_deref()),
+            read_events_cols: read_events_cols(),
+            env_overrides,
+            workspace_root,
+            home,
+        }
+    }
+}
+
+/// Walk up from the executable, then from the cwd, looking for the workspace marker.
+fn workspace_root() -> Option<PathBuf> {
+    let starts = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf)),
+        std::env::current_dir().ok(),
+    ];
+    for start in starts.into_iter().flatten() {
+        let mut cur: Option<&Path> = Some(&start);
+        while let Some(dir) = cur {
+            if dir.join("Cargo.toml").is_file() && dir.join("crates").is_dir() {
+                return Some(dir.to_path_buf());
+            }
+            cur = dir.parent();
+        }
+    }
+    None
+}
+
+fn git_sha(root: Option<&Path>) -> Option<String> {
+    let root = root?;
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// How many servers the tracked `.mcp.json` declares. Zero is the interesting
+/// answer: it means the repo ships the routing demand without the routing target.
+fn mcp_json_servers(root: Option<&Path>) -> Option<usize> {
+    let text = std::fs::read_to_string(root?.join(".mcp.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(v.get("mcpServers")?.as_object()?.len())
+}
+
+fn mcp_scope(root: Option<&Path>) -> String {
+    match mcp_json_servers(root) {
+        Some(n) if n > 0 => "project (.mcp.json)".to_string(),
+        _ if dirs::home_dir().is_some_and(|h| h.join(".claude.json").is_file()) => {
+            "user (~/.claude.json)".to_string()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Digest of the hook scripts, so a report says whether the intercept in play is the
+/// shipped one. Sorted by name for determinism.
+fn hooks_digest(root: Option<&Path>) -> Option<String> {
+    let dir = root?.join(".claude/hooks");
+    let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "sh"))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+
+    let mut hasher = Sha256::new();
+    for p in names {
+        hasher.update(p.file_name()?.as_encoded_bytes());
+        hasher.update(std::fs::read(&p).ok()?);
+    }
+    Some(hex(&hasher.finalize()))
+}
+
+/// Column count of `read_events`, to catch a database that missed a migration.
+fn read_events_cols() -> Option<usize> {
+    let db = lumen_core::meter::db_path()?;
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()?;
+    let mut stmt = conn.prepare("PRAGMA table_info(read_events)").ok()?;
+    let n = stmt.query_map([], |_| Ok(())).ok()?.count();
+    (n > 0).then_some(n)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+/// Faults of one `(kind, variant)`, merged across files.
+struct Group {
+    kind: String,
+    variant: String,
+    files: BTreeSet<String>,
+    count: u64,
+    first_seen: Option<String>,
+    last_seen: Option<String>,
+    details: Vec<String>,
+}
+
+/// Sort order for the table and for picking the headline. A fired fail-open guard
+/// outranks everything: it means the routing contract broke in the field.
+fn kind_priority(kind: &str) -> u8 {
+    match kind {
+        "hook_fail_open" => 0,
+        "schema_drift" => 1,
+        "daemon_watchdog_exit" => 2,
+        "ranked_decline" => 3,
+        _ => 4,
+    }
+}
+
+fn impact(kind: &str) -> &'static str {
+    match kind {
+        "hook_fail_open" => {
+            "The Read intercept redirected to lumen, lumen did not serve the call, and a \
+             fail-open guard released the Read. Routing is degraded, not broken — context \
+             was spent that lumen was supposed to save."
+        }
+        "schema_drift" => {
+            "The database's `read_events` columns do not match the set this build expects. \
+             Metering rows may be dropped or written to the wrong column."
+        }
+        "daemon_watchdog_exit" => {
+            "The daemon's watchdog terminated the process. Live metering stops until it is \
+             restarted; hook-written rows continue."
+        }
+        "ranked_decline" => {
+            "The ranked outline refused and fell back to the legacy outline. Not a failure \
+             on its own, but a high rate on one language or file shape points at a gap in \
+             the ranking path."
+        }
+        _ => "Unclassified fault. See the table below.",
+    }
+}
+
+/// `retry_escape_valve` → `retry escape valve`
+fn humanize(s: &str) -> String {
+    s.replace('_', " ")
+}
+
+/// Renders the no-sub-kind sentinel as an em dash, so a table cell reads as "nothing
+/// here" rather than as a literal value named `-`.
+fn em_dash_if_absent(variant: &str) -> String {
+    if variant == NO_VARIANT {
+        "—".to_string()
+    } else {
+        variant.to_string()
+    }
+}
+
+/// `2026-07-29T14:02:11Z` → `07-29 14:02`. Returns the input unchanged if it is not
+/// the shape expected, rather than inventing a timestamp.
+fn short_ts(ts: &str) -> String {
+    let bytes = ts.as_bytes();
+    if bytes.len() >= 16 && bytes[4] == b'-' && bytes[10] == b'T' {
+        format!("{} {}", &ts[5..10], &ts[11..16])
+    } else {
+        ts.to_string()
+    }
+}
+
+/// Reduce a path to something safe to publish.
+///
+/// Inside the workspace a relative path is fine — it is public code. Outside it, the
+/// basename itself can carry a client or project name, so only the extension survives;
+/// the content hash is what lets a maintainer confirm they hold the same file.
+fn redact_path(raw: &str, env: &Environment) -> String {
+    let p = Path::new(raw);
+    if p.is_relative() {
+        return raw.to_string();
+    }
+    if let Some(root) = &env.workspace_root
+        && let Ok(rel) = p.strip_prefix(root)
+    {
+        return rel.to_string_lossy().into_owned();
+    }
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("<redacted:external>.{ext}"),
+        None => "<redacted:external>".to_string(),
+    }
+}
+
+/// Reduce an env override's value to something publishable.
+///
+/// The knobs worth reporting are flags and numbers (`LUMEN_LINE_THRESHOLD=300`,
+/// `LUMEN_CAPTURE=0`). The ones that carry a path — `LUMEN_DB`, `LUMEN_FAULT_SPOOL`,
+/// `LUMEN_PROJECTS_DIR` — matter only in that they are *set*, and their values name
+/// directories that can identify a client. `$HOME` collapsing is not enough on its own:
+/// `/Users/me/clients/acme/lumen.db` would still ship "clients/acme".
+fn redact_env_value(value: &str) -> String {
+    if value.contains('/') || value.contains('\\') {
+        "<path>".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Last-resort scrub over fully rendered text. `redact_path` handles the path fields;
+/// this catches an absolute path or a username that rode in on a free-form `detail`.
+fn scrub(text: &str, env: &Environment) -> String {
+    let mut out = text.to_string();
+    if let Some(home) = &env.home {
+        let home = home.to_string_lossy();
+        out = out.replace(home.as_ref(), "~");
+        if let Some(user) = Path::new(home.as_ref())
+            .file_name()
+            .and_then(|u| u.to_str())
+            && user.len() >= 3
+        {
+            out = out.replace(user, "<user>");
+        }
+    }
+    out
+}
+
+fn group(faults: &[Fault], env: &Environment) -> Vec<Group> {
+    let mut by_key: BTreeMap<(String, String), Group> = BTreeMap::new();
+
+    for f in faults {
+        let key = (f.kind.clone(), f.variant().to_string());
+        let g = by_key.entry(key).or_insert_with(|| Group {
+            kind: f.kind.clone(),
+            variant: f.variant().to_string(),
+            files: BTreeSet::new(),
+            count: 0,
+            first_seen: None,
+            last_seen: None,
+            details: Vec::new(),
+        });
+
+        g.count += f.count;
+        if let Some(p) = &f.path {
+            g.files.insert(redact_path(p, env));
+        }
+        if let Some(d) = &f.detail
+            && !g.details.contains(d)
+        {
+            g.details.push(d.clone());
+        }
+        // Strings are ISO-8601 UTC, so lexicographic ordering is chronological.
+        if let Some(t) = &f.first_seen
+            && g.first_seen.as_ref().is_none_or(|cur| t < cur)
+        {
+            g.first_seen = Some(t.clone());
+        }
+        if let Some(t) = &f.last_seen
+            && g.last_seen.as_ref().is_none_or(|cur| t > cur)
+        {
+            g.last_seen = Some(t.clone());
+        }
+    }
+
+    let mut groups: Vec<Group> = by_key.into_values().collect();
+    groups.sort_by(|a, b| {
+        kind_priority(&a.kind)
+            .cmp(&kind_priority(&b.kind))
+            .then(b.count.cmp(&a.count))
+            .then(a.variant.cmp(&b.variant))
+    });
+    groups
+}
+
+/// Dedupe key. Covers only `(kind, variant, version)` — deliberately not counts,
+/// timestamps or paths, so the same defect fingerprints identically across runs and
+/// across users, and `lumen report` can find the issue it already filed.
+pub fn fingerprint(faults: &[Fault], env: &Environment) -> String {
+    let mut keys: Vec<String> = faults
+        .iter()
+        .map(|f| format!("{}|{}", f.kind, f.variant()))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys.push(env.lumen_version.clone());
+    sha256_hex(keys.join("\n").as_bytes())[..8].to_string()
+}
+
+fn headline(top: &Group, version: &str) -> String {
+    let files = top.files.len();
+    let body = match top.kind.as_str() {
+        "hook_fail_open" => format!(
+            "{} fired {}× on {} file{}",
+            humanize(&top.variant),
+            top.count,
+            files,
+            if files == 1 { "" } else { "s" }
+        ),
+        "ranked_decline" => format!(
+            "ranked outline declined ({}) {}× on {} file{}",
+            top.variant,
+            top.count,
+            files,
+            if files == 1 { "" } else { "s" }
+        ),
+        "schema_drift" => "read_events schema drift".to_string(),
+        "daemon_watchdog_exit" => format!("daemon watchdog exited {}×", top.count),
+        other => format!("{} ×{}", humanize(other), top.count),
+    };
+    format!("lumen {version} — {body}")
+}
+
+/// Rendering choices that change what leaves the machine.
+#[derive(Debug, Clone, Default)]
+pub struct RenderOpts {
+    /// Embed the contents of affected files. Off by default, and the CLI prints a
+    /// manifest of exactly what it will embed before emitting the body.
+    pub include_source: bool,
+}
+
+/// Bytes of any one file embedded under `include_source`. A 1900-line Rust file would
+/// otherwise produce an issue nobody can read and a paste nobody vetted.
+const INCLUDE_SOURCE_BYTE_CAP: usize = 8 * 1024;
+
+/// Render the issue body. `None` when there is nothing to report — the caller must
+/// not file an empty issue.
+pub fn render(faults: &[Fault], env: &Environment, opts: &RenderOpts) -> Option<String> {
+    let groups = group(faults, env);
+    let top = groups.first()?;
+
+    let mut s = String::new();
+    s.push_str(&format!("### {}\n\n", headline(top, &env.lumen_version)));
+    s.push_str(&format!("**Impact:** {}\n\n", impact(&top.kind)));
+
+    // "variant", not "detail": the free-form detail gets its own section below, and
+    // labelling both the same made the table look like it had been truncated.
+    s.push_str("| kind | variant | files | count | first seen | last seen |\n");
+    s.push_str("|---|---|---|---|---|---|\n");
+    for g in &groups {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            g.kind,
+            em_dash_if_absent(&g.variant),
+            if g.files.is_empty() {
+                "—".to_string()
+            } else {
+                g.files.len().to_string()
+            },
+            g.count,
+            g.first_seen
+                .as_deref()
+                .map(short_ts)
+                .unwrap_or_else(|| "—".into()),
+            g.last_seen
+                .as_deref()
+                .map(short_ts)
+                .unwrap_or_else(|| "—".into()),
+        ));
+    }
+
+    let files = affected_files(faults, env);
+    if !files.is_empty() {
+        s.push_str("\n**Affected files** (metadata only — no contents attached)\n");
+        for line in files {
+            s.push_str(&format!("- {line}\n"));
+        }
+    }
+
+    let detailed: Vec<&Group> = groups.iter().filter(|g| !g.details.is_empty()).collect();
+    if !detailed.is_empty() {
+        s.push_str("\n**Details**\n");
+        for g in detailed {
+            let heading = if g.variant == NO_VARIANT {
+                format!("`{}`", g.kind)
+            } else {
+                format!("`{}` / `{}`", g.kind, g.variant)
+            };
+            s.push_str(&format!("\n{heading}\n```\n"));
+            for d in &g.details {
+                s.push_str(&clamp_detail(d));
+                s.push('\n');
+            }
+            s.push_str("```\n");
+        }
+    }
+
+    if opts.include_source {
+        for (label, body) in embedded_sources(faults, env) {
+            s.push_str(&format!(
+                "\n<details><summary>source: {label}</summary>\n\n```\n{body}\n```\n</details>\n"
+            ));
+        }
+    }
+
+    s.push_str("\n**Environment**\n");
+    for line in environment_lines(env) {
+        s.push_str(&format!("- {line}\n"));
+    }
+
+    s.push_str(&format!(
+        "\n<!-- lumen-fault: {} -->\n",
+        fingerprint(faults, env)
+    ));
+
+    Some(scrub(&s, env))
+}
+
+/// A long detail buries the table, so keep the head and say what was dropped —
+/// silently truncating would read as a complete report.
+fn clamp_detail(detail: &str) -> String {
+    let lines: Vec<&str> = detail.lines().collect();
+    if lines.len() <= DETAIL_LINE_CAP {
+        return detail.to_string();
+    }
+    let kept = lines[..DETAIL_LINE_CAP].join("\n");
+    let dropped = lines.len() - DETAIL_LINE_CAP;
+    format!("{kept}\n… ({dropped} more lines omitted)")
+}
+
+/// One line per distinct file: redacted label, line count, extension, content hash.
+/// The hash is the reproducer handle — it identifies the file without shipping it.
+fn affected_files(faults: &[Fault], env: &Environment) -> Vec<String> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+
+    for f in faults {
+        let Some(raw) = &f.path else { continue };
+        let label = redact_path(raw, env);
+        if seen.contains_key(&label) {
+            continue;
+        }
+
+        let ext = Path::new(raw)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("—");
+        let lines = f
+            .lines
+            .map(|n| format!("{n} lines"))
+            .unwrap_or_else(|| "? lines".into());
+
+        // Resolve relative fixture paths against the workspace before hashing.
+        let abs = match (Path::new(raw).is_relative(), &env.workspace_root) {
+            (true, Some(root)) => root.join(raw),
+            _ => PathBuf::from(raw),
+        };
+        let digest = match std::fs::read(&abs) {
+            Ok(bytes) => format!("sha256:{}", &sha256_hex(&bytes)[..12]),
+            Err(_) => "sha256:unavailable".to_string(),
+        };
+
+        seen.insert(
+            label.clone(),
+            format!("`{label}` · {lines} · {ext} · {digest}"),
+        );
+    }
+
+    seen.into_values().collect()
+}
+
+fn environment_lines(env: &Environment) -> Vec<String> {
+    let sha = env.git_sha.as_deref().unwrap_or("unavailable");
+    let mut lines = vec![
+        format!("lumen {} · git `{}`", env.lumen_version, sha),
+        format!(
+            "{} {} · channel `{}` · MCP scope: {}",
+            env.os, env.arch, env.channel, env.mcp_scope
+        ),
+    ];
+
+    let servers = env
+        .mcp_json_servers
+        .map(|n| format!("{n} server(s)"))
+        .unwrap_or_else(|| "not readable".into());
+    let hooks = env
+        .hooks_digest
+        .as_ref()
+        .map(|d| format!("sha256:{}", &d[..8.min(d.len())]))
+        .unwrap_or_else(|| "absent".into());
+    lines.push(format!(
+        "`.mcp.json` declares {servers} · hooks digest `{hooks}`"
+    ));
+
+    lines.push(match env.read_events_cols {
+        Some(n) => format!("`read_events` {n} columns"),
+        None => "`read_events` not readable (no database at the resolved path)".to_string(),
+    });
+
+    lines.push(if env.env_overrides.is_empty() {
+        "env overrides in effect: none".to_string()
+    } else {
+        let joined = env
+            .env_overrides
+            .iter()
+            .map(|(k, v)| format!("`{k}={}`", redact_env_value(v)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("env overrides in effect: {joined}")
+    });
+
+    lines
+}
+
+/// Resolve each affected file and read a capped prefix, for `--include-source`.
+///
+/// Only files inside the workspace are eligible. An out-of-workspace path was redacted
+/// precisely because its name could identify a client; embedding its body would leak far
+/// more than the name did, so `--include-source` must not reach it.
+pub fn embedded_sources(faults: &[Fault], env: &Environment) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    for f in faults {
+        let Some(raw) = &f.path else { continue };
+        let label = redact_path(raw, env);
+        if label.starts_with("<redacted") || !seen.insert(label.clone()) {
+            continue;
+        }
+        let Some(root) = &env.workspace_root else {
+            continue;
+        };
+        let abs = if Path::new(raw).is_relative() {
+            root.join(raw)
+        } else {
+            PathBuf::from(raw)
+        };
+        let Ok(text) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+
+        let body = if text.len() > INCLUDE_SOURCE_BYTE_CAP {
+            let cut = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|i| *i <= INCLUDE_SOURCE_BYTE_CAP)
+                .last()
+                .unwrap_or(0);
+            format!(
+                "{}\n… truncated at {} of {} bytes",
+                &text[..cut],
+                cut,
+                text.len()
+            )
+        } else {
+            text
+        };
+        out.push((label, body));
+    }
+    out
+}
+
+/// What `--include-source` would upload, for printing before it does. Returned rather
+/// than printed so the caller decides the stream and the wording.
+pub fn source_manifest(faults: &[Fault], env: &Environment) -> Vec<(String, usize)> {
+    embedded_sources(faults, env)
+        .into_iter()
+        .map(|(label, body)| (label, body.len()))
+        .collect()
+}
+
+/// The five `routed_via` values that mean the ranked outline refused.
+///
+/// Built from the enum rather than written out, so a new `Decline` variant cannot be
+/// silently missed by the reporter.
+fn decline_routes() -> Vec<&'static str> {
+    use lumen_core::ranked::Decline::*;
+    [NoQuery, NoDefs, NotWorthIt, WouldInflate, TooSlow]
+        .iter()
+        .map(|d| d.route())
+        .collect()
+}
+
+/// Collect faults from the database: drained spool rows, ranked declines already in
+/// `read_events`, and a live schema check.
+///
+/// The drain runs first so a fault recorded seconds ago by a hook is in this report.
+pub fn load_faults_from_db(conn: &rusqlite::Connection) -> Result<Vec<Fault>, String> {
+    let mut out = Vec::new();
+    let mut degraded: Vec<String> = Vec::new();
+
+    // Every read below degrades instead of aborting. A stale or damaged database is
+    // precisely what this report exists to describe, so a reporter that dies on one
+    // cannot do its job — it would fail exactly when it is most needed.
+    if let Err(e) = lumen_core::faults::drain_spool(conn) {
+        degraded.push(format!("spool drain: {e}"));
+    }
+    match spooled_faults(conn) {
+        Ok(mut f) => out.append(&mut f),
+        Err(e) => degraded.push(format!("faults table: {e}")),
+    }
+    match declines(conn) {
+        Ok(mut f) => out.append(&mut f),
+        Err(e) => degraded.push(format!("ranked declines: {e}")),
+    }
+
+    if let Some(drift) = schema_drift_fault(conn) {
+        out.push(drift);
+    }
+    // Surfaced as a fault rather than swallowed: a report that quietly omits a source
+    // reads as "nothing there", which is the opposite of what happened.
+    for detail in degraded {
+        out.push(Fault {
+            kind: "reporter_degraded".to_string(),
+            detail: Some(detail),
+            ..Default::default()
+        });
+    }
+    Ok(out)
+}
+
+/// Rows drained from the spool into `faults`.
+///
+/// Grouped by detail as well as path: distinct details are distinct information, and the
+/// renderer merges them back under one heading while summing the counts.
+fn spooled_faults(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Fault>> {
+    let lines = if has_column(conn, "faults", "lines") {
+        "lines"
+    } else {
+        "NULL"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT kind, variant, path, {lines}, detail, count(*), min(ts), max(ts) \
+         FROM faults GROUP BY kind, variant, path, detail"
+    ))?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Fault {
+            kind: r.get(0)?,
+            path: r.get(2)?,
+            lines: r.get(3)?,
+            detail: r.get(4)?,
+            count: r.get::<_, i64>(5)? as u64,
+            first_seen: r.get(6)?,
+            last_seen: r.get(7)?,
+            ..Default::default()
+        }
+        // Carried in `guard`: `variant()` reads route first, and a stored variant must
+        // not masquerade as a decline route when the kind is not a decline.
+        .with_variant(r.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
+/// Ranked declines were already metered by the MCP server; they need a reader, not a
+/// writer. `lines` is selected only when present, so a database predating it still
+/// yields its declines instead of erroring the whole report.
+fn declines(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Fault>> {
+    let routes = decline_routes();
+    let placeholders = vec!["?"; routes.len()].join(",");
+    let lines = if has_column(conn, "read_events", "lines") {
+        "lines"
+    } else {
+        "NULL"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT routed_via, path, {lines}, count(*), min(ts), max(ts) FROM read_events \
+         WHERE routed_via IN ({placeholders}) GROUP BY routed_via, path"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(routes.iter()), |r| {
+        Ok(Fault {
+            kind: "ranked_decline".to_string(),
+            route: Some(r.get(0)?),
+            path: r.get(1)?,
+            lines: r.get(2)?,
+            count: r.get::<_, i64>(3)? as u64,
+            first_seen: r.get(4)?,
+            last_seen: r.get(5)?,
+            ..Default::default()
+        })
+    })?;
+    rows.collect()
+}
+
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    // `table` is a literal at every call site, never user input.
+    let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) else {
+        return false;
+    };
+    rows.flatten().any(|name| name == column)
+}
+
+/// A live comparison of `read_events` against the column set this build expects.
+///
+/// Synthesised at read time rather than captured: drift is a standing condition, not an
+/// event, so there is no moment at which to record it.
+fn schema_drift_fault(conn: &rusqlite::Connection) -> Option<Fault> {
+    let mut stmt = conn.prepare("PRAGMA table_info(read_events)").ok()?;
+    let live = stmt.query_map([], |_| Ok(())).ok()?.count();
+    if live == 0 || live == lumen_core::schema::READ_EVENTS_COLUMNS {
+        return None;
+    }
+    Some(Fault {
+        kind: "schema_drift".to_string(),
+        detail: Some(format!(
+            "read_events has {live} columns; this build expects {}",
+            lumen_core::schema::READ_EVENTS_COLUMNS
+        )),
+        count: 1,
+        ..Default::default()
+    })
+}
+
+/// Default issue tracker. Overridable so a fork, or a rehearsal against a scratch repo,
+/// does not have to be a code change.
+pub const DEFAULT_REPO: &str = "HackPoint/lumen";
+
+/// Open issues scanned when looking for a prior report of this fingerprint.
+const DEDUPE_SCAN_LIMIT: usize = 100;
+
+/// The marker `render` embeds, which is also the dedupe key.
+pub fn marker(fp: &str) -> String {
+    format!("<!-- lumen-fault: {fp} -->")
+}
+
+/// What filing did, so the caller can report it without re-deriving it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Filed {
+    Created(String),
+    /// Commented on an existing issue rather than opening a duplicate.
+    Commented(String),
+}
+
+fn gh(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run gh (is the GitHub CLI installed?): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "gh {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Find an open issue already carrying this fingerprint.
+///
+/// Bodies are fetched and matched locally rather than handed to `gh issue list --search`:
+/// GitHub's search index does not reliably match text inside an HTML comment, and a
+/// dedupe that silently misses is worse than no dedupe — it opens a duplicate every run.
+pub fn find_existing(repo: &str, fp: &str) -> Result<Option<u64>, String> {
+    let json = gh(&[
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--limit",
+        &DEDUPE_SCAN_LIMIT.to_string(),
+        "--json",
+        "number,body",
+    ])?;
+
+    let issues: Vec<serde_json::Value> =
+        serde_json::from_str(&json).map_err(|e| format!("cannot parse gh output: {e}"))?;
+    if issues.len() == DEDUPE_SCAN_LIMIT {
+        eprintln!(
+            "lumen report: scanned only the {DEDUPE_SCAN_LIMIT} most recent open issues; \
+             an older duplicate would not be found"
+        );
+    }
+
+    let needle = marker(fp);
+    Ok(issues
+        .iter()
+        .find(|i| {
+            i.get("body")
+                .and_then(|b| b.as_str())
+                .is_some_and(|b| b.contains(&needle))
+        })
+        .and_then(|i| i.get("number"))
+        .and_then(|n| n.as_u64()))
+}
+
+/// Comment on the existing issue for this fingerprint, or open a new one.
+pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filed, String> {
+    if let Some(number) = find_existing(repo, fp)? {
+        let n = number.to_string();
+        let url = gh(&["issue", "comment", &n, "--repo", repo, "--body-file", "-"])
+            .or_else(|_| write_via_tempfile(&["issue", "comment", &n, "--repo", repo], body))?;
+        return Ok(Filed::Commented(url.trim().to_string()));
+    }
+    let url = write_via_tempfile(&["issue", "create", "--repo", repo, "--title", title], body)?;
+    Ok(Filed::Created(url.trim().to_string()))
+}
+
+/// `gh` reads `--body-file -` from stdin, which `Command::output` cannot supply without
+/// a writer thread. A temp file is simpler and leaves the body inspectable if gh fails.
+fn write_via_tempfile(args: &[&str], body: &str) -> Result<String, String> {
+    let path = std::env::temp_dir().join(format!("lumen-issue-{}.md", std::process::id()));
+    std::fs::write(&path, body).map_err(|e| format!("cannot stage issue body: {e}"))?;
+
+    let mut full: Vec<&str> = args.to_vec();
+    let p = path.to_string_lossy().into_owned();
+    full.push("--body-file");
+    full.push(&p);
+
+    let result = gh(&full);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+/// First line of the body, without the `### ` marker — the issue title.
+pub fn title_from(body: &str) -> String {
+    body.lines()
+        .next()
+        .unwrap_or("lumen fault report")
+        .trim_start_matches('#')
+        .trim()
+        .to_string()
+}
+
+/// Parse a fault fixture. Errors carry the path, since a typo in the JSON is the
+/// most likely failure while iterating on the body.
+pub fn load_faults(path: &Path) -> Result<Vec<Fault>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    /// A fixed environment, so the snapshot does not move when the host does.
+    fn test_env() -> Environment {
+        Environment {
+            lumen_version: "1.4.0".into(),
+            git_sha: Some("703c1f2".into()),
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            channel: "cli".into(),
+            mcp_scope: "user (~/.claude.json)".into(),
+            mcp_json_servers: Some(0),
+            hooks_digest: Some("c41afe0912345678".into()),
+            read_events_cols: Some(24),
+            env_overrides: vec![("LUMEN_LINE_THRESHOLD".into(), "300".into())],
+            // Deliberately not the real root: paths must relativise identically on
+            // any machine, and nothing outside it may survive rendering.
+            workspace_root: Some(PathBuf::from("/w/lumen")),
+            home: Some(PathBuf::from("/Users/testuser")),
+        }
+    }
+
+    fn load(name: &str) -> Vec<Fault> {
+        load_faults(&fixture_dir().join(name)).expect("fixture parses")
+    }
+
+    #[test]
+    fn renders_mixed_fixture_to_snapshot() {
+        let body = render(
+            &load("faults_mixed.json"),
+            &test_env(),
+            &RenderOpts::default(),
+        )
+        .expect("non-empty");
+        let snap_path = fixture_dir().join("report_mixed.md");
+
+        if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
+            std::fs::write(&snap_path, &body).expect("write snapshot");
+            return;
+        }
+
+        let expected = std::fs::read_to_string(&snap_path).expect("snapshot exists");
+        assert_eq!(
+            body, expected,
+            "rendered body drifted from the snapshot; re-run with UPDATE_SNAPSHOTS=1 to accept"
+        );
+    }
+
+    /// The repository is public. This is the test that keeps it publishable.
+    #[test]
+    fn leaks_no_absolute_path_home_or_username() {
+        let body = render(
+            &load("faults_mixed.json"),
+            &test_env(),
+            &RenderOpts::default(),
+        )
+        .expect("non-empty");
+
+        assert!(!body.contains("/Users/testuser"), "home directory leaked");
+        assert!(!body.contains("testuser"), "username leaked");
+        assert!(!body.contains("/w/lumen"), "workspace root leaked");
+        assert!(
+            !body.contains("acme"),
+            "a private project name outside the workspace leaked"
+        );
+        assert!(
+            !body.lines().any(|l| l.starts_with("- `/")),
+            "an absolute path was rendered as a file label"
+        );
+        assert!(
+            body.contains("<redacted:external>"),
+            "an out-of-workspace path should be redacted, not dropped silently"
+        );
+    }
+
+    /// A path-valued env override must never publish its value. Found in a real run:
+    /// `LUMEN_DB=/var/folders/.../tmp.X/lumen.db` was printed verbatim, and a value
+    /// under `$HOME` would still have leaked the directory names below it.
+    #[test]
+    fn path_valued_env_overrides_are_reduced_to_a_marker() {
+        let mut env = test_env();
+        env.env_overrides = vec![
+            ("LUMEN_DB".into(), "/Users/me/clients/acme/lumen.db".into()),
+            ("LUMEN_LINE_THRESHOLD".into(), "300".into()),
+            ("LUMEN_CAPTURE".into(), "0".into()),
+        ];
+
+        let body = render(&load("faults_mixed.json"), &env, &RenderOpts::default()).unwrap();
+        assert!(!body.contains("acme"), "a client directory leaked via env");
+        assert!(!body.contains("clients"), "a path segment leaked via env");
+        assert!(
+            body.contains("`LUMEN_DB=<path>`"),
+            "the knob should still be reported"
+        );
+        assert!(
+            body.contains("`LUMEN_LINE_THRESHOLD=300`") && body.contains("`LUMEN_CAPTURE=0`"),
+            "non-path values stay visible — they are the useful ones"
+        );
+    }
+
+    /// Source contents must never ride along, even when the file is readable.
+    #[test]
+    fn attaches_no_source_content() {
+        let faults = vec![Fault {
+            kind: "ranked_decline".into(),
+            route: Some("ranked_no_defs".into()),
+            guard: None,
+            path: Some("crates/lumen-cli/src/report.rs".into()),
+            lines: Some(400),
+            detail: None,
+            count: 1,
+            first_seen: None,
+            last_seen: None,
+        }];
+        let mut env = test_env();
+        env.workspace_root = workspace_root();
+
+        let body = render(&faults, &env, &RenderOpts::default()).expect("non-empty");
+        assert!(
+            !body.contains("DETAIL_LINE_CAP"),
+            "a token from the referenced source file appeared in the body"
+        );
+        assert!(
+            body.contains("sha256:"),
+            "the content hash handle is missing"
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_runs_and_ignores_volatile_fields() {
+        let faults = load("faults_mixed.json");
+        let env = test_env();
+        assert_eq!(fingerprint(&faults, &env), fingerprint(&faults, &env));
+
+        // Counts and timestamps move constantly; the dedupe key must not.
+        let mut noisier = faults.clone();
+        for f in &mut noisier {
+            f.count += 991;
+            f.last_seen = Some("2027-01-01T00:00:00Z".into());
+        }
+        assert_eq!(
+            fingerprint(&faults, &env),
+            fingerprint(&noisier, &env),
+            "fingerprint moved on counts/timestamps, so every report would open a new issue"
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_kinds_and_versions() {
+        let env = test_env();
+        let base = load("faults_mixed.json");
+
+        let one = vec![base[0].clone()];
+        assert_ne!(
+            fingerprint(&base, &env),
+            fingerprint(&one, &env),
+            "a different fault set must not collide"
+        );
+
+        let mut bumped = test_env();
+        bumped.lumen_version = "1.5.0".into();
+        assert_ne!(
+            fingerprint(&base, &env),
+            fingerprint(&base, &bumped),
+            "a regression in a new version must file separately"
+        );
+    }
+
+    #[test]
+    fn empty_fixture_renders_nothing() {
+        assert!(
+            render(
+                &load("faults_empty.json"),
+                &test_env(),
+                &RenderOpts::default()
+            )
+            .is_none(),
+            "an empty fault list must not produce a body to file"
+        );
+    }
+
+    /// The 40-line-detail stress case: kept readable, and honest about the cut.
+    #[test]
+    fn long_detail_is_clamped_and_says_so() {
+        let long = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let faults = vec![Fault {
+            kind: "schema_drift".into(),
+            route: None,
+            guard: None,
+            path: None,
+            lines: None,
+            detail: Some(long),
+            count: 1,
+            first_seen: None,
+            last_seen: None,
+        }];
+
+        let body = render(&faults, &test_env(), &RenderOpts::default()).expect("non-empty");
+        assert!(body.contains("line 12"));
+        assert!(!body.contains("line 13"));
+        assert!(body.contains("(28 more lines omitted)"));
+    }
+
+    #[test]
+    fn fail_open_outranks_a_far_noisier_decline() {
+        let body = render(
+            &load("faults_mixed.json"),
+            &test_env(),
+            &RenderOpts::default(),
+        )
+        .expect("non-empty");
+        let first = body.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("escape valve"),
+            "headline should lead with the fail-open guard, got: {first}"
+        );
+    }
+
+    #[test]
+    fn single_occurrence_and_single_file_read_naturally() {
+        let faults = vec![Fault {
+            kind: "hook_fail_open".into(),
+            route: None,
+            guard: Some("lumen_mcp_missing".into()),
+            path: Some("crates/lumen-core/src/ranked.rs".into()),
+            lines: Some(1909),
+            detail: None,
+            count: 1,
+            first_seen: Some("2026-07-30T09:00:00Z".into()),
+            last_seen: Some("2026-07-30T09:00:00Z".into()),
+        }];
+        let body = render(&faults, &test_env(), &RenderOpts::default()).expect("non-empty");
+        assert!(
+            body.contains("fired 1× on 1 file\n") || body.contains("fired 1× on 1 file "),
+            "singular should not read '1 files': {}",
+            body.lines().next().unwrap_or_default()
+        );
+    }
+
+    fn db_with_schema() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(lumen_core::schema::DDL).unwrap();
+        for m in lumen_core::schema::MIGRATIONS {
+            let _ = c.execute_batch(m);
+        }
+        c
+    }
+
+    /// The decline routes the reader queries must be exactly the enum's, or a new
+    /// variant would be silently invisible to every report.
+    #[test]
+    fn decline_routes_match_the_enum() {
+        let routes = decline_routes();
+        assert_eq!(routes.len(), 5, "a Decline variant was added or removed");
+        assert!(routes.iter().all(|r| r.starts_with("ranked_")));
+        assert!(
+            !routes.contains(&lumen_core::ranked::ROUTE_RANKED),
+            "the success route must never be counted as a decline"
+        );
+    }
+
+    #[test]
+    fn db_reader_aggregates_faults_and_declines() {
+        let conn = db_with_schema();
+
+        // Two occurrences of one fault, one of another.
+        for (kind, variant, path, ts) in [
+            (
+                "hook_fail_open",
+                "retry_escape_valve",
+                "a.rs",
+                "2026-07-01T00:00:00Z",
+            ),
+            (
+                "hook_fail_open",
+                "retry_escape_valve",
+                "a.rs",
+                "2026-07-03T00:00:00Z",
+            ),
+            ("ingest_failed", "poll", "b.jsonl", "2026-07-02T00:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO faults(ts,kind,variant,path,channel) VALUES(?1,?2,?3,?4,'cli')",
+                rusqlite::params![ts, kind, variant, path],
+            )
+            .unwrap();
+        }
+
+        // A decline and a success on the ranked path; only the decline is a fault.
+        for route in ["ranked_too_slow", lumen_core::ranked::ROUTE_RANKED] {
+            conn.execute(
+                "INSERT INTO read_events(ts,tool,path,tokens_returned,full_tokens,\
+                 saved_tokens,routed_via,channel) \
+                 VALUES('2026-07-04T00:00:00Z','smart_read','c.rs',1,2,1,?1,'cli')",
+                [route],
+            )
+            .unwrap();
+        }
+
+        let faults = load_faults_from_db(&conn).expect("reader runs");
+
+        let valve = faults
+            .iter()
+            .find(|f| f.variant() == "retry_escape_valve")
+            .expect("aggregated fault present");
+        assert_eq!(valve.count, 2, "occurrences must be summed");
+        assert_eq!(valve.first_seen.as_deref(), Some("2026-07-01T00:00:00Z"));
+        assert_eq!(valve.last_seen.as_deref(), Some("2026-07-03T00:00:00Z"));
+
+        let declines: Vec<&Fault> = faults
+            .iter()
+            .filter(|f| f.kind == "ranked_decline")
+            .collect();
+        assert_eq!(declines.len(), 1, "only the declining route is a fault");
+        assert_eq!(declines[0].variant(), "ranked_too_slow");
+
+        assert!(
+            faults.iter().all(|f| f.kind != "schema_drift"),
+            "a current schema must not report drift"
+        );
+    }
+
+    #[test]
+    fn db_reader_reports_drift_on_a_stale_read_events() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // A read_events from before the ranked columns landed.
+        conn.execute_batch(
+            "CREATE TABLE read_events (ts TEXT NOT NULL, tool TEXT NOT NULL, \
+             path TEXT NOT NULL, tokens_returned INTEGER NOT NULL, \
+             full_tokens INTEGER NOT NULL, saved_tokens INTEGER NOT NULL, \
+             routed_via TEXT NOT NULL, channel TEXT NOT NULL DEFAULT 'unknown');\
+             CREATE TABLE faults (ts TEXT NOT NULL, kind TEXT NOT NULL, \
+             variant TEXT NOT NULL DEFAULT '-', path TEXT, lines INTEGER, detail TEXT, \
+             session_id TEXT, version TEXT, channel TEXT NOT NULL DEFAULT 'unknown');",
+        )
+        .unwrap();
+
+        let faults = load_faults_from_db(&conn).expect("reader runs");
+        let drift = faults
+            .iter()
+            .find(|f| f.kind == "schema_drift")
+            .expect("drift detected");
+        assert!(
+            drift
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("8 columns"),
+            "detail should name the live count: {:?}",
+            drift.detail
+        );
+    }
+
+    #[test]
+    fn include_source_embeds_workspace_files_and_never_redacted_ones() {
+        let faults = vec![
+            Fault {
+                kind: "hook_fail_open".into(),
+                guard: Some("retry_escape_valve".into()),
+                path: Some("crates/lumen-cli/tests/fixtures/faults_empty.json".into()),
+                ..Default::default()
+            },
+            Fault {
+                kind: "hook_fail_open".into(),
+                guard: Some("retry_escape_valve".into()),
+                path: Some("/Users/testuser/dev/acme-billing/src/invoice.ts".into()),
+                ..Default::default()
+            },
+        ];
+        let mut env = test_env();
+        env.workspace_root = workspace_root();
+
+        let embedded = embedded_sources(&faults, &env);
+        assert_eq!(embedded.len(), 1, "only the in-workspace file is eligible");
+        assert!(embedded[0].0.ends_with("faults_empty.json"));
+
+        let body = render(
+            &faults,
+            &env,
+            &RenderOpts {
+                include_source: true,
+            },
+        )
+        .unwrap();
+        assert!(body.contains("<details><summary>source:"));
+        assert!(
+            !body.contains("acme"),
+            "--include-source must not reach an out-of-workspace file"
+        );
+
+        // Default stays metadata-only.
+        let plain = render(&faults, &env, &RenderOpts::default()).unwrap();
+        assert!(!plain.contains("<details>"));
+    }
+
+    #[test]
+    fn title_is_the_headline_without_the_heading_marker() {
+        let body = render(
+            &load("faults_mixed.json"),
+            &test_env(),
+            &RenderOpts::default(),
+        )
+        .unwrap();
+        let title = title_from(&body);
+        assert!(title.starts_with("lumen 1.4.0 —"), "got: {title}");
+        assert!(!title.contains('#'));
+    }
+
+    #[test]
+    fn the_marker_in_the_body_is_the_dedupe_key() {
+        let faults = load("faults_mixed.json");
+        let env = test_env();
+        let body = render(&faults, &env, &RenderOpts::default()).unwrap();
+        assert!(
+            body.contains(&marker(&fingerprint(&faults, &env))),
+            "find_existing looks for exactly this string"
+        );
+    }
+
+    #[test]
+    fn malformed_fixture_names_the_file() {
+        let err = load_faults(&fixture_dir().join("does_not_exist.json")).unwrap_err();
+        assert!(
+            err.contains("does_not_exist.json"),
+            "error lost the path: {err}"
+        );
+    }
+}
