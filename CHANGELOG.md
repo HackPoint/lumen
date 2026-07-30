@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.5.0] — 2026-07-30
 
 ### The Read intercept could deadlock a session
 
@@ -22,52 +22,103 @@ released. The block message now says so explicitly, which is what breaks the ret
 *"If the lumen tools are unavailable to you, retry this exact Read — it will be allowed
 through."*
 
-Both guards sit below the extension and line-count checks, so a file that was never going
-to be intercepted is never counted as a routing failure.
+**The first version of this fix shipped to nobody.** It landed in the developer copy of
+the hook, `.claude/hooks/lumen_read_intercept.sh`. Setup installs a different script,
+generated from a string constant in `setup.rs`, and that one was untouched — so the
+repository looked fixed while every real install kept the deadlock, and the staleness
+check correctly reported no drift because the constant it compares against had not
+changed. Found by installing the build rather than reading it. Six tests now cover the
+shipped script, five of them by running it, and one compares guard markers between the
+two copies.
 
 Also fixed: `smart_read`'s tool description advertised "files ≥100 lines" while the hook
 and `CLAUDE.md` both said 300. The model was reading one threshold and meeting another.
 
 ### `lumen report` — faults become a filed issue
 
-A fired fail-open guard is the highest-signal fault Lumen has: it means routing degraded
-on a real machine, and nothing was recorded about it. `lumen report` now renders that and
-four other fault kinds as a GitHub issue body, and files it.
+A fired fail-open guard is the highest-signal fault Lumen has: routing degraded on a real
+machine and nothing recorded it. `lumen report` now renders that and five other fault
+kinds as a GitHub issue, and files it.
 
 Writers append to a JSONL spool; nobody writes to SQLite. The intercept sits on the path
 that decides whether the model may read a file, so a lock acquisition there is not
 acceptable — `lumen report` does the database work later, draining the spool into a new
-`faults` table. A drain renames before reading, so a hook writing during a drain lands in
-the fresh spool rather than being lost, and an interrupted drain is recovered on the next
-run instead of discarded.
+`faults` table. A drain renames before reading, so a hook writing mid-drain lands in the
+fresh spool rather than being lost, and an interrupted drain is recovered next run.
+Retry-loop callers are throttled: a permanently failed WS bind retries every two seconds
+and would otherwise write about 43,000 lines a day.
 
-Captured: both intercept guards, the daemon's three ingest-error paths (previously logged
-and dropped — the silent data loss that froze the gauge in 1.1.0), and its WS restart
-loop. Ranked declines needed no writer: they were already in `read_events.routed_via`.
-Schema drift is checked live against the column set the build expects. The daemon's
-supervisor-exit path is deliberately *not* captured: it is documented as exit-first for a
-reason, and adding I/O there would reintroduce the orphan bug from 1.2.2.
+Captured: both intercept guards, the daemon's three ingest-error paths (until now logged
+and dropped — the silent loss that froze the gauge in 1.1.0), and its WS restart loop.
+Ranked declines needed no writer; they were already in `read_events.routed_via`. Schema
+drift is checked live. The daemon's supervisor-exit path is deliberately **not** captured:
+it is documented as exit-first because logging before exit is what left an orphan daemon
+holding the port in 1.2.2.
 
-Every read degrades instead of aborting, because a stale database is exactly what the
-report exists to describe.
-
-Filing is deduplicated on a fingerprint of `(kind, variant, version)` carried in the body
-as an HTML comment — a second run comments on the existing issue instead of opening a
-duplicate. Bodies are matched locally rather than through GitHub search, which does not
-reliably index HTML comments; a dedupe that silently misses would open a duplicate every
-run. Filing needs an explicit `--yes`.
+Filing tries three routes and takes the first that works — the GitHub CLI, then the REST
+API with a token, then a prefilled browser form. The browser route is a *handoff, not a
+filing*: nothing exists on the tracker until you press Submit, and both the CLI and the UI
+say so rather than claiming an issue was created. Every skipped route is reported, because
+a chain that silently degrades hides that the preferred one is broken. Reports are
+deduplicated on a fingerprint of `(kind, variant, version)` carried in the body, so
+re-running comments on the existing issue instead of opening a duplicate; the lookup works
+without credentials on a public repository, since a token is only needed to write.
 
 **The tracker is public and Lumen reads your source files, so redaction is the feature.**
 Bodies are metadata-only: extension, line count, and a content hash that identifies a file
-without shipping it. Paths outside the workspace are reduced to their extension — a
-basename like `acme_client_billing.ts` leaks on its own. Path-valued environment overrides
-are reduced to `<path>`, because collapsing `$HOME` still leaves `clients/acme` visible.
-`--include-source` opts into embedding in-workspace file bodies and prints a manifest of
-exactly what it will send first. A test asserts no absolute path, home directory, username,
-or source token survives rendering, so a change that starts leaking fails CI.
+without shipping it. Paths outside the workspace lose even their basename — `acme_client_billing.ts`
+identifies a client on its own. Path-valued environment overrides render as `<path>`,
+because collapsing `$HOME` still leaves `clients/acme` visible.
 
-Ships with `/lumen-report`, a `.claude-plugin` manifest, and an issue template matching the
-generated shape so hand-written and generated reports are diffable.
+That property did not hold on Windows. `Path::is_relative` answers for the host, and
+`/Users/me/clients/acme` carries no drive letter, so a report rendered on Windows
+classified every Unix-style absolute path as workspace-local and published it verbatim —
+while the `$HOME` scrub made the output *look* sanitised. The same call appeared in three
+places, so `--include-source` would also have embedded a file from outside the workspace.
+Absoluteness is now decided from the string rather than the host. Caught by CI on
+windows-latest, on a push made before tagging; a release cut an hour earlier would have
+shipped a public-tracker leak to every Windows user.
+
+### Reporting faults from the app
+
+The report lives under **Report a fault** on the Hotspots screen, with a count badge on
+the nav and a row in the tray popover — which hands off to the main window rather than
+filing, because a 320×400 popover cannot show you the body first. Two clicks throughout:
+one renders locally, the other publishes, and the text shown is the text sent.
+
+Its first version was reachable only through a nav the tray popover does not have, and
+below a ten-row list at that. Fixing the placement exposed three older layout bugs on that
+screen: `.home`, the tab nav and the centred column were all styled only in the Home
+component, so Hotspots painted no background at all — near-white text on a white window —
+had no navigation styling, and sat flush against the window edge. The app shell is now
+defined once, globally.
+
+### Homebrew has been installing 1.2.0 since July
+
+`release.sh` bumps `Casks/lumen.rb`. That file was renamed to `Casks/lumen-app.rb` on
+28 July and the script was not updated, so the bump failed under `set -e` and the script
+aborted partway — after the manifests, before the tag. v1.3.0, v1.3.1 and v1.4.0 were cut
+some other way and the cask was never bumped.
+
+The cask interpolates its version into its download URL, so `brew install --cask lumen-app`
+has been fetching `Lumen_1.2.0_aarch64.dmg` for three releases. Anyone who installed the
+menu-bar app through Homebrew since 28 July got 1.2.0. Fixed, and `release.sh` now refuses
+a missing version file instead of failing mid-bump — half-applied bumps are how this stayed
+invisible.
+
+`lumen-stats` was also missing from the script's list of crates to bump, so no release ever
+touched it and it only stayed in step when someone noticed by hand. Both gaps are closed.
+
+### Notes
+
+- Every fault kind is checked against the renderer by a test. The first report ever filed
+  from the app read "Impact: Unclassified fault" because the daemon's kinds were added
+  without teaching the renderer about them, while a kind that is never emitted had prose
+  ready and waiting.
+- `docs/filing-a-fault-report.md` walks through filing with screenshots of each state.
+- `tauri build` does not rebuild sidecars. `build-sidecar.sh` must run first or the bundle
+  ships whatever binaries were last staged — during this work it shipped a two-day-old
+  MCP server alongside a current UI.
 
 ## [1.4.0] — 2026-07-29
 
