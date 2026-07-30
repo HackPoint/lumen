@@ -165,3 +165,21 @@ body {
   text-align: center;
   vertical-align: text-top;
 }
+
+/* The page background, global rather than per-route.
+   `.home` is the element that paints it, and it was styled only in home.css — which
+   Angular scopes to the Home component. Hotspots and Optimizer both reuse
+   `class="home"` and define no `.home` rule of their own, so on those routes nothing
+   painted a background at all. html/body are deliberately transparent (the panel
+   window needs that for its rounded corners), so the window fell through to white
+   while the tokens still resolved dark: near-white text on white, unreadable.
+   Home's own scoped copy still wins there and is identical, so this only fills the gap. */
+.home {
+  background:
+    radial-gradient(
+      120% 80% at 50% -10%,
+      color-mix(in srgb, var(--lumen-ok) 7%, transparent),
+      transparent 58%
+    ),
+    var(--lumen-bg);
+}
