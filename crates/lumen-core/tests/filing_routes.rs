@@ -122,29 +122,68 @@ fn handle(mut stream: TcpStream, status: u16, response_body: &str) -> Option<Cap
     })
 }
 
-/// A stub opener: a shell script that appends the URL it was given to a file.
+/// A stub opener that appends the URL it was given to a file.
 ///
-/// Written rather than mocked so the argv assembly is exercised too — the Windows arm
-/// passes an empty window-title argument before the URL, and a mock would not catch a
-/// mistake there.
+/// Written rather than mocked so the argv assembly is exercised too. Per-platform because
+/// the first version hardcoded `/bin/sh`, which does not exist on Windows — so the two
+/// browser-route tests failed there while passing everywhere else, and the Windows arm of
+/// `open_in_browser` was the one piece of that function nothing covered.
 fn stub_opener(dir: &std::path::Path) -> (Vec<String>, std::path::PathBuf) {
     let log = dir.join("opened.txt");
-    let script = dir.join("open.sh");
-    std::fs::write(
-        &script,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\n", log.display()),
-    )
-    .expect("write stub");
-    #[cfg(unix)]
+
+    #[cfg(windows)]
     {
+        let script = dir.join("open.bat");
+        // `%*` is every argument. The URL is the last one, and it is the only one this
+        // stub is ever given.
+        std::fs::write(
+            &script,
+            format!("@echo off\r\n>>\"{}\" echo %*\r\n", log.display()),
+        )
+        .expect("write stub");
+        return (
+            vec![
+                "cmd".to_string(),
+                "/C".to_string(),
+                script.to_string_lossy().into_owned(),
+            ],
+            log,
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        let script = dir.join("open.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\n", log.display()),
+        )
+        .expect("write stub");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("chmod stub");
+        (
+            vec!["/bin/sh".to_string(), script.to_string_lossy().into_owned()],
+            log,
+        )
     }
-    (
-        vec!["/bin/sh".to_string(), script.to_string_lossy().into_owned()],
-        log,
-    )
+}
+
+/// A `gh` that always fails, without touching the network.
+///
+/// `/usr/bin/false` does not exist on Windows, which is how this suite came to pass on
+/// Unix and fail on Windows for a reason unrelated to what it was testing.
+fn failing_gh() -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "exit".to_string(),
+            "1".to_string(),
+        ]
+    } else {
+        vec!["/usr/bin/false".to_string()]
+    }
 }
 
 /// Endpoints pointing at a local listener, with `gh` made unreachable so the chain is
@@ -159,9 +198,9 @@ fn endpoints(
         api_base: api.to_string(),
         web_base: web.to_string(),
         open_cmd,
-        // `false` exits non-zero and touches nothing, so the gh route always declines and
-        // the chain is forced onto the route under test — deterministically, and offline.
-        gh_cmd: Some(vec!["/usr/bin/false".to_string()]),
+        // Always exits non-zero and touches nothing, so the gh route declines and the
+        // chain is forced onto the route under test — deterministically, and offline.
+        gh_cmd: Some(failing_gh()),
         token: token.map(str::to_string),
     }
 }

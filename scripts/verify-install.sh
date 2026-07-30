@@ -214,6 +214,12 @@ fi
 section "Menu-bar widget"
 if [[ "$CLI_ONLY" == "1" ]]; then
     skip "--cli-only: GUI checks not applicable"
+elif [[ -n "$BIN_DIR" ]]; then
+    # --bin-dir points at build output, not an installed package. Failing on a missing
+    # app bundle there is a statement about the checkout, not about the install — which is
+    # how this reported a failure in CI while passing on a machine that had Lumen
+    # installed. Run without --bin-dir to check a real install.
+    skip "--bin-dir given: verifying built binaries, not an installed package"
 elif [[ "$PLATFORM" == "macos" ]]; then
     if [[ -d /Applications/Lumen.app ]]; then
         ok "app bundle installed"
