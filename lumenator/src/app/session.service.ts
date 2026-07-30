@@ -3,7 +3,7 @@ import { Observable, scan, startWith, merge, from, filter } from 'rxjs';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { RATE } from './components';
 import { TauriBridge } from './tauri-bridge';
-import type { ContextReport, FaultReport, FilingResult } from './components/index';
+import type { ContextReport, FaultReport, FilingResult, UpdateAvailable } from './components/index';
 import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
@@ -487,6 +487,46 @@ export class SessionService {
     this.bridge.invoke<number>('get_fault_count')
         .then((n) => this.faultCount.set(n ?? 0))
         .catch(() => { /* not in Tauri / db not ready — leave the badge dark */ });
+  }
+
+  // ── Update notice ─────────────────────────────────────────────────────────
+  //
+  // Minor and major releases only. The backend returns nothing for a patch bump, for an
+  // already-announced version, or when the check is disabled — so this signal is
+  // populated only when there is genuinely something to say.
+
+  readonly updateAvailable = signal<UpdateAvailable | null>(null);
+
+  /**
+   * Ask the backend whether a newer release exists, and notify once if so.
+   *
+   * The notification is sent from here rather than the backend so it goes through the
+   * same permission-aware path as every other notification, and so a browser or test
+   * build simply records it instead of needing a native notification service.
+   */
+  checkForUpdate(): void {
+    this.bridge.invoke<UpdateAvailable | null>('check_for_update')
+        .then((u) => {
+          if (!u) return;
+          this.updateAvailable.set(u);
+          void this.notifyUpdate(u);
+        })
+        .catch(() => { /* offline, or not in Tauri — the next launch tries again */ });
+  }
+
+  private async notifyUpdate(u: UpdateAvailable): Promise<void> {
+    try {
+      let granted = await this.bridge.isPermissionGranted();
+      if (!granted) granted = (await this.bridge.requestPermission()) === 'granted';
+      if (!granted) return;
+      this.bridge.sendNotification({
+        title: `Lumen ${u.latest} is available`,
+        body: `You are on ${u.current}. This is a ${u.bump} release.`,
+      });
+    } catch {
+      // A refused or unavailable notification service is not worth surfacing; the notice
+      // is still on screen.
+    }
   }
 
   /** Reveal the main window. The tray panel has no navigation of its own. */

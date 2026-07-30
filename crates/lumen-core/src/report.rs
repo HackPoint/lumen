@@ -932,6 +932,74 @@ fn schema_drift_fault(conn: &rusqlite::Connection) -> Option<Fault> {
     })
 }
 
+/// Where filing talks to, and how it opens a browser.
+///
+/// Injected rather than hardcoded so the REST and browser routes can be exercised for
+/// real — against a local listener and a stub opener — instead of only at the point they
+/// first meet GitHub. Both shipped in 1.5.0 having never created anything, which is not a
+/// state a filing path should reach users in.
+///
+/// `from_env` reads `LUMEN_GITHUB_API`, `LUMEN_GITHUB_WEB` and `LUMEN_OPEN_CMD`; tests
+/// construct the struct directly so they never mutate process-global environment, which
+/// cannot be done safely under a parallel test runner.
+#[derive(Debug, Clone)]
+pub struct Endpoints {
+    /// REST base, no trailing slash. `https://api.github.com` in production.
+    pub api_base: String,
+    /// Web base for the prefilled form. `https://github.com` in production.
+    pub web_base: String,
+    /// argv for opening a URL, which is appended as the final argument.
+    /// `None` picks the platform default.
+    pub open_cmd: Option<Vec<String>>,
+    /// argv for the GitHub CLI. `None` means plain `gh` on `PATH`.
+    ///
+    /// Injected for the same reason as `open_cmd`: without it, a test that needs the gh
+    /// route to fail has to rely on `gh` rejecting a nonexistent repository, which is a
+    /// live network call — slow, and flaky enough that the suite passed or failed
+    /// depending on GitHub's mood.
+    pub gh_cmd: Option<Vec<String>>,
+    /// Bearer token for the REST route. `None` means that route declines.
+    ///
+    /// Carried here rather than read from the environment at the point of use: two tests
+    /// that each needed a different answer had to set and unset the same variable, and
+    /// under a parallel runner they raced — one test's `remove_var` made another's route
+    /// decline, which looked exactly like a logic bug in the chain.
+    pub token: Option<String>,
+}
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            api_base: "https://api.github.com".to_string(),
+            web_base: "https://github.com".to_string(),
+            open_cmd: None,
+            gh_cmd: None,
+            token: None,
+        }
+    }
+}
+
+impl Endpoints {
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        Self {
+            api_base: std::env::var("LUMEN_GITHUB_API").unwrap_or(d.api_base),
+            web_base: std::env::var("LUMEN_GITHUB_WEB").unwrap_or(d.web_base),
+            open_cmd: std::env::var("LUMEN_OPEN_CMD").ok().map(|s| {
+                s.split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<String>>()
+            }),
+            gh_cmd: std::env::var("LUMEN_GH_CMD").ok().map(|s| {
+                s.split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<String>>()
+            }),
+            token: api_token(),
+        }
+    }
+}
+
 /// Default issue tracker. Overridable so a fork, or a rehearsal against a scratch repo,
 /// does not have to be a code change.
 pub const DEFAULT_REPO: &str = "HackPoint/lumen";
@@ -968,14 +1036,19 @@ pub struct Filing {
     pub fell_back: Vec<String>,
 }
 
-fn gh(args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("gh")
+fn gh(ep: &Endpoints, args: &[&str]) -> Result<String, String> {
+    let (program, prefix) = match ep.gh_cmd.as_deref() {
+        Some([first, rest @ ..]) => (first.as_str(), rest),
+        _ => ("gh", &[][..]),
+    };
+    let out = std::process::Command::new(program)
+        .args(prefix)
         .args(args)
         .output()
-        .map_err(|e| format!("cannot run gh (is the GitHub CLI installed?): {e}"))?;
+        .map_err(|e| format!("cannot run {program} (is the GitHub CLI installed?): {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "gh {} failed: {}",
+            "{program} {} failed: {}",
             args.first().unwrap_or(&""),
             String::from_utf8_lossy(&out.stderr).trim()
         ));
@@ -1012,6 +1085,20 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
+/// A temp-file name unique to this call, not just this process.
+///
+/// These used to be keyed on the pid alone. Two filing operations in one process then
+/// shared a path: each wrote its own curl config, and whichever finished first deleted the
+/// other's out from under it — so a request could be made with a config belonging to a
+/// different call, or none at all. The Tauri commands run on a blocking pool and the CLI
+/// does a dedupe read before a write, so concurrency here is ordinary rather than exotic.
+fn scratch_path(stem: &str, ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{stem}-{}-{n}.{ext}", std::process::id()))
+}
+
 /// One HTTPS request via `curl`, returning `(status, body)`.
 ///
 /// curl rather than an HTTP crate: the workspace has no HTTP client, and adding one
@@ -1026,10 +1113,8 @@ fn curl(
     token: Option<&str>,
     body: Option<&str>,
 ) -> Result<(u16, String), String> {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let cfg_path = dir.join(format!("lumen-curl-{pid}.cfg"));
-    let body_path = dir.join(format!("lumen-curl-{pid}.json"));
+    let cfg_path = scratch_path("lumen-curl", "cfg");
+    let body_path = scratch_path("lumen-curl", "json");
 
     let mut cfg = String::new();
     cfg.push_str("silent\nshow-error\n");
@@ -1089,22 +1174,37 @@ fn write_private(path: &Path, contents: &str) -> Result<(), String> {
 /// Tries `gh`, then the REST API. The read works unauthenticated on a public repo, so
 /// dedupe survives on a machine with neither `gh` nor a token.
 pub fn find_existing(repo: &str, fp: &str) -> Result<Option<(u64, String)>, String> {
+    find_existing_with(&Endpoints::from_env(), repo, fp)
+}
+
+/// [`find_existing`] against explicit endpoints.
+pub fn find_existing_with(
+    ep: &Endpoints,
+    repo: &str,
+    fp: &str,
+) -> Result<Option<(u64, String)>, String> {
     let limit = DEDUPE_SCAN_LIMIT.to_string();
-    let json = gh(&[
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "open",
-        "--limit",
-        &limit,
-        "--json",
-        "number,body,url",
-    ])
+    let json = gh(
+        ep,
+        &[
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            &limit,
+            "--json",
+            "number,body,url",
+        ],
+    )
     .or_else(|_| {
-        let url = format!("https://api.github.com/repos/{repo}/issues?state=open&per_page={limit}");
-        curl("GET", &url, api_token().as_deref(), None).and_then(|(code, body)| {
+        let url = format!(
+            "{}/repos/{repo}/issues?state=open&per_page={limit}",
+            ep.api_base
+        );
+        curl("GET", &url, ep.token.as_deref(), None).and_then(|(code, body)| {
             if code == 200 {
                 Ok(body)
             } else {
@@ -1152,11 +1252,22 @@ pub fn find_existing(repo: &str, fp: &str) -> Result<Option<(u64, String)>, Stri
 /// Every failure is collected. A caller that reports only the last one would say
 /// "cannot open a browser" on a machine whose real problem is an expired token.
 pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filing, String> {
+    file_issue_with(&Endpoints::from_env(), repo, title, body, fp)
+}
+
+/// [`file_issue`] against explicit endpoints.
+pub fn file_issue_with(
+    ep: &Endpoints,
+    repo: &str,
+    title: &str,
+    body: &str,
+    fp: &str,
+) -> Result<Filing, String> {
     let mut fell_back: Vec<String> = Vec::new();
 
     // The dedupe read has its own fallbacks; if every one fails, file anyway rather than
     // lose the report, and say so.
-    let existing = match find_existing(repo, fp) {
+    let existing = match find_existing_with(ep, repo, fp) {
         Ok(e) => e,
         Err(e) => {
             fell_back.push(format!(
@@ -1166,7 +1277,7 @@ pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filin
         }
     };
 
-    match via_gh(repo, title, body, existing.as_ref()) {
+    match via_gh(ep, repo, title, body, existing.as_ref()) {
         Ok(outcome) => {
             return Ok(Filing {
                 outcome,
@@ -1177,7 +1288,7 @@ pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filin
         Err(e) => fell_back.push(format!("gh: {e}")),
     }
 
-    match via_api(repo, title, body, existing.as_ref()) {
+    match via_api(ep, repo, title, body, existing.as_ref()) {
         Ok(outcome) => {
             return Ok(Filing {
                 outcome,
@@ -1188,7 +1299,7 @@ pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filin
         Err(e) => fell_back.push(format!("api: {e}")),
     }
 
-    match via_browser(repo, title, body, existing.as_ref()) {
+    match via_browser(ep, repo, title, body, existing.as_ref()) {
         Ok(outcome) => {
             return Ok(Filing {
                 outcome,
@@ -1206,6 +1317,7 @@ pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filin
 }
 
 fn via_gh(
+    ep: &Endpoints,
     repo: &str,
     title: &str,
     body: &str,
@@ -1213,35 +1325,43 @@ fn via_gh(
 ) -> Result<Filed, String> {
     if let Some((number, _)) = existing {
         let n = number.to_string();
-        let url = write_via_tempfile(&["issue", "comment", &n, "--repo", repo], body)?;
+        let url = write_via_tempfile(ep, &["issue", "comment", &n, "--repo", repo], body)?;
         return Ok(Filed::Commented(url.trim().to_string()));
     }
-    let url = write_via_tempfile(&["issue", "create", "--repo", repo, "--title", title], body)?;
+    let url = write_via_tempfile(
+        ep,
+        &["issue", "create", "--repo", repo, "--title", title],
+        body,
+    )?;
     Ok(Filed::Created(url.trim().to_string()))
 }
 
 fn via_api(
+    ep: &Endpoints,
     repo: &str,
     title: &str,
     body: &str,
     existing: Option<&(u64, String)>,
 ) -> Result<Filed, String> {
-    let token = api_token().ok_or("no GITHUB_TOKEN or GH_TOKEN in the environment")?;
+    let token = ep
+        .token
+        .as_deref()
+        .ok_or("no GITHUB_TOKEN or GH_TOKEN in the environment")?;
 
     let (url, payload, commenting) = match existing {
         Some((number, _)) => (
-            format!("https://api.github.com/repos/{repo}/issues/{number}/comments"),
+            format!("{}/repos/{repo}/issues/{number}/comments", ep.api_base),
             serde_json::json!({ "body": body }),
             true,
         ),
         None => (
-            format!("https://api.github.com/repos/{repo}/issues"),
+            format!("{}/repos/{repo}/issues", ep.api_base),
             serde_json::json!({ "title": title, "body": body }),
             false,
         ),
     };
 
-    let (code, resp) = curl("POST", &url, Some(&token), Some(&payload.to_string()))?;
+    let (code, resp) = curl("POST", &url, Some(token), Some(&payload.to_string()))?;
     if !(200..300).contains(&code) {
         let msg = serde_json::from_str::<serde_json::Value>(&resp)
             .ok()
@@ -1274,6 +1394,7 @@ fn via_api(
 const PREFILL_URL_CAP: usize = 6000;
 
 fn via_browser(
+    ep: &Endpoints,
     repo: &str,
     title: &str,
     body: &str,
@@ -1283,16 +1404,17 @@ fn via_browser(
     // rather than opening a form that would create a duplicate.
     if let Some((number, url)) = existing {
         let target = if url.is_empty() {
-            format!("https://github.com/{repo}/issues/{number}")
+            format!("{}/{repo}/issues/{number}", ep.web_base)
         } else {
             url.clone()
         };
-        open_in_browser(&target)?;
+        open_in_browser(ep, &target)?;
         return Ok(Filed::Handoff(target));
     }
 
     let full = format!(
-        "https://github.com/{repo}/issues/new?title={}&body={}",
+        "{}/{repo}/issues/new?title={}&body={}",
+        ep.web_base,
         percent_encode(title),
         percent_encode(body)
     );
@@ -1307,13 +1429,28 @@ fn via_browser(
              paste it into the form that just opened",
             path.display()
         );
-        format!("https://github.com/{repo}/issues/new")
+        format!("{}/{repo}/issues/new", ep.web_base)
     };
-    open_in_browser(&target)?;
+    open_in_browser(ep, &target)?;
     Ok(Filed::Handoff(target))
 }
 
-fn open_in_browser(url: &str) -> Result<(), String> {
+fn open_in_browser(ep: &Endpoints, url: &str) -> Result<(), String> {
+    // An injected opener is what makes this route testable: a stub records the URL it was
+    // handed, so the prefilled body can be asserted without a browser window.
+    if let Some(argv) = &ep.open_cmd {
+        let (cmd, rest) = argv.split_first().ok_or("LUMEN_OPEN_CMD is empty")?;
+        let status = std::process::Command::new(cmd)
+            .args(rest)
+            .arg(url)
+            .status()
+            .map_err(|e| format!("cannot run {cmd}: {e}"))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{cmd} exited with {status}"))
+        };
+    }
     let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(target_os = "windows") {
@@ -1334,8 +1471,8 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 
 /// `gh` reads `--body-file -` from stdin, which `Command::output` cannot supply without
 /// a writer thread. A temp file is simpler and leaves the body inspectable if gh fails.
-fn write_via_tempfile(args: &[&str], body: &str) -> Result<String, String> {
-    let path = std::env::temp_dir().join(format!("lumen-issue-{}.md", std::process::id()));
+fn write_via_tempfile(ep: &Endpoints, args: &[&str], body: &str) -> Result<String, String> {
+    let path = scratch_path("lumen-issue", "md");
     std::fs::write(&path, body).map_err(|e| format!("cannot stage issue body: {e}"))?;
 
     let mut full: Vec<&str> = args.to_vec();
@@ -1343,7 +1480,7 @@ fn write_via_tempfile(args: &[&str], body: &str) -> Result<String, String> {
     full.push("--body-file");
     full.push(&p);
 
-    let result = gh(&full);
+    let result = gh(ep, &full);
     let _ = std::fs::remove_file(&path);
     result
 }

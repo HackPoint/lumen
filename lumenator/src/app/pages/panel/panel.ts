@@ -32,6 +32,9 @@ export class Panel implements OnInit {
     ngOnInit(): void {
         void this.bridge.moveWindowToTray().catch(() => {});
         this.s.refreshFaultCount();
+        // From the panel, not the main window: the popover is what actually gets opened,
+        // and the backend throttles to one check a day regardless of how often this runs.
+        this.s.checkForUpdate();
     }
 
     /**

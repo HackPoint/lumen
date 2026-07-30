@@ -221,3 +221,38 @@ panel cost {
     margin-left: auto;
     opacity: 0.8;
 }
+
+/* Update notice. Brand green, not the amber a fault uses: a new release is good news,
+   and reusing the fault colour would make the two read as the same kind of event. */
+.panel__update {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--lumen-brand) 35%, transparent);
+    border-radius: var(--lumen-radius-sm, 12px);
+    background: color-mix(in srgb, var(--lumen-brand) 10%, transparent);
+    color: var(--lumen-brand);
+    font-size: 0.65rem;
+    text-decoration: none;
+}
+
+.panel__update:hover {
+    background: color-mix(in srgb, var(--lumen-brand) 18%, transparent);
+}
+
+.panel__update-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: var(--lumen-brand);
+    flex: none;
+}
+
+.panel__update-cta {
+    margin-left: auto;
+    opacity: 0.8;
+}

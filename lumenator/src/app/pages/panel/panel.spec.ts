@@ -146,4 +146,85 @@ describe('Panel', () => {
     // The panel cannot show the body, so it must never be able to file.
     expect(bridge.countOf('file_fault_report')).toBe(0);
   });
+  // ── Update notice ───────────────────────────────────────────────────────────
+  //
+  // The policy that matters is what does NOT notify: a patch bump, a version already
+  // announced, or a disabled check. All three are decided in the backend, which returns
+  // null — so these assert the UI does nothing at all with a null, and notifies exactly
+  // once with a value.
+
+  async function withUpdate(u: unknown): Promise<void> {
+    bridge = new FakeTauriBridge();
+    bridge.responses.set('get_fault_count', 0);
+    bridge.responses.set('check_for_update', u);
+    TestBed.configureTestingModule({
+      providers: [{ provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Panel);
+    fixture.detectChanges();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    fixture.detectChanges();
+  }
+
+  it('asks for an update on open', async () => {
+    await withUpdate(null);
+    expect(bridge.countOf('check_for_update')).toBe(1);
+  });
+
+  it('says nothing and notifies nothing when there is no update', async () => {
+    await withUpdate(null);
+    expect(fixture.nativeElement.querySelector('.panel__update')).toBeNull();
+    expect(bridge.notifications.length).toBe(0);
+  });
+
+  it('shows a minor release and notifies once', async () => {
+    await withUpdate({ current: '1.5.0', latest: '1.6.0', bump: 'minor', url: 'https://example.test/v1.6.0' });
+
+    const el = fixture.nativeElement.querySelector('.panel__update') as HTMLAnchorElement;
+    expect(el).not.toBeNull();
+    expect(el.textContent).toContain('Lumen 1.6.0 available');
+    expect(el.getAttribute('href')).toBe('https://example.test/v1.6.0');
+
+    expect(bridge.notifications.length).toBe(1);
+    expect(bridge.notifications[0].title).toContain('1.6.0');
+    expect(bridge.notifications[0].body).toContain('1.5.0');
+    expect(bridge.notifications[0].body).toContain('minor');
+  });
+
+  it('labels a major release as major', async () => {
+    await withUpdate({ current: '1.9.0', latest: '2.0.0', bump: 'major', url: 'https://example.test/v2.0.0' });
+    expect(bridge.notifications[0].body).toContain('major');
+  });
+
+  it('does not notify when notification permission is refused, but still shows the notice', async () => {
+    bridge = new FakeTauriBridge();
+    bridge.permissionGranted = false;
+    bridge.permissionAnswer = 'denied';
+    bridge.responses.set('get_fault_count', 0);
+    bridge.responses.set('check_for_update', { current: '1.5.0', latest: '1.6.0', bump: 'minor', url: 'https://example.test/x' });
+    TestBed.configureTestingModule({
+      providers: [{ provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Panel);
+    fixture.detectChanges();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(bridge.notifications.length).toBe(0);
+    expect(fixture.nativeElement.querySelector('.panel__update')).not.toBeNull();
+  });
+
+  it('survives a backend that cannot check', async () => {
+    bridge = new FakeTauriBridge();
+    bridge.responses.set('get_fault_count', 0);
+    bridge.failures.add('check_for_update');
+    TestBed.configureTestingModule({
+      providers: [{ provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Panel);
+    expect(() => fixture.detectChanges()).not.toThrow();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.panel__update')).toBeNull();
+  });
 });
