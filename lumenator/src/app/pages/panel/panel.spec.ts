@@ -89,4 +89,61 @@ describe('Panel', () => {
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
     expect(text).toContain(p.fmtFill());
   });
+  // ── Fault indicator ─────────────────────────────────────────────────────────
+  //
+  // The panel has no router links, so a fault surfaced here must hand off to the main
+  // window. It is also the window people actually open — the report button spent a
+  // release on a screen reachable only from a nav this window does not have.
+
+  async function withCount(n: number): Promise<Panel> {
+    bridge = new FakeTauriBridge();
+    bridge.responses.set('get_fault_count', n);
+    TestBed.configureTestingModule({
+      providers: [{ provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Panel);
+    fixture.detectChanges();
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    fixture.detectChanges();
+    return fixture.componentInstance;
+  }
+
+  function text(): string {
+    return (fixture.nativeElement as HTMLElement).textContent ?? '';
+  }
+
+  function faultButton(): HTMLButtonElement | null {
+    return (fixture.nativeElement as HTMLElement).querySelector('.panel__faults');
+  }
+
+  it('asks for the fault count on open', async () => {
+    await withCount(0);
+    expect(bridge.countOf('get_fault_count')).toBe(1);
+  });
+
+  it('stays out of the way when there is nothing to act on', async () => {
+    await withCount(0);
+    expect(faultButton()).toBeNull();
+  });
+
+  it('surfaces a recorded fault with a count', async () => {
+    await withCount(3);
+    expect(faultButton()).not.toBeNull();
+    expect(text()).toContain('3 faults recorded');
+  });
+
+  it('reads naturally for a single fault', async () => {
+    await withCount(1);
+    expect(text()).toContain('1 fault recorded');
+    expect(text()).not.toContain('1 faults');
+  });
+
+  it('hands off to the main window rather than filing anything', async () => {
+    await withCount(2);
+    faultButton()!.click();
+    await Promise.resolve();
+    expect(bridge.countOf('show_main_window')).toBe(1);
+    // The panel cannot show the body, so it must never be able to file.
+    expect(bridge.countOf('file_fault_report')).toBe(0);
+  });
 });

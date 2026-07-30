@@ -62,4 +62,16 @@
     </div>
 
     <cost [totals]="s.totals()"></cost>
+
+    <!-- The panel has no navigation of its own, so a fault noticed here would
+         otherwise have nowhere to go. Shown only when there is something to act on:
+         a permanently visible row would be furniture. -->
+    @if (s.faultCount() > 0) {
+        <button class="panel__faults" type="button" (click)="openFaults()"
+                [attr.aria-label]="s.faultCount() + ' faults recorded — open Lumen to review'">
+            <span class="panel__faults-dot"></span>
+            {{ s.faultCount() }} {{ s.faultCount() === 1 ? 'fault' : 'faults' }} recorded
+            <span class="panel__faults-cta">Review →</span>
+        </button>
+    }
 </div>

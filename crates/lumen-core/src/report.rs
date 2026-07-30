@@ -832,6 +832,27 @@ fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
     rows.flatten().any(|name| name == column)
 }
 
+/// Faults worth prompting someone about: recorded occurrences plus anything still
+/// spooled.
+///
+/// Ranked declines are deliberately excluded even though the report body includes them.
+/// A decline is a normal fallback, there are hundreds of them on any active install, and
+/// counting them would keep a badge permanently lit for something nobody needs to act on
+/// — which trains people to ignore the badge.
+///
+/// Read-only: it does not drain, so refreshing a badge on navigation writes nothing.
+pub fn actionable_fault_count(conn: &rusqlite::Connection) -> u64 {
+    let recorded: i64 = conn
+        .query_row("SELECT count(*) FROM faults", [], |r| r.get(0))
+        .unwrap_or(0);
+    recorded.max(0) as u64 + lumen_core_spool_len()
+}
+
+/// Indirection so the count can be unit-tested without a spool on disk.
+fn lumen_core_spool_len() -> u64 {
+    crate::faults::spool_len() as u64
+}
+
 /// A live comparison of `read_events` against the column set this build expects.
 ///
 /// Synthesised at read time rather than captured: drift is a standing condition, not an

@@ -239,7 +239,7 @@ describe('Hotspots', () => {
 
     expect(bridge.countOf('get_fault_report')).toBe(1);
     expect(bridge.countOf('file_fault_report')).toBe(0);
-    expect(text()).toContain('This is the exact text that will be filed');
+    expect(text()).toContain('this is the exact text that will be filed');
     expect(text()).toContain('2 fault groups, 7 occurrences');
   });
 
@@ -319,6 +319,28 @@ describe('Hotspots', () => {
     await tick();
 
     expect(bridge.countOf('file_fault_report')).toBe(0);
-    expect(text()).not.toContain('This is the exact text that will be filed');
+    expect(text()).not.toContain('this is the exact text that will be filed');
+  });
+  it('badges the Hotspots tab only when faults are waiting', async () => {
+    await mount(report());
+    expect(
+      (fixture.nativeElement as HTMLElement).querySelector('.tab-nav__badge'),
+    ).toBeNull();
+
+    bridge.responses.set('get_fault_count', 4);
+    fixture.componentInstance.s.refreshFaultCount();
+    await tick();
+
+    const badge = (fixture.nativeElement as HTMLElement).querySelector('.tab-nav__badge');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent?.trim()).toBe('4');
+  });
+
+  it('puts the report section above the file list, not below it', async () => {
+    await mount(report());
+    const html = (fixture.nativeElement as HTMLElement).innerHTML;
+    // Below a ten-row list in an 800x600 window it needs scrolling to find, which is
+    // how it went unnoticed.
+    expect(html.indexOf('Report a fault')).toBeLessThan(html.indexOf('hs__list'));
   });
 });

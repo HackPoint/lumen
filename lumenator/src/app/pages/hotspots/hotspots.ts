@@ -34,6 +34,7 @@ export class Hotspots implements OnInit {
 
     ngOnInit(): void {
         this.s.refreshContextReport();
+        this.s.refreshFaultCount();
     }
 
     readonly files = computed(() => this.s.contextFiles());

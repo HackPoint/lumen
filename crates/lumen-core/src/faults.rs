@@ -201,6 +201,22 @@ pub fn take_spool() -> Option<(Vec<FaultRecord>, PathBuf)> {
     take_spool_at(&spool_path()?)
 }
 
+/// How many records are waiting in the spool, without draining it.
+///
+/// Read-only on purpose: this feeds a badge that refreshes on navigation, and a count
+/// that silently moved rows into the database every time a screen opened would make
+/// looking at the UI a write.
+pub fn spool_len() -> usize {
+    spool_path().map(|p| spool_len_at(&p)).unwrap_or(0)
+}
+
+/// [`spool_len`] against an explicit spool path.
+pub fn spool_len_at(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
 /// [`take_spool`] against an explicit spool path.
 pub fn take_spool_at(path: &Path) -> Option<(Vec<FaultRecord>, PathBuf)> {
     if !path.is_file() {
