@@ -1,0 +1,169 @@
+name: Verify install
+
+# Runs the install verification on every platform Lumen ships to, before a release rather
+# than after one.
+#
+# It exists because two install bugs shipped that no unit test could see:
+#
+#   - the published Linux CLI required GLIBC_2.39, so it refused to start on Ubuntu 22.04
+#     LTS and Debian 12 — it had been built on `ubuntu-latest`, which moved to 24.04. Every
+#     test passed; the binary simply would not run on a stable distro.
+#   - a bundled MCP server was two days older than the UI shipped beside it, because
+#     `tauri build` does not rebuild sidecars.
+#
+# Both are "the artifact does not work where it lands", which is only catchable by
+# installing the artifact somewhere it has to land. The glibc job below deliberately runs
+# the binary on distros OLDER than the one that built it; that is the whole point of it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Verify the published artifacts of this release tag instead of a fresh build (e.g. v1.5.0)'
+        required: false
+
+concurrency:
+  group: verify-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Install verify (macOS, arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build the shipped binaries
+        run: cargo build --release -p lumen-cli -p lumen-mcp
+
+      - name: Verify (full)
+        run: ./scripts/verify-install.sh --bin-dir target/release
+
+      # The CLI distribution ships only `lumen`, so it has to pass on its own terms —
+      # without an MCP server or a tokenizer present.
+      - name: Verify (CLI-only, mirroring the Homebrew formula)
+        run: |
+          mkdir -p /tmp/cli-only
+          cp target/release/lumen /tmp/cli-only/lumen
+          ./scripts/verify-install.sh --cli-only --bin-dir /tmp/cli-only
+
+  linux:
+    name: Install verify (Linux, x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build the shipped binaries
+        run: cargo build --release -p lumen-cli -p lumen-mcp
+
+      - name: Verify (full)
+        run: ./scripts/verify-install.sh --bin-dir target/release
+
+      - name: Verify (CLI-only, mirroring the release tarball)
+        run: |
+          mkdir -p /tmp/cli-only
+          cp target/release/lumen /tmp/cli-only/lumen
+          ./scripts/verify-install.sh --cli-only --bin-dir /tmp/cli-only
+
+  glibc-floor:
+    name: Linux CLI runs on old distros
+    needs: linux
+    runs-on: ubuntu-22.04
+    # The job that would have caught the GLIBC_2.39 break. It runs the binary on distros
+    # older than the builder, which is the only way that class of bug is visible.
+    strategy:
+      fail-fast: false
+      matrix:
+        # Quoted: an unquoted `debian:12-slim` is a mapping to YAML, not a string.
+        image: ["debian:12-slim", "ubuntu:22.04"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build the CLI
+        run: cargo build --release -p lumen-cli
+
+      - name: Run it on ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/target/release/lumen:/usr/local/bin/lumen:ro" \
+            -v "$PWD/scripts:/scripts:ro" \
+            -e HOME=/root \
+            ${{ matrix.image }} \
+            bash -c '
+              set -e
+              echo "glibc: $(ldd --version | head -1)"
+              # A dynamic-link failure exits non-zero with a message on stderr, so asking
+              # for the version is a sufficient smoke test for the whole class.
+              lumen --version
+              bash /scripts/verify-install.sh --cli-only --bin-dir /usr/local/bin
+            '
+
+  windows:
+    name: Install verify (Windows, x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build the shipped binaries
+        run: cargo build --release -p lumen-cli -p lumen-mcp
+
+      - name: Verify (full)
+        shell: pwsh
+        run: .\scripts\verify-install.ps1 -BinDir target\release
+
+      - name: Verify (CLI-only, mirroring the release zip)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path cli-only | Out-Null
+          Copy-Item target\release\lumen.exe cli-only\lumen.exe
+          .\scripts\verify-install.ps1 -CliOnly -BinDir cli-only
+
+  published-artifacts:
+    name: Verify a published release
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Verifies what users actually download, rather than what this commit builds. The
+      # two can differ: `tauri build` reuses whatever sidecars were last staged.
+      - name: Download and verify the published Linux artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          mkdir -p /tmp/dl && cd /tmp/dl
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern "lumen-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            --pattern "lumen_${VERSION}_amd64.deb" --clobber
+          tar xzf "lumen-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p /tmp/cli && cp lumen /tmp/cli/lumen
+
+          cd "$GITHUB_WORKSPACE"
+          ./scripts/verify-install.sh --cli-only --bin-dir /tmp/cli --expect "$VERSION"
+
+          sudo dpkg -i "/tmp/dl/lumen_${VERSION}_amd64.deb" || sudo apt-get -f install -y
+          ./scripts/verify-install.sh --bin-dir /usr/bin --expect "$VERSION"

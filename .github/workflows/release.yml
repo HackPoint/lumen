@@ -248,8 +248,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned, NOT ubuntu-latest. A binary links against the glibc it was built
+          # on, and `latest` moved to Ubuntu 24.04 (glibc 2.39) — so the published CLI
+          # refused to start on Ubuntu 22.04 LTS (2.35) and Debian 12 (2.36) with
+          # "version `GLIBC_2.39' not found". It ran only on the newest distros.
+          # 22.04 is the oldest runner GitHub still offers, and matches the GUI job
+          # below, which was pinned for the same class of reason.
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - name: windows-x86_64
             os: windows-latest

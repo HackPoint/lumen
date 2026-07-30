@@ -437,3 +437,17 @@
     margin: 0.4rem 0 0;
     line-height: 1.4;
 }
+
+/* The provenance caveat under the hero figure. Amber left rule, the same device
+   .hs__rec uses for advice: this qualifies the number above it rather than reporting a
+   fault, so it must be visible without reading as an error. */
+.hero__warn {
+    max-width: 46ch;
+    margin: 0.5rem auto 0;
+    padding-left: 0.5rem;
+    border-left: 2px solid color-mix(in srgb, var(--lumen-warn) 60%, transparent);
+    font-size: 0.68rem;
+    line-height: 1.4;
+    text-align: left;
+    color: var(--lumen-text-dim);
+}
