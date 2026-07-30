@@ -148,3 +148,59 @@ fn the_shared_app_shell_is_defined_globally() {
         );
     }
 }
+
+/// The tray popover's card must size to its content, not be stretched by the window.
+///
+/// With `inset: 8px` the card's height came from the window, so its content had nowhere to
+/// go but under the bottom edge — and `overflow: hidden` made the overflow invisible
+/// rather than visibly broken. Four conditional rows later, the fault button was
+/// off-screen entirely: rendered, styled and unreachable. Asserted against the stylesheet
+/// because a computed `bottom` is a layout result, and the test environment has no layout.
+#[test]
+fn the_tray_popover_card_is_content_sized() {
+    let Some(root) = workspace_root() else { return };
+    let Ok(css) = std::fs::read_to_string(root.join("lumenator/src/app/pages/panel/panel.css"))
+    else {
+        return;
+    };
+
+    // The `.panel` rule only, not the whole file — and with comments stripped. The rule's
+    // own comment explains the `inset: 8px` it replaced, and matching that prose made this
+    // test fail against the very code it was written to accept.
+    let start = css.find(".panel {").expect("panel.css defines .panel");
+    let raw = &css[start..start + css[start..].find('}').expect("closed rule")];
+    let mut rule = String::new();
+    let mut rest = raw;
+    loop {
+        match rest.find("/*") {
+            Some(i) => {
+                rule.push_str(&rest[..i]);
+                match rest[i..].find("*/") {
+                    Some(j) => rest = &rest[i + j + 2..],
+                    None => break,
+                }
+            }
+            None => {
+                rule.push_str(rest);
+                break;
+            }
+        }
+    }
+    let rule = rule.as_str();
+
+    assert!(
+        !rule.contains("inset:"),
+        "`.panel` uses `inset`, which stretches it to the window and reintroduces the \
+         clipping: its content then has nowhere to grow into"
+    );
+    for edge in ["top:", "left:", "right:"] {
+        assert!(
+            rule.contains(edge),
+            "`.panel` should pin {edge} so only its height is content-driven"
+        );
+    }
+    assert!(
+        !rule.contains("bottom:"),
+        "`.panel` pins `bottom`, so its height comes from the window again"
+    );
+}

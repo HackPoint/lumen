@@ -39,6 +39,20 @@ skip() { printf '  \033[33mSKIP\033[0m  %s\n' "$1"; SKIP=$((SKIP+1)); }
 # first line — which made a passing check report a failure.
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
+# Wait briefly for a process to appear.
+#
+# The tray and the daemon are spawned asynchronously after launch, so checking immediately
+# after `open -a` reported the daemon missing on one run and present on the next. A check
+# whose answer depends on how fast the machine is is not a check.
+wait_for_process() {
+    local pattern="$1" tries=20
+    while (( tries-- )); do
+        pgrep -f "$pattern" >/dev/null && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
 case "$(uname -s)" in
     Darwin) PLATFORM=macos ;;
     Linux)  PLATFORM=linux ;;
@@ -226,12 +240,12 @@ elif [[ "$PLATFORM" == "macos" ]]; then
         BV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
               /Applications/Lumen.app/Contents/Info.plist 2>/dev/null)"
         [[ -n "$BV" ]] && ok "bundle version $BV" || bad "bundle has no version"
-        if pgrep -f 'Lumen.app/Contents/MacOS/Lumen$' >/dev/null; then
+        if wait_for_process 'Lumen.app/Contents/MacOS/Lumen$'; then
             ok "tray process is running"
         else
             bad "tray process is not running — the widget would not be in the menu bar"
         fi
-        if pgrep -f 'lumen-daemon' >/dev/null; then
+        if wait_for_process 'lumen-daemon'; then
             ok "daemon is running"
         else
             bad "daemon is not running — the gauge would not update"
