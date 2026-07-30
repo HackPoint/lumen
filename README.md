@@ -588,6 +588,9 @@ exists. Set `LUMEN_HOOK_ENABLED=0` to disable interception entirely.
 
 ### Filing a fault report
 
+**→ [Filing a fault report](docs/filing-a-fault-report.md)** walks through it with
+screenshots. The short version:
+
 Nothing is sent until you ask for it — via `lumen report --yes`, or the **File issue**
 button under **Report a fault** on the Hotspots screen. You see the exact text first,
 and it is the text that gets sent; it is never re-generated at send time.
