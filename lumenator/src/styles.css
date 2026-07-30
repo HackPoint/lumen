@@ -166,20 +166,93 @@ body {
   vertical-align: text-top;
 }
 
-/* The page background, global rather than per-route.
-   `.home` is the element that paints it, and it was styled only in home.css — which
-   Angular scopes to the Home component. Hotspots and Optimizer both reuse
-   `class="home"` and define no `.home` rule of their own, so on those routes nothing
-   painted a background at all. html/body are deliberately transparent (the panel
-   window needs that for its rounded corners), so the window fell through to white
-   while the tokens still resolved dark: near-white text on white, unreadable.
-   Home's own scoped copy still wins there and is identical, so this only fills the gap. */
+/* ── App shell ────────────────────────────────────────────────────────────────
+   The window chrome shared by every full-window route: background, centred
+   column, header and the tab nav.
+
+   Global, not per-component, because Angular scopes component CSS. These rules
+   lived in home.css while hotspots.html and optimizer.html reuse the same class
+   names, so on the Hotspots route the nav had NO styles at all — the three tabs
+   ran together as one unstyled string — and `.home__inner` was missing, so the
+   content sat flush against the window edge with no padding. Optimizer carried
+   its own byte-identical copy of the nav rules, which is the same bug one
+   duplication away from being noticed.
+
+   One definition, reachable from every route. Adding a fourth route now means
+   reusing these class names and getting the shell for free. */
+
 .home {
-  background:
-    radial-gradient(
-      120% 80% at 50% -10%,
-      color-mix(in srgb, var(--lumen-ok) 7%, transparent),
-      transparent 58%
-    ),
-    var(--lumen-bg);
+    min-height: 100vh;
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 3rem 2rem 3.5rem;
+    background:
+        radial-gradient(
+            120% 80% at 50% -10%,
+            color-mix(in srgb, var(--lumen-ok) 7%, transparent),
+            transparent 58%
+        ),
+        var(--lumen-bg);
+}
+
+.home__inner {
+    width: 100%;
+    max-width: 440px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.6rem;
+}
+
+/* ── brand ── */
+.home__head {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.home__logo {
+    font-size: 2.8rem;
+}
+
+.brand__tag {
+    margin: 0;
+    color: var(--lumen-text-dim);
+    font-size: 0.82rem;
+}
+
+/* ── tab nav (Context ↔ Optimizer) ── */
+.tab-nav {
+    display: flex;
+    gap: 0;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: 999px;
+    padding: 4px;
+    user-select: none;
+}
+
+.tab-nav__tab {
+    padding: 0.38rem 1.1rem;
+    border-radius: 999px;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--lumen-text-dim);
+    text-decoration: none;
+    letter-spacing: 0.2px;
+    transition: color 0.15s ease;
+}
+
+.tab-nav__tab:hover { color: var(--lumen-text); }
+
+.tab-nav__tab.is-active {
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border-strong);
+    color: var(--lumen-text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
 }
