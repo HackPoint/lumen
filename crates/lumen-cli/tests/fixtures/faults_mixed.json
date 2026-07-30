@@ -1,0 +1,63 @@
+[
+  {
+    "kind": "hook_fail_open",
+    "guard": "retry_escape_valve",
+    "path": "crates/lumen-core/src/ranked.rs",
+    "lines": 1909,
+    "first_seen": "2026-07-29T14:02:11Z",
+    "last_seen": "2026-07-30T09:41:03Z",
+    "count": 5
+  },
+  {
+    "kind": "hook_fail_open",
+    "guard": "retry_escape_valve",
+    "path": "/Users/testuser/dev/acme-billing/src/invoice.ts",
+    "lines": 683,
+    "first_seen": "2026-07-30T08:10:00Z",
+    "last_seen": "2026-07-30T08:12:44Z",
+    "count": 2
+  },
+  {
+    "kind": "hook_fail_open",
+    "guard": "lumen_mcp_missing",
+    "path": "crates/lumen-mcp/src/lib.rs",
+    "lines": 1559,
+    "first_seen": "2026-07-30T09:00:00Z",
+    "last_seen": "2026-07-30T09:00:00Z",
+    "count": 1
+  },
+  {
+    "kind": "ranked_decline",
+    "route": "ranked_too_slow",
+    "path": "crates/lumen-core/src/ranked.rs",
+    "lines": 1909,
+    "detail": "budget=12000 s_min=9400 k=0/41\nwall_clock_ms=812 ceiling_ms=750",
+    "first_seen": "2026-07-29T08:15:02Z",
+    "last_seen": "2026-07-30T09:38:51Z",
+    "count": 214
+  },
+  {
+    "kind": "ranked_decline",
+    "route": "ranked_no_query",
+    "path": "/Users/testuser/dev/acme-billing/src/ledger.tsx",
+    "lines": 412,
+    "detail": "lang=tsx tag_query=absent",
+    "first_seen": "2026-07-29T08:20:00Z",
+    "last_seen": "2026-07-30T07:02:10Z",
+    "count": 403
+  },
+  {
+    "kind": "schema_drift",
+    "detail": "expected 24 columns, found 22\nmissing: econ_source, k_selected",
+    "first_seen": "2026-07-30T06:00:00Z",
+    "last_seen": "2026-07-30T06:00:00Z",
+    "count": 1
+  },
+  {
+    "kind": "daemon_watchdog_exit",
+    "detail": "watchdog fired after 3 missed heartbeats",
+    "first_seen": "2026-07-29T22:14:00Z",
+    "last_seen": "2026-07-30T05:31:00Z",
+    "count": 3
+  }
+]

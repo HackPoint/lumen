@@ -97,7 +97,23 @@ pub const MIGRATIONS: &[&str] = &[
     "ALTER TABLE read_events ADD COLUMN target_outline INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
      ON read_events(session_id, path, file_mtime)",
+    // `faults` is also in DDL, which is enough for a fresh database. It is repeated
+    // here because DDL is one batch that aborts on the first failing statement: on a
+    // database old enough for an earlier statement to fail, a table declared in DDL
+    // never gets created. MIGRATIONS statements are swallowed individually, so this
+    // is the arm that cannot be skipped by someone else's error.
+    "CREATE TABLE IF NOT EXISTS faults (\
+        ts TEXT NOT NULL, kind TEXT NOT NULL, variant TEXT NOT NULL DEFAULT '-', \
+        path TEXT, lines INTEGER, detail TEXT, session_id TEXT, \
+        version TEXT, channel TEXT NOT NULL DEFAULT 'unknown')",
+    "CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant)",
 ];
+
+/// Column count of `read_events` on a current database — DDL plus every ALTER in
+/// [`MIGRATIONS`]. `lumen report` compares the live table against this to detect a
+/// database that missed a migration, so adding an ALTER means bumping this number;
+/// `read_events_column_count_matches_the_constant` fails if you forget.
+pub const READ_EVENTS_COLUMNS: usize = 25;
 
 pub const DDL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -177,6 +193,26 @@ CREATE TABLE IF NOT EXISTS read_events (
     target_outline  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
+
+-- One row per fault occurrence; `lumen report` aggregates count/first/last at read
+-- time, the way it already does for read_events. Writers never come here directly:
+-- everything appends to the JSONL spool (see lumen_core::faults) and `lumen report`
+-- drains it, so no hook on a blocking path ever waits on this lock.
+CREATE TABLE IF NOT EXISTS faults (
+    ts         TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    -- Sub-kind: a decline route, or which fail-open guard fired. '-' when the kind
+    -- has none, matching the sentinel the renderer fingerprints on.
+    variant    TEXT NOT NULL DEFAULT '-',
+    path       TEXT,
+    lines      INTEGER,
+    detail     TEXT,
+    session_id TEXT,
+    -- Version that produced the fault, so a fixed regression stops matching.
+    version    TEXT,
+    channel    TEXT NOT NULL DEFAULT 'unknown'
+);
+CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant);
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch
 -- against a database that may predate E7, where session_id does not yet exist —
 -- the index would fail, and because init_schema propagates that with `?`, the
@@ -213,6 +249,35 @@ mod tests {
             .connect(&format!("sqlite:{}?mode=rwc", db.display()))
             .await
             .unwrap()
+    }
+
+    /// `lumen report` reports a database whose `read_events` column count differs from
+    /// [`READ_EVENTS_COLUMNS`] as `schema_drift`. If an ALTER lands without bumping the
+    /// constant, every install would report drift against a correct database — so the
+    /// constant is pinned to what DDL plus MIGRATIONS actually produce.
+    #[test]
+    fn read_events_column_count_matches_the_constant() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL).unwrap();
+        for m in MIGRATIONS {
+            let _ = conn.execute_batch(m);
+        }
+
+        let mut stmt = conn.prepare("PRAGMA table_info(read_events)").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(
+            names.len(),
+            READ_EVENTS_COLUMNS,
+            "read_events has {} columns ({}), but READ_EVENTS_COLUMNS says {}",
+            names.len(),
+            names.join(", "),
+            READ_EVENTS_COLUMNS,
+        );
     }
 
     async fn columns(pool: &sqlx::SqlitePool, table: &str) -> Vec<String> {

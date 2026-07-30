@@ -88,6 +88,23 @@ fn exit_when_supervisor_does() {
     });
 }
 
+/// Record a daemon fault to the JSONL spool.
+///
+/// Spool, not SQLite: these are error paths, and the pool they would write to is often
+/// exactly what is unhealthy. Throttled because both callers sit in retry loops that can
+/// fire indefinitely.
+fn note_fault(kind: &str, variant: &str, path: Option<&std::path::Path>, detail: String) {
+    use lumen_core::faults::{FaultRecord, record_throttled};
+
+    let mut rec = FaultRecord::now(kind, variant).with_detail(detail);
+    if let Some(p) = path {
+        // Into `path`, never into `detail`: the reporter redacts the path field, so a
+        // transcript path under $HOME does not reach a public issue verbatim.
+        rec = rec.with_path(p.display().to_string());
+    }
+    record_throttled(&rec, std::time::Duration::from_secs(60));
+}
+
 /// Resolve the directory of Claude Code transcripts to watch.
 ///
 /// Overridable via `LUMEN_PROJECTS_DIR` so the e2e tests can point the daemon at
@@ -194,8 +211,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 if let Err(e) = ws_server(ws_pool.clone(), ws_tx.clone()).await {
                     logline!("ws_server exited: {e}; restarting in 2s");
+                    note_fault("ws_restart", "error", None, e.to_string());
                 } else {
                     logline!("ws_server returned; restarting in 2s");
+                    note_fault(
+                        "ws_restart",
+                        "clean_return",
+                        None,
+                        "ws_server returned Ok; the accept loop should never end".into(),
+                    );
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
@@ -222,6 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 logline!("init ingest {:?}: {e}", path);
+                note_fault("ingest_failed", "init", Some(&path), e.to_string());
             }
         }
     }
@@ -273,7 +298,10 @@ async fn poll_all(
         let start = *offsets.lock().unwrap().get(&path).unwrap_or(&0);
         match ingest_from(pool, &path, start, tx, true).await {
             Ok(end) => advance_offset(offsets, path, end),
-            Err(e) => logline!("poll ingest {:?}: {e}", path),
+            Err(e) => {
+                logline!("poll ingest {:?}: {e}", path);
+                note_fault("ingest_failed", "poll", Some(&path), e.to_string());
+            }
         }
     }
 }
@@ -345,7 +373,10 @@ async fn notify_watch_loop(
                 let start = *offsets.lock().unwrap().get(&path).unwrap_or(&0);
                 match ingest_from(pool, &path, start, tx, true).await {
                     Ok(end) => advance_offset(offsets, path, end),
-                    Err(e) => logline!("notify ingest {:?}: {e}", path),
+                    Err(e) => {
+                        logline!("notify ingest {:?}: {e}", path);
+                        note_fault("ingest_failed", "notify", Some(&path), e.to_string());
+                    }
                 }
             }
         }
