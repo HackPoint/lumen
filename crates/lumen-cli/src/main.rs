@@ -14,10 +14,10 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     tty::IsTty,
 };
+use lumen_core::report;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod data;
-mod report;
 mod ui;
 
 #[derive(Parser)]

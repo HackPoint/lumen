@@ -225,3 +225,21 @@ export interface ContextReport {
     top10SharePct: number;
     totalUnchangedRereads: number;
 }
+
+/**
+ * A rendered fault report, ready to show and then file.
+ *
+ * `body` is the whole issue text, already redacted by the backend: metadata only, no file
+ * contents, no absolute paths. It is passed back to `file_fault_report` unchanged so the
+ * text the user approved is byte-for-byte the text that gets filed.
+ */
+export interface FaultReport {
+    body: string;
+    title: string;
+    /** Dedupe key. A second filing of the same fingerprint comments instead of duplicating. */
+    fingerprint: string;
+    /** Distinct (kind, variant) groups, for a badge that need not parse the body. */
+    kinds: number;
+    occurrences: number;
+    repo: string;
+}

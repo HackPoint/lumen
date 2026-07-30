@@ -4,7 +4,7 @@ import { Hotspots } from './hotspots';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { FakeTauriBridge } from '../../tauri-bridge.fake';
-import type { ContextReport, FileHotspot } from '../../components/index';
+import type { ContextReport, FaultReport, FileHotspot } from '../../components/index';
 
 /**
  * Hotspots is the one screen that makes no savings claim, and that is its whole
@@ -184,5 +184,141 @@ describe('Hotspots', () => {
   it('does not divide by zero when a file has no reads', async () => {
     await mount(report({ topFiles: [file({ reads: 0, unchangedRereads: 0 })] }));
     expect(fixture.componentInstance.unchangedPct(file({ reads: 0 }))).toBe(0);
+  });
+  // ── Fault report ────────────────────────────────────────────────────────────
+  //
+  // Filing publishes to a public tracker and cannot be undone, so these tests are
+  // mostly about what must NOT happen: no send on mount, no send on preview, no
+  // second send, and never a body the user was not shown.
+
+  function faultReport(over: Partial<FaultReport> = {}): FaultReport {
+    return {
+      body: '### lumen 1.4.0 — retry escape valve fired 7x on 2 files\n\nbody text',
+      title: 'lumen 1.4.0 — retry escape valve fired 7x on 2 files',
+      fingerprint: 'ffd15312',
+      kinds: 2,
+      occurrences: 7,
+      repo: 'HackPoint/lumen',
+      ...over,
+    };
+  }
+
+  /**
+   * Flush the invoke promise chain, not just its first link.
+   *
+   * `then(set url)` and `finally(clear filing)` are separate microtasks, so two awaits
+   * land between them: the URL is on screen while the button still says "Filing…". Six
+   * drains the whole chain, and awaiting `whenStable()` is not an option — SessionService
+   * holds a live daemon subscription, so the fixture is never stable.
+   */
+  async function tick(): Promise<void> {
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    fixture.detectChanges();
+  }
+
+  function button(label: string): HTMLButtonElement | undefined {
+    const all = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll('button'),
+    ) as HTMLButtonElement[];
+    return all.find((b) => (b.textContent ?? '').trim().startsWith(label));
+  }
+
+  it('does not touch the fault backend until asked', async () => {
+    await mount(report());
+    expect(bridge.countOf('get_fault_report')).toBe(0);
+    expect(bridge.countOf('file_fault_report')).toBe(0);
+    expect(button('File issue')).toBeUndefined();
+  });
+
+  it('checking for faults renders locally and files nothing', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', faultReport());
+
+    button('Check for faults')!.click();
+    await tick();
+
+    expect(bridge.countOf('get_fault_report')).toBe(1);
+    expect(bridge.countOf('file_fault_report')).toBe(0);
+    expect(text()).toContain('This is the exact text that will be filed');
+    expect(text()).toContain('2 fault groups, 7 occurrences');
+  });
+
+  it('files only on the second, explicit click, and sends the shown body', async () => {
+    await mount(report());
+    const r = faultReport();
+    bridge.responses.set('get_fault_report', r);
+    bridge.responses.set('file_fault_report', 'https://github.com/HackPoint/lumen/issues/1');
+
+    button('Check for faults')!.click();
+    await tick();
+    button('File issue')!.click();
+    await tick();
+
+    expect(bridge.countOf('file_fault_report')).toBe(1);
+    // Byte-for-byte the text on screen: re-rendering could file something else.
+    expect(bridge.lastArgsOf('file_fault_report')).toEqual({
+      body: r.body,
+      title: r.title,
+      fingerprint: r.fingerprint,
+      repo: r.repo,
+    });
+    expect(text()).toContain('https://github.com/HackPoint/lumen/issues/1');
+  });
+
+  it('will not file the same report twice', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', faultReport());
+    bridge.responses.set('file_fault_report', 'https://example.test/1');
+
+    button('Check for faults')!.click();
+    await tick();
+    button('File issue')!.click();
+    await tick();
+
+    const filed = button('Filed');
+    expect(filed).toBeDefined();
+    expect(filed!.disabled).toBe(true);
+
+    filed!.click();
+    await tick();
+    expect(bridge.countOf('file_fault_report')).toBe(1);
+  });
+
+  it('says so when there is nothing to report, and offers no file button', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', null);
+
+    button('Check for faults')!.click();
+    await tick();
+
+    expect(text()).toContain('No faults recorded');
+    expect(button('File issue')).toBeUndefined();
+  });
+
+  it('surfaces a filing failure instead of claiming success', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', faultReport());
+    bridge.failures.add('file_fault_report');
+
+    button('Check for faults')!.click();
+    await tick();
+    button('File issue')!.click();
+    await tick();
+
+    expect(text()).toContain('fake: file_fault_report failed');
+    expect(text()).not.toContain('Filed:');
+  });
+
+  it('dismissing drops the report without filing it', async () => {
+    await mount(report());
+    bridge.responses.set('get_fault_report', faultReport());
+
+    button('Check for faults')!.click();
+    await tick();
+    button('Dismiss')!.click();
+    await tick();
+
+    expect(bridge.countOf('file_fault_report')).toBe(0);
+    expect(text()).not.toContain('This is the exact text that will be filed');
   });
 });

@@ -127,3 +127,113 @@
     border-left: 2px solid rgba(210, 153, 34, 0.6);
     color: #d29922;
 }
+
+/* ── Fault report ─────────────────────────────────────────────────────────────
+   Visually quieter than the hotspot rows above it. This section is a maintenance
+   affordance, not a metric, and it should not compete with the diagnosis it sits
+   under. The primary button is the only saturated element, because filing is the
+   only action here with a consequence outside this machine. */
+
+.fr {
+    margin-top: 1.4rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border, #30363d);
+}
+
+.fr__title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--text-dim, #8b949e);
+    margin: 0 0 0.3rem;
+}
+
+.fr__lede {
+    font-size: 0.7rem;
+    line-height: 1.4;
+    color: var(--text-dim, #8b949e);
+    margin: 0 0 0.6rem;
+}
+
+.fr__actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.fr__btn {
+    font: inherit;
+    font-size: 0.72rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 5px;
+    border: 1px solid var(--border, #30363d);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text, #c9d1d9);
+    cursor: pointer;
+}
+
+.fr__btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.fr__btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* Filing is the one irreversible action on this screen, so it is the one that looks
+   like a commitment. */
+.fr__btn--primary {
+    border-color: rgba(63, 185, 80, 0.5);
+    background: rgba(63, 185, 80, 0.16);
+    color: var(--accent, #3fb950);
+}
+
+.fr__btn--primary:hover:not(:disabled) {
+    background: rgba(63, 185, 80, 0.26);
+}
+
+.fr__btn--ghost {
+    background: none;
+}
+
+.fr__none,
+.fr__summary,
+.fr__vet,
+.fr__filed {
+    font-size: 0.68rem;
+    color: var(--text-dim, #8b949e);
+    margin: 0.5rem 0 0;
+}
+
+.fr__filed a {
+    color: var(--accent, #3fb950);
+}
+
+.fr__error {
+    font-size: 0.68rem;
+    line-height: 1.35;
+    margin: 0.5rem 0 0;
+    padding-left: 0.5rem;
+    border-left: 2px solid rgba(248, 81, 73, 0.6);
+    color: #f85149;
+}
+
+/* Scrolls rather than growing the window: the body can be forty lines, and the point
+   is that the user can read every one of them before filing. */
+.fr__body {
+    margin: 0.35rem 0 0;
+    padding: 0.5rem;
+    max-height: 15rem;
+    overflow: auto;
+    border-radius: 5px;
+    border: 1px solid var(--border, #30363d);
+    background: rgba(0, 0, 0, 0.25);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.62rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text, #c9d1d9);
+}

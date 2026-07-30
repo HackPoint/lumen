@@ -74,5 +74,54 @@
                 }
             </ol>
         }
+
+        <section class="fr" aria-labelledby="fr-title">
+            <h2 class="fr__title" id="fr-title">Report a fault</h2>
+            <p class="fr__lede">
+                Routing, ingest and schema faults Lumen recorded on this machine. The
+                report is metadata only — file names, line counts and hashes, never file
+                contents. Nothing is sent until you choose to file it.
+            </p>
+
+            <div class="fr__actions">
+                <button class="fr__btn" type="button" (click)="preview()"
+                        [disabled]="reportLoading()">
+                    {{ reportLoading() ? 'Checking…' : 'Check for faults' }}
+                </button>
+
+                @if (report()) {
+                    <button class="fr__btn fr__btn--primary" type="button" (click)="file()"
+                            [disabled]="filing() || alreadyFiled()">
+                        {{ filing() ? 'Filing…' : alreadyFiled() ? 'Filed' : 'File issue' }}
+                    </button>
+                    <button class="fr__btn fr__btn--ghost" type="button" (click)="dismiss()"
+                            [disabled]="filing()">Dismiss</button>
+                }
+            </div>
+
+            @if (reportNone()) {
+                <p class="fr__none">No faults recorded. Nothing to report.</p>
+            }
+
+            @if (reportError()) {
+                <p class="fr__error" role="alert">{{ reportError() }}</p>
+            }
+
+            @if (filedUrl()) {
+                <p class="fr__filed">
+                    Filed: <a [href]="filedUrl()" target="_blank" rel="noreferrer noopener">{{ filedUrl() }}</a>
+                </p>
+            }
+
+            @if (report(); as r) {
+                <p class="fr__summary">
+                    {{ r.kinds }} fault {{ r.kinds === 1 ? 'group' : 'groups' }},
+                    {{ r.occurrences }} {{ r.occurrences === 1 ? 'occurrence' : 'occurrences' }}
+                    · would file to <code>{{ r.repo }}</code>
+                </p>
+                <p class="fr__vet">This is the exact text that will be filed:</p>
+                <pre class="fr__body">{{ r.body }}</pre>
+            }
+        </section>
     </div>
 </main>
