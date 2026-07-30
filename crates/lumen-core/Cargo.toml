@@ -14,6 +14,8 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 # with sqlx on libsqlite3-sys — sqlx 0.9 accepts >=0.30.1 <0.38, which makes
 # rusqlite 0.39 the ceiling. Bump the two together, never one alone.
 rusqlite = { version = "0.39", features = ["bundled"] }
+sha2 = "0.10"
+dirs = "6"
 tiktoken-rs = "0.12"
 once_cell = "1"
 tree-sitter = "0.26.9"

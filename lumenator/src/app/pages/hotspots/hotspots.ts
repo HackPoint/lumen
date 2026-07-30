@@ -65,4 +65,32 @@ export class Hotspots implements OnInit {
     unchangedPct(f: FileHotspot): number {
         return f.reads > 0 ? (100 * f.unchangedRereads) / f.reads : 0;
     }
+
+    // ── Fault report ──────────────────────────────────────────────────────────
+    //
+    // Deliberately two clicks. The first renders locally and shows the exact text; the
+    // second publishes it to a public tracker. Collapsing them into one button would
+    // make an irreversible outward-facing action the default outcome of curiosity.
+
+    readonly report = computed(() => this.s.faultReport());
+    readonly reportLoading = computed(() => this.s.faultReportLoading());
+    readonly reportNone = computed(() => this.s.faultsNone());
+    readonly filing = computed(() => this.s.faultFiling());
+    readonly filedUrl = computed(() => this.s.faultFiledUrl());
+    readonly reportError = computed(() => this.s.faultError());
+
+    /** Whether the body on screen has already been filed — filing twice is pointless. */
+    readonly alreadyFiled = computed(() => this.filedUrl() !== null);
+
+    preview(): void {
+        this.s.refreshFaultReport();
+    }
+
+    file(): void {
+        this.s.fileFaultReport();
+    }
+
+    dismiss(): void {
+        this.s.dismissFaultReport();
+    }
 }

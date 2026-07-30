@@ -338,6 +338,8 @@ pub fn run() {
             get_sessions,
             get_optimizer_stats,
             get_context_report,
+            get_fault_report,
+            file_fault_report,
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
             setup::lumen_uninstall,
@@ -422,6 +424,80 @@ async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
 async fn get_context_report() -> Result<lumen_stats::ContextReport, String> {
     let pool = lumen_stats::connect_default().await?;
     lumen_stats::get_context_report(&pool).await
+}
+
+/// A rendered fault report, ready to show and then file.
+///
+/// The body is carried back to the frontend and handed to [`file_fault_report`] unchanged,
+/// so what the user approved is byte-for-byte what gets filed. Re-rendering at file time
+/// would let the two diverge — and the body is the thing being consented to.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaultReport {
+    pub body: String,
+    pub title: String,
+    pub fingerprint: String,
+    /// Distinct `(kind, variant)` groups, for a badge that does not need the body parsed.
+    pub kinds: usize,
+    /// Total occurrences across every group.
+    pub occurrences: u64,
+    pub repo: String,
+}
+
+/// Render the current fault report, or `None` when there is nothing to report.
+///
+/// rusqlite rather than the sqlx pool: this drains the JSONL fault spool into the `faults`
+/// table, and the drain and the aggregation have to see the same connection. SQLite in WAL
+/// mode takes a second connection without complaint.
+#[tauri::command]
+async fn get_fault_report() -> Result<Option<FaultReport>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let path = lumen_core::meter::db_path()
+            .ok_or_else(|| "cannot resolve a database path".to_string())?;
+        let conn = lumen_core::meter::connect_db(&path)
+            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+
+        let faults = lumen_core::report::load_faults_from_db(&conn)?;
+        let env = lumen_core::report::Environment::collect();
+
+        // Metadata-only by default, exactly as the CLI renders it. Embedding source is a
+        // deliberate opt-in with a manifest, which is not something a button can offer.
+        let opts = lumen_core::report::RenderOpts::default();
+        Ok(
+            lumen_core::report::render(&faults, &env, &opts).map(|body| FaultReport {
+                title: lumen_core::report::title_from(&body),
+                fingerprint: lumen_core::report::fingerprint(&faults, &env),
+                kinds: faults.len(),
+                occurrences: faults.iter().map(|f| f.count).sum(),
+                repo: lumen_core::report::DEFAULT_REPO.to_string(),
+                body,
+            }),
+        )
+    })
+    .await
+    .map_err(|e| format!("fault report task failed: {e}"))?
+}
+
+/// File a previously-rendered body, commenting on the existing issue if this fingerprint
+/// has already been reported.
+///
+/// Takes the body rather than regenerating it: the user approved a specific text, and this
+/// is the call that publishes it. The frontend must not reach this without that approval.
+#[tauri::command]
+async fn file_fault_report(
+    body: String,
+    title: String,
+    fingerprint: String,
+    repo: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        match lumen_core::report::file_issue(&repo, &title, &body, &fingerprint)? {
+            lumen_core::report::Filed::Created(url) => Ok(url),
+            lumen_core::report::Filed::Commented(url) => Ok(url),
+        }
+    })
+    .await
+    .map_err(|e| format!("filing task failed: {e}"))?
 }
 
 #[cfg(test)]

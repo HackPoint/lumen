@@ -2715,7 +2715,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tungstenite",
 ]
@@ -2724,10 +2723,12 @@ dependencies = [
 name = "lumen-core"
 version = "1.4.0"
 dependencies = [
+ "dirs 6.0.0",
  "once_cell",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "tiktoken-rs",

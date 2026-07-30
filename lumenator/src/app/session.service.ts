@@ -3,7 +3,7 @@ import { Observable, scan, startWith, merge, from, filter } from 'rxjs';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { RATE } from './components';
 import { TauriBridge } from './tauri-bridge';
-import type { ContextReport } from './components/index';
+import type { ContextReport, FaultReport } from './components/index';
 import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
@@ -451,6 +451,72 @@ export class SessionService {
     this.bridge.invoke<ContextReport>('get_context_report')
         .then((r) => this.contextReport.set(r))
         .catch(() => { /* not in Tauri / db not ready — ignore */ });
+  }
+
+  // ── Fault reporting ───────────────────────────────────────────────────────
+  //
+  // Two steps on purpose. Rendering is free and local; filing publishes to a public
+  // tracker and cannot be undone, so it never happens as a side effect of looking.
+
+  /** Rendered report, or null for "not fetched yet". */
+  readonly faultReport = signal<FaultReport | null>(null);
+  /** True once a fetch has resolved with nothing to report. */
+  readonly faultsNone = signal(false);
+  readonly faultReportLoading = signal(false);
+  readonly faultFiling = signal(false);
+  /** URL of the issue this report was filed to, once it has been. */
+  readonly faultFiledUrl = signal<string | null>(null);
+  readonly faultError = signal<string | null>(null);
+
+  /** Render the current fault report. Local only — nothing leaves the machine. */
+  refreshFaultReport(): void {
+    this.faultReportLoading.set(true);
+    this.faultError.set(null);
+    this.faultFiledUrl.set(null);
+    this.bridge.invoke<FaultReport | null>('get_fault_report')
+        .then((r) => {
+          this.faultReport.set(r ?? null);
+          this.faultsNone.set(r === null);
+        })
+        .catch((e: unknown) => this.faultError.set(this.message(e)))
+        .finally(() => this.faultReportLoading.set(false));
+  }
+
+  /**
+   * File the report that is currently on screen.
+   *
+   * Sends the body already rendered rather than asking the backend to re-render: the user
+   * approved a specific text, and re-rendering could file a different one.
+   */
+  fileFaultReport(): void {
+    const report = this.faultReport();
+    // Guard, not an assertion: the button is disabled without a report, and a filing call
+    // that slipped through anyway must publish nothing.
+    if (!report || this.faultFiling()) return;
+
+    this.faultFiling.set(true);
+    this.faultError.set(null);
+    this.bridge.invoke<string>('file_fault_report', {
+          body: report.body,
+          title: report.title,
+          fingerprint: report.fingerprint,
+          repo: report.repo,
+        })
+        .then((url) => this.faultFiledUrl.set(url))
+        .catch((e: unknown) => this.faultError.set(this.message(e)))
+        .finally(() => this.faultFiling.set(false));
+  }
+
+  /** Clear a rendered report without filing it. */
+  dismissFaultReport(): void {
+    this.faultReport.set(null);
+    this.faultsNone.set(false);
+    this.faultError.set(null);
+    this.faultFiledUrl.set(null);
+  }
+
+  private message(e: unknown): string {
+    return e instanceof Error ? e.message : String(e);
   }
 
   readonly contextTotalTokens = computed(() => this.contextReport()?.totalTokensRead ?? 0);

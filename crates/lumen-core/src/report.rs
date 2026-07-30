@@ -227,7 +227,7 @@ fn hooks_digest(root: Option<&Path>) -> Option<String> {
 
 /// Column count of `read_events`, to catch a database that missed a migration.
 fn read_events_cols() -> Option<usize> {
-    let db = lumen_core::meter::db_path()?;
+    let db = crate::meter::db_path()?;
     let conn = rusqlite::Connection::open_with_flags(
         db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
@@ -714,7 +714,7 @@ pub fn source_manifest(faults: &[Fault], env: &Environment) -> Vec<(String, usiz
 /// Built from the enum rather than written out, so a new `Decline` variant cannot be
 /// silently missed by the reporter.
 fn decline_routes() -> Vec<&'static str> {
-    use lumen_core::ranked::Decline::*;
+    use crate::ranked::Decline::*;
     [NoQuery, NoDefs, NotWorthIt, WouldInflate, TooSlow]
         .iter()
         .map(|d| d.route())
@@ -732,7 +732,7 @@ pub fn load_faults_from_db(conn: &rusqlite::Connection) -> Result<Vec<Fault>, St
     // Every read below degrades instead of aborting. A stale or damaged database is
     // precisely what this report exists to describe, so a reporter that dies on one
     // cannot do its job — it would fail exactly when it is most needed.
-    if let Err(e) = lumen_core::faults::drain_spool(conn) {
+    if let Err(e) = crate::faults::drain_spool(conn) {
         degraded.push(format!("spool drain: {e}"));
     }
     match spooled_faults(conn) {
@@ -839,14 +839,14 @@ fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
 fn schema_drift_fault(conn: &rusqlite::Connection) -> Option<Fault> {
     let mut stmt = conn.prepare("PRAGMA table_info(read_events)").ok()?;
     let live = stmt.query_map([], |_| Ok(())).ok()?.count();
-    if live == 0 || live == lumen_core::schema::READ_EVENTS_COLUMNS {
+    if live == 0 || live == crate::schema::READ_EVENTS_COLUMNS {
         return None;
     }
     Some(Fault {
         kind: "schema_drift".to_string(),
         detail: Some(format!(
             "read_events has {live} columns; this build expects {}",
-            lumen_core::schema::READ_EVENTS_COLUMNS
+            crate::schema::READ_EVENTS_COLUMNS
         )),
         count: 1,
         ..Default::default()
@@ -1224,8 +1224,8 @@ mod tests {
 
     fn db_with_schema() -> rusqlite::Connection {
         let c = rusqlite::Connection::open_in_memory().unwrap();
-        c.execute_batch(lumen_core::schema::DDL).unwrap();
-        for m in lumen_core::schema::MIGRATIONS {
+        c.execute_batch(crate::schema::DDL).unwrap();
+        for m in crate::schema::MIGRATIONS {
             let _ = c.execute_batch(m);
         }
         c
@@ -1239,7 +1239,7 @@ mod tests {
         assert_eq!(routes.len(), 5, "a Decline variant was added or removed");
         assert!(routes.iter().all(|r| r.starts_with("ranked_")));
         assert!(
-            !routes.contains(&lumen_core::ranked::ROUTE_RANKED),
+            !routes.contains(&crate::ranked::ROUTE_RANKED),
             "the success route must never be counted as a decline"
         );
     }
@@ -1272,7 +1272,7 @@ mod tests {
         }
 
         // A decline and a success on the ranked path; only the decline is a fault.
-        for route in ["ranked_too_slow", lumen_core::ranked::ROUTE_RANKED] {
+        for route in ["ranked_too_slow", crate::ranked::ROUTE_RANKED] {
             conn.execute(
                 "INSERT INTO read_events(ts,tool,path,tokens_returned,full_tokens,\
                  saved_tokens,routed_via,channel) \
@@ -1342,7 +1342,7 @@ mod tests {
             Fault {
                 kind: "hook_fail_open".into(),
                 guard: Some("retry_escape_valve".into()),
-                path: Some("crates/lumen-cli/tests/fixtures/faults_empty.json".into()),
+                path: Some("crates/lumen-core/tests/fixtures/faults_empty.json".into()),
                 ..Default::default()
             },
             Fault {
