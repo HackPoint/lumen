@@ -270,3 +270,24 @@
     word-break: break-word;
     color: var(--lumen-text);
 }
+
+/* ── Route width ──────────────────────────────────────────────────────────────
+   The shared shell centres a 440px column, which is right for Home's gauge and
+   wrong here: this route is a table of files plus a three-up stat row, and at
+   440px the stats collapse to one per line. Overriding in the component rather
+   than widening the shell keeps Home and Optimizer as they are.
+
+   `stretch` matters as much as the width: the shell centres its children, so
+   .hs__summary was sizing to its content and the auto-fit grid never had room for
+   three columns however wide the container was. */
+.home__inner {
+    max-width: 1000px;
+    align-items: stretch;
+}
+
+/* The header and nav are content-width pills and stay centred while their
+   siblings stretch. */
+.home__head,
+.tab-nav {
+    align-self: center;
+}
