@@ -566,8 +566,25 @@ Here is exactly what Lumen's hooks do:
 
 `lumen_read_intercept.sh` (PreToolUse, CLI only) — a shell script that receives the
 `Read` tool call as JSON on stdin, checks the file extension and line count, and if the
-file is large, writes a redirect message to stderr for Claude to act on. It reads no
-file contents, writes nothing to disk, and makes no network calls.
+file is large, writes a redirect message to stderr for Claude to act on. **It reads no
+file contents and makes no network calls.**
+
+It writes two things, both local, and both there so that a redirect can never leave
+Claude with no way to read the file at all:
+
+- **A session marker** — `$TMPDIR/lumen_intercept_<session-id>`, one line per file
+  already redirected in this session. A file is redirected at most once: if Claude comes
+  back to the built-in `Read` for the same file, the Lumen route did not work for it and
+  the read is allowed through. Without this the hook can deadlock a session — it blocks
+  the built-in `Read` while the replacement is unreachable.
+- **A fault record** — one JSON line appended to `faults.jsonl` beside the database when
+  a fail-open guard fires. It contains the file path, its line count, which guard fired,
+  and the session id — **never file contents**. `lumen report` reads these; nothing is
+  sent anywhere unless you explicitly file a report. Set `LUMEN_CAPTURE=0` to keep the
+  guards and record nothing.
+
+It also stats the `lumen-mcp` binary to check the server it would redirect to actually
+exists. Set `LUMEN_HOOK_ENABLED=0` to disable interception entirely.
 
 `lumen_meter.sh` (PostToolUse) — a shell script that fires after a `Read` or a `Bash`
 call completes. It inserts one row into a local SQLite database and makes no network
