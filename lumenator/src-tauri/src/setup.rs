@@ -568,7 +568,7 @@ pub struct ArtifactStatus {
 /// forever, while every report looked successful.
 ///
 /// Returns a description of what it repaired, or None when nothing was needed.
-pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str) -> Option<String> {
+pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) -> Option<String> {
     let dir = lumen_dir_in(home);
     // Absent directory means setup never ran; that is not drift, and creating
     // scripts for someone who never set Lumen up would be unasked-for.
@@ -579,7 +579,10 @@ pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str) -> Option<Strin
     let mut repaired = Vec::new();
     for (name, desired) in [
         ("lumen_meter.sh", desired_meter_script(db, tok)),
-        ("lumen_read_intercept.sh", desired_intercept_script()),
+        (
+            "lumen_read_intercept.sh",
+            desired_intercept_script(db, mcp_bin),
+        ),
     ] {
         let path = dir.join(name);
         if !script_needs_refresh(&path, &desired) {
@@ -610,7 +613,13 @@ pub fn ensure_scripts_fresh() -> Option<String> {
         log::warn!("lumen-tok not found; leaving hook scripts untouched");
         return None;
     }
-    ensure_scripts_fresh_in(&home(), &db_path(), &tok)
+    // Empty when lumen-mcp cannot be found. The generated script then falls back to
+    // `command -v lumen-mcp`, and failing that fails open — which is the correct
+    // behaviour for a machine where the server genuinely is not installed.
+    let mcp = stable_binary("lumen-mcp")
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    ensure_scripts_fresh_in(&home(), &db_path(), &tok, &mcp)
 }
 
 /// The reported artifacts, against the real home. Exposed to the Setup screen.
@@ -660,9 +669,15 @@ fn validate_scripts_in(home: &Path) -> ArtifactStatus {
     let tok = stable_binary("lumen-tok")
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
+    let mcp = stable_binary("lumen-mcp")
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     let stale: Vec<&str> = [
         ("lumen_meter.sh", desired_meter_script(&db_path(), &tok)),
-        ("lumen_read_intercept.sh", desired_intercept_script()),
+        (
+            "lumen_read_intercept.sh",
+            desired_intercept_script(&db_path(), &mcp),
+        ),
     ]
     .into_iter()
     .filter(|(name, want)| script_needs_refresh(&dir.join(name), want))
@@ -1174,33 +1189,73 @@ con.close()
 exit 0
 "#;
 
-const INTERCEPT_SCRIPT: &str = r#"#!/usr/bin/env bash
+const INTERCEPT_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # lumen_read_intercept.sh — installed by Lumen Setup.
+#
+# This hook blocks the only other way to read the file, so it must never block when
+# the tools it redirects to cannot run. Two fail-open guards enforce that:
+#   1. lumen-mcp missing        — the MCP server cannot be serving; do not block.
+#   2. same file intercepted    — the model was already told to use Lumen, so if it
+#      twice in one session       is back on the built-in Read that route failed.
+#
+# Both write: guard 2 needs one marker file per session under TMPDIR, and a fired
+# guard appends one line to the fault spool. Never SQLite from here — this hook
+# gates whether the model may read a file at all and must not wait on a lock.
+# Set LUMEN_CAPTURE=0 to keep the guards but record nothing.
 set -euo pipefail
 
 INPUT=$(cat)
 HOOK_ENABLED="${LUMEN_HOOK_ENABLED:-1}"
 THRESHOLD="${LUMEN_LINE_THRESHOLD:-300}"
+LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-__LUMEN_MCP__}"
+SPOOL="${LUMEN_FAULT_SPOOL:-__LUMEN_SPOOL__}"
 
 if [ "$HOOK_ENABLED" = "0" ]; then
     exit 0
 fi
 
-TOOL_NAME=$(python3 -c "
+# Append one hook_fail_open record. Best-effort: a hook that cannot record a fault
+# must not turn that into a second fault, so every failure here is swallowed.
+record_fault() {
+    [ "${LUMEN_CAPTURE:-1}" != "0" ] || return 0
+    [ -n "$SPOOL" ] || return 0
+    python3 - "$SPOOL" "$1" "$2" "$3" "$4" <<'PY' 2>/dev/null || true
+import json, sys, time
+
+spool, guard, path, lines, session = sys.argv[1:6]
+record = {
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "kind": "hook_fail_open",
+    "variant": guard,
+    "path": path,
+    "lines": int(lines) if lines.isdigit() else None,
+    "detail": None,
+    "session_id": session or None,
+    "version": None,
+    "channel": "cli",
+}
+with open(spool, "a") as fh:
+    fh.write(json.dumps(record) + "\n")
+PY
+}
+
+# Tab-separated so one python3 process covers all three fields.
+PARSED=$(python3 -c '
 import sys, json
 d = json.loads(sys.argv[1])
-print(d.get('tool_name', ''))
-" "$INPUT" 2>/dev/null || echo "")
+print("\t".join([
+    d.get("tool_name", ""),
+    d.get("tool_input", {}).get("file_path", ""),
+    str(d.get("session_id", "")),
+]))
+' "$INPUT" 2>/dev/null || echo "")
+
+TOOL_NAME=""; FILE_PATH=""; SESSION_ID=""
+IFS=$'\t' read -r TOOL_NAME FILE_PATH SESSION_ID <<<"$PARSED" || true
 
 if [ "$TOOL_NAME" != "Read" ]; then
     exit 0
 fi
-
-FILE_PATH=$(python3 -c "
-import sys, json
-d = json.loads(sys.argv[1])
-print(d.get('tool_input', {}).get('file_path', ''))
-" "$INPUT" 2>/dev/null || echo "")
 
 if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
     exit 0
@@ -1213,10 +1268,33 @@ case "$EXT" in
     *)                exit 0             ;;
 esac
 
-LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
+LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null | tr -d '[:space:]' || echo 0)
+LINE_COUNT="${LINE_COUNT:-0}"
 if [ "$LINE_COUNT" -lt "$THRESHOLD" ]; then
     exit 0
 fi
+
+# Both guards sit below the extension and threshold checks, not above them: a fired
+# guard means "this read would have been redirected and could not be", so a file we
+# were never going to intercept must not be recorded as a routing failure.
+
+# Guard 1: no lumen-mcp on this machine means the MCP server cannot be serving
+# smart_read/recall_file/compress_logs, so redirecting there would strand the model.
+if [ ! -x "$LUMEN_MCP_BIN" ] && ! command -v lumen-mcp >/dev/null 2>&1; then
+    record_fault "lumen_mcp_missing" "$FILE_PATH" "$LINE_COUNT" "$SESSION_ID"
+    exit 0
+fi
+
+# Guard 2: one redirect per file per session.
+SESSION_KEY="${SESSION_ID//[^A-Za-z0-9_-]/}"
+STATE_FILE="${TMPDIR:-/tmp}"
+STATE_FILE="${STATE_FILE%/}/lumen_intercept_${SESSION_KEY:-nosession}"
+
+if [ -f "$STATE_FILE" ] && grep -Fxq -- "$FILE_PATH" "$STATE_FILE" 2>/dev/null; then
+    record_fault "retry_escape_valve" "$FILE_PATH" "$LINE_COUNT" "$SESSION_ID"
+    exit 0
+fi
+printf '%s\n' "$FILE_PATH" >> "$STATE_FILE" 2>/dev/null || true
 
 if [ "$FILE_TYPE" = "log" ]; then
     cat >&2 <<MSG
@@ -1226,6 +1304,9 @@ Before reading the full file, call:
 This collapses repeated lines and stack frames deterministically (typically 40-80%
 token reduction). Analyze the compressed output; the full file is still readable
 via smart_read(mode="full") if needed.
+
+If the lumen tools are unavailable to you (server down, permission denied), retry
+this exact Read — it will be allowed through. Do not abandon the task.
 MSG
 else
     cat >&2 <<MSG
@@ -1235,6 +1316,9 @@ Instead of reading the full file, call:
   2. lumen:recall_file(path="${FILE_PATH}", names=["<item>"]) → fetch only what you need
 This typically saves 80-93% of context vs. reading the whole file.
 Use smart_read(mode="full") only if you truly need every line.
+
+If the lumen tools are unavailable to you (server down, permission denied), retry
+this exact Read — it will be allowed through. Do not abandon the task.
 MSG
 fi
 
@@ -1272,7 +1356,7 @@ fn which_claude() -> bool {
         .unwrap_or(false)
 }
 
-fn step_install_scripts_in(home: &Path, db: &str, tok: &str) -> SetupStep {
+fn step_install_scripts_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) -> SetupStep {
     let dir = lumen_dir_in(home);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return SetupStep::err(
@@ -1292,7 +1376,7 @@ fn step_install_scripts_in(home: &Path, db: &str, tok: &str) -> SetupStep {
         (&meter_path, desired_meter_script(db, tok), "lumen_meter.sh"),
         (
             &intercept_path,
-            desired_intercept_script(),
+            desired_intercept_script(db, mcp_bin),
             "lumen_read_intercept.sh",
         ),
     ] {
@@ -1336,11 +1420,27 @@ fn desired_meter_script(db: &str, tok: &str) -> String {
     )
 }
 
-/// The intercept script this build would install. No path substitutions — it
-/// reads no files and resolves no binaries, which is what keeps the README's
-/// security claim about it true.
-fn desired_intercept_script() -> String {
-    with_stamp(INTERCEPT_SCRIPT)
+/// The intercept script this build would install.
+///
+/// Two paths are baked: the `lumen-mcp` binary the fail-open probe stats, and the
+/// fault spool a fired guard appends to. Both used to be absent, and the script
+/// resolved nothing — but a hook that blocks the only other way to read a file
+/// cannot decide whether to block without knowing the redirect target exists, and
+/// the README documents the two writes this now performs.
+///
+/// Deriving the spool from the database rather than resolving it in bash keeps one
+/// answer for where it lives: `lumen report` looks beside the database, and a second
+/// resolution order in shell is how the two would drift apart.
+fn desired_intercept_script(db: &str, mcp_bin: &str) -> String {
+    let spool = std::path::Path::new(db)
+        .parent()
+        .map(|d| d.join("faults.jsonl").to_string_lossy().into_owned())
+        .unwrap_or_default();
+    with_stamp(
+        &INTERCEPT_TEMPLATE
+            .replace("__LUMEN_MCP__", mcp_bin)
+            .replace("__LUMEN_SPOOL__", &spool),
+    )
 }
 
 fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
@@ -1593,7 +1693,7 @@ fn run_setup_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
             "lumen-tok binary not found — rebuild sidecars with build-sidecar.sh",
         ));
     } else {
-        steps.push(step_install_scripts_in(home, &db_str, &tok_str));
+        steps.push(step_install_scripts_in(home, &db_str, &tok_str, &mcp_str));
     }
 
     // 4. Register MCP (needs mcp path)
@@ -1983,7 +2083,7 @@ mod tests {
         // stops firing — a regression worse than anything this release fixes.
         for script in [
             desired_meter_script("/tmp/db", "/tmp/tok"),
-            desired_intercept_script(),
+            desired_intercept_script("/tmp/x.db", "/tmp/lumen-mcp"),
         ] {
             assert!(
                 script.starts_with("#!/usr/bin/env bash\n"),
@@ -3247,7 +3347,12 @@ mod tests {
     #[test]
     fn installing_scripts_writes_both_hooks_executable() {
         let h = TempDir::new().unwrap();
-        let step = step_install_scripts_in(h.path(), "/tmp/lumen.db", "/bin/lumen-tok");
+        let step = step_install_scripts_in(
+            h.path(),
+            "/tmp/lumen.db",
+            "/bin/lumen-tok",
+            "/bin/lumen-mcp",
+        );
         assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
 
         let dir = lumen_dir_in(h.path());
@@ -3270,7 +3375,7 @@ mod tests {
     #[test]
     fn the_meter_script_is_templated_with_the_real_paths() {
         let h = TempDir::new().unwrap();
-        step_install_scripts_in(h.path(), "/my/lumen.db", "/my/lumen-tok");
+        step_install_scripts_in(h.path(), "/my/lumen.db", "/my/lumen-tok", "/my/lumen-mcp");
         let body = std::fs::read_to_string(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
         assert!(body.contains("/my/lumen.db"), "DB path must be substituted");
         assert!(
@@ -3286,8 +3391,8 @@ mod tests {
     #[test]
     fn reinstalling_scripts_overwrites_stale_paths() {
         let h = TempDir::new().unwrap();
-        step_install_scripts_in(h.path(), "/old.db", "/old-tok");
-        step_install_scripts_in(h.path(), "/new.db", "/new-tok");
+        step_install_scripts_in(h.path(), "/old.db", "/old-tok", "/old-mcp");
+        step_install_scripts_in(h.path(), "/new.db", "/new-tok", "/new-mcp");
         let body = std::fs::read_to_string(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
         assert!(body.contains("/new.db"));
         assert!(!body.contains("/old.db"), "the stale path must be gone");
@@ -3999,7 +4104,7 @@ mod tests {
     #[test]
     fn uninstall_removes_everything_setup_installed() {
         let h = TempDir::new().unwrap();
-        step_install_scripts_in(h.path(), "/db", "/tok");
+        step_install_scripts_in(h.path(), "/db", "/tok", "/mcp");
         step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
         step_install_hooks_in(h.path());
 
@@ -4152,7 +4257,7 @@ mod tests {
         std::fs::write(claude_json_path_in(h.path()), claude_before).unwrap();
         std::fs::write(global_settings_path_in(h.path()), settings_before).unwrap();
 
-        step_install_scripts_in(h.path(), "/db", "/tok");
+        step_install_scripts_in(h.path(), "/db", "/tok", "/mcp");
         step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
         step_install_hooks_in(h.path());
         run_uninstall_in(h.path(), &FakeAutoStart::default());
@@ -4194,5 +4299,184 @@ mod tests {
             marker.starts_with(dir.path()),
             "the marker must live under the supplied home, never the real one"
         );
+    }
+    // ── The shipped intercept's fail-open guards ──────────────────────────────
+    //
+    // These exist because the guards were fixed in .claude/hooks/ — the developer
+    // copy — and shipped nowhere. Setup generates its own script from
+    // INTERCEPT_TEMPLATE, so the two are separate sources and drifted silently:
+    // every installed Lumen kept the deadlock while the repo looked fixed. The
+    // drift test below is the one that would have caught it; the rest run the
+    // generated script for real, because "contains the string" is what let a
+    // script that could not fail open look fixed.
+
+    /// Write the generated script to `dir` and return its path.
+    fn staged_intercept(dir: &Path, mcp_bin: &str) -> PathBuf {
+        let db = dir.join("lumen.db");
+        let script = dir.join("lumen_read_intercept.sh");
+        std::fs::write(
+            &script,
+            desired_intercept_script(&db.to_string_lossy(), mcp_bin),
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+        std::fs::set_permissions(&script, perm).unwrap();
+        script
+    }
+
+    /// A file comfortably over the 300-line threshold.
+    fn big_source(dir: &Path) -> PathBuf {
+        let p = dir.join("big.rs");
+        std::fs::write(&p, "fn f() {}\n".repeat(400)).unwrap();
+        p
+    }
+
+    /// Run the hook with a Read payload. Returns (exit code, stderr).
+    fn run_intercept(script: &Path, file: &Path, session: &str, mcp_bin: &str) -> (i32, String) {
+        let payload = serde_json::json!({
+            "tool_name": "Read",
+            "session_id": session,
+            "tool_input": { "file_path": file.to_string_lossy() },
+        })
+        .to_string();
+
+        let mut child = std::process::Command::new("bash")
+            .arg(script)
+            .env("LUMEN_MCP_BIN", mcp_bin)
+            // A minimal PATH so `command -v lumen-mcp` cannot find a real one and
+            // make the missing-binary case silently pass for the wrong reason.
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("bash is available");
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    #[test]
+    fn the_shipped_intercept_blocks_a_first_large_read() {
+        let h = TempDir::new().unwrap();
+        let script = staged_intercept(h.path(), "/bin/sh"); // exists ⇒ guard 1 passes
+        let big = big_source(h.path());
+
+        let (code, err) = run_intercept(&script, &big, "s1", "/bin/sh");
+        assert_eq!(code, 2, "a large read must still be redirected");
+        assert!(err.contains("Lumen intercept:"));
+        // Without this sentence the model has no way to know an escape exists, which
+        // is what turned the block into an abandoned task in the field.
+        assert!(
+            err.contains("will be allowed through"),
+            "the block must state that a retry is allowed: {err}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_intercept_fails_open_when_lumen_mcp_is_missing() {
+        let h = TempDir::new().unwrap();
+        let script = staged_intercept(h.path(), "/nonexistent/lumen-mcp");
+        let big = big_source(h.path());
+
+        let (code, _) = run_intercept(&script, &big, "s2", "/nonexistent/lumen-mcp");
+        assert_eq!(
+            code, 0,
+            "with no server to route to, blocking leaves the model no way to read at all"
+        );
+    }
+
+    #[test]
+    fn the_shipped_intercept_releases_a_repeated_read() {
+        let h = TempDir::new().unwrap();
+        let script = staged_intercept(h.path(), "/bin/sh");
+        let big = big_source(h.path());
+
+        let (first, _) = run_intercept(&script, &big, "s3-unique-abc", "/bin/sh");
+        let (second, _) = run_intercept(&script, &big, "s3-unique-abc", "/bin/sh");
+        assert_eq!(first, 2, "first read is redirected");
+        assert_eq!(
+            second, 0,
+            "a model back on the built-in Read has already been told to use Lumen"
+        );
+    }
+
+    #[test]
+    fn the_shipped_intercept_spools_a_fired_guard() {
+        let h = TempDir::new().unwrap();
+        let script = staged_intercept(h.path(), "/nonexistent/lumen-mcp");
+        let big = big_source(h.path());
+
+        run_intercept(&script, &big, "s4", "/nonexistent/lumen-mcp");
+
+        // Beside the database, which is where `lumen report` looks for it.
+        let spool = h.path().join("faults.jsonl");
+        let text = std::fs::read_to_string(&spool).expect("a fired guard is recorded");
+        let rec: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(rec["kind"], "hook_fail_open");
+        assert_eq!(rec["variant"], "lumen_mcp_missing");
+        assert_eq!(rec["session_id"], "s4");
+    }
+
+    #[test]
+    fn a_file_below_the_threshold_is_neither_blocked_nor_recorded() {
+        let h = TempDir::new().unwrap();
+        let script = staged_intercept(h.path(), "/nonexistent/lumen-mcp");
+        let small = h.path().join("small.rs");
+        std::fs::write(&small, "fn f() {}\n".repeat(10)).unwrap();
+
+        let (code, _) = run_intercept(&script, &small, "s5", "/nonexistent/lumen-mcp");
+        assert_eq!(code, 0);
+        assert!(
+            !h.path().join("faults.jsonl").exists(),
+            "a read we were never going to intercept is not a routing failure"
+        );
+    }
+
+    /// The test that would have caught the drift: whatever guards the developer copy
+    /// has, the shipped script must have too. Comparing behaviour-bearing markers
+    /// rather than whole text, because the two legitimately differ — the shipped one
+    /// has paths baked in and carries a build stamp.
+    #[test]
+    fn the_shipped_and_developer_intercepts_agree_on_their_guards() {
+        let repo_copy = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(".claude/hooks/lumen_read_intercept.sh");
+        let dev = match std::fs::read_to_string(&repo_copy) {
+            Ok(t) => t,
+            // Absent in a packaged build; nothing to compare against.
+            Err(_) => return,
+        };
+        let shipped = desired_intercept_script("/tmp/x.db", "/tmp/lumen-mcp");
+
+        for marker in [
+            "lumen_mcp_missing",
+            "retry_escape_valve",
+            "will be allowed through",
+            "LUMEN_CAPTURE",
+            "hook_fail_open",
+        ] {
+            assert!(
+                dev.contains(marker),
+                "developer copy lost {marker} — fix it there too"
+            );
+            assert!(
+                shipped.contains(marker),
+                "shipped script is missing {marker}; the fix did not reach real installs"
+            );
+        }
     }
 }
