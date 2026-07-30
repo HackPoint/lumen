@@ -113,6 +113,11 @@ echo "  ✓ lumenator/package.json"
 update_json_version lumenator/src-tauri/tauri.conf.json "$NEW"
 echo "  ✓ lumenator/src-tauri/tauri.conf.json"
 
+# The Claude Code plugin manifest. Users see this version in `/plugin`, so a stale
+# one misreports which build's hooks and commands they have installed.
+update_json_version .claude-plugin/plugin.json "$NEW"
+echo "  ✓ .claude-plugin/plugin.json"
+
 # Brew files: bump version only; CI will update sha256 after building artifacts.
 # Leaving sha256 stale is intentional — it's overwritten by the CI tap-update job
 # before anyone runs 'brew install'.
@@ -189,6 +194,7 @@ git add \
     lumenator/src-tauri/tauri.conf.json \
     Formula/lumen-cli.rb \
     Casks/lumen-app.rb \
+    .claude-plugin/plugin.json \
     Cargo.lock \
     CHANGELOG.md
 

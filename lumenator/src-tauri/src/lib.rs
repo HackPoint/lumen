@@ -340,6 +340,7 @@ pub fn run() {
             get_context_report,
             get_fault_report,
             get_fault_count,
+            check_for_update,
             file_fault_report,
             show_main_window,
             setup::lumen_setup_needed,
@@ -478,6 +479,92 @@ async fn get_fault_report() -> Result<Option<FaultReport>, String> {
     })
     .await
     .map_err(|e| format!("fault report task failed: {e}"))?
+}
+
+/// Check whether a newer Lumen has been released, for minor and major bumps only.
+///
+/// **The only unprompted network request Lumen makes.** An unauthenticated GET of the
+/// repository's latest release: no credential, no identifier, nothing about the machine or
+/// the ledger. `LUMEN_UPDATE_CHECK=0` disables it, and the README documents it under
+/// Security & privacy alongside everything else that leaves the machine — which is
+/// otherwise nothing.
+///
+/// Returns `None` when there is nothing to say: check disabled, not yet due, already
+/// current, a patch-only bump, or this version already announced. The frontend shows a
+/// notification only for `Some`.
+#[tauri::command]
+async fn check_for_update() -> Result<Option<lumen_core::update::UpdateAvailable>, String> {
+    use lumen_core::update;
+
+    tauri::async_runtime::spawn_blocking(|| {
+        if !update::enabled() {
+            return Ok(None);
+        }
+        let Some(state_path) = update::state_path() else {
+            return Ok(None);
+        };
+        let mut state = update::load_state(&state_path);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if !update::due(&state, now, update::CHECK_INTERVAL_SECS) {
+            return Ok(None);
+        }
+
+        // Recorded before the request, not after: a network that always fails must not
+        // turn into a request on every launch.
+        state.last_checked = now;
+        update::save_state(&state_path, &state);
+
+        let repo = lumen_core::report::DEFAULT_REPO;
+        let json = match fetch_latest_release(repo) {
+            Some(j) => j,
+            // Offline is not an error worth surfacing; the next check will try again.
+            None => return Ok(None),
+        };
+        let Some(latest) = update::latest_from_json(&json) else {
+            return Ok(None);
+        };
+
+        let found = update::decide(update::Version::current(), latest, &state, repo);
+        if found.is_some() {
+            // Announce a given version once.
+            state.last_notified = Some(latest.to_string());
+            update::save_state(&state_path, &state);
+        }
+        Ok(found)
+    })
+    .await
+    .map_err(|e| format!("update check task failed: {e}"))?
+}
+
+/// GET the latest release as JSON, or `None` on any failure.
+///
+/// curl for the same reason the filing routes use it: the workspace has no HTTP client and
+/// adding one pulls a TLS stack in for one request a day.
+fn fetch_latest_release(repo: &str) -> Option<String> {
+    let out = std::process::Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "10",
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--header",
+            "X-GitHub-Api-Version: 2022-11-28",
+            "--header",
+            "User-Agent: lumen",
+            &format!("https://api.github.com/repos/{repo}/releases/latest"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// How many faults are waiting, for the nav badge and the tray panel.

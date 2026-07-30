@@ -227,6 +227,20 @@ export interface ContextReport {
 }
 
 /**
+ * A newer release worth telling the user about.
+ *
+ * Only ever populated for a minor or major bump — the backend returns nothing for a patch,
+ * so the UI cannot notify for one even by accident.
+ */
+export interface UpdateAvailable {
+    current: string;
+    latest: string;
+    /** `minor` or `major`. */
+    bump: string;
+    url: string;
+}
+
+/**
  * What filing did, and which route did it.
  *
  * `handoff` is the field that matters. The browser route opens a prefilled form and

@@ -30,7 +30,10 @@ It watches your session files locally and surfaces things Claude Code doesn't sh
 | **Net value of interception** — tokens saved, priced, less the round they cost | Optimizer screen hero metric |
 | **Context hotspots** — which files your context actually goes into | Hotspots screen |
 
-None of this leaves your machine. No account, no telemetry. See [Security & privacy](#security--privacy).
+No account, and no telemetry: none of the above leaves your machine. Lumen makes two
+network requests in total, both described under [Security & privacy](#security--privacy)
+— a once-a-day check for a new release, and filing a fault report, which only happens
+when you ask for it.
 
 ---
 
@@ -585,6 +588,29 @@ Claude with no way to read the file at all:
 
 It also stats the `lumen-mcp` binary to check the server it would redirect to actually
 exists. Set `LUMEN_HOOK_ENABLED=0` to disable interception entirely.
+
+### Checking for a new release
+
+**The only network request Lumen makes without being asked.** Once a day, at most, the app
+GETs `https://api.github.com/repos/HackPoint/lumen/releases/latest` and compares the tag to
+its own version.
+
+What is sent: nothing beyond what any HTTPS request to GitHub reveals. No credential, no
+identifier, no version string, nothing about the machine, the projects on it, or the ledger.
+It is a plain unauthenticated read of a public endpoint.
+
+You are notified only for a **minor or major** release. Patch releases are silent — a
+notification that fires for every `x.y.Z` gets dismissed reflexively, and then the one that
+mattered gets dismissed too. A given version is announced once, and the check state lives
+in `update_check.json` beside the database.
+
+Turn it off entirely:
+
+```bash
+export LUMEN_UPDATE_CHECK=0
+```
+
+With that set, Lumen makes no unprompted network request of any kind.
 
 ### Filing a fault report
 

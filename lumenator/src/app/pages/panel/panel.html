@@ -66,6 +66,17 @@
     <!-- The panel has no navigation of its own, so a fault noticed here would
          otherwise have nowhere to go. Shown only when there is something to act on:
          a permanently visible row would be furniture. -->
+    <!-- Minor and major releases only; the backend returns nothing for a patch, so this
+         cannot appear for one. Shown as well as notified because a notification is easy
+         to miss and impossible to go back to. -->
+    @if (s.updateAvailable(); as u) {
+        <a class="panel__update" [href]="u.url" target="_blank" rel="noreferrer noopener">
+            <span class="panel__update-dot"></span>
+            Lumen {{ u.latest }} available
+            <span class="panel__update-cta">Release notes →</span>
+        </a>
+    }
+
     @if (s.faultCount() > 0) {
         <button class="panel__faults" type="button" (click)="openFaults()"
                 [attr.aria-label]="s.faultCount() + ' faults recorded — open Lumen to review'">

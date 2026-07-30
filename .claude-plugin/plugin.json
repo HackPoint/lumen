@@ -1,7 +1,7 @@
 {
   "name": "lumen",
   "description": "Context optimizer for Claude Code: structure-first source reads, deterministic log compression, and cost metering. Ships the Read intercept and its fault reporter.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": {
     "name": "HackPoint"
   },

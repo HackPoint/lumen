@@ -10,6 +10,7 @@ pub mod report;
 pub mod schema;
 pub mod structure;
 pub mod tokenizer;
+pub mod update;
 
 #[cfg(test)]
 mod tests {
