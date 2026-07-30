@@ -1,0 +1,8 @@
+# Snapshot fixtures are compared byte-for-byte against rendered output, which always
+# uses LF. A CRLF checkout on Windows made the comparison fail as a rendering drift,
+# which it was not. The test also normalises, so this is belt and braces.
+crates/lumen-core/tests/fixtures/*.md text eol=lf
+crates/lumen-core/tests/fixtures/*.json text eol=lf
+
+# Hook scripts run under bash; a CRLF checkout breaks the shebang.
+*.sh text eol=lf

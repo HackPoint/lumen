@@ -357,6 +357,25 @@ fn short_ts(ts: &str) -> String {
     }
 }
 
+/// Whether a path string is absolute on **any** platform.
+///
+/// `Path::is_relative` answers only for the host. On Windows `/Users/me/clients/acme`
+/// carries no drive letter and is therefore "relative", so a report generated on Windows
+/// treated every Unix-style absolute path as workspace-relative and published it
+/// verbatim — including the client directory names redaction exists to strip. CI caught
+/// it on windows-latest; macOS could not have.
+///
+/// Redaction must not depend on which machine renders the report, so absoluteness is
+/// decided from the string: a leading separator (Unix root, Windows rooted path, or a
+/// UNC share) or a drive qualifier.
+fn is_absolute_anywhere(raw: &str) -> bool {
+    let b = raw.as_bytes();
+    if b.first().is_some_and(|c| *c == b'/' || *c == b'\\') {
+        return true;
+    }
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
 /// Reduce a path to something safe to publish.
 ///
 /// Inside the workspace a relative path is fine — it is public code. Outside it, the
@@ -364,7 +383,7 @@ fn short_ts(ts: &str) -> String {
 /// the content hash is what lets a maintainer confirm they hold the same file.
 fn redact_path(raw: &str, env: &Environment) -> String {
     let p = Path::new(raw);
-    if p.is_relative() {
+    if !is_absolute_anywhere(raw) {
         return raw.to_string();
     }
     if let Some(root) = &env.workspace_root
@@ -630,8 +649,8 @@ fn affected_files(faults: &[Fault], env: &Environment) -> Vec<String> {
             .unwrap_or_else(|| "? lines".into());
 
         // Resolve relative fixture paths against the workspace before hashing.
-        let abs = match (Path::new(raw).is_relative(), &env.workspace_root) {
-            (true, Some(root)) => root.join(raw),
+        let abs = match (is_absolute_anywhere(raw), &env.workspace_root) {
+            (false, Some(root)) => root.join(raw),
             _ => PathBuf::from(raw),
         };
         let digest = match std::fs::read(&abs) {
@@ -709,10 +728,10 @@ pub fn embedded_sources(faults: &[Fault], env: &Environment) -> Vec<(String, Str
         let Some(root) = &env.workspace_root else {
             continue;
         };
-        let abs = if Path::new(raw).is_relative() {
-            root.join(raw)
-        } else {
+        let abs = if is_absolute_anywhere(raw) {
             PathBuf::from(raw)
+        } else {
+            root.join(raw)
         };
         let Ok(text) = std::fs::read_to_string(&abs) else {
             continue;
@@ -1394,7 +1413,11 @@ mod tests {
             return;
         }
 
-        let expected = std::fs::read_to_string(&snap_path).expect("snapshot exists");
+        // Normalised: git checks the snapshot out with CRLF on Windows, and a line-ending
+        // difference is not a rendering regression.
+        let expected = std::fs::read_to_string(&snap_path)
+            .expect("snapshot exists")
+            .replace("\r\n", "\n");
         assert_eq!(
             body, expected,
             "rendered body drifted from the snapshot; re-run with UPDATE_SNAPSHOTS=1 to accept"
@@ -1959,6 +1982,49 @@ mod tests {
             if let Some(other) = seen.insert(kind_priority(kind), *kind) {
                 panic!("{kind} and {other} share priority {}", kind_priority(kind));
             }
+        }
+    }
+
+    /// Redaction must not depend on the machine rendering the report.
+    ///
+    /// This is the bug CI found on windows-latest: `Path::is_relative` called a
+    /// Unix-style absolute path "relative" for want of a drive letter, so every
+    /// out-of-workspace path was published verbatim. Asserted through the string
+    /// classifier so it holds on any host, not just the one that happened to be wrong.
+    #[test]
+    fn absoluteness_is_decided_the_same_way_on_every_platform() {
+        for abs in [
+            "/Users/me/clients/acme/invoice.ts",
+            "/etc/passwd",
+            "\\\\server\\share\\file.rs",
+            "C:\\Users\\me\\clients\\acme\\invoice.ts",
+            "c:/Users/me/x.rs",
+        ] {
+            assert!(is_absolute_anywhere(abs), "{abs} must count as absolute");
+        }
+        for rel in [
+            "crates/lumen-core/src/report.rs",
+            "a.rs",
+            "./a.rs",
+            "sub\\dir\\a.rs",
+        ] {
+            assert!(!is_absolute_anywhere(rel), "{rel} must count as relative");
+        }
+    }
+
+    #[test]
+    fn an_out_of_workspace_path_is_redacted_in_either_path_style() {
+        let env = test_env();
+        for raw in [
+            "/Users/testuser/dev/acme-billing/src/invoice.ts",
+            "C:\\Users\\testuser\\dev\\acme-billing\\src\\invoice.ts",
+        ] {
+            let label = redact_path(raw, &env);
+            assert!(
+                !label.contains("acme"),
+                "{raw} leaked a private directory name as {label}"
+            );
+            assert!(label.starts_with("<redacted:external>"), "got {label}");
         }
     }
 }
