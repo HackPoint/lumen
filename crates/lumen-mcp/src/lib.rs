@@ -327,7 +327,7 @@ pub fn handle_tools_list() -> Value {
             "description": "Read a source-code file structure-first. Returns a compact outline — \
     functions, classes, structs, interfaces, and imports with their exact line ranges — WITHOUT \
     reading all the bodies. Use this INSTEAD OF the built-in Read tool whenever you need to \
-    understand what a source file contains, especially for files ≥100 lines. Follow with \
+    understand what a source file contains, especially for files ≥300 lines. Follow with \
     recall_file to fetch only the specific items you need. Always reports full_tokens vs \
     returned_tokens so the savings are verifiable. Mode 'full' is available as a fallback when \
     the entire file body is genuinely needed.",
