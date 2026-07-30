@@ -339,7 +339,9 @@ pub fn run() {
             get_optimizer_stats,
             get_context_report,
             get_fault_report,
+            get_fault_count,
             file_fault_report,
+            show_main_window,
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
             setup::lumen_uninstall,
@@ -476,6 +478,42 @@ async fn get_fault_report() -> Result<Option<FaultReport>, String> {
     })
     .await
     .map_err(|e| format!("fault report task failed: {e}"))?
+}
+
+/// How many faults are waiting, for the nav badge and the tray panel.
+///
+/// Separate from [`get_fault_report`] because a badge refreshes on every navigation and
+/// rendering a whole issue body for a number would be absurd. Read-only: it does not
+/// drain the spool, so opening a screen is never a write.
+#[tauri::command]
+async fn get_fault_count() -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(path) = lumen_core::meter::db_path() else {
+            return Ok(0);
+        };
+        // A database that will not open is not a reason to fail a navigation; the badge
+        // simply stays dark and the report screen reports the real error.
+        match lumen_core::meter::connect_db(&path) {
+            Ok(conn) => Ok(lumen_core::report::actionable_fault_count(&conn)),
+            Err(_) => Ok(0),
+        }
+    })
+    .await
+    .map_err(|e| format!("fault count task failed: {e}"))?
+}
+
+/// Reveal the main window, for the tray panel's fault indicator.
+///
+/// The panel is a 320x400 popover with no navigation, so a fault noticed there has no
+/// route to the report screen without this.
+#[tauri::command]
+async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let w = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    w.show().map_err(|e| e.to_string())?;
+    let _ = w.set_focus();
+    Ok(())
 }
 
 /// File a previously-rendered body, commenting on the existing issue if this fingerprint

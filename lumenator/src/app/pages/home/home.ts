@@ -24,6 +24,7 @@ export class Home implements OnInit {
         this.bridge.invoke<boolean>('lumen_setup_needed')
             .then(needed => { if (needed) this.router.navigate(['/setup']); })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });
+        this.s.refreshFaultCount();
     }
 
     /** Explains which session the gauge is following, and that others exist. */

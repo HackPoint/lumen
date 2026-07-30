@@ -129,111 +129,144 @@
 }
 
 /* ── Fault report ─────────────────────────────────────────────────────────────
-   Visually quieter than the hotspot rows above it. This section is a maintenance
-   affordance, not a metric, and it should not compete with the diagnosis it sits
-   under. The primary button is the only saturated element, because filing is the
-   only action here with a consequence outside this machine. */
+   Styled from the --lumen-* tokens, not the bare --border/--text-dim names the
+   older rules in this file use. Those variables do not exist, so those rules fall
+   back to hard-coded dark greys and stay dark on a light desktop. Using the real
+   tokens is what makes this section follow the theme like the rest of the app.
+
+   Quieter than the stat tiles above it: this is a maintenance affordance, not a
+   measurement, and the only saturated element is the button whose consequence
+   leaves the machine. */
 
 .fr {
-    margin-top: 1.4rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--border, #30363d);
+    margin-top: 1.25rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--lumen-border);
 }
 
-.fr__title {
-    font-size: 0.78rem;
+/* One row: label, count, actions. Wraps rather than squeezing the button, the same
+   failure the stat grid above solved with auto-fit. */
+.fr__bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+/* Matches .hs__stat-label so the two read as the same kind of thing. */
+.fr__label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.62rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.4px;
     text-transform: uppercase;
-    color: var(--text-dim, #8b949e);
-    margin: 0 0 0.3rem;
+    color: var(--lumen-text-dim);
 }
 
-.fr__lede {
-    font-size: 0.7rem;
-    line-height: 1.4;
-    color: var(--text-dim, #8b949e);
-    margin: 0 0 0.6rem;
+.fr__info {
+    cursor: help;
+    opacity: 0.75;
+}
+
+.fr__count {
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--lumen-warn) 16%, transparent);
+    color: var(--lumen-warn);
+    font-size: 0.62rem;
+    font-variant-numeric: tabular-nums;
 }
 
 .fr__actions {
     display: flex;
     gap: 0.4rem;
-    flex-wrap: wrap;
+    margin-left: auto;
 }
 
 .fr__btn {
     font: inherit;
-    font-size: 0.72rem;
-    padding: 0.3rem 0.7rem;
-    border-radius: 5px;
-    border: 1px solid var(--border, #30363d);
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--text, #c9d1d9);
+    font-size: 0.7rem;
+    padding: 0.28rem 0.7rem;
+    border-radius: 8px;
+    border: 1px solid var(--lumen-border-strong);
+    background: var(--lumen-bg-elevated);
+    color: var(--lumen-text);
     cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .fr__btn:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--lumen-brand);
 }
 
 .fr__btn:disabled {
-    opacity: 0.5;
+    opacity: 0.45;
     cursor: default;
 }
 
 /* Filing is the one irreversible action on this screen, so it is the one that looks
-   like a commitment. */
+   like a commitment. Brand green, matching the savings accent used elsewhere. */
 .fr__btn--primary {
-    border-color: rgba(63, 185, 80, 0.5);
-    background: rgba(63, 185, 80, 0.16);
-    color: var(--accent, #3fb950);
+    border-color: color-mix(in srgb, var(--lumen-brand) 55%, transparent);
+    background: color-mix(in srgb, var(--lumen-brand) 14%, transparent);
+    color: var(--lumen-brand);
 }
 
 .fr__btn--primary:hover:not(:disabled) {
-    background: rgba(63, 185, 80, 0.26);
+    background: color-mix(in srgb, var(--lumen-brand) 24%, transparent);
 }
 
 .fr__btn--ghost {
-    background: none;
+    background: transparent;
+    color: var(--lumen-text-dim);
 }
 
-.fr__none,
-.fr__summary,
-.fr__vet,
-.fr__filed {
+.fr__note {
     font-size: 0.68rem;
-    color: var(--text-dim, #8b949e);
+    line-height: 1.4;
+    color: var(--lumen-text-dim);
     margin: 0.5rem 0 0;
 }
 
-.fr__filed a {
-    color: var(--accent, #3fb950);
+.fr__note code {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.94em;
 }
 
+.fr__note--filed a {
+    color: var(--lumen-brand);
+}
+
+/* Amber left rule, the same device .hs__rec uses for advice. */
 .fr__error {
     font-size: 0.68rem;
-    line-height: 1.35;
+    line-height: 1.4;
     margin: 0.5rem 0 0;
     padding-left: 0.5rem;
-    border-left: 2px solid rgba(248, 81, 73, 0.6);
-    color: #f85149;
+    border-left: 2px solid color-mix(in srgb, var(--lumen-alert) 60%, transparent);
+    color: var(--lumen-alert);
 }
 
-/* Scrolls rather than growing the window: the body can be forty lines, and the point
-   is that the user can read every one of them before filing. */
+.fr__preview {
+    margin-top: 0.3rem;
+}
+
+/* Scrolls rather than growing the window: the body can be forty lines, and the whole
+   point is that every one of them can be read before filing. */
 .fr__body {
     margin: 0.35rem 0 0;
-    padding: 0.5rem;
-    max-height: 15rem;
+    padding: 0.6rem 0.7rem;
+    max-height: 14rem;
     overflow: auto;
-    border-radius: 5px;
-    border: 1px solid var(--border, #30363d);
-    background: rgba(0, 0, 0, 0.25);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    border-radius: 8px;
+    border: 1px solid var(--lumen-border);
+    background: var(--lumen-bg-secondary);
+    font-family: var(--lumen-font-mono);
     font-size: 0.62rem;
-    line-height: 1.4;
+    line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
-    color: var(--text, #c9d1d9);
+    color: var(--lumen-text);
 }

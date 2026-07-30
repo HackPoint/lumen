@@ -144,3 +144,24 @@ body {
 .lumen-tooltip--visible {
   opacity: 1;
 }
+
+/* Fault badge on the Hotspots nav tab.
+   Global rather than per-component: three pages render the same tab-nav markup and
+   each duplicates its styles, so a component copy would need to be a fourth. Angular
+   scopes component CSS, so a copy in hotspots.css could never reach home or optimizer
+   — which is exactly the bug this placement avoids. */
+.tab-nav__badge {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0 0.3rem;
+  min-width: 1.1em;
+  border-radius: 999px;
+  background: var(--lumen-warn);
+  color: var(--lumen-bg);
+  font-size: 0.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+  text-align: center;
+  vertical-align: text-top;
+}

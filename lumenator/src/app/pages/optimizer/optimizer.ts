@@ -1,6 +1,7 @@
 import {
     ChangeDetectionStrategy,
     Component,
+    OnInit,
     computed,
     inject,
 } from '@angular/core';
@@ -18,7 +19,7 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
     styleUrl: './optimizer.css',
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class Optimizer {
+export class Optimizer implements OnInit {
     /**
      * The headline, in dollars, with its sign.
      *
@@ -78,6 +79,12 @@ export class Optimizer {
     );
 
     readonly s = inject(SessionService);
+
+    ngOnInit(): void {
+        // Only the badge: this page's own figures already arrive through the daemon
+        // stream, and the fault count is the one thing not on it.
+        this.s.refreshFaultCount();
+    }
 
     // ── hero ──────────────────────────────────────────────────────────────────
 

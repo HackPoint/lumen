@@ -468,6 +468,27 @@ export class SessionService {
   readonly faultFiledUrl = signal<string | null>(null);
   readonly faultError = signal<string | null>(null);
 
+  /**
+   * Faults waiting, for the nav badge and the tray panel.
+   *
+   * Its own signal rather than derived from {@link faultReport}: the badge has to be
+   * current on every screen, and rendering a whole issue body to show a number would
+   * make navigation expensive. Ranked declines are excluded by the backend — hundreds of
+   * them would keep the badge permanently lit.
+   */
+  readonly faultCount = signal(0);
+
+  refreshFaultCount(): void {
+    this.bridge.invoke<number>('get_fault_count')
+        .then((n) => this.faultCount.set(n ?? 0))
+        .catch(() => { /* not in Tauri / db not ready — leave the badge dark */ });
+  }
+
+  /** Reveal the main window. The tray panel has no navigation of its own. */
+  openMainWindow(): void {
+    this.bridge.invoke<void>('show_main_window').catch(() => { /* not in Tauri */ });
+  }
+
   /** Render the current fault report. Local only — nothing leaves the machine. */
   refreshFaultReport(): void {
     this.faultReportLoading.set(true);

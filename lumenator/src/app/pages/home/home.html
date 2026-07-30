@@ -24,7 +24,8 @@
                routerLink="/hotspots"
                routerLinkActive="is-active"
                role="tab">
-               Hotspots
+               Hotspots@if (s.faultCount() > 0) {<span class="tab-nav__badge"
+                     [attr.aria-label]="s.faultCount() + ' faults recorded'">{{ s.faultCount() }}</span>}
             </a>
         </nav>
 

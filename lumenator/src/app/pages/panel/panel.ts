@@ -31,5 +31,17 @@ export class Panel implements OnInit {
 
     ngOnInit(): void {
         void this.bridge.moveWindowToTray().catch(() => {});
+        this.s.refreshFaultCount();
+    }
+
+    /**
+     * Reveal the main window so the fault can actually be reviewed.
+     *
+     * The panel deliberately has no router links — it is a 320x400 popover — so this
+     * hands off to the main window rather than trying to host the report here, where
+     * the body could not be read before filing it.
+     */
+    openFaults(): void {
+        this.s.openMainWindow();
     }
 }

@@ -183,3 +183,41 @@ panel cost {
     from { opacity: 0; transform: scale(0.97); }
     to   { opacity: 1; transform: none; }
 }
+
+/* Fault row. Amber, not red: routing degraded is not the same as broken, and the
+   panel's red is already spoken for by imminent compaction. Full-width tap target
+   because the whole row is the affordance, not just the arrow. */
+.panel__faults {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    width: 100%;
+    margin-top: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--lumen-warn) 35%, transparent);
+    border-radius: var(--lumen-radius-sm, 12px);
+    background: color-mix(in srgb, var(--lumen-warn) 10%, transparent);
+    color: var(--lumen-warn);
+    font: inherit;
+    font-size: 0.65rem;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+
+.panel__faults:hover {
+    background: color-mix(in srgb, var(--lumen-warn) 18%, transparent);
+}
+
+.panel__faults-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: var(--lumen-warn);
+    flex: none;
+}
+
+.panel__faults-cta {
+    margin-left: auto;
+    opacity: 0.8;
+}
