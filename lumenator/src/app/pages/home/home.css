@@ -259,3 +259,29 @@
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: none; }
 }
+
+/* Which session the gauge is following. Dim and small: it answers a question the user
+   only asks when several editor windows are open, so it must not compete with the gauge
+   it annotates. Matches .panel__project, which is the same label in the popover. */
+.gauge-stage__project {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    margin-top: 0.5rem;
+    font-family: var(--lumen-font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.2px;
+    color: var(--lumen-text-dim);
+    cursor: help;
+}
+
+/* "+2 more" — a count of the other live sessions. A pill rather than plain text so it
+   reads as a quantity attached to the label, not a second label. */
+.gauge-stage__count {
+    padding: 0 0.3rem;
+    border-radius: 999px;
+    border: 1px solid var(--lumen-border);
+    font-size: 0.6rem;
+    font-variant-numeric: tabular-nums;
+}

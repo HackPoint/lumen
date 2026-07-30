@@ -256,3 +256,14 @@ panel cost {
     margin-left: auto;
     opacity: 0.8;
 }
+
+/* The project label. Deliberately identical to .panel__model beside it — the two are
+   the same kind of fact about the session being shown, and differing type would imply a
+   difference that is not there. */
+.panel__project {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.2px;
+    color: var(--lumen-text-dim);
+    cursor: help;
+}

@@ -18,7 +18,11 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 pub const SERVER_NAME: &str = "lumen";
-pub const SERVER_VERSION: &str = "0.2.0";
+// Taken from the crate, not written out. Hardcoded, it said 0.2.0 while the crate was
+// 1.5.0 — so the startup banner and every `initialize` response reported a version
+// seven releases old, which is worse than reporting none at all when someone is
+// trying to work out which build they are talking to.
+pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// JSON-RPC error codes we emit.
