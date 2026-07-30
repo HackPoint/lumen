@@ -529,6 +529,16 @@ export class SessionService {
     }
   }
 
+  /**
+   * Ask the tray popover to fit `height` logical pixels.
+   *
+   * The backend clamps it. Fire-and-forget: a popover that is briefly the wrong size is a
+   * cosmetic problem, and surfacing an error for it would be worse than the symptom.
+   */
+  resizePanel(height: number): void {
+    this.bridge.invoke<void>('resize_panel', { height }).catch(() => { /* not in Tauri */ });
+  }
+
   /** Reveal the main window. The tray panel has no navigation of its own. */
   openMainWindow(): void {
     this.bridge.invoke<void>('show_main_window').catch(() => { /* not in Tauri */ });

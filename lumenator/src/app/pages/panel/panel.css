@@ -9,18 +9,25 @@
 
 .panel {
     position: absolute;
-    inset: 8px;
+    /* Top/left/right but deliberately NOT bottom: with `inset: 8px` the card was
+       stretched to the window, so its height came from the window and its content had
+       nowhere to go but under the bottom edge. Leaving `bottom` unset makes the height
+       content-driven, which is what lets the window follow it (see resize_panel). */
+    top: 8px;
+    left: 8px;
+    right: 8px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 0.55rem;
     padding: 0.8rem 0.9rem 0.75rem;
-    /* The popover is a fixed 320x400 window, but the rows below the gauge are
-       conditional: the project label and the compaction badge appear only
-       sometimes, and together they add 48px. Without a hard clip plus a
-       shrinkable child, that growth pushed the cost tiles past the bottom edge
-       and the second figure was cut in half. */
+    /* The rows below the gauge are conditional — the project label, the compaction
+       badge, a recorded-fault row, an update notice. Clipping them was the old fix, and
+       it hid the fault button entirely once there were four of them. The window now
+       resizes to fit; `overflow: hidden` stays only as a backstop for the frame between
+       a row appearing and the resize landing, and to keep the rounded corners clipping
+       the backdrop. */
     overflow: hidden;
     min-height: 0;
     border-radius: 16px;
@@ -29,7 +36,6 @@
     backdrop-filter: blur(30px) saturate(180%);
     border: 1px solid var(--lumen-border-strong);
     box-shadow: var(--lumen-shadow);
-    overflow: hidden;
     animation: panel-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 

@@ -343,6 +343,7 @@ pub fn run() {
             check_for_update,
             file_fault_report,
             show_main_window,
+            resize_panel,
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
             setup::lumen_uninstall,
@@ -587,6 +588,37 @@ async fn get_fault_count() -> Result<u64, String> {
     })
     .await
     .map_err(|e| format!("fault count task failed: {e}"))?
+}
+
+/// Width of the tray popover. Fixed: it is positioned under the tray icon and a varying
+/// width would make it jump horizontally as rows appear.
+const PANEL_WIDTH: f64 = 320.0;
+/// Never shorter than the gauge it exists to show, never taller than a popover should be.
+const PANEL_MIN_HEIGHT: f64 = 400.0;
+const PANEL_MAX_HEIGHT: f64 = 720.0;
+
+/// Resize the tray popover to fit its content.
+///
+/// The popover was a fixed 320x400 window whose card clipped anything that did not fit,
+/// so each conditional row added — the project label, the compaction badge, a recorded
+/// fault, an update notice — ate into the space below it until the fault button was
+/// entirely off-screen. It was rendered, styled and unreachable.
+///
+/// Clamped rather than trusted: a measurement bug should make the popover slightly wrong,
+/// not turn it into a full-screen sheet or collapse it to nothing.
+#[tauri::command]
+async fn resize_panel(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    let window = app
+        .get_webview_window("panel")
+        .ok_or_else(|| "panel window not found".to_string())?;
+    let h = height.clamp(PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
+    window
+        .set_size(tauri::LogicalSize::new(PANEL_WIDTH, h))
+        .map_err(|e| format!("cannot resize the panel: {e}"))?;
+    // Re-park under the tray icon: the positioner anchors by the window's own geometry, so
+    // a taller window left unmoved hangs down past where it was placed.
+    let _ = window.move_window(Position::TrayBottomCenter);
+    Ok(())
 }
 
 /// Reveal the main window, for the tray panel's fault indicator.

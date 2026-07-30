@@ -227,4 +227,43 @@ describe('Panel', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.panel__update')).toBeNull();
   });
+  // ── Fitting the window to the content ───────────────────────────────────────
+  //
+  // The popover is a fixed-size window whose card used to clip anything that did not fit,
+  // so each conditional row pushed the next one under the bottom edge. With a fault row
+  // and an update notice both present, the fault button was off-screen entirely — present
+  // in the DOM, styled, and unreachable. The window has to follow the content.
+
+  it('asks the window to fit its content on open', async () => {
+    await withUpdate(null);
+    expect(bridge.countOf('resize_panel')).toBeGreaterThanOrEqual(1);
+    const args = bridge.lastArgsOf('resize_panel');
+    expect(args).toBeDefined();
+    expect(typeof args!['height']).toBe('number');
+  });
+
+  it('never asks for a height that would clip the card', async () => {
+    await withUpdate({ current: '1.5.0', latest: '1.6.0', bump: 'minor', url: 'https://example.test/x' });
+    const card = fixture.nativeElement.querySelector('.panel') as HTMLElement;
+    const asked = bridge.lastArgsOf('resize_panel')!['height'] as number;
+    // 16px is the card's inset, 8 on each side. Asking for less than the card needs is
+    // exactly the bug: the difference is what gets cut off.
+    expect(asked).toBeGreaterThanOrEqual(Math.ceil(card.getBoundingClientRect().height) + 16);
+  });
+
+  /**
+   * The card is measured, not assumed: whatever height it reports, the window must be
+   * asked for at least that much plus the 8px inset on each side.
+   *
+   * Deliberately not asserting `getComputedStyle(card).bottom === 'auto'` — jsdom does no
+   * layout, so that passes here and reports `-3.2px` in a real browser. The assertion that
+   * the card is content-sized rather than stretched lives in the Rust CSS test, which
+   * reads the stylesheet instead of a computed value.
+   */
+  it('requests a height derived from the measured card, not a constant', async () => {
+    await withUpdate({ current: '1.5.0', latest: '1.6.0', bump: 'minor', url: 'https://example.test/x' });
+    const card = fixture.nativeElement.querySelector('.panel') as HTMLElement;
+    const asked = bridge.lastArgsOf('resize_panel')!['height'] as number;
+    expect(asked).toBe(Math.ceil(card.getBoundingClientRect().height) + 16);
+  });
 });
