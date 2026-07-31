@@ -4479,4 +4479,61 @@ mod tests {
             );
         }
     }
+
+    /// The developer meter hook and the installed one must record the same columns.
+    ///
+    /// They drifted to nine columns against fifteen, and the developer copy also resolved
+    /// the database as <workspace>/lumen.db — a path with no schema — so every INSERT
+    /// failed and `|| true` discarded the error. It recorded nothing for weeks while
+    /// appearing to work. A row missing token_source is indistinguishable from a bytes/4
+    /// estimate, and one missing req_key cannot be deduplicated, so a partial writer
+    /// quietly degrades every figure built on the ledger.
+    #[test]
+    fn meter_hooks_agree_on_the_columns_they_record() {
+        let repo_copy = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(".claude/hooks/lumen_meter.sh");
+        let dev = match std::fs::read_to_string(&repo_copy) {
+            Ok(t) => t,
+            // Absent in a packaged build; nothing to compare against.
+            Err(_) => return,
+        };
+        let shipped = desired_meter_script("/tmp/db", "/tmp/tok");
+
+        for column in [
+            "token_source",
+            "session_id",
+            "file_mtime",
+            "req_key",
+            "is_subagent",
+            "writer_hook",
+            "routed_via",
+            "saved_tokens",
+        ] {
+            assert!(
+                shipped.contains(column),
+                "the installed meter no longer records {column}"
+            );
+            assert!(
+                dev.contains(column),
+                "the developer meter hook does not record {column}; rows it writes would \
+                 be missing a field every figure built on read_events depends on"
+            );
+        }
+
+        // The developer copy used to point at <workspace>/lumen.db, which has no schema.
+        assert!(
+            !dev.contains("${WORKSPACE_ROOT}/lumen.db"),
+            "the developer meter hook resolves the database as a workspace path again — \
+             that file has no schema, so every write is silently discarded"
+        );
+        // And it must leave a trace when a write fails, rather than swallowing it.
+        assert!(
+            dev.contains("lumen_hook_errors.log"),
+            "a failed write must be recorded somewhere; silence is what hid this for weeks"
+        );
+    }
 }
