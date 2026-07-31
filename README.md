@@ -467,16 +467,27 @@ caching savings display.
 ## How much you save
 
 The hero metric on the Optimizer screen is the **net dollar value** of interception: what
-the tokens Lumen avoided are worth, less what the extra round cost. On the author's
-machine that is **+$276 over 291 measured calls, about +$0.95 each**.
+the tokens Lumen avoided are worth, less what the extra round cost. On the author's machine
+that is **+$69.61 over 1,497 intercepted reads** — 9.86M tokens avoided, worth $381.89,
+against $312.29 of forced round-trips.
 
-The token ratio — 87% fewer tokens per intercepted read — is shown underneath it. It is
+The token ratio — **84% fewer tokens per intercepted read** — is shown underneath it. It is
 real and measured to the token, but on its own it is not a result: a smaller reply that
 forces a second round is a loss however good the ratio looks.
 
 Every intercepted read reports `full_tokens` vs `returned_tokens`, measured by the same
-BPE tokenizer Claude uses. No estimation, no extrapolation — and the figure is **not
-scaled up** from the 291 calls that could be attributed to the 1,470 in the ledger.
+BPE tokenizer Claude uses. No estimation, no extrapolation, and no scaling up — 96.2% of
+that saving rests on a real tokenizer count rather than a bytes/4 guess, which is asserted
+by a test rather than asserted here.
+
+**→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
+measurement: outline cost per file, what the ledger recorded, and the three numbers that
+would make the figure above dishonest if they moved — including the 64.9% of reads that
+never reach a Lumen tool and the 16 of 29 files where interception costs more than it saves.
+Every figure there is produced and asserted by
+`cargo test --release -p lumen-mcp --test efficiency -- --nocapture`, so a regression fails
+CI instead of ageing into a stale claim — which is precisely what the numbers this paragraph
+replaced had done.
 
 The Optimizer screen shows two clearly separated numbers:
 
