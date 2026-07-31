@@ -70,6 +70,29 @@ lumen report --yes          # file it
 `--yes` is required. Without it, `lumen report` prints the body and exits `2` with a
 notice, so filing is never something that happens because a flag was forgotten.
 
+### If `lumen` is not a command
+
+The `lumen` command comes from the **`lumen-cli` formula**, not from the app. A cask-only
+install (`brew install --cask lumen-app`) puts nothing on your `PATH` — the CLI is inside
+the bundle, where you can still call it directly:
+
+```bash
+/Applications/Lumen.app/Contents/MacOS/lumen-cli report --dry-run
+```
+
+That path matters in exactly the case this page exists for. If the app itself will not
+start — no menu-bar icon, no window — the UI route is unavailable, and the terminal route
+is the only one left. It reads the same database and files the same report.
+
+For a `lumen` on your `PATH`, install the formula alongside the cask:
+
+```bash
+brew install hackpoint/tap/lumen-cli
+```
+
+The cask does not link the bundled binary itself: doing so would have to declare a conflict
+with the formula, and then the two could not be installed together.
+
 Useful flags:
 
 | flag | effect |
