@@ -258,12 +258,25 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
             if !k.starts_with("NSStatusItem ") {
                 continue;
             }
-            // `objectForKey` distinguishes "absent" from "present and false"; `boolForKey`
-            // alone would render both as false and we would clear keys that do not exist.
-            let val = dict.objectForKey(&NSString::from_str(&k)).map(|_| {
-                defaults.boolForKey(&NSString::from_str(&k))
-            });
-            log::warn!("TRAY: pref {k} = {val:?}");
+            // Only the `Visible` keys are booleans. `Preferred Position` holds a number — 612 on
+            // this machine — and `boolForKey` on it returns true, so reading every key as a bool
+            // logged `Preferred Position = Some(true)`, which is meaningless and would send a
+            // maintainer down the wrong path. `keys_to_clear` was never fooled (it filters on the
+            // prefix), but the log line is the diagnostic a human reads.
+            let is_visible_key = k.starts_with("NSStatusItem Visible ");
+            // `objectForKey` distinguishes "absent" from "present and false"; `boolForKey` alone
+            // would render both as false and we would clear keys that do not exist.
+            let present = dict.objectForKey(&NSString::from_str(&k)).is_some();
+            let val = if is_visible_key && present {
+                Some(defaults.boolForKey(&NSString::from_str(&k)))
+            } else {
+                None
+            };
+            if is_visible_key {
+                log::warn!("TRAY: pref {k} = {val:?}");
+            } else {
+                log::warn!("TRAY: pref {k} present (not a visibility flag)");
+            }
             found.push((k, val));
         }
 

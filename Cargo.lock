@@ -6,6 +6,7 @@ version = 3
 name = "Lumen"
 version = "1.5.1"
 dependencies = [
+ "anyhow",
  "dirs 6.0.0",
  "futures-util",
  "log",
