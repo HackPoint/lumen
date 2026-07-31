@@ -169,8 +169,8 @@ struct Scenario {
     intent: &'static str,
     /// Fixture filename (extension drives language detection) and its content.
     fixture: Option<(&'static str, String)>,
-    /// Arguments, given the fixture's path on disk.
-    args: fn(&Path) -> Value,
+    /// Arguments, given the fixture's forward-slash relative path.
+    args: fn(&str) -> Value,
 }
 
 fn scenarios() -> Vec<Scenario> {
@@ -189,49 +189,49 @@ fn scenarios() -> Vec<Scenario> {
             tool: "smart_read",
             intent: "the win case: few items, real bodies",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "smart_read/outline_many_tiny_items",
             tool: "smart_read",
             intent: "outline can exceed the file; must fall back rather than claim a saving",
             fixture: Some(("decls.rs", many_tiny_items(120))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "smart_read/outline_tiny_file",
             tool: "smart_read",
             intent: "too small to amortise any header",
             fixture: Some(("tiny.rs", tiny_file())),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "smart_read/outline_unsupported_language",
             tool: "smart_read",
             intent: "no grammar: must return the file, not a one-item pseudo-outline",
             fixture: Some(("notes.xyz", unsupported_language(400))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "smart_read/outline_typescript",
             tool: "smart_read",
             intent: "TS class with methods",
             fixture: Some(("service.ts", typescript_service(14, 20))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "smart_read/outline_python",
             tool: "smart_read",
             intent: "Python functions plus a class",
             fixture: Some(("mod.py", python_module(14, 20))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "smart_read/full_mode",
             tool: "smart_read",
             intent: "delivery, not optimisation: expected to cost the file plus a header",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy(), "mode": "full" }),
+            args: |p| json!({ "path": p, "mode": "full" }),
         },
         // ── recall_file
         Scenario {
@@ -239,56 +239,56 @@ fn scenarios() -> Vec<Scenario> {
             tool: "recall_file",
             intent: "the intended use: one named item out of many",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy(), "names": ["operation_6"] }),
+            args: |p| json!({ "path": p, "names": ["operation_6"] }),
         },
         Scenario {
             id: "recall_file/exact_three_names",
             tool: "recall_file",
             intent: "several named items, merged where they touch",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy(), "names": ["operation_1", "operation_2", "operation_9"] }),
+            args: |p| json!({ "path": p, "names": ["operation_1", "operation_2", "operation_9"] }),
         },
         Scenario {
             id: "recall_file/substring_narrow",
             tool: "recall_file",
             intent: "inexact query, few matches: honoured but labelled",
             fixture: Some(("service.ts", typescript_service(14, 20))),
-            args: |p| json!({ "path": p.to_string_lossy(), "names": ["method_1"] }),
+            args: |p| json!({ "path": p, "names": ["method_1"] }),
         },
         Scenario {
             id: "recall_file/substring_broad",
             tool: "recall_file",
             intent: "inexact query matching most of the file: must return the map, not the bodies",
             fixture: Some(("service.ts", typescript_service(14, 20))),
-            args: |p| json!({ "path": p.to_string_lossy(), "names": ["method"] }),
+            args: |p| json!({ "path": p, "names": ["method"] }),
         },
         Scenario {
             id: "recall_file/no_match",
             tool: "recall_file",
             intent: "nothing matched: offer the outline so the caller can retry",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy(), "names": ["nonexistent_symbol"] }),
+            args: |p| json!({ "path": p, "names": ["nonexistent_symbol"] }),
         },
         Scenario {
             id: "recall_file/range_narrow",
             tool: "recall_file",
             intent: "an explicit small range out of a large file",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy(), "start_line": 100, "end_line": 130 }),
+            args: |p| json!({ "path": p, "start_line": 100, "end_line": 130 }),
         },
         Scenario {
             id: "recall_file/range_whole_file",
             tool: "recall_file",
             intent: "asking for everything must not cost more than reading everything",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy(), "start_line": 1, "end_line": 999_999 }),
+            args: |p| json!({ "path": p, "start_line": 1, "end_line": 999_999 }),
         },
         Scenario {
             id: "recall_file/no_selector",
             tool: "recall_file",
             intent: "no selector: outline, not the file plus a header",
             fixture: Some(("big.rs", few_big_items(12, 40))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         // ── compress_logs
         Scenario {
@@ -296,21 +296,21 @@ fn scenarios() -> Vec<Scenario> {
             tool: "compress_logs",
             intent: "the win case: one line repeated",
             fixture: Some(("app.log", repetitive_log(20, 30))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "compress_logs/stack_traces",
             tool: "compress_logs",
             intent: "repeated deep stack frames",
             fixture: Some(("crash.log", stack_trace_log(12, 25))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "compress_logs/incompressible",
             tool: "compress_logs",
             intent: "nothing to collapse: must not inflate",
             fixture: Some(("unique.log", incompressible_log(400))),
-            args: |p| json!({ "path": p.to_string_lossy() }),
+            args: |p| json!({ "path": p }),
         },
         Scenario {
             id: "compress_logs/inline_text",
@@ -358,24 +358,33 @@ struct Measured {
 /// these bytes.
 const FIXTURE_DIR: &str = "target/bench-fixtures";
 
-/// Create the fixture directory and return the relative path to `name`.
-fn fixture_path(name: &str) -> PathBuf {
-    let dir = PathBuf::from(FIXTURE_DIR);
-    std::fs::create_dir_all(&dir).expect("create the fixture directory");
-    dir.join(name)
+/// Create the fixture directory and return the path to `name` **with forward slashes**.
+///
+/// Returned as a `String` built with `/` rather than via `PathBuf::join`, because the separator ends
+/// up in the reply header and therefore in `returned_tokens`. `join` yields
+/// `target/bench-fixtures\\big.rs` on Windows, which tokenizes differently from the Unix form — the
+/// Windows CI job failed by +1 to +3 tokens on nine scenarios for exactly that reason, with no
+/// behavioural difference at all.
+///
+/// Windows accepts `/` in paths, so one string works everywhere and the header is identical on every
+/// platform. This is the same defect as the random tempdir, one level down: anything that varies in
+/// the path varies in the measurement.
+fn fixture_rel(name: &str) -> String {
+    std::fs::create_dir_all(FIXTURE_DIR).expect("create the fixture directory");
+    format!("{FIXTURE_DIR}/{name}")
 }
 
 /// Run one scenario. Returns the measurement and the median wall-clock over a few passes.
 fn measure(s: &Scenario) -> (Measured, u128) {
     let path = match &s.fixture {
         Some((name, body)) => {
-            let p = fixture_path(name);
+            let p = fixture_rel(name);
             // Rewritten every time rather than only when absent: a stale file from an earlier
             // version of a generator would silently invalidate every number taken against it.
             std::fs::write(&p, body).expect("write fixture");
             p
         }
-        None => fixture_path("(none)"),
+        None => fixture_rel("(none)"),
     };
     let args = (s.args)(&path);
     let params = json!({ "name": s.tool, "arguments": args });
