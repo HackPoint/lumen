@@ -2082,17 +2082,20 @@ mod tests {
     /// unfixable, and the last error is usually the least informative one.
     #[test]
     fn total_failure_reports_every_route_it_tried() {
-        // SAFETY: single-threaded; PATH is restored before returning.
-        let saved = std::env::var("PATH").unwrap_or_default();
-        unsafe {
-            std::env::set_var("PATH", "/nonexistent-bin");
-            std::env::remove_var("GITHUB_TOKEN");
-            std::env::remove_var("GH_TOKEN");
-        }
+        // Endpoints, not the environment. The first version cleared PATH so nothing would
+        // resolve — which works on Unix and not on Windows, where CreateProcess finds
+        // `cmd` in System32 whatever PATH says. The browser route then succeeded, the
+        // `unwrap_err` panicked, and the failure looked like a bug in the chain rather
+        // than in how the test forced it.
+        let ep = Endpoints {
+            api_base: "http://127.0.0.1:1".into(),
+            web_base: "http://127.0.0.1:1".into(),
+            gh_cmd: Some(vec!["lumen-no-such-gh-binary".into()]),
+            open_cmd: Some(vec!["lumen-no-such-opener".into()]),
+            token: None,
+        };
 
-        let err = file_issue("owner/repo", "t", "b", "deadbeef").unwrap_err();
-
-        unsafe { std::env::set_var("PATH", saved) };
+        let err = file_issue_with(&ep, "owner/repo", "t", "b", "deadbeef").unwrap_err();
 
         assert!(err.contains("every filing route failed"), "{err}");
         for route in ["gh:", "api:", "browser:"] {
