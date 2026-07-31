@@ -15,7 +15,10 @@
 # the same (asserted by lumen-core's meter_hooks_agree test) and a failed write leaves a
 # line in lumen_hook_errors.log beside the database instead of vanishing.
 
-set -euo pipefail
+# `-uo pipefail` without `-e`, matching METER_TEMPLATE. Under `-e`, `VAR=$(cmd)` with a
+# non-zero `cmd` aborts the script before `$?` can be read — which is exactly what the
+# tokenizer branch below has to inspect.
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
@@ -70,13 +73,33 @@ LINE_COUNT="${LINE_COUNT:-0}"
 
 # token_source records WHICH of these produced the count. Without it a bytes/4 estimate is
 # indistinguishable from a real measurement, which is the whole point of the column.
-if [ -x "$LUMEN_TOK" ]; then
-    FULL_TOKENS=$("$LUMEN_TOK" < "$FILE_PATH" 2>/dev/null || echo 0)
-    TOKEN_SOURCE="measured"
-else
-    FULL_TOKENS=$(( $(wc -c < "$FILE_PATH") / 4 ))
-    TOKEN_SOURCE="estimated"
-fi
+#
+# Identical to METER_TEMPLATE's count_tokens, and it has to be. This copy used to do
+#
+#     FULL_TOKENS=$("$LUMEN_TOK" < "$FILE_PATH" 2>/dev/null || echo 0)
+#     TOKEN_SOURCE="measured"
+#
+# which threw the exit code away. lumen-tok exits 3 for a file that is not valid UTF-8, so a
+# PNG was recorded as `full_tokens=0, token_source='measured'` — an unsupported file laundered
+# as a measurement, in the one column that exists to tell those apart. The drift test only
+# compared column *names*, so it passed.
+count_tokens() {
+    _f="$1"
+    if [ -x "$LUMEN_TOK" ]; then
+        _c=$("$LUMEN_TOK" < "$_f" 2>/dev/null)
+        _rc=$?
+        [ "$_rc" -eq 0 ] && { printf '%s measured\n' "$_c"; return 0; }
+        # 3 is EXIT_NOT_TEXT: the tokenizer ran and said this is not text. That is a fact about
+        # the file, not a failure, and it must not become a bytes/4 guess — bytes/4 overstates a
+        # screenshot by roughly 40x.
+        [ "$_rc" -eq 3 ] && { printf '0 unsupported\n'; return 0; }
+    fi
+    printf '%s estimated\n' "$(wc -c < "$_f" | awk '{print int($1/4)}')"
+}
+
+read -r FULL_TOKENS TOKEN_SOURCE <<EOF
+$(count_tokens "$FILE_PATH")
+EOF
 
 # Parameterised, not interpolated: the previous version spliced the path into SQL and
 # hand-escaped quotes, which is one apostrophe away from a broken statement.

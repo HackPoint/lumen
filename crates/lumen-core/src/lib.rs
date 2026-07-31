@@ -1,3 +1,4 @@
+pub mod coverage;
 pub mod compress;
 pub mod econ;
 pub mod faults;

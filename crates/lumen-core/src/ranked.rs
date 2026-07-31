@@ -804,7 +804,10 @@ impl Decline {
             Decline::NoQuery => "ranked_no_query",
             Decline::NoDefs => "ranked_no_defs",
             Decline::NotWorthIt => "ranked_not_worth_it",
-            Decline::WouldInflate => "ranked_would_inflate",
+            // Not `ranked_*`: this route is emitted by every metered path now, not only
+            // the ranked outline. Renamed at no historical cost — the old string has
+            // zero rows in any ledger, because the ranked rollout has never been on.
+            Decline::WouldInflate => "would_inflate",
             Decline::TooSlow => "ranked_too_slow",
         }
     }
@@ -1376,7 +1379,17 @@ fn caller(a: A) -> u8 { shared(a) }
         let mut seen = std::collections::BTreeSet::new();
         for d in all {
             assert!(seen.insert(d.route()), "duplicate route {}", d.route());
-            assert!(d.route().starts_with("ranked_"));
+        }
+        // `would_inflate` is deliberately NOT `ranked_`-prefixed: it is emitted by every metered
+        // path now, not only the ranked outline. The rename cost nothing historically — the
+        // ranked rollout has never been on, so the old string has zero rows anywhere.
+        assert_eq!(Decline::WouldInflate.route(), "would_inflate");
+        for d in all.iter().filter(|d| **d != Decline::WouldInflate) {
+            assert!(
+                d.route().starts_with("ranked_"),
+                "{} is ranked-only and must say so",
+                d.route()
+            );
         }
     }
 

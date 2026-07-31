@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import { RouterLink, RouterLinkActive, Router } from '@angular/router';
 import { Gauge } from '../../components/gauge/gauge';
 import { Cost } from '../../components/cost/cost';
@@ -7,6 +7,13 @@ import { Firefly } from '../../components/firefly/firefly';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { LumenTooltip } from '../../directives/tooltip.directive';
+
+/** Mirrors the `lumen_startup_health` command's payload. */
+interface StartupHealth {
+    degraded: boolean;
+    tray: string;
+    degradations: string[];
+}
 
 @Component({
     selector: 'home',
@@ -20,7 +27,19 @@ export class Home implements OnInit {
     private readonly router = inject(Router);
     private readonly bridge = inject(TauriBridge);
 
+    /**
+     * What failed at startup, if anything.
+     *
+     * Reported because a degraded Lumen used to look identical to a healthy one. In issue #5 the
+     * tray never appeared, nothing errored, and the app carried on presenting itself as fine —
+     * so the user had no way to know what was wrong or that a report was worth filing.
+     */
+    readonly health = signal<StartupHealth | null>(null);
+
     ngOnInit(): void {
+        this.bridge.invoke<StartupHealth>('lumen_startup_health')
+            .then(h => { if (h?.degraded) this.health.set(h); })
+            .catch(() => { /* non-fatal: an older backend simply has no such command */ });
         this.bridge.invoke<boolean>('lumen_setup_needed')
             .then(needed => { if (needed) this.router.navigate(['/setup']); })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });

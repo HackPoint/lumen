@@ -21,7 +21,11 @@ tauri-build = { version = "2.6.2", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.2", features = ["macos-private-api", "tray-icon"] }
+# Pinned exactly. `with_inner_tray_icon` reaches through to the `tray-icon` crate, so
+# this crate and Tauri must agree on its version — and Tauri's own docs warn that
+# `tray-icon` may change in a minor release. An `=` pin turns a silent type mismatch
+# into a resolver error.
+tauri = { version = "=2.11.5", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-positioner = { version = "2.3.2", features = ["tray-icon"] }
 lumen-core = { path = "../../crates/lumen-core" }
@@ -34,6 +38,22 @@ tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
 dirs = "6.0.0"
 tauri-plugin-autostart = "2.5.1"
+
+# macOS only, and only for the tray-visibility work (issue #5).
+#
+# NSUserDefaults: macOS persists a status item's removal as
+# `NSStatusItem Visible <autosave>` = false, permanently. Clearing it is the cure, and it
+# needs AppKit's own defaults store rather than a Tauri API.
+#
+# tray-icon: `TrayIcon::rect()` detects an item that exists but is not on screen, and
+# `with_inner_tray_icon` is the only route to `NSStatusItem::setVisible` — Tauri's
+# `set_visible(true)` only re-creates a *missing* item and never calls it, so it cannot
+# repair a persisted hidden state. Version must match Tauri's exactly; see the pin above.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", "NSDictionary", "NSArray", "NSValue"] }
+objc2-app-kit = { version = "0.3", features = ["NSStatusItem"] }
+objc2 = "0.6"
+tray-icon = "=0.24.2"
 
 [dev-dependencies]
 tempfile = "3"

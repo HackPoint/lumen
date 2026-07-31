@@ -19,34 +19,13 @@ use sqlx::sqlite::SqlitePoolOptions;
 /// records a *missed* optimization and must never count as a saving.
 pub const LUMEN_ROUTES: [&str; 3] = ["smart_read", "recall_file", "compress_logs"];
 
-/// File extensions with no meaningful token count.
-///
-/// A built-in Read of one of these is not a missed optimization: there is no outline
-/// to return and no saving that was available to miss. From 1.2.1 the meter labels
-/// them `token_source = 'unsupported'`, but rows written earlier cannot be identified
-/// that way — a failing tokenizer produced a bytes/4 estimate labelled `estimated`,
-/// which is indistinguishable from a genuinely broken tokenizer on real source.
-///
-/// The distortion is not marginal. Half of the historical missed-optimization total
-/// (3,431,295 of 6,862,596 tokens) comes from 117 binary reads out of 2,749, and the
-/// six largest rows in the whole table are screenshots. Matching on the extension
-/// corrects the figure for all history; the alternative, rewriting those rows, would
-/// mutate a ledger that is otherwise append-only.
-pub const UNMEASURABLE_EXTS: [&str; 21] = [
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "pdf", "tiff", "tif", "zip", "gz", "tar",
-    "dmg", "woff", "woff2", "ttf", "so", "dylib", "o", "a",
-];
-
-/// `AND lower(path) NOT LIKE '%.ext'` for every unmeasurable extension.
-///
-/// Built from a compile-time list of literals, so nothing user-supplied reaches the
-/// SQL and the `AssertSqlSafe` at the call site stays sound.
-fn not_unmeasurable_clause() -> String {
-    UNMEASURABLE_EXTS
-        .iter()
-        .map(|e| format!(" AND lower(path) NOT LIKE '%.{e}'"))
-        .collect()
-}
+// Both moved to `lumen_core::coverage`, which is the one place that answers "would Lumen have
+// handled this file?". Five places used to decide it independently and disagreed, which is how
+// the efficiency report came to publish a 64.9% "bypass" rate whose real value on the honest
+// denominator is 0.0%. Re-exported so every existing caller keeps compiling.
+pub use lumen_core::coverage::{
+    not_unmeasurable_sql as not_unmeasurable_clause, UNMEASURABLE_EXTS,
+};
 
 /// Resolve the metering DB into a sqlx connection URL.
 pub fn db_url() -> String {

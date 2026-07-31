@@ -156,4 +156,56 @@ describe('Home', () => {
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
     expect(text).toContain('claude-sonnet-4');
   });
+
+  // ── degraded-startup banner ────────────────────────────────────────────────
+  //
+  // Issue #5: the tray never appeared, nothing errored, and the app presented itself as
+  // completely healthy. The user had no way to know what was wrong, or that filing a report
+  // was worth doing. These tests pin both halves — it shows when something is wrong, and it
+  // stays out of the way when nothing is.
+
+  it('shows nothing when startup was healthy', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.degraded')).toBeNull();
+  });
+
+  it('shows nothing when the backend has no such command', async () => {
+    // An older backend simply rejects the call; that must not blank the screen or throw.
+    await build();
+    expect(fixture.nativeElement.querySelector('.degraded')).toBeNull();
+  });
+
+  it('reports an invisible tray even when nothing errored', async () => {
+    // The exact issue #5 shape: no degradations at all, yet the app is unusable.
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: true,
+      tray: 'built but not visible: hidden by preference',
+      degradations: [],
+    }));
+    const el = fixture.nativeElement.querySelector('.degraded');
+    expect(el).not.toBeNull();
+    expect(el.textContent).toContain('not visible');
+    expect(el.textContent).toContain('Report a fault');
+  });
+
+  it('lists every degradation it was given', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: true,
+      tray: 'present',
+      degradations: ['daemon: could not spawn: ENOENT', 'tray-menu: could not build the menu'],
+    }));
+    const items = fixture.nativeElement.querySelectorAll('.degraded__item');
+    expect(items.length).toBe(2);
+    expect(items[0].textContent).toContain('could not spawn');
+    expect(items[1].textContent).toContain('could not build the menu');
+  });
+
+  it('asks the backend for startup health exactly once', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [],
+    }));
+    expect(bridge.countOf('lumen_startup_health')).toBe(1);
+  });
 });

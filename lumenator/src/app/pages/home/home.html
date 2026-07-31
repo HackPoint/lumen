@@ -5,6 +5,22 @@
             <p class="brand__tag">Context &amp; cost for Claude Code</p>
         </header>
 
+        <!-- Shown only when something actually failed. A banner on a healthy launch would
+             train people to ignore it, which is how the one that mattered gets ignored too. -->
+        @if (health(); as h) {
+            <section class="degraded" role="status" aria-live="polite">
+                <p class="degraded__head">Lumen is running with reduced function</p>
+                <p class="degraded__tray">Menu-bar icon: {{ h.tray }}</p>
+                @for (d of h.degradations; track d) {
+                    <p class="degraded__item">{{ d }}</p>
+                }
+                <p class="degraded__hint">
+                    Use <strong>Report a fault</strong> on the Optimizer screen — the report
+                    includes this detail already.
+                </p>
+            </section>
+        }
+
         <!-- Tab nav: switch between Context and Optimizer screens -->
         <nav class="tab-nav" role="tablist" aria-label="Main navigation">
             <a class="tab-nav__tab"

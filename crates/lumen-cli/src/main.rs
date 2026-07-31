@@ -18,6 +18,7 @@ use lumen_core::report;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod data;
+mod doctor;
 mod ui;
 
 #[derive(Parser)]
@@ -58,6 +59,10 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Ask a running Lumen to show its window — a way in when the menu-bar icon is missing.
+    Show,
+    /// Print everything a bug report needs: status-item preferences, processes, paths, logs.
+    Doctor,
 }
 
 fn main() {
@@ -140,6 +145,11 @@ fn run_subcommand(cmd: Cmd) -> i32 {
             repo,
             yes,
         } => run_report(dry_run, faults, include_source, &repo, yes),
+        Cmd::Show => doctor::show(),
+        Cmd::Doctor => {
+            print!("{}", doctor::render(&doctor::collect()));
+            0
+        }
     }
 }
 

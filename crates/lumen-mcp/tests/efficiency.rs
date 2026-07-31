@@ -20,6 +20,7 @@
 //!   3. **The unflattering number renders.** Interception does not pay on every file. Those
 //!      files are named here rather than dropped, so a change that makes it worse fails.
 
+use lumen_core::coverage;
 use lumen_core::econ::Econ;
 use lumen_core::ranked::TagLang;
 use lumen_core::structure::{detect_lang, outline};
@@ -63,6 +64,9 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 
 struct Measured {
     name: String,
+    /// The absolute path. `name` is repo-relative for readable tables, but the tools need
+    /// something they can open.
+    path: String,
     lines: usize,
     full: usize,
     /// What `smart_read` returns.
@@ -95,7 +99,10 @@ fn measure() -> Vec<Measured> {
             continue;
         }
         let items = outline(&src, detect_lang(&path.to_string_lossy()));
-        if items.is_empty() {
+        // `is_empty` is not enough. `outline` does not fail on a language it cannot parse — it
+        // returns one synthetic whole-file item — so a file it never looked inside would enter
+        // the corpus with a ~40-token "outline" and flatter every published ratio.
+        if items.is_empty() || items.iter().all(|i| i.kind == "file") {
             continue;
         }
         let full = count_tokens(&src);
@@ -116,6 +123,7 @@ fn measure() -> Vec<Measured> {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned(),
+            path: path.to_string_lossy().into_owned(),
             lines,
             full,
             outline: count_tokens(&rendered),
@@ -421,17 +429,26 @@ fn the_recorded_ledger_agrees_with_itself() {
     // `sum(full) - sum(returned)`. Comparing the two sums therefore fails on correct data —
     // which is exactly what the first version of this test did, and it read like a metering
     // bug rather than an arithmetic mistake in the test.
+    // Two eras, and the invariant differs between them. Until 737eb71 (2026-07-29) the writer
+    // clamped a loss to zero; since then it records the signed difference, so a call that cost
+    // more than the file finally shows as negative. Asserting `max(0, …)` across the whole table
+    // fails on correct new data, and asserting signed equality fails on correct old data.
+    //
+    // The last clamped row is 2026-07-28 and the first signed row 2026-07-31, so the boundary is
+    // real rather than chosen.
+    const SIGNED_SINCE: &str = "2026-07-29";
     let violations: i64 = conn
         .query_row(
             "SELECT count(*) FROM read_events \
-             WHERE saved_tokens <> MAX(0, full_tokens - tokens_returned)",
-            [],
+             WHERE (ts >= ?1 AND saved_tokens <> full_tokens - tokens_returned) \
+                OR (ts <  ?1 AND saved_tokens <> MAX(0, full_tokens - tokens_returned))",
+            [SIGNED_SINCE],
             |r| r.get(0),
         )
         .unwrap_or(0);
     assert_eq!(
         violations, 0,
-        "{violations} rows where saved_tokens is not max(0, full - returned)"
+        "{violations} rows disagree with the saved_tokens rule for their era"
     );
 
     // What the clamp conceals: calls whose reply was larger than reading the file whole.
@@ -468,21 +485,184 @@ fn the_recorded_ledger_agrees_with_itself() {
         );
     }
 
-    // The honest denominator: a saving on a third of reads is not a saving on all of them.
-    let opt: i64 = rows
-        .iter()
-        .filter(|r| r.0 != "builtin_read")
-        .map(|r| r.1)
-        .sum();
-    let bypassed: i64 = rows
-        .iter()
-        .filter(|r| r.0 == "builtin_read")
-        .map(|r| r.1)
-        .sum();
-    if opt + bypassed > 0 {
-        println!(
-            "\n  optimized {opt}, bypassed {bypassed} — {:.1}% of reads never reached a Lumen tool",
-            100.0 * bypassed as f64 / (opt + bypassed) as f64
-        );
+    // ── Leak, versus scope ───────────────────────────────────────────────────────────────
+    //
+    // What this replaced: `builtin_read` rows divided by all rows, published as
+    // "64.9% of reads never reached a Lumen tool". Every builtin row was in the denominator
+    // whether or not interception was ever going to fire, so the number measured the file mix of
+    // one machine — mostly how many screenshots its author had looked at — and read as a routing
+    // failure. On the honest denominator the leak rate is zero.
+    //
+    // A leak is the only bucket that can indict the router, and the only one asserted.
+    let mut rows = conn
+        .prepare("SELECT routed_via, path, lines, full_tokens, ts FROM read_events")
+        .expect("prepare");
+    let all: Vec<(String, String, Option<i64>, i64, String)> = rows
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .expect("query")
+        .flatten()
+        .collect();
+
+    // Both ~/.claude/settings.json and the repo's .claude/settings.json register a meter on
+    // Read, and on a development machine both fire — 13 builtin reads already carry two rows at
+    // the same (path, ts) under different writer_hook values, and only 239 of 2,778 rows carry a
+    // writer_hook at all, so the true inflation is unknown and at least 13. Deduplicated on the
+    // identity of the read rather than on the row.
+    // Keyed on (path, ts) — the identity of one *read*. Keyed on (path, lines, full_tokens) it
+    // would be the identity of the *file*, and collapse 25 genuine reads of README.md into one:
+    // that over-deduplicated by 1,288 rows on first attempt.
+    let mut seen_reads: std::collections::HashSet<(String, String)> = Default::default();
+    let dupes = {
+        let mut d = 0i64;
+        for (route, path, _, _, ts) in &all {
+            if route == "builtin_read" && !seen_reads.insert((path.clone(), ts.clone())) {
+                d += 1;
+            }
+        }
+        d
+    };
+    seen_reads.clear();
+
+    let mut leaked = 0i64;
+    let mut below = 0i64;
+    let mut unmeasurable = (0i64, 0i64);
+    let mut uncovered: std::collections::BTreeMap<String, (i64, i64)> = Default::default();
+    let mut optimized = 0i64;
+    for (route, path, lines, full, ts) in &all {
+        if route != "builtin_read" {
+            optimized += 1;
+            continue;
+        }
+        if !seen_reads.insert((path.clone(), ts.clone())) {
+            continue;
+        }
+        match coverage::classify(path, *lines) {
+            coverage::Scope::Optimizable => leaked += 1,
+            coverage::Scope::BelowThreshold => below += 1,
+            coverage::Scope::Unmeasurable => {
+                unmeasurable.0 += 1;
+                unmeasurable.1 += full;
+            }
+            coverage::Scope::UncoveredKind => {
+                let e = uncovered.entry(coverage::ext_of(path)).or_default();
+                e.0 += 1;
+                e.1 += full;
+            }
+        }
     }
+
+    println!("\n== Coverage: what leaked, versus what was out of scope ==========");
+    if dupes > 0 {
+        println!("  ({dupes} duplicate builtin rows collapsed — two meter hooks are registered)");
+    }
+    println!("  optimized                {optimized:>7} calls");
+    println!(
+        "  LEAKED                   {leaked:>7} calls   <- eligible but not intercepted{}",
+        if leaked == 0 { " (none)" } else { "" }
+    );
+    println!("  out of scope:");
+    println!("    below 300 lines        {below:>7} calls");
+    println!(
+        "    unmeasurable           {:>7} calls   {:>10} tokens excluded from every baseline",
+        unmeasurable.0, unmeasurable.1
+    );
+    let uncovered_calls: i64 = uncovered.values().map(|v| v.0).sum();
+    let uncovered_tokens: i64 = uncovered.values().map(|v| v.1).sum();
+    println!(
+        "    kinds not handled      {uncovered_calls:>7} calls   {uncovered_tokens:>10} tokens — the coverage backlog"
+    );
+    let mut backlog: Vec<_> = uncovered.iter().collect();
+    backlog.sort_by_key(|(_, v)| -v.1);
+    for (ext, (n, tok)) in backlog.iter().take(6) {
+        println!("      .{ext:<8} {n:>5} calls {tok:>9} tokens");
+    }
+
+    // A leak means the hook did not fire on a file it claims to cover. There is no acceptable
+    // non-zero value, so this is an equality rather than a threshold.
+    assert_eq!(
+        leaked, 0,
+        "{leaked} reads were eligible for interception and were not intercepted"
+    );
+
+    // ── The baseline, with binaries excluded ─────────────────────────────────────────────
+    //
+    // lumen-stats has excluded these from `missed_calls` since 1.2.1; this test never did, which
+    // is why docs/efficiency.md published a 6.88M-token "missed" figure whose PNG half is a
+    // bytes/4 guess the codebase itself documents as ~40x too high.
+    let missed_tokens: i64 = all
+        .iter()
+        .filter(|(route, path, lines, _, _)| {
+            route == "builtin_read"
+                && coverage::classify(path, *lines) != coverage::Scope::Unmeasurable
+        })
+        .map(|(_, _, _, full, _)| full)
+        .sum();
+    let raw_missed: i64 = all
+        .iter()
+        .filter(|(route, ..)| route == "builtin_read")
+        .map(|(_, _, _, full, _)| full)
+        .sum();
+    println!("\n  missed-optimization tokens, binaries excluded: {missed_tokens}");
+    println!(
+        "  (raw would be {raw_missed} — {:.0}% of it is unmeasurable files)",
+        100.0 * (raw_missed - missed_tokens) as f64 / raw_missed.max(1) as f64
+    );
+    assert!(
+        missed_tokens <= raw_missed,
+        "excluding rows cannot increase the total"
+    );
+}
+
+/// No Lumen tool may return more than the file it was asked about.
+///
+/// The corpus form of the guarantee: not "this did not happen recently" but "this cannot happen",
+/// checked against every real file in the repository at or above the interception threshold and
+/// for every shape a caller can ask for.
+#[test]
+fn no_tool_returns_more_than_the_file_on_any_real_file() {
+    let files = measure();
+    assert!(!files.is_empty(), "corpus must not be empty");
+
+    let mut worst: Option<(String, i64, i64, String)> = None;
+    for f in &files {
+        let calls = [
+            ("smart_read outline", serde_json::json!({ "path": &f.path })),
+            ("recall_file no selector", serde_json::json!({ "path": &f.path })),
+            (
+                "recall_file whole range",
+                serde_json::json!({ "path": &f.path, "start_line": 1, "end_line": 999_999 }),
+            ),
+        ];
+        for (label, args) in calls {
+            let out = if label.starts_with("smart_read") {
+                lumen_mcp::tool_smart_read(&args)
+            } else {
+                lumen_mcp::tool_recall_file(&args)
+            };
+            let Some(m) = out.meter else { continue };
+            let over = m.returned_tokens - m.full_tokens;
+            if over > 0 && worst.as_ref().map(|w| over > w.1).unwrap_or(true) {
+                worst = Some((f.name.clone(), over, m.full_tokens, label.to_string()));
+            }
+            assert!(
+                m.returned_tokens <= m.full_tokens + lumen_mcp::NOTE_ALLOWANCE,
+                "{label} on {} returned {} against {} for the file (over by {over})",
+                f.name,
+                m.returned_tokens,
+                m.full_tokens,
+                );
+        }
+    }
+
+    println!("\n== Worst overage across the corpus ==============================");
+    match worst {
+        Some((name, over, full, label)) => println!(
+            "  {over} tokens ({:.2}% of the file) — {label} on {name}",
+            100.0 * over as f64 / full.max(1) as f64
+        ),
+        None => println!("  none: every reply cost less than reading the file"),
+    }
+    println!("  allowance is {} tokens (one explanatory line)", lumen_mcp::NOTE_ALLOWANCE);
 }

@@ -118,6 +118,12 @@ pub struct Environment {
     pub hooks_digest: Option<String>,
     pub read_events_cols: Option<usize>,
     pub env_overrides: Vec<(String, String)>,
+    /// The menu-bar/tray state, when the caller knows it. `collect()` cannot: the tray belongs
+    /// to the GUI process, so the GUI fills this in after collecting. A report that says the
+    /// icon was never visible answers the first question a maintainer would otherwise ask.
+    pub tray: Option<String>,
+    /// Startup steps that failed without aborting. Same source as the in-app degraded banner.
+    pub startup_degradations: Vec<String>,
     /// Workspace root, used to relativise paths. Never rendered.
     pub workspace_root: Option<PathBuf>,
     /// Home directory, scrubbed from all rendered text. Never rendered.
@@ -125,7 +131,18 @@ pub struct Environment {
 }
 
 impl Environment {
+    /// Collect for the CLI. See [`Environment::collect_for`] for why the channel is a parameter.
     pub fn collect() -> Self {
+        Self::collect_for("cli")
+    }
+
+    /// Collect, naming the channel the report is being filed from.
+    ///
+    /// This used to hardcode `"cli"`, so every report filed from the GUI's **File issue** button
+    /// claimed to come from the CLI. MESSAGING_CONTRACT.md makes channel honesty an explicit
+    /// rule — CLI is Full mode, VS Code is Soft mode — and the report screen is the one place a
+    /// maintainer takes it at face value.
+    pub fn collect_for(channel: &str) -> Self {
         let workspace_root = workspace_root();
         let home = dirs::home_dir();
 
@@ -139,12 +156,14 @@ impl Environment {
             git_sha: git_sha(workspace_root.as_deref()),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
-            channel: "cli".to_string(),
+            channel: channel.to_string(),
             mcp_scope: mcp_scope(workspace_root.as_deref()),
             mcp_json_servers: mcp_json_servers(workspace_root.as_deref()),
             hooks_digest: hooks_digest(workspace_root.as_deref()),
             read_events_cols: read_events_cols(),
             env_overrides,
+            tray: None,
+            startup_degradations: Vec::new(),
             workspace_root,
             home,
         }
@@ -706,6 +725,19 @@ fn environment_lines(env: &Environment) -> Vec<String> {
             .join(", ");
         format!("env overrides in effect: {joined}")
     });
+
+    // Only rendered when the caller knew. The CLI cannot — the tray belongs to the GUI process
+    // — and printing "tray: unknown" on every CLI report would be noise that reads like a
+    // finding.
+    if let Some(tray) = &env.tray {
+        lines.push(format!("menu-bar icon: {tray}"));
+    }
+    if !env.startup_degradations.is_empty() {
+        lines.push(format!(
+            "startup degraded: {}",
+            env.startup_degradations.join("; ")
+        ));
+    }
 
     lines
 }
@@ -1545,11 +1577,51 @@ mod tests {
             hooks_digest: Some("c41afe0912345678".into()),
             read_events_cols: Some(24),
             env_overrides: vec![("LUMEN_LINE_THRESHOLD".into(), "300".into())],
+            // The CLI's shape: it cannot know the tray state, so the existing snapshots must
+            // stay byte-identical. The tests below set these explicitly.
+            tray: None,
+            startup_degradations: Vec::new(),
             // Deliberately not the real root: paths must relativise identically on
             // any machine, and nothing outside it may survive rendering.
             workspace_root: Some(PathBuf::from("/w/lumen")),
             home: Some(PathBuf::from("/Users/testuser")),
         }
+    }
+
+    #[test]
+    fn a_cli_report_does_not_claim_to_know_the_tray_state() {
+        // It cannot: the tray belongs to the GUI process. Printing "tray: unknown" on every CLI
+        // report would be noise that reads like a finding.
+        let lines = environment_lines(&test_env());
+        assert!(
+            !lines.iter().any(|l| l.contains("menu-bar icon")),
+            "{lines:#?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("startup degraded")));
+    }
+
+    #[test]
+    fn a_gui_report_renders_the_tray_state_and_any_degradations() {
+        // The issue #5 shape: this is the line that answers the first question a maintainer
+        // would otherwise have to ask for.
+        let mut env = test_env();
+        env.channel = "gui".into();
+        env.tray = Some("built but not visible: hidden by preference".into());
+        env.startup_degradations = vec!["daemon: could not spawn: ENOENT".into()];
+        let lines = environment_lines(&env);
+        let joined = lines.join("\n");
+        assert!(joined.contains("menu-bar icon: built but not visible"), "{joined}");
+        assert!(joined.contains("startup degraded: daemon: could not spawn"), "{joined}");
+        assert!(joined.contains("channel `gui`"), "{joined}");
+    }
+
+    #[test]
+    fn the_channel_is_whatever_the_caller_says_it_is() {
+        // Was hardcoded "cli", so every report filed from the app's own button claimed to come
+        // from the CLI — and MESSAGING_CONTRACT.md makes channel honesty an explicit rule.
+        assert_eq!(Environment::collect_for("gui").channel, "gui");
+        assert_eq!(Environment::collect_for("vscode").channel, "vscode");
+        assert_eq!(Environment::collect().channel, "cli");
     }
 
     fn load(name: &str) -> Vec<Fault> {
@@ -1791,7 +1863,13 @@ mod tests {
     fn decline_routes_match_the_enum() {
         let routes = decline_routes();
         assert_eq!(routes.len(), 5, "a Decline variant was added or removed");
-        assert!(routes.iter().all(|r| r.starts_with("ranked_")));
+        // All but one are ranked-only. `would_inflate` is shared by every metered path, which is
+        // why the report must pick these up from the enum rather than from a prefix match.
+        assert!(routes.contains(&"would_inflate"));
+        assert_eq!(
+            routes.iter().filter(|r| r.starts_with("ranked_")).count(),
+            4
+        );
         assert!(
             !routes.contains(&crate::ranked::ROUTE_RANKED),
             "the success route must never be counted as a decline"

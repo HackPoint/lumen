@@ -182,11 +182,35 @@ fn lumen_ping_round_trips_through_the_process() {
     s.shutdown();
 }
 
+/// A file shaped like real source, so protocol tests exercise the tool rather than the
+/// inflation guard.
+///
+/// `"fn alpha() {}\nfn beta() {}"` is eight tokens: literally any reply about it — a header
+/// alone — costs more than reading it, so the guard correctly returns the file and three tests
+/// started asserting the guard instead of the protocol.
+fn realistic_rs(names: &[&str]) -> String {
+    let mut s = String::from("use std::io;\n\n");
+    for (n, name) in names.iter().enumerate() {
+        s.push_str(&format!("fn {name}() {{\n"));
+        s.push_str(&format!("    let marker_{n} = {n};\n"));
+        for j in 0..24 {
+            s.push_str(&format!("    let v{j} = marker_{n}.wrapping_add({j});\n"));
+        }
+        s.push_str("}\n\n");
+        // More than CTX_LINES of separation, so a single-item recall cannot bleed the next one.
+        for _ in 0..6 {
+            s.push_str("// pad\n");
+        }
+        s.push('\n');
+    }
+    s
+}
+
 #[test]
 fn smart_read_outlines_a_real_file_on_disk() {
     let dir = TempDir::new().unwrap();
     let file = dir.path().join("sample.rs");
-    std::fs::write(&file, "fn alpha() {}\nfn beta() {}\n").unwrap();
+    std::fs::write(&file, realistic_rs(&["alpha", "beta"])).unwrap();
 
     let mut s = Server::start();
     let frame = s.call(tool_call(
@@ -205,11 +229,7 @@ fn smart_read_outlines_a_real_file_on_disk() {
 fn recall_file_returns_one_item_from_a_real_file() {
     let dir = TempDir::new().unwrap();
     let file = dir.path().join("sample.rs");
-    std::fs::write(
-        &file,
-        "fn alpha() {\n    let a = 1;\n}\n\n// pad\n// pad\n// pad\n// pad\n\nfn beta() {\n    let b = 2;\n}\n",
-    )
-    .unwrap();
+    std::fs::write(&file, realistic_rs(&["alpha", "beta"])).unwrap();
 
     let mut s = Server::start();
     let frame = s.call(tool_call(
@@ -219,8 +239,8 @@ fn recall_file_returns_one_item_from_a_real_file() {
     ));
     let text = text_of(&frame);
     assert!(text.contains("alpha"), "{text}");
-    assert!(text.contains("let a = 1"));
-    assert!(!text.contains("let b = 2"), "beta must not leak: {text}");
+    assert!(text.contains("marker_0"), "alpha's body must be present: {text}");
+    assert!(!text.contains("marker_1"), "beta's body must not leak: {text}");
     s.shutdown();
 }
 
@@ -436,7 +456,7 @@ fn a_tool_call_writes_a_metering_row_after_answering() {
     let db = db_dir.path().join("meter.db");
     let src_dir = TempDir::new().unwrap();
     let file = src_dir.path().join("s.rs");
-    std::fs::write(&file, "fn alpha() {}\nfn beta() {}\n").unwrap();
+    std::fs::write(&file, realistic_rs(&["alpha", "beta"])).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"))
         .env("LUMEN_DB", &db)
