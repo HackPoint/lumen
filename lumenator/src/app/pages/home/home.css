@@ -285,3 +285,42 @@
     font-size: 0.6rem;
     font-variant-numeric: tabular-nums;
 }
+
+/* Degraded-startup banner. Amber rather than red: the app still works, it is just not whole,
+   and red is reserved for the alert threshold on the gauge. */
+.degraded {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--warn-border, #6b5320);
+    border-left-width: 3px;
+    border-radius: 6px;
+    background: var(--warn-bg, rgba(210, 153, 34, 0.08));
+}
+
+.degraded__head {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--warn-fg, #d29922);
+}
+
+.degraded__tray,
+.degraded__item {
+    margin: 0 0 4px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--fg-muted, #8b949e);
+    /* Error text can be long and arbitrary; it must wrap rather than widen the popover. */
+    overflow-wrap: anywhere;
+}
+
+.degraded__hint {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: var(--fg-muted, #8b949e);
+}
+
+.degraded__hint strong {
+    color: var(--fg, #e6edf3);
+    font-weight: 600;
+}

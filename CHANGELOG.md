@@ -1,5 +1,122 @@
 # Changelog
 
+## [Unreleased]
+
+Two things this release is really about: the menu-bar icon that never appeared for one user, and
+the discovery that two of the three "honesty" figures published in 1.5.1's efficiency report were
+themselves wrong.
+
+### The menu-bar icon, and why nothing was logged
+
+Issue #5 reported Lumen running with two processes and no menu-bar icon on macOS 26 — and because
+both windows start hidden and the tray is the whole interface, no popover, no window, and no way
+to reach the fault reporter to report it. It did not reproduce here.
+
+**The diagnostic asked for did not exist.** `tauri_plugin_log` was registered under
+`if cfg!(debug_assertions)`, and no other logger exists in the crate, so in a released build every
+`log::error!` went to a no-op sink and `~/Library/Logs/io.speedata.lumen/Lumen.log` was never
+created. The 1.5.1 CHANGELOG and a comment on the issue both asked the reporter for a line from
+that file. Logging is now registered unconditionally, at `Warn` in release, with `LUMEN_LOG` to
+raise it and `Stdout` retained so running the binary from a terminal shows its output.
+
+**The likely cause needed no error at all.** ⌘-dragging a status item off the menu bar makes macOS
+persist `NSStatusItem Visible <autosave>` = false, permanently: from then on AppKit creates the
+item and immediately hides it. `build()` returns `Ok`, the app logs success, and the fallback added
+in 1.5.1 never fires — the app is exactly as unreachable as before, while looking healthy from the
+inside. It is per-user preference state, which is why it does not reproduce on another machine.
+
+Lumen now clears that preference before building the tray, and says so rather than silently
+overriding a choice someone may have made deliberately: on the launch that repairs it, the window
+opens once with an explanation. `TrayIcon::set_visible(true)` is *not* the fix — it only re-creates
+a missing item and never calls `NSStatusItem::setVisible`.
+
+**"Built" is not "visible", and is no longer treated as such.** After the event loop starts, the
+status item's rect is checked at +500ms, +1.5s and +4s, and classified `Present` / `Absent` /
+`OffScreen` (a full menu bar or a notch clip — which Lumen cannot fix, and now says so instead of
+pretending). On `Absent` it asks AppKit directly to show the item. The build itself is not retried:
+its only macOS error paths are deterministic, so a second attempt cannot succeed.
+
+**Nothing in startup uses `?` or `expect` any more.** Three `?` on tray-menu construction and two
+`expect`s on the daemon sidecar could abort startup outright, and 1.5.1's fallback covered none of
+them. Every step now either succeeds or records a degradation, startup ends with one decision about
+reachability, and the app says so in a banner instead of presenting itself as healthy. A latent
+trap came with it: `DaemonChild` was only managed on the success path while the exit handler called
+`state::<DaemonChild>()`, which panics if unmanaged — so degrading past a failed spawn would have
+traded a startup panic for a shutdown panic.
+
+**And there are now ways in that do not involve the tray.** `open -a Lumen` or double-clicking the
+app reveals the window (previously it did nothing at all). `lumen show` asks a running instance to
+surface. `lumen doctor` prints what a bug report needs in one paste — status-item preferences across
+both domains, processes, menu-bar managers, log and database paths — with the likely cause named
+and its one-line fix. The fallback also switches to `Regular` activation while degraded, because an
+Accessory process has no Dock icon and a window it "shows" has nothing to bring it forward.
+
+### Two of the three published honesty figures were wrong
+
+**"64.9% of reads never reached a Lumen tool" was a bad denominator.** It divided every recorded
+read of every file type by the total, so reads that were never eligible for interception were
+counted as bypasses — it measured the file mix of one machine, mostly how many screenshots its
+author had looked at. On the honest denominator, **0 of 1,573 eligible reads leaked**. Coverage on
+what the hook claims to cover is complete, and a test now asserts that equality rather than a
+ratio, alongside a *scope* table that prices what is genuinely not covered (`.md` 250k tokens,
+`.scss` 180k, `.js` 98k) instead of hiding it inside a percentage.
+
+**Half the missed-optimization baseline was screenshots.** 3,431,295 of 6,931,572 tokens came from
+124 reads of binary files, whose `full_tokens` is a bytes/4 estimate this codebase already
+documents as overstating a PNG by ~40×. `lumen-stats` had excluded these since 1.2.1 using a
+constant that already existed; the efficiency test aggregated raw. Both now read one list from one
+place. 28 duplicate rows were also collapsed — two meter hooks are registered on a development
+machine and both fire.
+
+Five places independently decided "would Lumen have handled this file?", and they disagreed. That
+is now one module, and the disagreement it hid included a real bug: `mts`/`cts` were accepted by
+the ranked language detector and not by the structural one, so `smart_read` on a `.mts` file
+produced a one-item whole-file "outline" and metered it as a ~95% saving of a file it never looked
+inside.
+
+### No tool can return more than the file it was asked about
+
+170 recorded calls had cost more than a plain read — 92,347 tokens, and that is a floor, because
+the JSON-RPC envelope is never counted. 96% of it came from one mechanism: `recall_file` prefixed
+every line with `{lineno:>5}: `, about three tokens of gutter, and applied it across essentially
+whole files because name matching used `contains()` while the tool's own description promised exact
+matching. `names: ["e"]` selected nearly every item in a file.
+
+Exact matching now comes first, with substring as a labelled fallback capped at five items; the
+gutter is `123|`; overlapping and adjacent items merge so shared lines are emitted once; the
+no-selector branch returns the outline rather than the file plus a header; and `mode="full"` has its
+own route so handing over a whole file cannot pool with outline savings.
+
+Then a backstop at the single point every metered reply passes through: **a reply that would cost
+more than the file returns the file instead**, with one line saying so, routed `would_inflate`. Not
+an error, which would leave the model with nothing and burn a round; not a truncation, which would
+silently return less than was asked for. A corpus test asserts it against every file in this
+repository at or above the threshold, for every shape a caller can ask for. Worst overage across the
+corpus: 27 tokens, 0.33% of the file.
+
+### The developer meter hook laundered unsupported files as measurements
+
+It did `FULL_TOKENS=$("$LUMEN_TOK" < "$f" 2>/dev/null || echo 0); TOKEN_SOURCE="measured"`,
+discarding the exit code — and `lumen-tok` exits 3 for a file that is not valid UTF-8. A PNG was
+recorded as `full_tokens=0, token_source='measured'`: an unsupported file laundered as a
+measurement, in the one column that exists to tell those apart. The installed copy was correct. The
+drift test compared column *names*, which is why it passed.
+
+That test now runs both copies against a stub tokenizer and compares what they record, across exit
+0, exit 3, exit 1 and a missing binary. Reintroducing the bug fails it by name.
+
+### Notes
+
+- Fault reports filed from the app claimed `channel: "cli"`, because `Environment::collect`
+  hardcoded it. They now say `gui`, and carry the tray state and any startup degradations — so a
+  user who *can* reach the app files a report that already contains the answer.
+- `LUMEN_SIMULATE_TRAY=err|absent|offscreen` is honoured in release builds. The tray failure paths
+  need a live app and a real menu bar, so they cannot be unit-tested at all; this is what makes them
+  reachable deliberately instead of by breaking your menu bar.
+- Test fixtures shaped like toys were hiding behind the guard: `"fn alpha() {}\nfn beta() {}"` is
+  eight tokens, so any reply about it legitimately costs more than reading it. Fifteen tests were
+  asserting the inflation guard rather than the behaviour they were written for.
+
 ## [1.5.1] — 2026-07-31
 
 A patch release, and the reason to install it is that 1.5.0's Linux CLI does not run.
@@ -64,8 +181,15 @@ ignored.
 
 The main window is now shown when the tray cannot be built. That is not a fix for whatever
 makes the tray fail, which remains undiagnosed and does not reproduce here on the same OS
-version; it is the difference between a degraded app and an unusable one. The identifying
-line is `TRAY: build failed:` in `~/Library/Logs/io.speedata.lumen/Lumen.log`.
+version; it is the difference between a degraded app and an unusable one.
+
+**Correction.** This entry originally said the identifying line was `TRAY: build failed:` in
+`~/Library/Logs/io.speedata.lumen/Lumen.log`. That file does not exist in a released build:
+the logger was registered only under `cfg!(debug_assertions)`, so every `log::error!` in the
+shipped binary went to a no-op sink. The instruction was wrong when it was written, and it
+was also sent to the reporter of #5. Release logging is fixed in the next version; until
+then the diagnostics that do work are in
+[docs/troubleshooting-the-tray.md](docs/troubleshooting-the-tray.md).
 
 The same report caught the cask uninstalling a LaunchAgent that does not exist: it
 unloaded `io.speedata.lumen`, but `launchctl` matches on the agent's Label and the plugin

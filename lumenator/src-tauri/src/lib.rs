@@ -1,11 +1,12 @@
 #![allow(clippy::single_match)] // match with one arm used intentionally for clarity
 #![allow(clippy::collapsible_match)] // guard conditions in match arms kept explicit for readability
 #![allow(clippy::type_complexity)] // complex sqlx query types are self-documenting inline
+mod health;
 mod setup;
 use futures_util::StreamExt;
 use std::sync::Mutex;
-use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent, TrayIconId};
+use crate::health::StartupHealth;
 use tauri::{Emitter, Manager, State, WindowEvent};
 use tauri_plugin_positioner::{Position, WindowExt};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -178,24 +179,84 @@ pub fn run() {
             }
             WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    // Hiding is right only while there is a tray to re-open from. With the
+                    // icon unavailable, hiding this window puts the app back exactly where
+                    // issue #5 found it — running, with nothing to click. Quit instead.
+                    let reachable = window
+                        .app_handle()
+                        .try_state::<StartupHealth>()
+                        .map(|h| !health::needs_fallback(&h.tray()))
+                        .unwrap_or(true);
+                    if reachable {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        log::warn!("CLOSE: no reachable tray — quitting rather than hiding");
+                        window.app_handle().exit(0);
+                    }
                 }
             }
             _ => {}
         })
+        .manage(StartupHealth::default())
         .setup(|app| {
-            // macOS: run as a menu-bar accessory (no Dock icon, tray shows reliably)
+            // Nothing below this line uses `?` or `expect`.
+            //
+            // Every step either succeeds or records a degradation, and setup ends with one
+            // decision about whether the app is reachable. Before this rule, three `?` on
+            // menu construction and two `expect`s on the daemon sidecar could abort startup
+            // outright, and the tray fallback added in 1.5.1 covered none of them — so a
+            // failure in any of those five places produced a process with no interface at
+            // all, which is the shape of issue #5.
+
+            // macOS: run as a menu-bar accessory (no Dock icon, tray shows reliably).
+            // Deliberately reversible — `reveal_main_window` switches back to Regular, because
+            // an Accessory process has no Dock icon and is absent from the app switcher, so a
+            // window it "shows" has nothing to bring it forward.
+            //
+            // Ordered before the `state()` borrow below: this one needs `&mut App`.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+            let health = app.state::<StartupHealth>();
+
+            // Registered unconditionally. This used to be `if cfg!(debug_assertions)`, and
+            // since no other logger exists in this crate, every log::error! in a released
+            // build went to a no-op sink — so ~/Library/Logs/io.speedata.lumen/Lumen.log was
+            // never created. Both the 1.5.1 CHANGELOG and a comment on issue #5 asked the
+            // reporter for a line from that file. There was nothing to find.
+            //
+            // Warn by default in release, not off and not opt-in: a user who cannot reach the
+            // app cannot be told to set an env var, and by the time they are asked the launch
+            // that mattered is over. LUMEN_LOG raises it for a follow-up.
+            let level = health::log_level_from(std::env::var("LUMEN_LOG").ok().as_deref(), cfg!(debug_assertions));
+            if let Err(e) = app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(level)
+                    // These are chatty at Debug and would bury the lines we actually want.
+                    .level_for("sqlx", log::LevelFilter::Warn)
+                    .level_for("tao", log::LevelFilter::Warn)
+                    .level_for("wry", log::LevelFilter::Warn)
+                    .level_for("tungstenite", log::LevelFilter::Warn)
+                    .level_for("tokio_tungstenite", log::LevelFilter::Warn)
+                    .level_for("hyper", log::LevelFilter::Warn)
+                    .level_for("reqwest", log::LevelFilter::Warn)
+                    // Stdout is kept in release on purpose: it is what makes "quit, then run
+                    // the binary from Terminal" a working diagnostic. The no-println rule in
+                    // lumen-daemon is about *that* process, whose pipes this one owns.
+                    .targets([
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                    ])
+                    // The plugin default is 40 KB, which a Debug session overruns in seconds.
+                    .max_file_size(256 * 1024)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                    .build(),
+            ) {
+                // No logger yet, so this is the one place stderr is the only option.
+                eprintln!("LOG: could not register the log plugin: {e}");
             }
+            log::warn!("STARTUP: Lumen {} (log level {level})", env!("CARGO_PKG_VERSION"));
 
             // resolve a stable DB path in the app-data dir
             let db_path = app
@@ -238,33 +299,77 @@ pub fn run() {
             // LUMEN_SUPERVISED tells the daemon to exit when this process does. The
             // sidecar's stdin is a pipe held by the app, so the daemon sees EOF even
             // when the app is killed outright and no exit handler runs.
-            let sidecar = app
-                .shell()
-                .sidecar("lumen-daemon")
-                .expect("sidecar lumen-daemon not found")
-                .env("LUMEN_DB", &db_path)
-                .env("LUMEN_SUPERVISED", "1");
-            let (mut rx, child) = sidecar.spawn().expect("failed to spawn daemon");
-            app.manage(DaemonChild(Mutex::new(Some(child))));
+            //
+            // Managed unconditionally, and before the spawn is attempted: the RunEvent::Exit
+            // handler does `app.state::<DaemonChild>()`, which panics if nothing was ever
+            // managed. Registering it only on the success path meant that degrading past a
+            // failed spawn would trade a startup panic for a shutdown panic.
+            app.manage(DaemonChild(Mutex::new(None)));
 
-            tauri::async_runtime::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    if let CommandEvent::Stderr(line) = event {
-                        log::info!("[daemon] {}", String::from_utf8_lossy(&line));
+            match app.shell().sidecar("lumen-daemon") {
+                Ok(cmd) => {
+                    let cmd = cmd
+                        .env("LUMEN_DB", &db_path)
+                        .env("LUMEN_SUPERVISED", "1");
+                    match cmd.spawn() {
+                        Ok((mut rx, child)) => {
+                            *app.state::<DaemonChild>().0.lock().unwrap() = Some(child);
+                            tauri::async_runtime::spawn(async move {
+                                while let Some(event) = rx.recv().await {
+                                    if let CommandEvent::Stderr(line) = event {
+                                        // warn!, not info!: release defaults to Warn, and the
+                                        // daemon only writes here for genuinely notable
+                                        // events, so this does not spam.
+                                        log::warn!("[daemon] {}", String::from_utf8_lossy(&line));
+                                    }
+                                }
+                            });
+                        }
+                        // Survivable: get_stats/get_usage/get_sessions read SQLite directly via
+                        // lumen-stats, so the app still opens and still shows history. Only the
+                        // live gauge is missing.
+                        Err(e) => health.degrade("daemon", format!("could not spawn: {e}")),
                     }
                 }
-            });
+                Err(e) => health.degrade("daemon", format!("sidecar not found: {e}")),
+            }
 
             // --- tray icon ---
-            let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
-            let show = MenuItem::with_id(app, "show", "Open Lumen", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            //
+            // Before building: clear any persisted "this status item is hidden" preference, so
+            // the item is created visible rather than created and immediately hidden.
+            //
+            // This is the likely cause of issue #5. ⌘-dragging a status item off the menu bar
+            // makes macOS write `NSStatusItem Visible <autosave>` = false, permanently — and
+            // from then on nothing fails: AppKit creates the item, hides it, build() returns
+            // Ok, and the 1.5.1 fallback never fires. It is per-user state, which is why it
+            // does not reproduce on the maintainer's machine.
+            let restored = health::clear_hidden_status_item_prefs();
 
-            let tray_result = TrayIconBuilder::with_id("lumen-tray")
+            let menu = match health::build_tray_menu_items(app) {
+                Ok(m) => Some(m),
+                // Was three `?`, which aborted Tauri startup entirely and left nothing running.
+                // A tray with no menu is worse than no tray, so skip the tray and let the
+                // reachability gate below reveal a window.
+                Err(e) => {
+                    health.degrade("tray-menu", format!("could not build the menu: {e}"));
+                    None
+                }
+            };
+
+            let simulate = health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
+            if simulate != health::SimulatedTray::None {
+                log::warn!("TRAY: LUMEN_SIMULATE_TRAY is set — simulating {simulate:?}");
+            }
+
+            let tray_result = match (&menu, simulate) {
+                (_, health::SimulatedTray::BuildError) => Err(tauri::Error::WebviewNotFound),
+                (None, _) => Err(tauri::Error::WebviewNotFound),
+                (Some(menu), _) => TrayIconBuilder::with_id("lumen-tray")
                 // colored battery-ring at 0%; recolored/redrawn live by update_tray
                 .icon(render_tray_icon(0, "ok"))
                 .icon_as_template(false)
-                .menu(&menu)
+                .menu(menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
@@ -301,27 +406,27 @@ pub fn run() {
                         }
                     }
                 })
-                .build(app);
+                    .build(app),
+            };
 
             match tray_result {
-                Ok(_) => log::info!("TRAY: built successfully"),
+                // "Built" is NOT "visible" — that conflation is why issue #5 produced a log
+                // saying everything was fine. Left Unknown here on purpose and verified after
+                // RunEvent::Ready, once the event loop has run and AppKit has laid the status
+                // bar out; checking now would report a false absence on every launch.
+                Ok(_) => log::warn!("TRAY: built; visibility not yet verified"),
                 Err(e) => {
-                    log::error!("TRAY: build failed: {e}");
-                    // Both windows start hidden and the tray is the whole interface, so a
-                    // failed tray leaves a running process with no way to reach anything —
-                    // no popover, no main window, not even Quit. Reported from the field on
-                    // macOS 26 (issue #5): the app was running with 2 processes and no
-                    // menu-bar item, and the in-app fault reporter was unreachable because
-                    // reaching it requires the UI that is missing.
-                    //
-                    // Showing the main window is not a fix for whatever made the tray fail.
-                    // It is the difference between a degraded app and an unusable one.
-                    log::warn!("TRAY: falling back to the main window so the app is reachable");
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
+                    health.set_tray(health::TrayState::Failed(e.to_string()));
+                    health.degrade("tray", format!("build failed: {e}"));
                 }
+            }
+
+            // If a hidden-icon preference was cleared, say so once. The icon reappearing with
+            // no explanation reads as the app fighting the user — and someone who ⌘-dragged it
+            // away deliberately needs to be told that is not how to remove it, and what is.
+            if !restored.is_empty() && health.claim_restore_explanation() {
+                log::warn!("TRAY: restored a hidden menu-bar icon ({} pref(s))", restored.len());
+                reveal_main_window(app.handle(), "the menu-bar icon was restored");
             }
 
             // Register the login item for installs that completed setup before
@@ -344,6 +449,13 @@ pub fn run() {
             // connect to the daemon WS and forward to the frontend
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connect_daemon(handle));
+
+            // One reachability gate, covering a failed menu, a failed build and (after the
+            // check scheduled on Ready) an invisible icon — identically. Previously each case
+            // was handled where it happened, or not at all.
+            if health::needs_fallback(&health.tray()) {
+                reveal_main_window(app.handle(), "the menu-bar icon is unavailable");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -359,6 +471,7 @@ pub fn run() {
             check_for_update,
             file_fault_report,
             show_main_window,
+            lumen_startup_health,
             resize_panel,
             setup::lumen_setup_needed,
             setup::lumen_run_setup,
@@ -370,17 +483,190 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
+        .run(|app, event| match event {
             // Kill the daemon on the way out. The daemon's own stdin watchdog covers
             // the case where this never runs (SIGKILL, force quit); this covers the
             // ordinary quit, and does it before the process image goes away so the
             // port is free by the time a replacement app launches.
-            if matches!(event, tauri::RunEvent::Exit) {
+            tauri::RunEvent::Exit => {
                 if let Some(child) = app.state::<DaemonChild>().0.lock().unwrap().take() {
                     let _ = child.kill();
                 }
             }
+
+            // Verify the icon is actually on screen, now that the event loop has run.
+            // Scheduled here rather than in setup() because AppKit lays the status bar out
+            // asynchronously — a check inside setup() sees a rect that does not exist yet.
+            tauri::RunEvent::Ready => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move { verify_tray_presence(handle).await });
+            }
+
+            // Double-clicking Lumen in /Applications, or `open -a Lumen`, arrives here.
+            // Previously it did nothing at all: both windows start hidden, so the most natural
+            // thing a user does when they cannot find the icon had no effect whatsoever. This
+            // is the tray-independent way back in.
+            tauri::RunEvent::Reopen { .. } => {
+                log::warn!("REOPEN: the app was re-activated");
+                reveal_main_window(app, "the app was re-opened");
+            }
+            _ => {}
         });
+}
+
+/// Bring the main window forward, logging every branch.
+///
+/// Switching to `Regular` first is load-bearing on macOS. Startup sets
+/// `ActivationPolicy::Accessory`, which leaves the process with no Dock icon and absent from
+/// the app switcher — so `show()` + `set_focus()` can order a window in behind everything and
+/// look exactly like doing nothing. And while the tray is unavailable the Dock icon is not a
+/// cosmetic regression, it *is* the escape hatch, so the policy stays Regular until the tray
+/// verifies Present.
+///
+/// The 1.5.1 version of this discarded both results with `let _ =` and fell through silently
+/// when there was no window, so "we showed it and macOS refused" was indistinguishable from
+/// "there was nothing to show".
+fn reveal_main_window(app: &tauri::AppHandle, why: &str) {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
+        log::error!("FALLBACK: could not switch to Regular activation: {e}");
+    }
+    let Some(w) = app.get_webview_window("main") else {
+        log::error!("FALLBACK: no 'main' window exists — the app is unreachable ({why})");
+        return;
+    };
+    if let Err(e) = w.unminimize() {
+        log::warn!("FALLBACK: unminimize failed: {e}");
+    }
+    if let Err(e) = w.show() {
+        log::error!("FALLBACK: show failed: {e}");
+    }
+    if let Err(e) = w.set_focus() {
+        log::warn!("FALLBACK: set_focus failed: {e}");
+    }
+    log::warn!(
+        "FALLBACK: revealed the main window ({why}); visible={:?}",
+        w.is_visible()
+    );
+}
+
+/// Check whether the status item is on screen, and repair it if it is not.
+///
+/// Three bounded attempts rather than a loop: AppKit's status-bar layout settles
+/// asynchronously, so a single check right after `Ready` can be too early, but an unbounded
+/// retry would spin forever on a genuinely full menu bar.
+///
+/// Note what is *not* retried: `TrayIconBuilder::build` itself. On macOS its only error paths
+/// are `NotMainThread` and image conversion of a fixed 44×44 in-memory buffer — both
+/// deterministic, so a second attempt cannot succeed. The thing worth re-checking is
+/// visibility, which genuinely does change between attempts.
+async fn verify_tray_presence(app: tauri::AppHandle) {
+    const DELAYS_MS: [u64; 3] = [500, 1_500, 4_000];
+    let simulate = health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
+
+    let mut last = health::TrayPresence::Unknown;
+    for (attempt, delay) in DELAYS_MS.iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+
+        last = match simulate {
+            health::SimulatedTray::Absent => health::TrayPresence::Absent,
+            health::SimulatedTray::OffScreen => health::TrayPresence::OffScreen,
+            _ => tray_presence(&app),
+        };
+        log::warn!("TRAY: presence check {} of 3 → {last:?}", attempt + 1);
+
+        if last == health::TrayPresence::Present {
+            app.state::<StartupHealth>().set_tray(health::TrayState::Present);
+            // Healthy: drop back to Accessory so there is no Dock icon, which is the intended
+            // look for a menu-bar app.
+            #[cfg(target_os = "macos")]
+            if let Err(e) = app.set_activation_policy(tauri::ActivationPolicy::Accessory) {
+                log::warn!("TRAY: could not return to Accessory activation: {e}");
+            }
+            return;
+        }
+
+        // Absent means the status item has no on-screen window. Ask AppKit directly to show
+        // it — Tauri's own `set_visible(true)` cannot help here, because it only re-creates a
+        // *missing* item and never calls `NSStatusItem::setVisible`.
+        if last == health::TrayPresence::Absent && simulate == health::SimulatedTray::None {
+            #[cfg(target_os = "macos")]
+            if repair_tray_visibility(&app) {
+                log::warn!("TRAY: asked AppKit to show the status item; re-checking");
+                continue;
+            }
+        }
+    }
+
+    let health = app.state::<StartupHealth>();
+    let why = match last {
+        health::TrayPresence::OffScreen => {
+            // Honest answer: there is nothing the app can do about a full menu bar.
+            "the menu bar has no room for it (full, or clipped by the notch)".to_string()
+        }
+        health::TrayPresence::Absent => "it was created but is not visible".to_string(),
+        other => format!("presence could not be determined ({other:?})"),
+    };
+    log::error!("TRAY: not visible after 3 checks — {why}");
+    health.set_tray(health::TrayState::Absent(why.clone()));
+    reveal_main_window(&app, &format!("the menu-bar icon is not visible: {why}"));
+}
+
+/// Ask the tray for its on-screen rect and classify it.
+fn tray_presence(app: &tauri::AppHandle) -> health::TrayPresence {
+    let Some(tray) = app.tray_by_id(&TrayIconId::new("lumen-tray")) else {
+        return health::TrayPresence::Absent;
+    };
+    // Linux always returns None here, which is why the whole check is macOS-gated: treating
+    // that as Absent would report every Linux launch as broken.
+    if !cfg!(target_os = "macos") {
+        return health::TrayPresence::Unknown;
+    }
+    let rect = match tray.rect() {
+        Ok(Some(r)) => {
+            let pos = r.position.to_physical::<f64>(1.0);
+            let size = r.size.to_physical::<f64>(1.0);
+            Some((pos.x, pos.y, size.width, size.height))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            log::warn!("TRAY: rect() failed: {e}");
+            return health::TrayPresence::Unknown;
+        }
+    };
+    let monitors: Vec<health::MonitorBounds> = app
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x as f64, p.y as f64, s.width as f64, s.height as f64)
+        })
+        .collect();
+    health::classify_presence(rect, &monitors)
+}
+
+/// Reach through Tauri to AppKit and set the status item visible. Returns whether the call
+/// was made.
+///
+/// The closure must return a `Send` value, so it returns `bool` — `NSStatusItem` is
+/// main-thread-only and not `Send`, and handing it back would not compile. `setVisible(true)`
+/// also re-persists the preference, which is what makes the repair stick.
+#[cfg(target_os = "macos")]
+fn repair_tray_visibility(app: &tauri::AppHandle) -> bool {
+    let Some(tray) = app.tray_by_id(&TrayIconId::new("lumen-tray")) else {
+        return false;
+    };
+    tray.with_inner_tray_icon(|inner| {
+        if let Some(item) = inner.ns_status_item() {
+            unsafe { item.setVisible(true) };
+            true
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false)
 }
 
 /// Return the cached daemon snapshot JSON (or null if not received yet).
@@ -404,7 +690,37 @@ fn update_tray(app: tauri::AppHandle, percent: u8, status: String) {
         let _ = tray.set_icon(Some(render_tray_icon(percent, &status)));
         let _ = tray.set_icon_as_template(false);
         let _ = tray.set_title(None::<&str>);
+        return;
     }
+    // This ran on every daemon snapshot and did nothing, invisibly. A tray that vanishes
+    // *after* startup — the app was fine, then wasn't — left no trace at all. Logged once
+    // (not every second) and recorded, so the banner and the fault report both learn about it.
+    if let Some(health) = app.try_state::<StartupHealth>() {
+        if health.claim_missing_tray_warning() {
+            log::error!("TRAY: gone at update time — the gauge cannot be drawn");
+            health.set_tray(health::TrayState::Absent(
+                "disappeared after startup".to_string(),
+            ));
+            reveal_main_window(&app, "the menu-bar icon disappeared");
+        }
+    }
+}
+
+/// What degraded during startup, and whether the tray is actually visible.
+///
+/// Read by the frontend so a degraded app says so instead of looking healthy. Also folded into
+/// the fault report, so a user who *can* reach the app files something that already contains
+/// the answer.
+#[tauri::command]
+fn lumen_startup_health(app: tauri::AppHandle) -> serde_json::Value {
+    let Some(health) = app.try_state::<StartupHealth>() else {
+        return serde_json::json!({ "degraded": false, "tray": "unknown", "degradations": [] });
+    };
+    serde_json::json!({
+        "degraded": health.is_degraded(),
+        "tray": health.tray().describe(),
+        "degradations": health.degradations(),
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -470,15 +786,25 @@ pub struct FaultReport {
 /// table, and the drain and the aggregation have to see the same connection. SQLite in WAL
 /// mode takes a second connection without complaint.
 #[tauri::command]
-async fn get_fault_report() -> Result<Option<FaultReport>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn get_fault_report(app: tauri::AppHandle) -> Result<Option<FaultReport>, String> {
+    // Read the tray state on this side: `Environment::collect` runs on a blocking thread and
+    // cannot know it, because the tray belongs to this process rather than to lumen-core.
+    let (tray, degradations) = match app.try_state::<StartupHealth>() {
+        Some(h) => (Some(h.tray().describe()), h.degradations()),
+        None => (None, Vec::new()),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
         let path = lumen_core::meter::db_path()
             .ok_or_else(|| "cannot resolve a database path".to_string())?;
         let conn = lumen_core::meter::connect_db(&path)
             .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
 
         let faults = lumen_core::report::load_faults_from_db(&conn)?;
-        let env = lumen_core::report::Environment::collect();
+        // "gui", not the default "cli": this report is being filed from the app's own button,
+        // and a report that misnames its own channel misleads the one reader who trusts it.
+        let mut env = lumen_core::report::Environment::collect_for("gui");
+        env.tray = tray;
+        env.startup_degradations = degradations;
 
         // Metadata-only by default, exactly as the CLI renders it. Embedding source is a
         // deliberate opt-in with a manifest, which is not something a button can offer.

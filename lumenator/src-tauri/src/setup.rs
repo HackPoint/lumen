@@ -3680,6 +3680,33 @@ mod tests {
         (h, script, db)
     }
 
+    /// The repository's developer copy of the meter hook, if this is a source checkout.
+    ///
+    /// `None` in a packaged build, where the tests that use it skip rather than fail.
+    fn repo_meter_hook() -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.claude/hooks/lumen_meter.sh");
+        p.canonicalize().ok().filter(|p| p.is_file())
+    }
+
+    /// Stage one of the two meter copies against the same temp db and stub tokenizer.
+    ///
+    /// The generated script bakes both paths in; the repo copy resolves them at run time, so it
+    /// has to be handed them through the env overrides it honours. Returning the env means the
+    /// caller passes it for both and the two are driven identically — which is the whole point.
+    fn staged_meter(
+        which: &str,
+        stub: &str,
+    ) -> Option<(TempDir, std::path::PathBuf, std::path::PathBuf, String, String)> {
+        let (h, script, db) = meter_harness(stub);
+        if which == "repo" {
+            std::fs::copy(repo_meter_hook()?, &script).unwrap();
+        }
+        let tok = h.path().join("stub-tok").to_string_lossy().into_owned();
+        let dbs = db.to_string_lossy().into_owned();
+        Some((h, script, db, dbs, tok))
+    }
+
     /// Feed `payload` to `script`; return the rows it wrote as tab-joined strings.
     fn run_meter(
         script: &std::path::Path,
@@ -4489,52 +4516,88 @@ mod tests {
     /// estimate, and one missing req_key cannot be deduplicated, so a partial writer
     /// quietly degrades every figure built on the ledger.
     #[test]
-    fn meter_hooks_agree_on_the_columns_they_record() {
-        let repo_copy = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(".claude/hooks/lumen_meter.sh");
-        let dev = match std::fs::read_to_string(&repo_copy) {
-            Ok(t) => t,
-            // Absent in a packaged build; nothing to compare against.
-            Err(_) => return,
+    fn both_meter_hooks_agree_on_the_provenance_they_record() {
+        // Replaces a test that grepped both scripts for column *names*. That is why an exit-code
+        // bug walked straight past it: the developer copy did
+        //
+        //     FULL_TOKENS=$("$LUMEN_TOK" < "$FILE_PATH" 2>/dev/null || echo 0)
+        //     TOKEN_SOURCE="measured"
+        //
+        // discarding the exit code, so a PNG — which lumen-tok rejects with exit 3 — was written
+        // as `full_tokens=0, token_source='measured'`. An unsupported file laundered as a
+        // measurement, in the one column that exists to tell those two apart. Every column name
+        // matched, so the old test was satisfied.
+        //
+        // This one runs both scripts and compares what they actually record.
+        let cases: [(&str, &str, &str); 3] = [
+            // stub tokenizer                                     expected source  expected tokens
+            ("#!/bin/sh\ncat >/dev/null\necho 4242\n", "measured", "4242"),
+            // Exit 3 is EXIT_NOT_TEXT: the tokenizer ran and said this is not text. A fact about
+            // the file, not a failure — and it must not become a bytes/4 guess, which overstates
+            // a screenshot by roughly 40x.
+            ("#!/bin/sh\ncat >/dev/null\nexit 3\n", "unsupported", "0"),
+            // Any other non-zero: the tokenizer is broken, so an estimate is all there is, and it
+            // must be labelled as one.
+            ("#!/bin/sh\ncat >/dev/null\nexit 1\n", "estimated", ""),
+        ];
+
+        let Some(_) = repo_meter_hook() else {
+            eprintln!("skipping: no repo hook copy (packaged build)");
+            return;
         };
-        let shipped = desired_meter_script("/tmp/db", "/tmp/tok");
 
-        for column in [
-            "token_source",
-            "session_id",
-            "file_mtime",
-            "req_key",
-            "is_subagent",
-            "writer_hook",
-            "routed_via",
-            "saved_tokens",
-        ] {
-            assert!(
-                shipped.contains(column),
-                "the installed meter no longer records {column}"
+        for (stub, want_source, want_tokens) in cases {
+            let mut seen: Vec<(String, String, String)> = Vec::new();
+            for which in ["generated", "repo"] {
+                let (h, script, db, dbs, tok) = staged_meter(which, stub).unwrap();
+                let f = h.path().join("subject.rs");
+                std::fs::write(&f, "fn main() {}\n").unwrap();
+                let rows = run_meter(
+                    &script,
+                    &db,
+                    &read_payload(&f.to_string_lossy()),
+                    &[("LUMEN_DB", &dbs), ("LUMEN_TOK", &tok)],
+                );
+                assert_eq!(rows.len(), 1, "[{which}] expected one row, got {rows:?}");
+                let cols: Vec<&str> = rows[0].split('\t').collect();
+                seen.push((cols[0].to_string(), cols[1].to_string(), cols[2].to_string()));
+            }
+
+            let (g, r) = (&seen[0], &seen[1]);
+            assert_eq!(
+                g, r,
+                "the two meter hooks disagree for stub {stub:?}: generated {g:?} vs repo {r:?}"
             );
-            assert!(
-                dev.contains(column),
-                "the developer meter hook does not record {column}; rows it writes would \
-                 be missing a field every figure built on read_events depends on"
-            );
+            assert_eq!(g.1, want_source, "wrong token_source for stub {stub:?}");
+            if !want_tokens.is_empty() {
+                assert_eq!(g.2, want_tokens, "wrong full_tokens for stub {stub:?}");
+            }
+            assert_eq!(g.0, "builtin_read");
         }
+    }
 
-        // The developer copy used to point at <workspace>/lumen.db, which has no schema.
-        assert!(
-            !dev.contains("${WORKSPACE_ROOT}/lumen.db"),
-            "the developer meter hook resolves the database as a workspace path again — \
-             that file has no schema, so every write is silently discarded"
-        );
-        // And it must leave a trace when a write fails, rather than swallowing it.
-        assert!(
-            dev.contains("lumen_hook_errors.log"),
-            "a failed write must be recorded somewhere; silence is what hid this for weeks"
-        );
+    #[test]
+    fn both_meter_hooks_agree_that_a_missing_tokenizer_is_an_estimate() {
+        let Some(_) = repo_meter_hook() else { return };
+        let mut seen = Vec::new();
+        for which in ["generated", "repo"] {
+            let (h, script, db, dbs, _tok) = staged_meter(which, "#!/bin/sh\nexit 0\n").unwrap();
+            let f = h.path().join("subject.rs");
+            // 40 bytes -> a bytes/4 estimate of 10.
+            std::fs::write(&f, "0123456789".repeat(4)).unwrap();
+            let missing = h.path().join("no-such-tok").to_string_lossy().into_owned();
+            let rows = run_meter(
+                &script,
+                &db,
+                &read_payload(&f.to_string_lossy()),
+                &[("LUMEN_DB", &dbs), ("LUMEN_TOK", &missing)],
+            );
+            let cols: Vec<&str> = rows[0].split('\t').collect();
+            seen.push((cols[1].to_string(), cols[2].to_string()));
+        }
+        assert_eq!(seen[0], seen[1], "hooks disagree with no tokenizer: {seen:?}");
+        assert_eq!(seen[0].0, "estimated");
+        assert_eq!(seen[0].1, "10", "bytes/4 of 40 bytes");
     }
 
     /// The cask must uninstall the LaunchAgent that actually exists.

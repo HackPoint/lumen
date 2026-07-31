@@ -468,26 +468,26 @@ caching savings display.
 
 The hero metric on the Optimizer screen is the **net dollar value** of interception: what
 the tokens Lumen avoided are worth, less what the extra round cost. On the author's machine
-that is **+$69.61 over 1,497 intercepted reads** — 9.86M tokens avoided, worth $381.89,
-against $312.29 of forced round-trips.
+that is **+$99.21 over 1,573 intercepted reads** — 11.03M tokens avoided, worth $427.35,
+against $328.14 of forced round-trips.
 
 The token ratio — **84% fewer tokens per intercepted read** — is shown underneath it. It is
 real and measured to the token, but on its own it is not a result: a smaller reply that
 forces a second round is a loss however good the ratio looks.
 
 Every intercepted read reports `full_tokens` vs `returned_tokens`, measured by the same
-BPE tokenizer Claude uses. No estimation, no extrapolation, and no scaling up — 96.2% of
+BPE tokenizer Claude uses. No estimation, no extrapolation, and no scaling up — 96.6% of
 that saving rests on a real tokenizer count rather than a bytes/4 guess, which is asserted
 by a test rather than asserted here.
 
 **→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
-measurement: outline cost per file, what the ledger recorded, and the three numbers that
-would make the figure above dishonest if they moved — including the 64.9% of reads that
-never reach a Lumen tool and the 16 of 29 files where interception costs more than it saves.
-Every figure there is produced and asserted by
-`cargo test --release -p lumen-mcp --test efficiency -- --nocapture`, so a regression fails
-CI instead of ageing into a stale claim — which is precisely what the numbers this paragraph
-replaced had done.
+measurement, including the things that would make the figure above dishonest: **0 of 1,573
+eligible reads leaked** past the optimizer, 3.4M tokens of binary-file noise excluded from the
+baseline, and the 17 of 31 files where interception costs more than it saves. No Lumen tool can
+return more than the file it was asked about — that is a backstop with a corpus test behind it,
+not an observation. Every figure there is produced and asserted by
+`cargo test --release -p lumen-mcp --test efficiency -- --nocapture`, so a regression fails CI
+instead of ageing into a stale claim.
 
 The Optimizer screen shows two clearly separated numbers:
 
@@ -787,6 +787,32 @@ crates/
   lumen-stats/   SQLite rollups the GUI displays: usage, sessions, optimizer
 lumenator/       Tauri application: Angular frontend + Rust backend
 ```
+
+---
+
+## Troubleshooting
+
+**No menu-bar icon on macOS?** The most common cause is that the icon was ⌘-dragged off the menu
+bar at some point — macOS remembers that permanently, and recreates the item hidden on every later
+launch. Lumen now clears that state at startup and tells you it did. If the icon is still missing:
+
+```sh
+lumen doctor          # names the likely cause and its one-line fix
+```
+
+**→ [No menu-bar icon (macOS)](docs/troubleshooting-the-tray.md)** is the full diagnosis path.
+
+If Lumen is running but you cannot reach it, `open -a Lumen` (or double-clicking it in
+/Applications) reveals the main window, and `lumen show` does the same from a terminal. The CLI
+inside the bundle works even when the GUI does not:
+
+```sh
+/Applications/Lumen.app/Contents/MacOS/lumen-cli report --dry-run
+```
+
+Logs are at `~/Library/Logs/io.speedata.lumen/Lumen.log`. Set `LUMEN_LOG=debug` for more.
+*(Released builds up to and including 1.5.1 wrote no log at all — the logger was registered
+only in debug builds.)*
 
 ---
 

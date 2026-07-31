@@ -260,6 +260,141 @@ fn metered(
     )
 }
 
+/// How a call site wants inflation handled.
+///
+/// An explicit parameter rather than a default, so a new tool cannot forget to decide. Before
+/// this existed only the ranked path had a guard (`Decline::WouldInflate`); the legacy outline,
+/// `mode="full"` and all four `recall_file` branches had none, and between them they spent
+/// 92,347 tokens above what a plain read would have cost.
+pub enum Inflate<'a> {
+    /// If the reply would cost more than the file, return the file instead and say so.
+    Guard { fallback: &'a str },
+    /// Delivering the whole file *is* the request, so a header-sized overage is expected and
+    /// honest. Only `smart_read(mode="full")` uses this.
+    Allow,
+}
+
+/// The most a guarded reply may exceed the file by: the one explanatory line it adds.
+///
+/// A fallback cannot cost *less* than the file it returns, so `returned <= full` is not a
+/// satisfiable bound — the honest one is `full + NOTE_ALLOWANCE`. Sized with room to spare
+/// because the note embeds the path, and a long monorobo path tokenizes to tens of tokens on
+/// its own. Note also that the JSON-RPC envelope and `_meta` block are never counted at all, so
+/// every recorded `tokens_returned` understates real cost by ~40-60 tokens regardless.
+pub const NOTE_ALLOWANCE: i64 = 80;
+
+/// A reply that would cost more than the file is never an optimisation.
+///
+/// Returns the file plus one line of explanation, not an error and not a truncation:
+///   - an error leaves the model with no content and burns a round, which is the exact failure
+///     the ranked arm already refuses to cause;
+///   - a truncation returns less than was asked for, silently.
+///
+/// Routed as `would_inflate` so it is visible in the ledger and excluded from the savings
+/// headline by route rather than hidden inside a clamp.
+fn inflated_fallback(
+    fallback: &str,
+    attempted: usize,
+    full_tokens: usize,
+    tool_name: &str,
+    path: &str,
+    lines: Option<i64>,
+    req_key: Option<String>,
+) -> Outcome {
+    let text = format!(
+        "# lumen: the requested view was {attempted} tokens against {full_tokens} for the file, \
+         so the file is returned instead.\n\n{fallback}"
+    );
+    let returned_tokens = count_tokens(&text);
+    Outcome {
+        payload: Payload::Ok(ok_result(text, full_tokens, returned_tokens)),
+        meter: Some(MeterRow {
+            path: path.to_string(),
+            lines,
+            returned_tokens: returned_tokens as i64,
+            full_tokens: full_tokens as i64,
+            saved_tokens: full_tokens as i64 - returned_tokens as i64,
+            routed_via: lumen_core::ranked::Decline::WouldInflate.route().to_string(),
+            tool_name: tool_name.to_string(),
+            session_id: session_id(),
+            file_mtime: file_mtime(path),
+            req_key: req_key.or_else(|| Some(path.to_string())),
+            ranked: lumen_core::meter::RankedMeta::default(),
+        }),
+    }
+}
+
+/// The language could not be parsed, so there is no structure to return.
+///
+/// Distinct from `inflated_fallback` because the complaint is different: the outline here is
+/// *cheap*, it just describes nothing — one synthetic whole-file item. Reporting it as "the view
+/// cost more than the file" would be false, and the old behaviour (metering it as a ~95% saving)
+/// was worse: a saving on a file the tool never looked inside.
+fn undescribable_fallback(
+    src: &str,
+    full_tokens: usize,
+    path: &str,
+    lines: Option<i64>,
+) -> Outcome {
+    let text = format!(
+        "# lumen: no structure could be extracted from {path}, so the file is returned instead.\n\n{src}"
+    );
+    let returned_tokens = count_tokens(&text);
+    Outcome {
+        payload: Payload::Ok(ok_result(text, full_tokens, returned_tokens)),
+        meter: Some(MeterRow {
+            path: path.to_string(),
+            lines,
+            returned_tokens: returned_tokens as i64,
+            full_tokens: full_tokens as i64,
+            saved_tokens: full_tokens as i64 - returned_tokens as i64,
+            routed_via: lumen_core::ranked::Decline::NoDefs.route().to_string(),
+            tool_name: "mcp__lumen__smart_read".to_string(),
+            session_id: session_id(),
+            file_mtime: file_mtime(path),
+            req_key: Some(path.to_string()),
+            ranked: lumen_core::meter::RankedMeta::default(),
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metered_guarded(
+    text: String,
+    full_tokens: usize,
+    tool_name: &str,
+    routed_via: &str,
+    path: &str,
+    lines: Option<i64>,
+    req_key: Option<String>,
+    inflate: Inflate<'_>,
+) -> Outcome {
+    let returned_tokens = count_tokens(&text);
+    if let Inflate::Guard { fallback } = inflate {
+        if returned_tokens >= full_tokens {
+            return inflated_fallback(
+                fallback,
+                returned_tokens,
+                full_tokens,
+                tool_name,
+                path,
+                lines,
+                req_key,
+            );
+        }
+    }
+    metered(
+        text,
+        full_tokens,
+        returned_tokens,
+        tool_name,
+        routed_via,
+        path,
+        lines,
+        req_key,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn metered_with(
     text: String,
@@ -455,21 +590,26 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
         .unwrap_or("outline");
 
     if mode == "full" {
-        let text = format!(
-            "# {path} (full, {line_count} lines, {full_tokens} tokens)\n\n{}",
-            src
-        );
-        let returned_tokens = count_tokens(&text);
-        return metered(
+        // Header shrunk to one short token-cheap line. The old one repeated the absolute path
+        // alongside two counts, and on a long monorepo path that alone was ~40 tokens — which
+        // is exactly 47 of the 84 recorded smart_read overages, every one of them this header.
+        let text = format!("# {path} (full)\n\n{}", src);
+        // Routed `smart_read_full`, NOT `smart_read`. Handing over a whole file is a delivery,
+        // not an optimisation, and pooling it with outline savings is how a route that can only
+        // ever lose tokens ended up inside the savings headline. Deliberately absent from
+        // lumen-stats' LUMEN_ROUTES.
+        return metered_guarded(
             text,
             full_tokens,
-            returned_tokens,
             "mcp__lumen__smart_read",
-            "smart_read",
+            "smart_read_full",
             path,
             Some(line_count as i64),
             // One outline per file, so the path is the whole request identity.
             None,
+            // Allowed: the caller asked for the file, so returning it plus a header is the
+            // honest answer and the small overage is the header they asked to be labelled with.
+            Inflate::Allow,
         );
     }
 
@@ -484,18 +624,27 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
 
     let lang = detect_lang(path);
     let items = outline(&src, lang);
-    let text = format_outline(path, line_count, full_tokens, &items);
-    let returned_tokens = count_tokens(&text);
 
-    metered(
+    // An "outline" that is one synthetic whole-file item describes nothing. `outline` does not
+    // fail on a language it cannot parse — it returns `whole_file_item` — so without this the
+    // tool would report a ~95% saving on a file it never looked inside. Hand back the file and
+    // let the ledger say so.
+    if items.iter().all(|i| i.kind == "file") {
+        return undescribable_fallback(&src, full_tokens, path, Some(line_count as i64));
+    }
+
+    let text = format_outline(path, line_count, full_tokens, &items);
+    metered_guarded(
         text,
         full_tokens,
-        returned_tokens,
         "mcp__lumen__smart_read",
         "smart_read",
         path,
         Some(line_count as i64),
         None,
+        // Guarded: a tiny file, or one that is almost entirely short declarations, can have an
+        // outline larger than itself. That is not a saving and must not be recorded as one.
+        Inflate::Guard { fallback: &src },
     )
 }
 
@@ -661,40 +810,120 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         let lang = detect_lang(path);
         let items = outline(&src, lang);
 
-        let matched: Vec<&CodeItem> = items
+        // Empty or whitespace-only queries matched every named item under the old substring
+        // rule — `names: [""]` returned the entire file, dressed as a saving.
+        let queries: Vec<String> = queries
+            .iter()
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| !q.is_empty())
+            .collect();
+        if queries.is_empty() {
+            return Outcome::err(
+                INVALID_PARAMS,
+                "recall_file: 'names' contained no usable names (empty strings match nothing)",
+            );
+        }
+
+        // Exact first. The tool description promised exact matching and the code did
+        // `nl == q || nl.contains(q)`, so `names: ["e"]` matched nearly every item in a file and
+        // the reply came back larger than the file itself — the mechanism behind 96% of the
+        // recorded overshoot.
+        let exact: Vec<&CodeItem> = items
             .iter()
             .filter(|item| {
                 item.name
                     .as_ref()
-                    .map(|n| {
-                        let nl = n.to_lowercase();
-                        queries.iter().any(|q| nl == *q || nl.contains(q.as_str()))
-                    })
+                    .map(|n| queries.contains(&n.to_lowercase()))
                     .unwrap_or(false)
             })
             .collect();
 
-        if matched.is_empty() {
-            // Honest: name not found → return the outline so the caller can retry
-            let outline_text = format_outline(path, line_count, full_tokens, &items);
-            let msg = format!(
-                "# recall_file: no items matched {queries:?} in {path}\n\
-                 # Available items:\n\n{outline_text}"
+        // Substring only as a labelled fallback, and only when it stays small. Sloppy queries
+        // are genuinely useful — dropping them outright would break real callers — but they must
+        // not be able to select the whole file.
+        const SUBSTRING_CAP: usize = 5;
+        let mut fuzzy_note = String::new();
+        let matched: Vec<&CodeItem> = if !exact.is_empty() {
+            exact
+        } else {
+            let subs: Vec<&CodeItem> = items
+                .iter()
+                .filter(|item| {
+                    item.name
+                        .as_ref()
+                        .map(|n| {
+                            let nl = n.to_lowercase();
+                            queries.iter().any(|q| nl.contains(q.as_str()))
+                        })
+                        .unwrap_or(false)
+                })
+                .collect();
+            if subs.is_empty() || subs.len() > SUBSTRING_CAP {
+                // Too broad to answer with bodies. Return the map, not the territory.
+                let names: Vec<String> = subs
+                    .iter()
+                    .filter_map(|i| i.name.clone())
+                    .collect();
+                let filtered: Vec<&CodeItem> = if subs.is_empty() { items.iter().collect() } else { subs };
+                let head = if names.is_empty() {
+                    format!(
+                        "# recall_file: nothing matched {} in {path}\n# Available items:\n\n",
+                        queries.join(", ")
+                    )
+                } else {
+                    format!(
+                        "# recall_file: {} matched {} items — too many to return bodies for.\n\
+                         # Pick an exact name from below and call again.\n\n",
+                        queries.join(", "),
+                        names.len()
+                    )
+                };
+                let text = format!("{head}{}", format_outline_compact(path, line_count, &filtered));
+                return metered_guarded(
+                    text,
+                    full_tokens,
+                    "mcp__lumen__recall_file",
+                    "recall_file",
+                    path,
+                    Some(line_count as i64),
+                    Some(req_key.clone()),
+                    Inflate::Guard { fallback: &src },
+                );
+            }
+            fuzzy_note = format!(
+                "# matched by substring, not exact: {} → {}\n",
+                queries.join(", "),
+                subs.iter().filter_map(|i| i.name.as_deref()).collect::<Vec<_>>().join(", ")
             );
-            let returned_tokens = count_tokens(&msg);
-            return metered(
-                msg,
+            subs
+        };
+
+        // A selection covering most of the file is a full read with extra steps. Return the
+        // outline instead and let the caller narrow it.
+        let span: usize = merge_blocks(&matched, src_lines.len())
+            .iter()
+            .map(|b| b.end - b.start)
+            .sum();
+        if line_count > 0 && span * 100 / line_count > 60 {
+            let text = format!(
+                "# recall_file: those names cover {}% of {path} — returning the outline instead.\n\
+                 # Ask for fewer names, or use smart_read(mode=\"full\") to read it whole.\n\n{}",
+                span * 100 / line_count,
+                format_outline_compact(path, line_count, &matched)
+            );
+            return metered_guarded(
+                text,
                 full_tokens,
-                returned_tokens,
                 "mcp__lumen__recall_file",
                 "recall_file",
                 path,
                 Some(line_count as i64),
                 Some(req_key.clone()),
+                Inflate::Guard { fallback: &src },
             );
         }
 
-        format_items_excerpt(path, &src_lines, &matched)
+        format!("{fuzzy_note}{}", format_items_excerpt(path, &src_lines, &matched))
     } else if let (Some(start), Some(end)) = (start_line, end_line) {
         // Explicit line range
         let start0 = start.saturating_sub(1);
@@ -704,29 +933,98 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
 
         let mut buf = format!("# {path} — L{start}-{end} (+3 lines context)\n\n");
         for (i, &line) in src_lines[ctx_start..ctx_end].iter().enumerate() {
-            let lineno = ctx_start + i + 1;
-            buf.push_str(&format!("{lineno:>5}: {line}\n"));
+            buf.push_str(&gutter_line(ctx_start + i + 1, line));
         }
         buf
     } else {
-        // No selector — honest no-op: return full file
+        // No selector. Returning the file plus a header was guaranteed to cost more than the
+        // file — the one branch that could never save anything. Return the outline instead,
+        // which is what the caller needs in order to ask a real question. Not an error: an
+        // error costs a round and delivers nothing.
+        let lang = detect_lang(path);
+        let items = outline(&src, lang);
+        let refs: Vec<&CodeItem> = items.iter().collect();
         format!(
-            "# {path} — full (no selector given, {line_count} lines, {full_tokens} tokens)\n\n{}",
-            src
+            "# recall_file: no selector given, so here is the outline.\n\
+             # Call again with names=[...] or start_line/end_line, or use \
+             smart_read(mode=\"full\") for the whole file.\n\n{}",
+            format_outline_compact(path, line_count, &refs)
         )
     };
 
-    let returned_tokens = count_tokens(&text);
-    metered(
+    metered_guarded(
         text,
         full_tokens,
-        returned_tokens,
         "mcp__lumen__recall_file",
         "recall_file",
         path,
         Some(line_count as i64),
         Some(req_key.clone()),
+        // Guarded on every branch: a range spanning the file, or an outline of a file with
+        // hundreds of tiny declarations, can both exceed the file itself.
+        Inflate::Guard { fallback: &src },
     )
+}
+
+/// One emitted source line, with its number.
+///
+/// `{lineno:>5}: ` cost about three tokens of gutter per line — the padding run, the digits, the
+/// colon and the space — and applied across most of a file that was the entire mechanism behind
+/// the recorded overshoot (mean 2.85 tokens per line of file). `{n}|` drops the padding and the
+/// trailing space. Set `LUMEN_LINE_NUMBERS=0` to drop the gutter altogether; the block headers
+/// still carry the line ranges, which is how the ranked renderer has always worked.
+fn gutter_line(lineno: usize, line: &str) -> String {
+    if std::env::var("LUMEN_LINE_NUMBERS").as_deref() == Ok("0") {
+        format!("{line}\n")
+    } else {
+        format!("{lineno}|{line}\n")
+    }
+}
+
+/// A contiguous run of source lines, and the items that asked for it.
+#[derive(Debug, PartialEq)]
+pub struct Block {
+    pub start: usize,
+    pub end: usize,
+    pub labels: Vec<String>,
+}
+
+/// Merge matched items into non-overlapping blocks, context included.
+///
+/// Nested and adjacent items previously each emitted their own context, body and three markdown
+/// headers, so shared lines went out twice — re-numbered each time. A method inside a matched
+/// struct duplicated the struct's own lines.
+pub fn merge_blocks(items: &[&CodeItem], total_lines: usize) -> Vec<Block> {
+    let mut spans: Vec<(usize, usize, String)> = items
+        .iter()
+        .map(|i| {
+            let start = i.start_line.saturating_sub(1).saturating_sub(CTX_LINES);
+            let end = (i.end_line + CTX_LINES).min(total_lines);
+            let label = format!(
+                "{} {} [L{}-{}]",
+                i.kind,
+                i.name.as_deref().unwrap_or("(anonymous)"),
+                i.start_line,
+                i.end_line
+            );
+            (start, end, label)
+        })
+        .collect();
+    spans.sort_by_key(|(s, e, _)| (*s, *e));
+
+    let mut out: Vec<Block> = Vec::new();
+    for (start, end, label) in spans {
+        match out.last_mut() {
+            // `<=  end + 1` merges touching blocks too: a one-line gap between two runs costs
+            // more as a second header than as the line itself.
+            Some(prev) if start <= prev.end + 1 => {
+                prev.end = prev.end.max(end);
+                prev.labels.push(label);
+            }
+            _ => out.push(Block { start, end, labels: vec![label] }),
+        }
+    }
+    out
 }
 
 const CTX_LINES: usize = 3;
@@ -737,48 +1035,41 @@ pub fn format_items_excerpt(path: &str, src_lines: &[&str], items: &[&CodeItem])
         .map(|i| i.name.as_deref().unwrap_or("(anonymous)").to_string())
         .collect();
 
+    // Header kept verbatim — callers and tests read the "N item(s): names" line.
     let mut buf = format!("# {path} — {} item(s): {}\n", items.len(), names.join(", "));
 
-    for item in items {
-        let name = item.name.as_deref().unwrap_or("(anonymous)");
-        // Convert 1-based inclusive to 0-based indices
-        let start0 = item.start_line.saturating_sub(1);
-        let end0 = item.end_line.min(src_lines.len());
-        let ctx_start = start0.saturating_sub(CTX_LINES);
-        let ctx_end = (end0 + CTX_LINES).min(src_lines.len());
-
+    // One block per contiguous run, one header, and every line exactly once. The old shape
+    // emitted `## kind name`, `### context`, `### body` and `### context` per item, which on
+    // nested or adjacent matches meant the same lines twice with three extra headers each.
+    for block in merge_blocks(items, src_lines.len()) {
         buf.push('\n');
-        buf.push_str(&format!(
-            "## {} {} [L{}-{}]\n",
-            item.kind, name, item.start_line, item.end_line
-        ));
-
-        if ctx_start < start0 {
-            buf.push_str(&format!("### context [L{}-{}]\n", ctx_start + 1, start0));
-            for (i, &line) in src_lines[ctx_start..start0].iter().enumerate() {
-                let lineno = ctx_start + i + 1;
-                buf.push_str(&format!("{lineno:>5}: {line}\n"));
-            }
-        }
-
-        buf.push_str(&format!(
-            "### body [L{}-{}]\n",
-            item.start_line, item.end_line
-        ));
-        for (i, &line) in src_lines[start0..end0].iter().enumerate() {
-            let lineno = start0 + i + 1;
-            buf.push_str(&format!("{lineno:>5}: {line}\n"));
-        }
-
-        if end0 < ctx_end {
-            buf.push_str(&format!("### context [L{}-{}]\n", end0 + 1, ctx_end));
-            for (i, &line) in src_lines[end0..ctx_end].iter().enumerate() {
-                let lineno = end0 + i + 1;
-                buf.push_str(&format!("{lineno:>5}: {line}\n"));
-            }
+        buf.push_str(&format!("## {}\n", block.labels.join(" + ")));
+        for (i, &line) in src_lines[block.start..block.end].iter().enumerate() {
+            buf.push_str(&gutter_line(block.start + i + 1, line));
         }
     }
 
+    buf
+}
+
+/// An outline with no trailing usage examples.
+///
+/// `format_outline` ends with two example lines that repeat the absolute path twice more. That
+/// is right for `smart_read`, where the caller is deciding what to ask for next. It is pure cost
+/// when an outline is returned as a *fallback* from a call the caller has already made and whose
+/// shape they already know.
+pub fn format_outline_compact(path: &str, line_count: usize, items: &[&CodeItem]) -> String {
+    let mut buf = format!("# {path} — outline ({line_count} lines, {} items)\n", items.len());
+    for (n, item) in items.iter().enumerate() {
+        buf.push_str(&format!(
+            "{:>3}. {:<14} {:<32} L{}-{}\n",
+            n + 1,
+            item.kind,
+            item.name.as_deref().unwrap_or("(anonymous)"),
+            item.start_line,
+            item.end_line
+        ));
+    }
     buf
 }
 
@@ -881,22 +1172,40 @@ mod tests {
     // alpha and beta are separated by more than CTX_LINES of filler so that a
     // single-item recall of `alpha` cannot bleed beta's body in via the ±3-line
     // context window.
-    const RUST_SRC: &str = "\
-use std::io;
-
-fn alpha(x: i32) -> i32 {
-    x + 1
-}
-
-// filler
-// filler
-// filler
-// filler
-
-fn beta() {
-    println!(\"BETA_BODY_MARKER\");
-}
-";
+    //
+    // Bodies are substantial on purpose. With one-line bodies this file was 14 lines, and every
+    // reply about it legitimately cost more than reading it whole — so the inflation guard fired
+    // and twelve behavioural tests started asserting the guard instead of the behaviour they
+    // were written for. A fixture has to be shaped like the input the tool is for.
+    fn rust_src() -> String {
+        let mut s = String::from("use std::io;\n\n");
+        s.push_str("fn alpha(x: i32) -> i32 {\n");
+        for j in 0..18 {
+            s.push_str(&format!("    let a{j} = x.wrapping_mul({j}).wrapping_add(1);\n"));
+        }
+        s.push_str("    x + 1\n}\n\n");
+        for _ in 0..6 {
+            s.push_str("// filler\n");
+        }
+        s.push('\n');
+        s.push_str("fn beta() {\n");
+        s.push_str("    println!(\"BETA_BODY_MARKER\");\n");
+        for j in 0..18 {
+            s.push_str(&format!("    let b{j} = {j} * 3 + 1;\n"));
+        }
+        s.push_str("}\n\n");
+        // Six more items so that recalling alpha+beta is a minority of the file. With only two
+        // functions, asking for both *is* a full read, and the >60%-coverage guard correctly
+        // returned the outline — which made a test about fetching two names assert the guard.
+        for k in 0..6 {
+            s.push_str(&format!("fn spare_{k}(v: usize) -> usize {{\n"));
+            for j in 0..18 {
+                s.push_str(&format!("    let s{j} = v.wrapping_add({j});\n"));
+            }
+            s.push_str("    v\n}\n\n");
+        }
+        s
+    }
 
     /// A file shaped like real source: few items, substantial bodies. This is
     /// the shape smart_read's outline is meant to win on.
@@ -1167,7 +1476,7 @@ fn beta() {
 
     #[test]
     fn smart_read_outline_lists_the_functions_with_line_ranges() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_smart_read(&json!({ "path": &path }));
         let text = text_of(&out);
         assert!(text.contains("— outline"), "got: {text}");
@@ -1229,32 +1538,51 @@ fn beta() {
 
     #[test]
     fn smart_read_full_mode_returns_the_whole_body() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_smart_read(&json!({ "path": &path, "mode": "full" }));
         let text = text_of(&out);
-        assert!(
-            text.contains("(full,"),
-            "header must mark full mode: {text}"
-        );
+        assert!(text.contains("(full)"), "header must mark full mode: {text}");
         assert!(text.contains("BETA_BODY_MARKER"), "body must be present");
     }
 
     #[test]
+    fn full_mode_is_routed_separately_so_it_never_pools_with_outline_savings() {
+        // Handing over a whole file is a delivery, not an optimisation. Under one shared route,
+        // a call that can only ever lose tokens sat inside the savings headline — 47 of the 84
+        // recorded smart_read overages were this path and nothing else.
+        let (_d, path) = fixture("src.rs", &rust_src());
+        let m = tool_smart_read(&json!({ "path": &path, "mode": "full" }))
+            .meter
+            .expect("full mode still meters");
+        assert_eq!(m.routed_via, "smart_read_full");
+        assert!(
+            !lumen_stats::LUMEN_ROUTES.contains(&m.routed_via.as_str()),
+            "smart_read_full must be excluded from the savings routes"
+        );
+        // The overage is the one-line header and nothing more.
+        assert!(
+            m.returned_tokens - m.full_tokens < 40,
+            "the full-mode header should cost a handful of tokens, not {}",
+            m.returned_tokens - m.full_tokens
+        );
+    }
+
+    #[test]
     fn smart_read_unknown_mode_falls_back_to_outline() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_smart_read(&json!({ "path": &path, "mode": "sideways" }));
         assert!(text_of(&out).contains("— outline"));
     }
 
     #[test]
     fn smart_read_meters_the_path_and_line_count() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_smart_read(&json!({ "path": &path }));
         let m = out.meter.expect("smart_read must meter");
         assert_eq!(m.path, path);
         assert_eq!(m.tool_name, "mcp__lumen__smart_read");
         assert_eq!(m.routed_via, "smart_read");
-        assert_eq!(m.lines, Some(RUST_SRC.lines().count() as i64));
+        assert_eq!(m.lines, Some(rust_src().lines().count() as i64));
         // Saturating: a tiny file's outline can exceed the file, and the metered
         // saving must then be 0 rather than negative.
         // Inverted: exact signed difference, no floor.
@@ -1280,11 +1608,23 @@ fn beta() {
     }
 
     #[test]
-    fn smart_read_handles_an_unknown_extension() {
-        let (_d, path) = fixture("notes.xyz", "some free text\nmore text\n");
+    fn an_unparseable_language_returns_the_file_rather_than_a_fake_saving() {
+        // `outline` does not fail on a language it cannot parse — it returns one synthetic
+        // whole-file item. Formatted as an outline that is ~40 tokens describing nothing, and it
+        // was metered as a ~95% saving of a file the tool never looked inside. A false saving is
+        // worse than a miss, because nothing downstream can tell it from a real one.
+        let (_d, path) = fixture("notes.xyz", &"some free text\n".repeat(200));
         let out = tool_smart_read(&json!({ "path": &path }));
-        // Unknown languages yield a single whole-file item rather than an error.
-        assert!(text_of(&out).contains("— outline"));
+        let text = text_of(&out);
+        assert!(text.contains("no structure could be extracted"), "got: {text}");
+        assert!(text.contains("some free text"), "the file itself must come back");
+        let m = out.meter.expect("still meters");
+        assert_eq!(m.routed_via, "ranked_no_defs");
+        assert!(
+            m.saved_tokens < 0,
+            "it cost more than a plain read, so it is a loss: {}",
+            m.saved_tokens
+        );
     }
 
     // ── recall_file ──────────────────────────────────────────────────────────
@@ -1304,7 +1644,7 @@ fn beta() {
 
     #[test]
     fn recall_file_by_name_returns_only_that_item() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_recall_file(&json!({ "path": &path, "names": ["alpha"] }));
         let text = text_of(&out);
         assert!(text.contains("1 item(s): alpha"), "got: {text}");
@@ -1317,14 +1657,14 @@ fn beta() {
 
     #[test]
     fn recall_file_by_name_is_case_insensitive() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_recall_file(&json!({ "path": &path, "names": ["ALPHA"] }));
         assert!(text_of(&out).contains("alpha"));
     }
 
     #[test]
     fn recall_file_can_fetch_several_names_at_once() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_recall_file(&json!({ "path": &path, "names": ["alpha", "beta"] }));
         let text = text_of(&out);
         assert!(text.contains("2 item(s)"), "got: {text}");
@@ -1333,10 +1673,10 @@ fn beta() {
 
     #[test]
     fn recall_file_unmatched_name_falls_back_to_the_outline() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_recall_file(&json!({ "path": &path, "names": ["gamma"] }));
         let text = text_of(&out);
-        assert!(text.contains("no items matched"), "got: {text}");
+        assert!(text.contains("nothing matched"), "got: {text}");
         assert!(text.contains("Available items:"));
         assert!(text.contains("alpha"), "the outline must still be offered");
         assert!(
@@ -1347,15 +1687,22 @@ fn beta() {
 
     #[test]
     fn recall_file_by_line_range_includes_three_lines_of_context() {
-        let numbered: String = (1..=20).map(|i| format!("line{i}\n")).collect();
+        // 400 lines with real content, not 20 tiny ones: a range read of a 20-line file costs
+        // more than the file, so the inflation guard fires and the context window never gets
+        // exercised. The range branch only means anything on a file worth not reading whole.
+        let numbered: String = (1..=400)
+            .map(|i| format!("line{i} // padding to make this file worth a partial read\n"))
+            .collect();
         let (_d, path) = fixture("nums.txt", &numbered);
         let out = tool_recall_file(&json!({ "path": &path, "start_line": 10, "end_line": 12 }));
         let text = text_of(&out);
         assert!(text.contains("L10-12 (+3 lines context)"), "got: {text}");
-        assert!(text.contains("line7"), "3 lines of leading context");
-        assert!(!text.contains("line6"), "but not a 4th: {text}");
-        assert!(text.contains("line15"), "3 lines of trailing context");
-        assert!(!text.contains("line16"), "but not a 4th: {text}");
+        // Anchored on the gutter: a bare "line6" also matches line60..line69 in a 400-line
+        // file, so the negative assertions would pass for the wrong reason.
+        assert!(text.contains("7|line7 "), "3 lines of leading context: {text}");
+        assert!(!text.contains("6|line6 "), "but not a 4th: {text}");
+        assert!(text.contains("15|line15 "), "3 lines of trailing context: {text}");
+        assert!(!text.contains("16|line16 "), "but not a 4th: {text}");
     }
 
     #[test]
@@ -1376,17 +1723,32 @@ fn beta() {
     }
 
     #[test]
-    fn recall_file_with_no_selector_returns_the_whole_file() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+    fn recall_file_with_no_selector_returns_the_outline_not_the_file() {
+        // Returning the file plus a header made this the one branch that could never save
+        // anything — guaranteed inflation, every single call. The outline is what a caller
+        // without a selector actually needs, and it is not an error, because an error costs a
+        // round and delivers nothing.
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_recall_file(&json!({ "path": &path }));
         let text = text_of(&out);
         assert!(text.contains("no selector given"), "got: {text}");
-        assert!(text.contains("x + 1") && text.contains("BETA_BODY_MARKER"));
+        assert!(text.contains("alpha") && text.contains("beta"), "outline must name both: {text}");
+        assert!(
+            !text.contains("BETA_BODY_MARKER"),
+            "bodies must NOT come back: {text}"
+        );
+        let m = out.meter.expect("meters");
+        assert!(
+            m.returned_tokens < m.full_tokens,
+            "the outline must cost less than the file ({} vs {})",
+            m.returned_tokens,
+            m.full_tokens
+        );
     }
 
     #[test]
     fn recall_file_names_take_precedence_over_a_range() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_recall_file(
             &json!({ "path": &path, "names": ["alpha"], "start_line": 1, "end_line": 2 }),
         );
@@ -1395,12 +1757,164 @@ fn beta() {
 
     #[test]
     fn recall_file_meters_with_its_own_tool_name() {
-        let (_d, path) = fixture("src.rs", RUST_SRC);
+        let (_d, path) = fixture("src.rs", &rust_src());
         let m = tool_recall_file(&json!({ "path": &path, "names": ["alpha"] }))
             .meter
             .expect("recall_file must meter");
         assert_eq!(m.tool_name, "mcp__lumen__recall_file");
         assert_eq!(m.routed_via, "recall_file");
+    }
+
+    #[test]
+    fn a_single_letter_name_no_longer_selects_the_whole_file() {
+        // `nl == q || nl.contains(q)` while the description promised exact matching. `["e"]`
+        // matched nearly every item, and the reply came back larger than the file — the
+        // mechanism behind 96% of the 92,347 recorded overshoot tokens.
+        let (_d, path) = fixture("src.rs", &rust_src());
+        let out = tool_recall_file(&json!({ "path": &path, "names": ["a"] }));
+        let m = out.meter.expect("meters");
+        assert!(
+            m.returned_tokens <= m.full_tokens,
+            "a one-letter query must never cost more than the file ({} vs {})",
+            m.returned_tokens,
+            m.full_tokens
+        );
+    }
+
+    #[test]
+    fn an_exact_name_wins_over_substring_matches() {
+        // `beta` is also a substring of nothing here, but `spare_0` vs `spare_1`… would be:
+        // exact-first is what stops one precise ask fanning out into six bodies.
+        let (_d, path) = fixture("src.rs", &rust_src());
+        let out = tool_recall_file(&json!({ "path": &path, "names": ["spare_0"] }));
+        let text = text_of(&out);
+        assert!(text.contains("1 item(s): spare_0"), "got: {text}");
+        // One block, one header. `fn spare_1` does appear — it is inside spare_0's trailing
+        // three lines of context, which is the documented behaviour — so the claim to test is
+        // that only one item was *selected*, not that a sibling name is absent.
+        assert_eq!(
+            text.matches("\n## ").count(),
+            1,
+            "exactly one block should be emitted: {text}"
+        );
+        let m = out.meter.expect("meters");
+        assert!(
+            m.returned_tokens * 3 < m.full_tokens,
+            "one of eight items should be a small fraction of the file ({} vs {})",
+            m.returned_tokens,
+            m.full_tokens
+        );
+    }
+
+    #[test]
+    fn a_broad_substring_query_returns_the_map_not_the_territory() {
+        // "spare" substring-matches six items. Returning six bodies would be most of the file,
+        // so the outline comes back with an instruction instead.
+        let (_d, path) = fixture("src.rs", &rust_src());
+        let out = tool_recall_file(&json!({ "path": &path, "names": ["spare"] }));
+        let text = text_of(&out);
+        assert!(text.contains("too many to return bodies"), "got: {text}");
+        assert!(!text.contains("wrapping_add"), "no bodies: {text}");
+        let m = out.meter.expect("meters");
+        assert!(m.returned_tokens < m.full_tokens, "and it must still be cheaper than the file");
+    }
+
+    #[test]
+    fn a_narrow_substring_match_is_returned_but_labelled_as_inexact() {
+        // Sloppy queries are genuinely useful and real callers rely on them; they just must not
+        // be able to select the whole file. When they are honoured, the reply says so.
+        let (_d, path) = fixture("src.rs", &rust_src());
+        let text = text_of(&tool_recall_file(&json!({ "path": &path, "names": ["lph"] })));
+        assert!(text.contains("matched by substring, not exact"), "got: {text}");
+        assert!(text.contains("alpha"), "got: {text}");
+    }
+
+    #[test]
+    fn an_empty_name_is_rejected_rather_than_matching_everything() {
+        // `names: [""]` matched every named item under the old rule.
+        let (_d, path) = fixture("src.rs", &rust_src());
+        for names in [json!([""]), json!(["   "]), json!([])] {
+            let out = tool_recall_file(&json!({ "path": &path, "names": names }));
+            assert_eq!(out.error_code(), Some(INVALID_PARAMS), "for {names:?}");
+        }
+    }
+
+    #[test]
+    fn names_covering_most_of_the_file_return_the_outline_instead() {
+        let (_d, path) = fixture("small.rs", &realistic_rust(2, 30));
+        let out = tool_recall_file(
+            &json!({ "path": &path, "names": ["operation_0", "operation_1"] }),
+        );
+        let text = text_of(&out);
+        assert!(text.contains("returning the outline instead"), "got: {text}");
+        let m = out.meter.expect("meters");
+        assert!(m.returned_tokens < m.full_tokens);
+    }
+
+    #[test]
+    fn overlapping_items_emit_their_shared_lines_once() {
+        // A nested item used to re-emit its parent's lines, re-numbered, under three more
+        // markdown headers.
+        let items = vec![
+            CodeItem { kind: "struct".into(), name: Some("Outer".into()), start_line: 10, end_line: 40, start_byte: 0, end_byte: 0 },
+            CodeItem { kind: "fn".into(), name: Some("inner".into()), start_line: 15, end_line: 20, start_byte: 0, end_byte: 0 },
+        ];
+        let refs: Vec<&CodeItem> = items.iter().collect();
+        let blocks = merge_blocks(&refs, 100);
+        assert_eq!(blocks.len(), 1, "nested items are one block: {blocks:?}");
+        assert_eq!(blocks[0].labels.len(), 2, "both are labelled");
+    }
+
+    #[test]
+    fn items_separated_by_more_than_the_context_window_stay_separate() {
+        let items = vec![
+            CodeItem { kind: "fn".into(), name: Some("a".into()), start_line: 1, end_line: 5, start_byte: 0, end_byte: 0 },
+            CodeItem { kind: "fn".into(), name: Some("b".into()), start_line: 90, end_line: 95, start_byte: 0, end_byte: 0 },
+        ];
+        let refs: Vec<&CodeItem> = items.iter().collect();
+        assert_eq!(merge_blocks(&refs, 100).len(), 2);
+    }
+
+    #[test]
+    fn a_range_spanning_the_whole_file_cannot_cost_more_than_the_file() {
+        let (_d, path) = fixture("big.rs", &realistic_rust(8, 40));
+        let out = tool_recall_file(&json!({ "path": &path, "start_line": 1, "end_line": 99999 }));
+        let m = out.meter.expect("meters");
+        assert!(
+            m.returned_tokens <= m.full_tokens + NOTE_ALLOWANCE,
+            "asking for everything must fall back to the file, not exceed it ({} vs {})",
+            m.returned_tokens,
+            m.full_tokens
+        );
+        assert_eq!(m.routed_via, "would_inflate");
+    }
+
+    #[test]
+    fn every_guarded_path_stays_within_the_file_on_a_realistic_corpus_shape() {
+        // The assertion that makes the class impossible rather than merely absent: for each
+        // shape a caller can ask for, the reply is never more expensive than reading the file.
+        for (label, body) in [
+            ("few big items", realistic_rust(8, 40)),
+            ("many tiny items", (0..80).map(|i| format!("fn f{i}() {{}}\n")).collect()),
+            ("one item", realistic_rust(1, 200)),
+        ] {
+            let (_d, path) = fixture("c.rs", &body);
+            let outs = [
+                tool_smart_read(&json!({ "path": &path })),
+                tool_recall_file(&json!({ "path": &path })),
+                tool_recall_file(&json!({ "path": &path, "start_line": 1, "end_line": 99999 })),
+            ];
+            for out in outs {
+                let m = out.meter.expect("meters");
+                assert!(
+                    m.returned_tokens <= m.full_tokens + NOTE_ALLOWANCE,
+                    "[{label}] {} returned {} against {} for the file",
+                    m.routed_via,
+                    m.returned_tokens,
+                    m.full_tokens
+                );
+            }
+        }
     }
 
     // ── compress_logs ────────────────────────────────────────────────────────
