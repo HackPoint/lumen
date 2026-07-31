@@ -4536,4 +4536,33 @@ mod tests {
             "a failed write must be recorded somewhere; silence is what hid this for weeks"
         );
     }
+
+    /// The cask must uninstall the LaunchAgent that actually exists.
+    ///
+    /// It targeted `io.speedata.lumen` — the bundle id — while the autostart plugin writes
+    /// `Lumen.plist` with Label `Lumen`. `launchctl` matches on the Label, so every
+    /// uninstall left the login item in place, still trying to launch a deleted app at
+    /// each boot. Reported from the field as part of issue #5.
+    #[test]
+    fn the_cask_uninstalls_the_launch_agent_that_exists() {
+        let cask = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("Casks/lumen-app.rb");
+        let text = match std::fs::read_to_string(&cask) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        assert!(
+            text.contains("launchctl:  \"Lumen\"") || text.contains("launchctl: \"Lumen\""),
+            "the cask must unload the agent by its Label (Lumen), not by the bundle id"
+        );
+        assert!(
+            text.contains("~/Library/LaunchAgents/Lumen.plist"),
+            "zap must remove the plist the plugin actually writes"
+        );
+    }
 }

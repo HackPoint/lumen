@@ -305,7 +305,23 @@ pub fn run() {
 
             match tray_result {
                 Ok(_) => log::info!("TRAY: built successfully"),
-                Err(e) => log::error!("TRAY: build failed: {e}"),
+                Err(e) => {
+                    log::error!("TRAY: build failed: {e}");
+                    // Both windows start hidden and the tray is the whole interface, so a
+                    // failed tray leaves a running process with no way to reach anything —
+                    // no popover, no main window, not even Quit. Reported from the field on
+                    // macOS 26 (issue #5): the app was running with 2 processes and no
+                    // menu-bar item, and the in-app fault reporter was unreachable because
+                    // reaching it requires the UI that is missing.
+                    //
+                    // Showing the main window is not a fix for whatever made the tray fail.
+                    // It is the difference between a degraded app and an unusable one.
+                    log::warn!("TRAY: falling back to the main window so the app is reachable");
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
             }
 
             // Register the login item for installs that completed setup before
