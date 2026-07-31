@@ -29,6 +29,66 @@ macro_rules! logline {
     }};
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WS restart backoff and log suppression
+//
+// The restart loop used to retry every 2 seconds and log two lines each time, for as long as the
+// failure persisted. Measured against a held port: 434 KB/hour. The GUI forwards this process's
+// stderr into its own log, which is capped at 256 KB with KeepOne — so a sustained bind failure
+// rotated the file every ~35 minutes and took the startup and tray diagnostics with it. That is
+// the opposite of what release logging was added for: the evidence disappears precisely when the
+// user finally reports the problem.
+//
+// Two changes, both bounded. The retry interval backs off, because a held port does not become
+// free faster for being asked every 2 seconds; and an unchanged failure stops being logged in
+// full, with the suppressed count reported when it next speaks.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// First retry delay after a failure.
+const WS_RETRY_BASE_SECS: u64 = 2;
+
+/// Ceiling on the retry delay.
+///
+/// 30s rather than something larger: an orphaned daemon from an upgrade usually dies within
+/// seconds once its stdin closes, and this bounds how long the replacement waits before taking the
+/// port. The GUI retries its own connection every 2s, so recovery is this plus at most 2s.
+const WS_RETRY_CAP_SECS: u64 = 30;
+
+/// How long to wait before restart attempt `attempt` (1-based).
+///
+/// Doubles from the base and clamps at the cap.
+fn ws_retry_delay(attempt: u32) -> std::time::Duration {
+    let secs = WS_RETRY_BASE_SECS
+        .saturating_mul(1u64 << attempt.saturating_sub(1).min(16))
+        .min(WS_RETRY_CAP_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Should attempt `attempt` (1-based) be logged?
+///
+/// `changed` means the failure text differs from the last one logged — always worth saying, since
+/// a new error is new information. Otherwise: the first three, then one in ten. `verbose` comes
+/// from `LUMEN_LOG=debug|trace` and reports everything, for someone actively debugging.
+fn should_log_ws_retry(attempt: u32, changed: bool, verbose: bool) -> bool {
+    verbose || changed || attempt <= 3 || attempt.is_multiple_of(10)
+}
+
+/// Whether every retry should be logged, from `LUMEN_LOG`.
+///
+/// The same variable the GUI uses for its own level, so there is one thing to learn. This process
+/// has no level filter of its own — `logline!` writes straight to stderr — so it is read here
+/// rather than plumbed through a logger.
+fn ws_retry_verbose() -> bool {
+    matches!(
+        std::env::var("LUMEN_LOG")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "debug" | "trace"
+    )
+}
+
 /// Where the GUI and CLI expect to find the daemon.
 const DEFAULT_WS_ADDR: &str = "127.0.0.1:9999";
 
@@ -213,20 +273,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ws_pool = pool.clone();
         let ws_tx = tx.clone();
         async move {
+            let verbose = ws_retry_verbose();
+            // Attempt count and last failure, so an unchanged error can be collapsed and a new one
+            // always reported. Reset on success, so a daemon that recovers and later fails again
+            // starts loud rather than inheriting a suppressed state.
+            let mut attempt: u32 = 0;
+            let mut last: Option<String> = None;
+            let mut suppressed: u32 = 0;
             loop {
-                if let Err(e) = ws_server(ws_pool.clone(), ws_tx.clone()).await {
-                    logline!("ws_server exited: {e}; restarting in 2s");
-                    note_fault("ws_restart", "error", None, e.to_string());
-                } else {
-                    logline!("ws_server returned; restarting in 2s");
-                    note_fault(
-                        "ws_restart",
-                        "clean_return",
-                        None,
-                        "ws_server returned Ok; the accept loop should never end".into(),
-                    );
+                let outcome = match ws_server(ws_pool.clone(), ws_tx.clone()).await {
+                    Err(e) => {
+                        note_fault("ws_restart", "error", None, e.to_string());
+                        format!("exited: {e}")
+                    }
+                    Ok(()) => {
+                        note_fault(
+                            "ws_restart",
+                            "clean_return",
+                            None,
+                            "ws_server returned Ok; the accept loop should never end".into(),
+                        );
+                        "returned Ok; the accept loop should never end".to_string()
+                    }
+                };
+
+                attempt = attempt.saturating_add(1);
+                let changed = last.as_deref() != Some(outcome.as_str());
+                if changed {
+                    attempt = 1;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let delay = ws_retry_delay(attempt);
+
+                if should_log_ws_retry(attempt, changed, verbose) {
+                    let also = if suppressed > 0 {
+                        format!(" ({suppressed} identical since the last message)")
+                    } else {
+                        String::new()
+                    };
+                    logline!(
+                        "ws_server {outcome}{also}; attempt {attempt}, retrying in {}s",
+                        delay.as_secs()
+                    );
+                    suppressed = 0;
+                } else {
+                    suppressed = suppressed.saturating_add(1);
+                }
+                last = Some(outcome);
+
+                tokio::time::sleep(delay).await;
             }
         }
     });
@@ -255,7 +349,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    logline!("initial import done, watching for changes...");
+    // Reports the total, which is the information the suppressed per-turn lines carried in
+    // aggregate — and the only line a fresh install needs about the backfill.
+    //
+    // Read from the ledger rather than counted in the loop: `ingest_from` returns a byte offset,
+    // and threading a second value out of it would change three call sites for one log line.
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM turns")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(-1);
+    logline!("initial import done ({total} turns in the ledger), watching for changes...");
 
     // ── Notify watcher task (latency path) ────────────────────────────────
     // Runs in its own task with an inner restart loop.  If the watcher
@@ -481,12 +584,26 @@ async fn ingest_from(
 
         if res.rows_affected() > 0 {
             new += 1;
-            logline!(
-                "+ turn {} ({} in / {} out)",
-                rec.message.id,
-                u.input_tokens,
-                u.output_tokens
-            );
+            // Per-turn only for live turns, not for the initial import.
+            //
+            // `broadcast_live` is false exactly during the startup backfill, which on a fresh
+            // database replays every transcript on the machine: measured at 16,252 lines and 876 KB
+            // in 60 seconds here. The GUI forwards this stderr into a 256 KB log with KeepOne, so a
+            // first run rotated the file three times over and destroyed the startup and tray
+            // diagnostics — on precisely the launch where a new user is most likely to hit a
+            // problem and be asked for a log.
+            //
+            // A live turn arrives every few seconds at most, and seeing them is the point of the
+            // tool, so those stay. `LUMEN_LOG=debug` restores the per-turn line during import for
+            // anyone debugging ingestion.
+            if broadcast_live || ws_retry_verbose() {
+                logline!(
+                    "+ turn {} ({} in / {} out)",
+                    rec.message.id,
+                    u.input_tokens,
+                    u.output_tokens
+                );
+            }
             if broadcast_live {
                 let _ = tx.send(TurnMsg {
                     message_id: rec.message.id.clone(),
@@ -535,10 +652,13 @@ async fn ws_server(
     tx: broadcast::Sender<TurnMsg>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = ws_addr();
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        logline!("ws bind failed ({addr} in use?): {e}");
-        e
-    })?;
+    // Deliberately silent. This used to log "ws bind failed" here while the restart loop logged
+    // "ws_server exited" for the same event — two lines per failed cycle, and the throttle state
+    // could only live in the loop. The loop now formats the single message, and the error carries
+    // enough to identify a bind failure.
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| format!("could not bind {addr} ({e}); is another daemon running?"))?;
     logline!("WebSocket server listening on ws://{addr}");
     serve_ws(listener, pool, tx).await
 }
@@ -684,6 +804,123 @@ fn walk_jsonl(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    // ── WS restart backoff and log suppression (issue #7) ────────────────────
+    //
+    // The volume, not the correctness, was the defect: 434 KB/hour against the GUI's 256 KB log cap
+    // rotated the tray diagnostics away in ~35 minutes. These pin the two decisions that bound it.
+
+    #[test]
+    fn the_retry_delay_backs_off_and_then_stops_growing() {
+        let secs = |a: u32| ws_retry_delay(a).as_secs();
+        assert_eq!(secs(1), 2, "the first retry stays prompt");
+        assert_eq!(secs(2), 4);
+        assert_eq!(secs(3), 8);
+        assert_eq!(secs(4), 16);
+        // Capped: a held port does not free up faster for being asked more often, but recovery
+        // must still be bounded.
+        assert_eq!(secs(5), 30);
+        assert_eq!(secs(6), 30);
+        assert_eq!(secs(1000), 30);
+    }
+
+    #[test]
+    fn the_retry_delay_never_overflows_or_reaches_zero() {
+        // `1 << attempt` on a large attempt count is the obvious way to write this and the obvious
+        // way to panic in release-mode arithmetic. A zero delay would spin the loop.
+        for a in [0, 1, 31, 32, 33, 64, 1_000_000, u32::MAX] {
+            let s = ws_retry_delay(a).as_secs();
+            assert!(
+                (WS_RETRY_BASE_SECS..=WS_RETRY_CAP_SECS).contains(&s),
+                "attempt {a} gave {s}s, outside {WS_RETRY_BASE_SECS}..={WS_RETRY_CAP_SECS}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_few_failures_are_always_reported() {
+        // Silence on the first failure would be worse than the noise: this is the line that says
+        // the daemon cannot serve.
+        for a in 1..=3 {
+            assert!(should_log_ws_retry(a, false, false), "attempt {a}");
+        }
+    }
+
+    #[test]
+    fn an_unchanged_failure_is_collapsed_to_one_in_ten() {
+        for a in 4..=9 {
+            assert!(
+                !should_log_ws_retry(a, false, false),
+                "attempt {a} should be quiet"
+            );
+        }
+        assert!(should_log_ws_retry(10, false, false));
+        assert!(should_log_ws_retry(20, false, false));
+        assert!(!should_log_ws_retry(11, false, false));
+    }
+
+    #[test]
+    fn a_changed_failure_is_always_reported_however_deep_the_run() {
+        // A new error is new information, and suppressing it would hide a bind failure turning
+        // into something else entirely.
+        assert!(should_log_ws_retry(7, true, false));
+        assert!(should_log_ws_retry(9_999, true, false));
+    }
+
+    #[test]
+    fn verbose_reports_every_attempt() {
+        for a in [4, 5, 7, 11, 99] {
+            assert!(
+                should_log_ws_retry(a, false, true),
+                "attempt {a} under LUMEN_LOG=debug"
+            );
+        }
+    }
+
+    #[test]
+    fn the_suppression_and_backoff_together_bound_the_hourly_volume() {
+        // The claim the issue is about, computed rather than asserted by hand: one hour of an
+        // unchanged failure must produce a small number of lines, against the ~1,800 cycles and
+        // 434 KB/hour measured before the fix.
+        let mut elapsed = 0u64;
+        let mut attempt = 0u32;
+        let mut logged = 0u32;
+        while elapsed < 3600 {
+            attempt += 1;
+            if should_log_ws_retry(attempt, attempt == 1, false) {
+                logged += 1;
+            }
+            elapsed += ws_retry_delay(attempt).as_secs();
+        }
+        assert!(
+            logged <= 20,
+            "an hour of one unchanged failure logged {logged} lines; that is not bounded"
+        );
+        // And it must not be silent, or a persistent failure leaves no trace at all.
+        assert!(logged >= 3, "only {logged} lines in an hour is too quiet");
+    }
+
+    #[test]
+    fn verbose_is_read_from_the_same_variable_the_gui_uses() {
+        // Not a new env var: LUMEN_LOG is what a user already sets for the app's own level.
+        // Serialised implicitly by being the only test that touches it.
+        let prev = std::env::var("LUMEN_LOG").ok();
+        for (v, want) in [
+            ("debug", true),
+            ("DEBUG", true),
+            (" trace ", true),
+            ("warn", false),
+            ("", false),
+            ("nonsense", false),
+        ] {
+            unsafe { std::env::set_var("LUMEN_LOG", v) };
+            assert_eq!(ws_retry_verbose(), want, "for LUMEN_LOG={v:?}");
+        }
+        match prev {
+            Some(p) => unsafe { std::env::set_var("LUMEN_LOG", p) },
+            None => unsafe { std::env::remove_var("LUMEN_LOG") },
+        }
+    }
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::io::Write;
