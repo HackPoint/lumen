@@ -184,12 +184,11 @@ read -r answer
 
 # ── commit + tag ──────────────────────────────────────────────────────────────
 
-git add \
-    crates/lumen-core/Cargo.toml \
-    crates/lumen-cli/Cargo.toml \
-    crates/lumen-daemon/Cargo.toml \
-    crates/lumen-mcp/Cargo.toml \
-    lumenator/src-tauri/Cargo.toml \
+# Staged from CARGO_TOML_FILES rather than a second hand-written list. The two lists
+# disagreed: lumen-stats was added to the bump but not to the commit, so the release
+# commit carried a stale version while the working tree looked correct — and the version
+# guard, which reads the working tree, passed.
+git add "${CARGO_TOML_FILES[@]}" \
     lumenator/package.json \
     lumenator/src-tauri/tauri.conf.json \
     Formula/lumen-cli.rb \
