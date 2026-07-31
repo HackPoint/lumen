@@ -481,8 +481,8 @@ that saving rests on a real tokenizer count rather than a bytes/4 guess, which i
 by a test rather than asserted here.
 
 **→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
-measurement, including the things that would make the figure above dishonest: **0 of 1,573
-eligible reads leaked** past the optimizer, 3.4M tokens of binary-file noise excluded from the
+measurement, including the things that would make the figure above dishonest: **8 of 1,608
+eligible reads bypassed** the optimizer, all of them the intercept's deliberate fail-open guards, 3.4M tokens of binary-file noise excluded from the
 baseline, and the 17 of 31 files where interception costs more than it saves. No Lumen tool can
 return more than the file it was asked about — that is a backstop with a corpus test behind it,
 not an observation. Every figure there is produced and asserted by
