@@ -621,6 +621,12 @@ Nothing is sent until you ask for it — via `lumen report --yes`, or the **File
 button under **Report a fault** on the Hotspots screen. You see the exact text first,
 and it is the text that gets sent; it is never re-generated at send time.
 
+`lumen` comes from the `lumen-cli` formula; a cask-only install leaves it off your `PATH`.
+The binary is still in the bundle at
+`/Applications/Lumen.app/Contents/MacOS/lumen-cli`, which is the route that works when the
+app will not start — see [If `lumen` is not a
+command](docs/filing-a-fault-report.md#if-lumen-is-not-a-command).
+
 Three routes are tried in order, and the first that works wins:
 
 | order | route | needs | can comment on an existing issue |
