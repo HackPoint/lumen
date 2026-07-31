@@ -73,9 +73,36 @@ pub fn log_level_from(env: Option<&str>, debug: bool) -> log::LevelFilter {
 pub fn keys_to_clear(entries: &[(String, Option<bool>)]) -> Vec<String> {
     entries
         .iter()
-        .filter(|(k, v)| k.starts_with("NSStatusItem Visible ") && *v == Some(false))
+        .filter(|(k, v)| is_visibility_key(k) && *v == Some(false))
         .map(|(k, _)| k.clone())
         .collect()
+}
+
+/// Is this key a status-item visibility flag?
+///
+/// **There are two forms, and only one was handled.** The original filter required
+/// `"NSStatusItem Visible "` with a trailing space, which misses the second:
+///
+/// ```text
+/// NSStatusItem Visible Item-0        <- the classic form
+/// NSStatusItem VisibleCC Item-0      <- also real, and MISSED by a trailing-space match
+/// ```
+///
+/// The `CC` form is not a typo and not ours. It appears across unrelated apps on this machine —
+/// Apple's own `com.apple.TextInputMenuAgent` (`VisibleCC Item-0` = true), `com.apple.controlcenter`
+/// (`VisibleCC Battery`, `VisibleCC Clock`, `VisibleCC WiFi`, `VisibleCC BentoBox-0`, all true) and
+/// `com.microsoft.OneDrive` (`VisibleCC Item-0` = true). `CC` is Control Center, which manages
+/// status items on current macOS.
+///
+/// It was found by accident: after testing the clearing path, Lumen's own domain held
+/// `NSStatusItem VisibleCC Item-0` = **false** while every other app's equivalent was true — so
+/// the app was carrying a hidden-status-item flag that the clearing code could not see. That is
+/// the same defect issue #5 is about, in a key shape nobody had looked for.
+///
+/// Matching the prefix without the separator catches both, and cannot reach
+/// `NSStatusItem Preferred Position …`, which is a position rather than a flag.
+fn is_visibility_key(key: &str) -> bool {
+    key.starts_with("NSStatusItem Visible")
 }
 
 /// A monitor's physical bounds: `(x, y, width, height)`.
@@ -272,7 +299,7 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
             // logged `Preferred Position = Some(true)`, which is meaningless and would send a
             // maintainer down the wrong path. `keys_to_clear` was never fooled (it filters on the
             // prefix), but the log line is the diagnostic a human reads.
-            let is_visible_key = k.starts_with("NSStatusItem Visible ");
+            let is_visible_key = is_visibility_key(&k);
             // `objectForKey` distinguishes "absent" from "present and false"; `boolForKey` alone
             // would render both as false and we would clear keys that do not exist.
             let present = dict.objectForKey(&NSString::from_str(&k)).is_some();
@@ -384,6 +411,40 @@ mod tests {
         ];
         let got = keys_to_clear(&entries);
         assert_eq!(got.len(), 2, "both names should be cleared, got {got:?}");
+    }
+
+    #[test]
+    fn the_control_center_key_form_is_also_cleared() {
+        // `NSStatusItem VisibleCC <name>` is a real AppKit key, not a typo: it appears in
+        // com.apple.TextInputMenuAgent, com.apple.controlcenter and com.microsoft.OneDrive on this
+        // machine, all set true. Lumen's own was false while the clearing code — which required a
+        // trailing space after "Visible" — could not see it at all.
+        let entries = vec![
+            pref("NSStatusItem VisibleCC Item-0", Some(false)),
+            pref("NSStatusItem Visible Item-0", Some(false)),
+        ];
+        let got = keys_to_clear(&entries);
+        assert_eq!(got.len(), 2, "both key forms must be cleared, got {got:?}");
+        assert!(got.iter().any(|k| k.contains("VisibleCC")), "{got:?}");
+    }
+
+    #[test]
+    fn the_control_center_form_is_left_alone_when_it_is_true() {
+        // Every other app on this machine has VisibleCC = true. Rewriting those would be churn,
+        // and clearing a flag that already says "visible" could only cause confusion.
+        let entries = vec![pref("NSStatusItem VisibleCC Item-0", Some(true))];
+        assert!(keys_to_clear(&entries).is_empty());
+    }
+
+    #[test]
+    fn a_position_key_is_never_treated_as_a_visibility_flag() {
+        // The looser prefix must not start matching positions: this key holds 612 on this machine,
+        // and boolForKey on a number returns true, which is how the log came to print
+        // "Preferred Position = Some(true)".
+        assert!(!is_visibility_key("NSStatusItem Preferred Position Item-0"));
+        assert!(is_visibility_key("NSStatusItem Visible Item-0"));
+        assert!(is_visibility_key("NSStatusItem VisibleCC Item-0"));
+        assert!(!is_visibility_key("SomethingElse"));
     }
 
     #[test]

@@ -61,7 +61,7 @@ bytes/4 guess; see §3.
 
 Each of these is asserted by a test, because each is a way the headline above could lie.
 
-### Nothing leaked. **0 of 1,573 eligible reads bypassed the optimizer.**
+### Almost nothing leaked — and zero was the wrong thing to assert
 
 **This section previously published "64.9% of reads never reached a Lumen tool", and that
 figure was wrong** — not unflattering, wrong. It divided every recorded read of every file type
@@ -80,9 +80,19 @@ leak rate is zero, and a test now asserts exactly that rather than a percentage:
 | out of scope: unmeasurable (binary) | 124 | 3,431,295 *excluded from every baseline* |
 | out of scope: kinds not handled | 95 | 640,335 — **the coverage backlog** |
 
-A leak would mean the hook did not fire on a file it claims to cover, so there is no acceptable
-non-zero value and the assertion is an equality. The other rows are a statement of *scope*, and
-the last one is a bill:
+**A correction to the first version of this page.** It said the assertion was an equality — zero
+eligible reads bypassing the optimizer, no acceptable non-zero value. That was wrong, and it broke
+within the hour of being written.
+
+The intercept has two deliberate fail-open guards: `retry_escape_valve` lets a second read of the
+same path through in one session, so a model that genuinely cannot reach the MCP tools is never
+deadlocked, and `lumen_mcp_missing` does the same when the server is absent. Both produce exactly
+the shape counted above — a built-in read of a file the hook covers — and both are working as
+designed. The count is now a bounded share with the offending paths printed, so a real routing
+regression (the hook not firing at all, which would put every eligible read in this bucket) is still
+caught, while a guard doing its job is not reported as a defect.
+
+The other rows are a statement of *scope*, and the last one is a bill:
 
 | kind | calls | tokens read whole |
 | --- | --- | --- |

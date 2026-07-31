@@ -193,6 +193,21 @@ fn failing_gh() -> Vec<String> {
     }
 }
 
+/// An opener that always fails, without touching the desktop.
+///
+/// `open_cmd: None` does NOT mean "no browser" — it means "use the platform default", i.e. the
+/// real `open`. A test that passed `None` and let the chain reach the browser route therefore
+/// launched the developer's actual browser at `example.test/...`, on every `cargo test` run. The
+/// test even documented it ("a machine with a working `open` hands off to the browser instead of
+/// failing") and made its assertion conditional to tolerate it, rather than preventing it.
+///
+/// A test must never open a browser. Passing this makes every route fail deterministically, which
+/// also makes the aggregated-error assertion unconditional — strictly better than the version that
+/// only checked its claim on machines without a working `open`.
+fn failing_opener() -> Vec<String> {
+    failing_gh()
+}
+
 /// Endpoints pointing at a local listener, with `gh` made unreachable so the chain is
 /// forced past it — otherwise a machine with the CLI installed silently tests route 1.
 fn endpoints(
@@ -227,7 +242,16 @@ fn the_rest_route_posts_a_real_issue_request() {
             r#"{"html_url":"https://example.test/owner/repo/issues/7","number":7}"#,
         ),
     ]);
-    let ep = endpoints(&base, "https://example.test", None, Some("test-token-abc"));
+    // A failing opener rather than None. This test succeeds on the API route so it never reaches
+    // the browser today — but None resolves to the real `open`, so the moment the API stub changed
+    // or failed, this test would launch a browser window. Caught by the guard at the bottom of
+    // this file on its first run.
+    let ep = endpoints(
+        &base,
+        "https://example.test",
+        Some(failing_opener()),
+        Some("test-token-abc"),
+    );
     let filing = file_issue_with(&ep, UNRESOLVABLE_REPO, "a title", "a body", "deadbeef")
         .expect("a route should succeed");
 
@@ -282,18 +306,46 @@ fn the_rest_route_surfaces_githubs_own_error_message() {
         (200, "[]"),
         (422, r#"{"message":"Validation Failed"}"#),
     ]);
-    let ep = endpoints(&base, "https://example.test", None, Some("test-token-abc"));
-    // With no browser opener and a rejecting API, every route fails — which is what makes
-    // the aggregated error assertable.
-    // A machine with a working `open` hands off to the browser instead of failing, which
-    // is correct behaviour — so the assertion is conditional rather than unconditional.
-    if let Err(e) = file_issue_with(&ep, UNRESOLVABLE_REPO, "t", "b", "cafe") {
-        assert!(e.contains("422"), "status should be reported: {e}");
-        assert!(
-            e.contains("Validation Failed"),
-            "GitHub's message should be surfaced verbatim, not replaced: {e}"
-        );
-    }
+    // A stub opener that fails, NOT None. None means "use the platform default", so this test
+    // used to hand a prefilled example.test URL to the real `open` and pop the developer's
+    // browser on every run.
+    let ep = endpoints(
+        &base,
+        "https://example.test",
+        Some(failing_opener()),
+        Some("test-token-abc"),
+    );
+    // Now every route fails deterministically, so the aggregated error is assertable
+    // unconditionally rather than only on machines without a working `open`.
+    let err = file_issue_with(&ep, UNRESOLVABLE_REPO, "t", "b", "cafe")
+        .expect_err("every route was stubbed to fail, so filing must fail");
+    assert!(err.contains("422"), "status should be reported: {err}");
+    assert!(
+        err.contains("Validation Failed"),
+        "GitHub's message should be surfaced verbatim, not replaced: {err}"
+    );
+}
+
+#[test]
+fn no_test_in_this_suite_may_reach_the_real_browser_opener() {
+    // The guard for the defect above. `open_cmd: None` falls back to the platform opener, so any
+    // test that leaves it None and lets the chain reach the browser route launches a real browser
+    // window — which happened on every `cargo test --workspace` until it was noticed by a human
+    // seeing example.test open in their browser.
+    let src = include_str!("filing_routes.rs");
+    let offenders: Vec<&str> = src
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            // An `endpoints(...)` call site that passes a bare `None` for open_cmd.
+            t.starts_with("let ep = endpoints(") && t.contains(", None,")
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these call sites pass open_cmd: None, which resolves to the real `open`. \
+         Pass Some(stub_opener(..).0) or Some(failing_opener()) instead:\n{offenders:#?}"
+    );
 }
 
 #[test]

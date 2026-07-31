@@ -30,8 +30,11 @@ pub struct Facts {
     pub status_item_prefs: Vec<StatusItemPref>,
     /// Process names matching Lumen, as reported by the OS.
     pub processes: Vec<String>,
-    /// Menu-bar managers found installed or running.
+    /// Menu-bar managers that are **running**. Only these can be hiding a status item.
     pub menu_bar_managers: Vec<String>,
+    /// Menu-bar managers present in /Applications but not running. Context, never a finding —
+    /// reporting one as a cause sends the reader after something that cannot be responsible.
+    pub menu_bar_managers_installed: Vec<String>,
     pub log_path: Option<String>,
     /// `None` when the log file does not exist.
     pub log_size_bytes: Option<u64>,
@@ -49,7 +52,7 @@ pub enum Finding {
     /// A `NSStatusItem Visible …` key is false: the icon was ⌘-dragged off the menu bar and
     /// macOS remembers it. The cause of the reported symptom, and it has a one-line fix.
     IconHiddenByPreference { domain: String, key: String },
-    /// A menu-bar manager is present, which can hide the icon into an overflow area.
+    /// A **running** menu-bar manager, which can hide the icon into an overflow area.
     MenuBarManager { name: String },
     /// Lumen is not running at all, so no icon is expected.
     NotRunning,
@@ -174,7 +177,14 @@ pub fn render(f: &Facts) -> String {
         }
     }
     if !f.menu_bar_managers.is_empty() {
-        let _ = writeln!(s, "  managers present: {}", f.menu_bar_managers.join(", "));
+        let _ = writeln!(s, "  managers RUNNING: {}", f.menu_bar_managers.join(", "));
+    }
+    if !f.menu_bar_managers_installed.is_empty() {
+        let _ = writeln!(
+            s,
+            "  managers installed but not running: {}  (cannot be hiding it)",
+            f.menu_bar_managers_installed.join(", ")
+        );
     }
     let _ = writeln!(s);
 
@@ -249,7 +259,7 @@ fn describe(x: &Finding) -> String {
              icon is created and then immediately hidden, so nothing appears to fail."
         ),
         Finding::MenuBarManager { name } => {
-            format!("{name} is present and may be holding the icon in an overflow area.")
+            format!("{name} is running and may be holding the icon in an overflow area.")
         }
         Finding::NotRunning => "Lumen is not running, so there would be no icon.".to_string(),
         Finding::NoLog => "Lumen is running but has written no log file.".to_string(),
@@ -344,16 +354,30 @@ pub fn collect() -> Facts {
                 .filter(|l| l.contains("Lumen.app") || l.contains("lumen-daemon"))
                 .map(|l| l.trim().to_string())
                 .collect();
+            // Matched against each process's own path, not as a substring of the whole ps output.
+            //
+            // The old code did `ps.to_lowercase().contains("ice")`, and **"ice" is a substring of
+            // "Services"** — so it matched `CoreServices`, `XPCServices`, `fseventsd` and 127 other
+            // lines on a stock macOS install. `lumen doctor` therefore reported Ice as a present
+            // menu-bar manager on a machine where Ice has never been installed, and would have
+            // done so on essentially any Mac. Any short manager name has the same exposure.
+            //
+            // This was the top and only finding in the output, and it nearly went out in a comment
+            // on issue #5 as evidence. A diagnostic that invents a cause is worse than no
+            // diagnostic: it costs the reporter a round-trip chasing something that is not there.
             for m in MENU_BAR_MANAGERS {
-                if ps.to_lowercase().contains(&m.to_lowercase()) {
+                let needle = format!("/{m}.app/");
+                if ps.lines().any(|l| l.contains(&needle)) {
                     f.menu_bar_managers.push(m.to_string());
                 }
             }
         }
+        // Installed but not running is context, not a cause: it cannot hide anything. Kept
+        // separate so the two claims stay distinguishable in the output.
         for m in MENU_BAR_MANAGERS {
             let p = format!("/Applications/{m}.app");
             if std::path::Path::new(&p).exists() && !f.menu_bar_managers.contains(&m.to_string()) {
-                f.menu_bar_managers.push(m.to_string());
+                f.menu_bar_managers_installed.push(m.to_string());
             }
         }
 
@@ -482,6 +506,53 @@ mod tests {
         );
         assert!(found[0].remedy().contains("defaults delete"));
         assert!(found[0].remedy().contains("NSStatusItem Visible Item-0"));
+    }
+
+    #[test]
+    fn a_manager_that_is_installed_but_not_running_is_not_a_finding() {
+        // Only a *running* manager can be hiding a status item.
+        let mut f = healthy();
+        f.menu_bar_managers_installed = vec!["Ice".into()];
+        assert!(findings(&f).is_empty(), "{:?}", findings(&f));
+
+        let out = render(&f);
+        assert!(out.contains("installed but not running"), "{out}");
+        assert!(out.contains("cannot be hiding it"), "{out}");
+    }
+
+    #[test]
+    fn a_manager_name_that_is_a_substring_of_a_system_path_is_not_detected() {
+        // The real defect. `contains("ice")` over the whole ps output matched "CoreServices",
+        // "XPCServices" and 128 other lines on a stock install, so Ice was reported as present on
+        // a machine where it has never been installed. This asserts the shape of the fix — the
+        // manager list is only ever populated from an "/<Name>.app/" path match — at the level a
+        // reader can check, since `collect()` itself shells out and cannot be unit-tested.
+        for line in [
+            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Support/fseventsd",
+            "/System/Library/PrivateFrameworks/XPCServices.framework/xpcservice",
+        ] {
+            assert!(
+                line.to_lowercase().contains("ice"),
+                "the substring really is there, which is why the old check matched: {line}"
+            );
+            assert!(
+                !line.contains("/Ice.app/"),
+                "but the path form must not match: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_manager_is_still_a_finding() {
+        let mut f = healthy();
+        f.menu_bar_managers = vec!["Bartender".into()];
+        let found = findings(&f);
+        assert!(
+            matches!(found[0], Finding::MenuBarManager { .. }),
+            "{found:?}"
+        );
+        assert!(found[0].remedy().contains("Bartender"));
+        assert!(render(&f).contains("managers RUNNING"));
     }
 
     #[test]
