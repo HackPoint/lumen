@@ -165,5 +165,15 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           ./scripts/verify-install.sh --cli-only --bin-dir /tmp/cli --expect "$VERSION"
 
-          sudo dpkg -i "/tmp/dl/lumen_${VERSION}_amd64.deb" || sudo apt-get -f install -y
+          # Bounded, and non-interactive. Unbounded, this step hung: a hosted runner runs
+          # unattended-upgrades at boot, so dpkg's lock can be held for minutes, and
+          # `apt-get` waits for it forever rather than failing. The job sat on this one
+          # command with no output and no timeout.
+          export DEBIAN_FRONTEND=noninteractive
+          for _ in $(seq 1 60); do
+            sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+            echo "waiting for the dpkg lock…"; sleep 5
+          done
+          timeout 300 sudo dpkg -i "/tmp/dl/lumen_${VERSION}_amd64.deb" \
+            || timeout 300 sudo apt-get -f install -y
           ./scripts/verify-install.sh --bin-dir /usr/bin --expect "$VERSION"

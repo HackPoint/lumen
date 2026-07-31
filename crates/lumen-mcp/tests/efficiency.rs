@@ -290,6 +290,80 @@ fn the_files_where_interception_does_not_pay_are_named() {
     );
 }
 
+/// The recorded ledger, priced — and how much of the headline rests on a real count.
+///
+/// The corpus tests above measure what interception *would* save on this repository. This
+/// one prices what it *did* save on this machine, through the same `Econ` the UI headline
+/// uses, so the report and the product cannot disagree.
+///
+/// The provenance half matters more than the dollars. `full_tokens` is the denominator of
+/// every claim here, and it comes either from the tokenizer or from a bytes/4 guess.
+/// `token_source` records which. A headline built mostly on guesses is not a measurement,
+/// and until this test existed nothing distinguished the two.
+#[test]
+fn the_recorded_savings_are_priced_and_their_provenance_is_known() {
+    let Some(db) = lumen_core::meter::db_path() else {
+        return;
+    };
+    let Ok(conn) = lumen_core::meter::connect_db(&db) else {
+        return;
+    };
+
+    let Ok((opt_calls, saved)) = conn.query_row(
+        "SELECT count(*), COALESCE(sum(saved_tokens), 0) FROM read_events \
+         WHERE routed_via <> 'builtin_read'",
+        [],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    ) else {
+        return;
+    };
+    if opt_calls == 0 {
+        return;
+    }
+
+    let econ = Econ::default();
+    let per_token = econ.value_per_token();
+    let per_read = econ.round_cost();
+    let gross = saved as f64 * per_token;
+    let cost = opt_calls as f64 * per_read;
+
+    println!("\n== The recorded ledger, priced ==================================");
+    println!("  intercepted reads:       {opt_calls:>10}");
+    println!("  tokens saved:            {saved:>10}");
+    println!("  gross value:             ${gross:>10.2}");
+    println!("  cost of those rounds:    ${cost:>10.2}");
+    println!("  NET:                     ${:>10.2}", gross - cost);
+
+    // Provenance. Measured means lumen-tok counted the file; anything else is a guess or a
+    // language the tokenizer would not take.
+    let measured_saved: i64 = conn
+        .query_row(
+            "SELECT COALESCE(sum(saved_tokens), 0) FROM read_events \
+             WHERE routed_via <> 'builtin_read' AND token_source = 'measured'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let share = 100.0 * measured_saved as f64 / saved as f64;
+    println!("\n  of that saving, {share:.1}% rests on a tokenizer count rather than bytes/4");
+
+    // The threshold is deliberately high. Below it the headline is an estimate wearing a
+    // measurement's clothes, and the right response is to fix metering, not to soften the
+    // wording. A regression that stops recording token_source fails here.
+    assert!(
+        share > 80.0,
+        "only {share:.1}% of the reported saving comes from a measured count; \
+         the headline is mostly estimate"
+    );
+
+    // Priced consistently with the corpus tests: the round is subtracted, not assumed free.
+    assert!(per_token > 0.0, "a zero value per token prices nothing");
+    assert!(
+        cost > 0.0,
+        "intercepted reads must be charged for the round they cost"
+    );
+}
+
 /// The recorded ledger's own arithmetic. Skips cleanly where there is no database.
 #[test]
 fn the_recorded_ledger_agrees_with_itself() {
