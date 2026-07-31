@@ -197,7 +197,10 @@ impl StartupHealth {
     }
 
     pub fn degradations(&self) -> Vec<String> {
-        self.degradations.lock().map(|v| v.clone()).unwrap_or_default()
+        self.degradations
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     /// True the first time only. Used for the once-per-process log lines.
@@ -325,7 +328,10 @@ mod tests {
     #[test]
     fn an_unparseable_log_level_falls_back_rather_than_silencing_the_app() {
         // A typo must not be the difference between having a diagnostic and not having one.
-        assert_eq!(log_level_from(Some("verbose"), false), log::LevelFilter::Warn);
+        assert_eq!(
+            log_level_from(Some("verbose"), false),
+            log::LevelFilter::Warn
+        );
         assert_eq!(log_level_from(Some(""), true), log::LevelFilter::Info);
     }
 
@@ -475,7 +481,9 @@ mod tests {
     #[test]
     fn tray_states_describe_themselves_for_the_report() {
         assert_eq!(TrayState::Present.describe(), "present");
-        assert!(TrayState::Absent("hidden".into()).describe().contains("not visible"));
+        assert!(TrayState::Absent("hidden".into())
+            .describe()
+            .contains("not visible"));
         assert!(TrayState::Failed("boom".into()).describe().contains("boom"));
     }
 
@@ -484,7 +492,10 @@ mod tests {
         assert_eq!(simulated_tray_from(None), SimulatedTray::None);
         assert_eq!(simulated_tray_from(Some("err")), SimulatedTray::BuildError);
         assert_eq!(simulated_tray_from(Some("ABSENT")), SimulatedTray::Absent);
-        assert_eq!(simulated_tray_from(Some(" offscreen ")), SimulatedTray::OffScreen);
+        assert_eq!(
+            simulated_tray_from(Some(" offscreen ")),
+            SimulatedTray::OffScreen
+        );
         assert_eq!(simulated_tray_from(Some("nonsense")), SimulatedTray::None);
     }
 }
@@ -495,9 +506,7 @@ mod tests {
 /// aborted Tauri startup outright, leaving a process with no window, no tray and no way in —
 /// and the fallback added in 1.5.1 wrapped only the *builder* result, so it covered none of
 /// them.
-pub fn build_tray_menu_items(
-    app: &tauri::App,
-) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem};
     let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "Open Lumen", true, None::<&str>)?;

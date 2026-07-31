@@ -239,8 +239,14 @@ fn recall_file_returns_one_item_from_a_real_file() {
     ));
     let text = text_of(&frame);
     assert!(text.contains("alpha"), "{text}");
-    assert!(text.contains("marker_0"), "alpha's body must be present: {text}");
-    assert!(!text.contains("marker_1"), "beta's body must not leak: {text}");
+    assert!(
+        text.contains("marker_0"),
+        "alpha's body must be present: {text}"
+    );
+    assert!(
+        !text.contains("marker_1"),
+        "beta's body must not leak: {text}"
+    );
     s.shutdown();
 }
 

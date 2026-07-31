@@ -1610,8 +1610,14 @@ mod tests {
         env.startup_degradations = vec!["daemon: could not spawn: ENOENT".into()];
         let lines = environment_lines(&env);
         let joined = lines.join("\n");
-        assert!(joined.contains("menu-bar icon: built but not visible"), "{joined}");
-        assert!(joined.contains("startup degraded: daemon: could not spawn"), "{joined}");
+        assert!(
+            joined.contains("menu-bar icon: built but not visible"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("startup degraded: daemon: could not spawn"),
+            "{joined}"
+        );
         assert!(joined.contains("channel `gui`"), "{joined}");
     }
 

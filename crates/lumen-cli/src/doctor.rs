@@ -63,9 +63,9 @@ impl Finding {
     /// The remedy, or an explanation when there is not one.
     pub fn remedy(&self) -> String {
         match self {
-            Finding::IconHiddenByPreference { domain, key } => format!(
-                "defaults delete {domain} \"{key}\" && killall Lumen; open -a Lumen"
-            ),
+            Finding::IconHiddenByPreference { domain, key } => {
+                format!("defaults delete {domain} \"{key}\" && killall Lumen; open -a Lumen")
+            }
             Finding::MenuBarManager { name } => {
                 format!("check {name}'s hidden/overflow section before assuming Lumen failed")
             }
@@ -159,7 +159,10 @@ pub fn render(f: &Facts) -> String {
 
     let _ = writeln!(s, "menu-bar status item");
     if f.status_item_prefs.is_empty() {
-        let _ = writeln!(s, "  (no NSStatusItem preferences — nothing is suppressing it)");
+        let _ = writeln!(
+            s,
+            "  (no NSStatusItem preferences — nothing is suppressing it)"
+        );
     } else {
         for p in &f.status_item_prefs {
             let v = match p.visible {
@@ -177,7 +180,10 @@ pub fn render(f: &Facts) -> String {
 
     let _ = writeln!(s, "monitors");
     if f.monitors.is_empty() {
-        let _ = writeln!(s, "  (not available from the CLI — needs the app; see docs/troubleshooting-the-tray.md step 3)");
+        let _ = writeln!(
+            s,
+            "  (not available from the CLI — needs the app; see docs/troubleshooting-the-tray.md step 3)"
+        );
     } else {
         for (x, y, w, h) in &f.monitors {
             let _ = writeln!(s, "  {w}x{h} at ({x},{y})");
@@ -246,9 +252,7 @@ fn describe(x: &Finding) -> String {
             format!("{name} is present and may be holding the icon in an overflow area.")
         }
         Finding::NotRunning => "Lumen is not running, so there would be no icon.".to_string(),
-        Finding::NoLog => {
-            "Lumen is running but has written no log file.".to_string()
-        }
+        Finding::NoLog => "Lumen is running but has written no log file.".to_string(),
         Finding::StaleLoginItem { path } => {
             format!("A login item at {path} points at an app that no longer exists.")
         }
@@ -300,7 +304,10 @@ mod tests {
             },
         ];
         let found = findings(&f);
-        assert!(matches!(found[0], Finding::IconHiddenByPreference { .. }), "{found:?}");
+        assert!(
+            matches!(found[0], Finding::IconHiddenByPreference { .. }),
+            "{found:?}"
+        );
         assert!(found[0].remedy().contains("defaults delete"));
         assert!(found[0].remedy().contains("NSStatusItem Visible Item-0"));
     }
@@ -360,7 +367,10 @@ mod tests {
         // finding, it is arithmetic.
         f.processes.clear();
         let found = findings(&f);
-        assert!(!found.iter().any(|x| matches!(x, Finding::NoLog)), "{found:?}");
+        assert!(
+            !found.iter().any(|x| matches!(x, Finding::NoLog)),
+            "{found:?}"
+        );
         assert!(found.iter().any(|x| matches!(x, Finding::NotRunning)));
     }
 
@@ -372,7 +382,12 @@ mod tests {
         f.launch_agent = Some("/Users/x/Library/LaunchAgents/Lumen.plist".into());
         f.launch_agent_target_exists = Some(false);
         let found = findings(&f);
-        assert!(found.iter().any(|x| matches!(x, Finding::StaleLoginItem { .. })), "{found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|x| matches!(x, Finding::StaleLoginItem { .. })),
+            "{found:?}"
+        );
     }
 
     #[test]
@@ -388,7 +403,14 @@ mod tests {
         // doctor is what someone runs when the app will not start, so it must never panic or
         // bail on absent data.
         let out = render(&Facts::default());
-        for section in ["platform", "processes", "menu-bar status item", "monitors", "files", "findings"] {
+        for section in [
+            "platform",
+            "processes",
+            "menu-bar status item",
+            "monitors",
+            "files",
+            "findings",
+        ] {
             assert!(out.contains(section), "missing {section} in:\n{out}");
         }
         assert!(out.contains("MISSING"));
@@ -430,7 +452,13 @@ mod tests {
 pub const PREF_DOMAINS: [&str; 2] = ["io.speedata.lumen", "Lumen"];
 
 const MENU_BAR_MANAGERS: [&str; 7] = [
-    "Bartender", "Ice", "Hidden Bar", "Dozer", "Vanilla", "TopNotch", "Barbee",
+    "Bartender",
+    "Ice",
+    "Hidden Bar",
+    "Dozer",
+    "Vanilla",
+    "TopNotch",
+    "Barbee",
 ];
 
 #[cfg(target_os = "macos")]
@@ -463,13 +491,17 @@ pub fn collect() -> Facts {
         // `defaults read <domain>` prints a plist; parsing the two keys we care about out of it
         // is enough, and far less machinery than linking CoreFoundation into the CLI.
         for domain in PREF_DOMAINS {
-            let Some(text) = sh("defaults", &["read", domain]) else { continue };
+            let Some(text) = sh("defaults", &["read", domain]) else {
+                continue;
+            };
             for line in text.lines() {
                 let line = line.trim();
                 if !line.contains("NSStatusItem") {
                     continue;
                 }
-                let Some((raw_key, raw_val)) = line.split_once('=') else { continue };
+                let Some((raw_key, raw_val)) = line.split_once('=') else {
+                    continue;
+                };
                 let key = raw_key.trim().trim_matches('"').to_string();
                 let val = raw_val.trim().trim_end_matches(';').trim();
                 let visible = if key.starts_with("NSStatusItem Visible ") {
@@ -481,7 +513,11 @@ pub fn collect() -> Facts {
                 } else {
                     None
                 };
-                f.status_item_prefs.push(StatusItemPref { domain: domain.to_string(), key, visible });
+                f.status_item_prefs.push(StatusItemPref {
+                    domain: domain.to_string(),
+                    key,
+                    visible,
+                });
             }
         }
 
@@ -512,7 +548,11 @@ pub fn collect() -> Facts {
         if app.exists() {
             f.app_version = sh(
                 "/usr/bin/defaults",
-                &["read", "/Applications/Lumen.app/Contents/Info.plist", "CFBundleShortVersionString"],
+                &[
+                    "read",
+                    "/Applications/Lumen.app/Contents/Info.plist",
+                    "CFBundleShortVersionString",
+                ],
             )
             .map(|s| s.trim().to_string());
         }
