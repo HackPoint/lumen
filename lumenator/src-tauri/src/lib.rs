@@ -363,8 +363,8 @@ pub fn run() {
             }
 
             let tray_result = match (&menu, simulate) {
-                (_, health::SimulatedTray::BuildError) => Err(tauri::Error::WebviewNotFound),
-                (None, _) => Err(tauri::Error::WebviewNotFound),
+                (_, health::SimulatedTray::BuildError) => Err(tray_error("simulated tray build failure (LUMEN_SIMULATE_TRAY=err)")),
+                (None, _) => Err(tray_error("no tray menu could be built")),
                 (Some(menu), _) => TrayIconBuilder::with_id("lumen-tray")
                 // colored battery-ring at 0%; recolored/redrawn live by update_tray
                 .icon(render_tray_icon(0, "ok"))
@@ -514,6 +514,14 @@ pub fn run() {
         });
 }
 
+/// A `tauri::Error` carrying our own message.
+///
+/// Used so a degraded tray reports *why* rather than borrowing an unrelated variant —
+/// `WebviewNotFound` in a log reads like a real defect somewhere else entirely.
+fn tray_error(msg: &'static str) -> tauri::Error {
+    tauri::Error::Anyhow(anyhow::anyhow!(msg))
+}
+
 /// Bring the main window forward, logging every branch.
 ///
 /// Switching to `Regular` first is load-bearing on macOS. Startup sets
@@ -561,6 +569,17 @@ fn reveal_main_window(app: &tauri::AppHandle, why: &str) {
 /// deterministic, so a second attempt cannot succeed. The thing worth re-checking is
 /// visibility, which genuinely does change between attempts.
 async fn verify_tray_presence(app: tauri::AppHandle) {
+    // Nothing to verify if the tray was never built: the setup gate has already revealed a
+    // window, and checking anyway reported "it was created but is not visible" about a tray that
+    // was never created, then revealed the same window a second time.
+    if matches!(
+        app.state::<StartupHealth>().tray(),
+        health::TrayState::Failed(_)
+    ) {
+        log::warn!("TRAY: skipping the presence check — the tray was never built");
+        return;
+    }
+
     const DELAYS_MS: [u64; 3] = [500, 1_500, 4_000];
     let simulate = health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
 
