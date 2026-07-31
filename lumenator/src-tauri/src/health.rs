@@ -52,6 +52,10 @@ pub fn log_level_from(env: Option<&str>, debug: bool) -> log::LevelFilter {
 
 /// Which `NSStatusItem Visible …` preference keys are suppressing our status item.
 ///
+/// Compiled everywhere so its tests run everywhere — the decision is pure and worth checking on
+/// any host — but only *called* from the macOS reader below, which is why it needs an explicit
+/// allow rather than a `cfg`.
+///
 /// macOS gives every status item an autosave name and persists two keys under it:
 /// `NSStatusItem Preferred Position <name>` (harmless — where it last sat) and
 /// `NSStatusItem Visible <name>`, which is written `false` when the user ⌘-drags the item off
@@ -65,6 +69,7 @@ pub fn log_level_from(env: Option<&str>, debug: bool) -> log::LevelFilter {
 ///
 /// Only `Some(false)` is returned. A missing key is the normal state, and `Some(true)` is
 /// already what we want; rewriting either would be churn.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn keys_to_clear(entries: &[(String, Option<bool>)]) -> Vec<String> {
     entries
         .iter()
@@ -252,8 +257,9 @@ pub fn simulated_tray_from(env: Option<&str>) -> SimulatedTray {
 pub fn clear_hidden_status_item_prefs() -> Vec<String> {
     use objc2_foundation::{NSString, NSUserDefaults};
 
+    // No `unsafe` needed: objc2's NSUserDefaults accessors are safe wrappers.
     let mut found: Vec<(String, Option<bool>)> = Vec::new();
-    unsafe {
+    {
         let defaults = NSUserDefaults::standardUserDefaults();
         let dict = defaults.dictionaryRepresentation();
         for key in dict.keys() {
@@ -296,6 +302,19 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
 pub fn clear_hidden_status_item_prefs() -> Vec<String> {
     // The autosave mechanism is AppKit's. Nothing to do elsewhere.
     Vec::new()
+}
+
+/// Build the tray menu items.
+///
+/// Extracted so the caller can degrade instead of propagating. As three `?` in `setup()` these
+/// aborted Tauri startup outright, leaving a process with no window, no tray and no way in —
+/// and the fallback added in 1.5.1 wrapped only the *builder* result, so it covered none of
+/// them.
+pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+    let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Open Lumen", true, None::<&str>)?;
+    Menu::with_items(app, &[&show, &quit])
 }
 
 #[cfg(test)]
@@ -498,17 +517,4 @@ mod tests {
         );
         assert_eq!(simulated_tray_from(Some("nonsense")), SimulatedTray::None);
     }
-}
-
-/// Build the tray menu items.
-///
-/// Extracted so the caller can degrade instead of propagating. As three `?` in `setup()` these
-/// aborted Tauri startup outright, leaving a process with no window, no tray and no way in —
-/// and the fallback added in 1.5.1 wrapped only the *builder* result, so it covered none of
-/// them.
-pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItem};
-    let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
-    let show = MenuItem::with_id(app, "show", "Open Lumen", true, None::<&str>)?;
-    Menu::with_items(app, &[&show, &quit])
 }
