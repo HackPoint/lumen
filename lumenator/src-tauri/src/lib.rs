@@ -698,7 +698,7 @@ fn repair_tray_visibility(app: &tauri::AppHandle) -> bool {
     };
     tray.with_inner_tray_icon(|inner| {
         if let Some(item) = inner.ns_status_item() {
-            unsafe { item.setVisible(true) };
+            item.setVisible(true);
             true
         } else {
             false

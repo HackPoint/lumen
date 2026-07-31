@@ -372,18 +372,18 @@ fn metered_guarded(
     inflate: Inflate<'_>,
 ) -> Outcome {
     let returned_tokens = count_tokens(&text);
-    if let Inflate::Guard { fallback } = inflate {
-        if returned_tokens >= full_tokens {
-            return inflated_fallback(
-                fallback,
-                returned_tokens,
-                full_tokens,
-                tool_name,
-                path,
-                lines,
-                req_key,
-            );
-        }
+    if let Inflate::Guard { fallback } = inflate
+        && returned_tokens >= full_tokens
+    {
+        return inflated_fallback(
+            fallback,
+            returned_tokens,
+            full_tokens,
+            tool_name,
+            path,
+            lines,
+            req_key,
+        );
     }
     metered(
         text,
@@ -1904,7 +1904,7 @@ mod tests {
     fn overlapping_items_emit_their_shared_lines_once() {
         // A nested item used to re-emit its parent's lines, re-numbered, under three more
         // markdown headers.
-        let items = vec![
+        let items = [
             CodeItem {
                 kind: "struct".into(),
                 name: Some("Outer".into()),
@@ -1930,7 +1930,7 @@ mod tests {
 
     #[test]
     fn items_separated_by_more_than_the_context_window_stay_separate() {
-        let items = vec![
+        let items = [
             CodeItem {
                 kind: "fn".into(),
                 name: Some("a".into()),

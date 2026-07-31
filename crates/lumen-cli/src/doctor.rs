@@ -259,6 +259,178 @@ fn describe(x: &Finding) -> String {
     }
 }
 
+// ── Collection ────────────────────────────────────────────────────────────────
+//
+// Deliberately below the tests: this half talks to the OS and cannot be unit-tested, so it is
+// kept as thin as possible and every judgement lives in `findings` above.
+
+/// The preference domains Lumen has written status-item state under. Both are real — this
+/// machine has `NSStatusItem Preferred Position Item-0` in each, with different values.
+pub const PREF_DOMAINS: [&str; 2] = ["io.speedata.lumen", "Lumen"];
+
+const MENU_BAR_MANAGERS: [&str; 7] = [
+    "Bartender",
+    "Ice",
+    "Hidden Bar",
+    "Dozer",
+    "Vanilla",
+    "TopNotch",
+    "Barbee",
+];
+
+#[cfg(target_os = "macos")]
+fn sh(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Collect what we can. Every field is optional because doctor's whole purpose is to run on a
+/// machine where things are missing.
+pub fn collect() -> Facts {
+    let mut f = Facts {
+        platform: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        ..Default::default()
+    };
+
+    if let Some(db) = lumen_core::meter::db_path() {
+        f.db_size_bytes = std::fs::metadata(&db).ok().map(|m| m.len());
+        f.db_path = Some(db.to_string_lossy().to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+
+        // `defaults read <domain>` prints a plist; parsing the two keys we care about out of it
+        // is enough, and far less machinery than linking CoreFoundation into the CLI.
+        for domain in PREF_DOMAINS {
+            let Some(text) = sh("defaults", &["read", domain]) else {
+                continue;
+            };
+            for line in text.lines() {
+                let line = line.trim();
+                if !line.contains("NSStatusItem") {
+                    continue;
+                }
+                let Some((raw_key, raw_val)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = raw_key.trim().trim_matches('"').to_string();
+                let val = raw_val.trim().trim_end_matches(';').trim();
+                let visible = if key.starts_with("NSStatusItem Visible ") {
+                    match val {
+                        "0" | "false" | "NO" => Some(false),
+                        "1" | "true" | "YES" => Some(true),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                f.status_item_prefs.push(StatusItemPref {
+                    domain: domain.to_string(),
+                    key,
+                    visible,
+                });
+            }
+        }
+
+        if let Some(ps) = sh("/bin/ps", &["-ax", "-o", "comm"]) {
+            f.processes = ps
+                .lines()
+                .filter(|l| l.contains("Lumen.app") || l.contains("lumen-daemon"))
+                .map(|l| l.trim().to_string())
+                .collect();
+            for m in MENU_BAR_MANAGERS {
+                if ps.to_lowercase().contains(&m.to_lowercase()) {
+                    f.menu_bar_managers.push(m.to_string());
+                }
+            }
+        }
+        for m in MENU_BAR_MANAGERS {
+            let p = format!("/Applications/{m}.app");
+            if std::path::Path::new(&p).exists() && !f.menu_bar_managers.contains(&m.to_string()) {
+                f.menu_bar_managers.push(m.to_string());
+            }
+        }
+
+        let log = home.join("Library/Logs/io.speedata.lumen/Lumen.log");
+        f.log_size_bytes = std::fs::metadata(&log).ok().map(|m| m.len());
+        f.log_path = Some(log.to_string_lossy().to_string());
+
+        let app = std::path::Path::new("/Applications/Lumen.app");
+        if app.exists() {
+            f.app_version = sh(
+                "/usr/bin/defaults",
+                &[
+                    "read",
+                    "/Applications/Lumen.app/Contents/Info.plist",
+                    "CFBundleShortVersionString",
+                ],
+            )
+            .map(|s| s.trim().to_string());
+        }
+
+        // The label is `Lumen`, not the bundle id — the distinction that made every cask
+        // uninstall leave a login item behind.
+        let agent = home.join("Library/LaunchAgents/Lumen.plist");
+        if agent.exists() {
+            f.launch_agent = Some(agent.to_string_lossy().to_string());
+            f.launch_agent_target_exists = sh("/usr/bin/plutil", &["-p", &agent.to_string_lossy()])
+                .map(|txt| {
+                    txt.split('"')
+                        .find(|s| s.contains("Lumen.app"))
+                        .map(|p| std::path::Path::new(p).exists())
+                        .unwrap_or(true)
+                });
+        }
+    }
+
+    f
+}
+
+/// Ask a running Lumen to show its window.
+///
+/// macOS only by design. There is no single-instance plugin, so launching the app elsewhere
+/// starts a *second* GUI whose daemon cannot bind 9999 — the version-skew failure the daemon
+/// documents at length. Printing an instruction is better than causing that.
+pub fn show() -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        match std::process::Command::new("/usr/bin/open")
+            .args(["-b", "io.speedata.lumen"])
+            .status()
+        {
+            Ok(s) if s.success() => {
+                println!("Asked Lumen to show its window.");
+                println!("If nothing appeared, Lumen may not be running: open -a Lumen");
+                0
+            }
+            Ok(s) => {
+                eprintln!("open exited {s}. Is Lumen installed in /Applications?");
+                1
+            }
+            Err(e) => {
+                eprintln!("could not run open: {e}");
+                1
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!(
+            "`lumen show` is macOS-only.\n\
+             On this platform, launching Lumen again would start a second instance whose daemon\n\
+             cannot bind 127.0.0.1:9999, leaving the UI reading from the wrong process.\n\
+             Start it from your launcher instead."
+        );
+        2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,177 +611,5 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(18 * 1024 * 1024), "18.0 MB");
-    }
-}
-
-// ── Collection ────────────────────────────────────────────────────────────────
-//
-// Deliberately below the tests: this half talks to the OS and cannot be unit-tested, so it is
-// kept as thin as possible and every judgement lives in `findings` above.
-
-/// The preference domains Lumen has written status-item state under. Both are real — this
-/// machine has `NSStatusItem Preferred Position Item-0` in each, with different values.
-pub const PREF_DOMAINS: [&str; 2] = ["io.speedata.lumen", "Lumen"];
-
-const MENU_BAR_MANAGERS: [&str; 7] = [
-    "Bartender",
-    "Ice",
-    "Hidden Bar",
-    "Dozer",
-    "Vanilla",
-    "TopNotch",
-    "Barbee",
-];
-
-#[cfg(target_os = "macos")]
-fn sh(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(cmd).args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-/// Collect what we can. Every field is optional because doctor's whole purpose is to run on a
-/// machine where things are missing.
-pub fn collect() -> Facts {
-    let mut f = Facts {
-        platform: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
-        ..Default::default()
-    };
-
-    if let Some(db) = lumen_core::meter::db_path() {
-        f.db_size_bytes = std::fs::metadata(&db).ok().map(|m| m.len());
-        f.db_path = Some(db.to_string_lossy().to_string());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = dirs::home_dir().unwrap_or_default();
-
-        // `defaults read <domain>` prints a plist; parsing the two keys we care about out of it
-        // is enough, and far less machinery than linking CoreFoundation into the CLI.
-        for domain in PREF_DOMAINS {
-            let Some(text) = sh("defaults", &["read", domain]) else {
-                continue;
-            };
-            for line in text.lines() {
-                let line = line.trim();
-                if !line.contains("NSStatusItem") {
-                    continue;
-                }
-                let Some((raw_key, raw_val)) = line.split_once('=') else {
-                    continue;
-                };
-                let key = raw_key.trim().trim_matches('"').to_string();
-                let val = raw_val.trim().trim_end_matches(';').trim();
-                let visible = if key.starts_with("NSStatusItem Visible ") {
-                    match val {
-                        "0" | "false" | "NO" => Some(false),
-                        "1" | "true" | "YES" => Some(true),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                f.status_item_prefs.push(StatusItemPref {
-                    domain: domain.to_string(),
-                    key,
-                    visible,
-                });
-            }
-        }
-
-        if let Some(ps) = sh("/bin/ps", &["-ax", "-o", "comm"]) {
-            f.processes = ps
-                .lines()
-                .filter(|l| l.contains("Lumen.app") || l.contains("lumen-daemon"))
-                .map(|l| l.trim().to_string())
-                .collect();
-            for m in MENU_BAR_MANAGERS {
-                if ps.to_lowercase().contains(&m.to_lowercase()) {
-                    f.menu_bar_managers.push(m.to_string());
-                }
-            }
-        }
-        for m in MENU_BAR_MANAGERS {
-            let p = format!("/Applications/{m}.app");
-            if std::path::Path::new(&p).exists() && !f.menu_bar_managers.contains(&m.to_string()) {
-                f.menu_bar_managers.push(m.to_string());
-            }
-        }
-
-        let log = home.join("Library/Logs/io.speedata.lumen/Lumen.log");
-        f.log_size_bytes = std::fs::metadata(&log).ok().map(|m| m.len());
-        f.log_path = Some(log.to_string_lossy().to_string());
-
-        let app = std::path::Path::new("/Applications/Lumen.app");
-        if app.exists() {
-            f.app_version = sh(
-                "/usr/bin/defaults",
-                &[
-                    "read",
-                    "/Applications/Lumen.app/Contents/Info.plist",
-                    "CFBundleShortVersionString",
-                ],
-            )
-            .map(|s| s.trim().to_string());
-        }
-
-        // The label is `Lumen`, not the bundle id — the distinction that made every cask
-        // uninstall leave a login item behind.
-        let agent = home.join("Library/LaunchAgents/Lumen.plist");
-        if agent.exists() {
-            f.launch_agent = Some(agent.to_string_lossy().to_string());
-            f.launch_agent_target_exists = sh("/usr/bin/plutil", &["-p", &agent.to_string_lossy()])
-                .map(|txt| {
-                    txt.split('"')
-                        .find(|s| s.contains("Lumen.app"))
-                        .map(|p| std::path::Path::new(p).exists())
-                        .unwrap_or(true)
-                });
-        }
-    }
-
-    f
-}
-
-/// Ask a running Lumen to show its window.
-///
-/// macOS only by design. There is no single-instance plugin, so launching the app elsewhere
-/// starts a *second* GUI whose daemon cannot bind 9999 — the version-skew failure the daemon
-/// documents at length. Printing an instruction is better than causing that.
-pub fn show() -> i32 {
-    #[cfg(target_os = "macos")]
-    {
-        match std::process::Command::new("/usr/bin/open")
-            .args(["-b", "io.speedata.lumen"])
-            .status()
-        {
-            Ok(s) if s.success() => {
-                println!("Asked Lumen to show its window.");
-                println!("If nothing appeared, Lumen may not be running: open -a Lumen");
-                0
-            }
-            Ok(s) => {
-                eprintln!("open exited {s}. Is Lumen installed in /Applications?");
-                1
-            }
-            Err(e) => {
-                eprintln!("could not run open: {e}");
-                1
-            }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        eprintln!(
-            "`lumen show` is macOS-only.\n\
-             On this platform, launching Lumen again would start a second instance whose daemon\n\
-             cannot bind 127.0.0.1:9999, leaving the UI reading from the wrong process.\n\
-             Start it from your launcher instead."
-        );
-        2
     }
 }
