@@ -24,7 +24,7 @@ pub const LUMEN_ROUTES: [&str; 3] = ["smart_read", "recall_file", "compress_logs
 // the efficiency report came to publish a 64.9% "bypass" rate whose real value on the honest
 // denominator is 0.0%. Re-exported so every existing caller keeps compiling.
 pub use lumen_core::coverage::{
-    not_unmeasurable_sql as not_unmeasurable_clause, UNMEASURABLE_EXTS,
+    UNMEASURABLE_EXTS, not_unmeasurable_sql as not_unmeasurable_clause,
 };
 
 /// Resolve the metering DB into a sqlx connection URL.

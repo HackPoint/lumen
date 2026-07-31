@@ -314,7 +314,9 @@ fn inflated_fallback(
             returned_tokens: returned_tokens as i64,
             full_tokens: full_tokens as i64,
             saved_tokens: full_tokens as i64 - returned_tokens as i64,
-            routed_via: lumen_core::ranked::Decline::WouldInflate.route().to_string(),
+            routed_via: lumen_core::ranked::Decline::WouldInflate
+                .route()
+                .to_string(),
             tool_name: tool_name.to_string(),
             session_id: session_id(),
             file_mtime: file_mtime(path),
@@ -860,11 +862,12 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                 .collect();
             if subs.is_empty() || subs.len() > SUBSTRING_CAP {
                 // Too broad to answer with bodies. Return the map, not the territory.
-                let names: Vec<String> = subs
-                    .iter()
-                    .filter_map(|i| i.name.clone())
-                    .collect();
-                let filtered: Vec<&CodeItem> = if subs.is_empty() { items.iter().collect() } else { subs };
+                let names: Vec<String> = subs.iter().filter_map(|i| i.name.clone()).collect();
+                let filtered: Vec<&CodeItem> = if subs.is_empty() {
+                    items.iter().collect()
+                } else {
+                    subs
+                };
                 let head = if names.is_empty() {
                     format!(
                         "# recall_file: nothing matched {} in {path}\n# Available items:\n\n",
@@ -878,7 +881,10 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                         names.len()
                     )
                 };
-                let text = format!("{head}{}", format_outline_compact(path, line_count, &filtered));
+                let text = format!(
+                    "{head}{}",
+                    format_outline_compact(path, line_count, &filtered)
+                );
                 return metered_guarded(
                     text,
                     full_tokens,
@@ -893,7 +899,10 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
             fuzzy_note = format!(
                 "# matched by substring, not exact: {} → {}\n",
                 queries.join(", "),
-                subs.iter().filter_map(|i| i.name.as_deref()).collect::<Vec<_>>().join(", ")
+                subs.iter()
+                    .filter_map(|i| i.name.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             subs
         };
@@ -923,7 +932,10 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
             );
         }
 
-        format!("{fuzzy_note}{}", format_items_excerpt(path, &src_lines, &matched))
+        format!(
+            "{fuzzy_note}{}",
+            format_items_excerpt(path, &src_lines, &matched)
+        )
     } else if let (Some(start), Some(end)) = (start_line, end_line) {
         // Explicit line range
         let start0 = start.saturating_sub(1);
@@ -1021,7 +1033,11 @@ pub fn merge_blocks(items: &[&CodeItem], total_lines: usize) -> Vec<Block> {
                 prev.end = prev.end.max(end);
                 prev.labels.push(label);
             }
-            _ => out.push(Block { start, end, labels: vec![label] }),
+            _ => out.push(Block {
+                start,
+                end,
+                labels: vec![label],
+            }),
         }
     }
     out
@@ -1059,7 +1075,10 @@ pub fn format_items_excerpt(path: &str, src_lines: &[&str], items: &[&CodeItem])
 /// when an outline is returned as a *fallback* from a call the caller has already made and whose
 /// shape they already know.
 pub fn format_outline_compact(path: &str, line_count: usize, items: &[&CodeItem]) -> String {
-    let mut buf = format!("# {path} — outline ({line_count} lines, {} items)\n", items.len());
+    let mut buf = format!(
+        "# {path} — outline ({line_count} lines, {} items)\n",
+        items.len()
+    );
     for (n, item) in items.iter().enumerate() {
         buf.push_str(&format!(
             "{:>3}. {:<14} {:<32} L{}-{}\n",
@@ -1181,7 +1200,9 @@ mod tests {
         let mut s = String::from("use std::io;\n\n");
         s.push_str("fn alpha(x: i32) -> i32 {\n");
         for j in 0..18 {
-            s.push_str(&format!("    let a{j} = x.wrapping_mul({j}).wrapping_add(1);\n"));
+            s.push_str(&format!(
+                "    let a{j} = x.wrapping_mul({j}).wrapping_add(1);\n"
+            ));
         }
         s.push_str("    x + 1\n}\n\n");
         for _ in 0..6 {
@@ -1541,7 +1562,10 @@ mod tests {
         let (_d, path) = fixture("src.rs", &rust_src());
         let out = tool_smart_read(&json!({ "path": &path, "mode": "full" }));
         let text = text_of(&out);
-        assert!(text.contains("(full)"), "header must mark full mode: {text}");
+        assert!(
+            text.contains("(full)"),
+            "header must mark full mode: {text}"
+        );
         assert!(text.contains("BETA_BODY_MARKER"), "body must be present");
     }
 
@@ -1616,8 +1640,14 @@ mod tests {
         let (_d, path) = fixture("notes.xyz", &"some free text\n".repeat(200));
         let out = tool_smart_read(&json!({ "path": &path }));
         let text = text_of(&out);
-        assert!(text.contains("no structure could be extracted"), "got: {text}");
-        assert!(text.contains("some free text"), "the file itself must come back");
+        assert!(
+            text.contains("no structure could be extracted"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("some free text"),
+            "the file itself must come back"
+        );
         let m = out.meter.expect("still meters");
         assert_eq!(m.routed_via, "ranked_no_defs");
         assert!(
@@ -1699,9 +1729,15 @@ mod tests {
         assert!(text.contains("L10-12 (+3 lines context)"), "got: {text}");
         // Anchored on the gutter: a bare "line6" also matches line60..line69 in a 400-line
         // file, so the negative assertions would pass for the wrong reason.
-        assert!(text.contains("7|line7 "), "3 lines of leading context: {text}");
+        assert!(
+            text.contains("7|line7 "),
+            "3 lines of leading context: {text}"
+        );
         assert!(!text.contains("6|line6 "), "but not a 4th: {text}");
-        assert!(text.contains("15|line15 "), "3 lines of trailing context: {text}");
+        assert!(
+            text.contains("15|line15 "),
+            "3 lines of trailing context: {text}"
+        );
         assert!(!text.contains("16|line16 "), "but not a 4th: {text}");
     }
 
@@ -1732,7 +1768,10 @@ mod tests {
         let out = tool_recall_file(&json!({ "path": &path }));
         let text = text_of(&out);
         assert!(text.contains("no selector given"), "got: {text}");
-        assert!(text.contains("alpha") && text.contains("beta"), "outline must name both: {text}");
+        assert!(
+            text.contains("alpha") && text.contains("beta"),
+            "outline must name both: {text}"
+        );
         assert!(
             !text.contains("BETA_BODY_MARKER"),
             "bodies must NOT come back: {text}"
@@ -1816,7 +1855,10 @@ mod tests {
         assert!(text.contains("too many to return bodies"), "got: {text}");
         assert!(!text.contains("wrapping_add"), "no bodies: {text}");
         let m = out.meter.expect("meters");
-        assert!(m.returned_tokens < m.full_tokens, "and it must still be cheaper than the file");
+        assert!(
+            m.returned_tokens < m.full_tokens,
+            "and it must still be cheaper than the file"
+        );
     }
 
     #[test]
@@ -1824,8 +1866,13 @@ mod tests {
         // Sloppy queries are genuinely useful and real callers rely on them; they just must not
         // be able to select the whole file. When they are honoured, the reply says so.
         let (_d, path) = fixture("src.rs", &rust_src());
-        let text = text_of(&tool_recall_file(&json!({ "path": &path, "names": ["lph"] })));
-        assert!(text.contains("matched by substring, not exact"), "got: {text}");
+        let text = text_of(&tool_recall_file(
+            &json!({ "path": &path, "names": ["lph"] }),
+        ));
+        assert!(
+            text.contains("matched by substring, not exact"),
+            "got: {text}"
+        );
         assert!(text.contains("alpha"), "got: {text}");
     }
 
@@ -1842,11 +1889,13 @@ mod tests {
     #[test]
     fn names_covering_most_of_the_file_return_the_outline_instead() {
         let (_d, path) = fixture("small.rs", &realistic_rust(2, 30));
-        let out = tool_recall_file(
-            &json!({ "path": &path, "names": ["operation_0", "operation_1"] }),
-        );
+        let out =
+            tool_recall_file(&json!({ "path": &path, "names": ["operation_0", "operation_1"] }));
         let text = text_of(&out);
-        assert!(text.contains("returning the outline instead"), "got: {text}");
+        assert!(
+            text.contains("returning the outline instead"),
+            "got: {text}"
+        );
         let m = out.meter.expect("meters");
         assert!(m.returned_tokens < m.full_tokens);
     }
@@ -1856,8 +1905,22 @@ mod tests {
         // A nested item used to re-emit its parent's lines, re-numbered, under three more
         // markdown headers.
         let items = vec![
-            CodeItem { kind: "struct".into(), name: Some("Outer".into()), start_line: 10, end_line: 40, start_byte: 0, end_byte: 0 },
-            CodeItem { kind: "fn".into(), name: Some("inner".into()), start_line: 15, end_line: 20, start_byte: 0, end_byte: 0 },
+            CodeItem {
+                kind: "struct".into(),
+                name: Some("Outer".into()),
+                start_line: 10,
+                end_line: 40,
+                start_byte: 0,
+                end_byte: 0,
+            },
+            CodeItem {
+                kind: "fn".into(),
+                name: Some("inner".into()),
+                start_line: 15,
+                end_line: 20,
+                start_byte: 0,
+                end_byte: 0,
+            },
         ];
         let refs: Vec<&CodeItem> = items.iter().collect();
         let blocks = merge_blocks(&refs, 100);
@@ -1868,8 +1931,22 @@ mod tests {
     #[test]
     fn items_separated_by_more_than_the_context_window_stay_separate() {
         let items = vec![
-            CodeItem { kind: "fn".into(), name: Some("a".into()), start_line: 1, end_line: 5, start_byte: 0, end_byte: 0 },
-            CodeItem { kind: "fn".into(), name: Some("b".into()), start_line: 90, end_line: 95, start_byte: 0, end_byte: 0 },
+            CodeItem {
+                kind: "fn".into(),
+                name: Some("a".into()),
+                start_line: 1,
+                end_line: 5,
+                start_byte: 0,
+                end_byte: 0,
+            },
+            CodeItem {
+                kind: "fn".into(),
+                name: Some("b".into()),
+                start_line: 90,
+                end_line: 95,
+                start_byte: 0,
+                end_byte: 0,
+            },
         ];
         let refs: Vec<&CodeItem> = items.iter().collect();
         assert_eq!(merge_blocks(&refs, 100).len(), 2);
@@ -1895,7 +1972,10 @@ mod tests {
         // shape a caller can ask for, the reply is never more expensive than reading the file.
         for (label, body) in [
             ("few big items", realistic_rust(8, 40)),
-            ("many tiny items", (0..80).map(|i| format!("fn f{i}() {{}}\n")).collect()),
+            (
+                "many tiny items",
+                (0..80).map(|i| format!("fn f{i}() {{}}\n")).collect(),
+            ),
             ("one item", realistic_rust(1, 200)),
         ] {
             let (_d, path) = fixture("c.rs", &body);

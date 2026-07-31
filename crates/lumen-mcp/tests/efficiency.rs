@@ -629,7 +629,10 @@ fn no_tool_returns_more_than_the_file_on_any_real_file() {
     for f in &files {
         let calls = [
             ("smart_read outline", serde_json::json!({ "path": &f.path })),
-            ("recall_file no selector", serde_json::json!({ "path": &f.path })),
+            (
+                "recall_file no selector",
+                serde_json::json!({ "path": &f.path }),
+            ),
             (
                 "recall_file whole range",
                 serde_json::json!({ "path": &f.path, "start_line": 1, "end_line": 999_999 }),
@@ -652,7 +655,7 @@ fn no_tool_returns_more_than_the_file_on_any_real_file() {
                 f.name,
                 m.returned_tokens,
                 m.full_tokens,
-                );
+            );
         }
     }
 
@@ -664,5 +667,8 @@ fn no_tool_returns_more_than_the_file_on_any_real_file() {
         ),
         None => println!("  none: every reply cost less than reading the file"),
     }
-    println!("  allowance is {} tokens (one explanatory line)", lumen_mcp::NOTE_ALLOWANCE);
+    println!(
+        "  allowance is {} tokens (one explanatory line)",
+        lumen_mcp::NOTE_ALLOWANCE
+    );
 }

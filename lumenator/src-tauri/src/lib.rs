@@ -3,10 +3,10 @@
 #![allow(clippy::type_complexity)] // complex sqlx query types are self-documenting inline
 mod health;
 mod setup;
+use crate::health::StartupHealth;
 use futures_util::StreamExt;
 use std::sync::Mutex;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent, TrayIconId};
-use crate::health::StartupHealth;
 use tauri::{Emitter, Manager, State, WindowEvent};
 use tauri_plugin_positioner::{Position, WindowExt};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -229,7 +229,10 @@ pub fn run() {
             // Warn by default in release, not off and not opt-in: a user who cannot reach the
             // app cannot be told to set an env var, and by the time they are asked the launch
             // that mattered is over. LUMEN_LOG raises it for a follow-up.
-            let level = health::log_level_from(std::env::var("LUMEN_LOG").ok().as_deref(), cfg!(debug_assertions));
+            let level = health::log_level_from(
+                std::env::var("LUMEN_LOG").ok().as_deref(),
+                cfg!(debug_assertions),
+            );
             if let Err(e) = app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(level)
@@ -246,7 +249,9 @@ pub fn run() {
                     // lumen-daemon is about *that* process, whose pipes this one owns.
                     .targets([
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                            file_name: None,
+                        }),
                     ])
                     // The plugin default is 40 KB, which a Debug session overruns in seconds.
                     .max_file_size(256 * 1024)
@@ -256,7 +261,10 @@ pub fn run() {
                 // No logger yet, so this is the one place stderr is the only option.
                 eprintln!("LOG: could not register the log plugin: {e}");
             }
-            log::warn!("STARTUP: Lumen {} (log level {level})", env!("CARGO_PKG_VERSION"));
+            log::warn!(
+                "STARTUP: Lumen {} (log level {level})",
+                env!("CARGO_PKG_VERSION")
+            );
 
             // resolve a stable DB path in the app-data dir
             let db_path = app
@@ -308,9 +316,7 @@ pub fn run() {
 
             match app.shell().sidecar("lumen-daemon") {
                 Ok(cmd) => {
-                    let cmd = cmd
-                        .env("LUMEN_DB", &db_path)
-                        .env("LUMEN_SUPERVISED", "1");
+                    let cmd = cmd.env("LUMEN_DB", &db_path).env("LUMEN_SUPERVISED", "1");
                     match cmd.spawn() {
                         Ok((mut rx, child)) => {
                             *app.state::<DaemonChild>().0.lock().unwrap() = Some(child);
@@ -357,55 +363,58 @@ pub fn run() {
                 }
             };
 
-            let simulate = health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
+            let simulate =
+                health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
             if simulate != health::SimulatedTray::None {
                 log::warn!("TRAY: LUMEN_SIMULATE_TRAY is set — simulating {simulate:?}");
             }
 
             let tray_result = match (&menu, simulate) {
-                (_, health::SimulatedTray::BuildError) => Err(tray_error("simulated tray build failure (LUMEN_SIMULATE_TRAY=err)")),
+                (_, health::SimulatedTray::BuildError) => Err(tray_error(
+                    "simulated tray build failure (LUMEN_SIMULATE_TRAY=err)",
+                )),
                 (None, _) => Err(tray_error("no tray menu could be built")),
                 (Some(menu), _) => TrayIconBuilder::with_id("lumen-tray")
-                // colored battery-ring at 0%; recolored/redrawn live by update_tray
-                .icon(render_tray_icon(0, "ok"))
-                .icon_as_template(false)
-                .menu(menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.unminimize();
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    // record the tray geometry for the positioner (needed for
-                    // TrayBottomCenter to resolve a screen position)
-                    tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
-
-                    // left-click toggles the panel popover
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(panel) = app.get_webview_window("panel") {
-                            if panel.is_visible().unwrap_or(false) {
-                                let _ = panel.hide();
-                            } else {
-                                let _ = panel.move_window(Position::TrayBottomCenter);
-                                let _ = panel.show();
-                                let _ = panel.set_focus();
+                    // colored battery-ring at 0%; recolored/redrawn live by update_tray
+                    .icon(render_tray_icon(0, "ok"))
+                    .icon_as_template(false)
+                    .menu(menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "quit" => app.exit(0),
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.unminimize();
+                                let _ = w.show();
+                                let _ = w.set_focus();
                             }
                         }
-                    }
-                })
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        // record the tray geometry for the positioner (needed for
+                        // TrayBottomCenter to resolve a screen position)
+                        tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
+
+                        // left-click toggles the panel popover
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(panel) = app.get_webview_window("panel") {
+                                if panel.is_visible().unwrap_or(false) {
+                                    let _ = panel.hide();
+                                } else {
+                                    let _ = panel.move_window(Position::TrayBottomCenter);
+                                    let _ = panel.show();
+                                    let _ = panel.set_focus();
+                                }
+                            }
+                        }
+                    })
                     .build(app),
             };
 
@@ -425,7 +434,10 @@ pub fn run() {
             // no explanation reads as the app fighting the user — and someone who ⌘-dragged it
             // away deliberately needs to be told that is not how to remove it, and what is.
             if !restored.is_empty() && health.claim_restore_explanation() {
-                log::warn!("TRAY: restored a hidden menu-bar icon ({} pref(s))", restored.len());
+                log::warn!(
+                    "TRAY: restored a hidden menu-bar icon ({} pref(s))",
+                    restored.len()
+                );
                 reveal_main_window(app.handle(), "the menu-bar icon was restored");
             }
 
@@ -506,6 +518,11 @@ pub fn run() {
             // Previously it did nothing at all: both windows start hidden, so the most natural
             // thing a user does when they cannot find the icon had no effect whatsoever. This
             // is the tray-independent way back in.
+            //
+            // macOS-only, and the variant itself does not exist elsewhere: it is wired from
+            // AppKit's `applicationShouldHandleReopen:`, so on Linux this does not merely never
+            // fire — it fails to compile. Caught by CI's Linux job, not by anything local.
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 log::warn!("REOPEN: the app was re-activated");
                 reveal_main_window(app, "the app was re-opened");
@@ -581,7 +598,8 @@ async fn verify_tray_presence(app: tauri::AppHandle) {
     }
 
     const DELAYS_MS: [u64; 3] = [500, 1_500, 4_000];
-    let simulate = health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
+    let simulate =
+        health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
 
     let mut last = health::TrayPresence::Unknown;
     for (attempt, delay) in DELAYS_MS.iter().enumerate() {
@@ -595,7 +613,8 @@ async fn verify_tray_presence(app: tauri::AppHandle) {
         log::warn!("TRAY: presence check {} of 3 → {last:?}", attempt + 1);
 
         if last == health::TrayPresence::Present {
-            app.state::<StartupHealth>().set_tray(health::TrayState::Present);
+            app.state::<StartupHealth>()
+                .set_tray(health::TrayState::Present);
             // Healthy: drop back to Accessory so there is no Dock icon, which is the intended
             // look for a menu-bar app.
             #[cfg(target_os = "macos")]

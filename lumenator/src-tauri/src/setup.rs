@@ -3697,7 +3697,13 @@ mod tests {
     fn staged_meter(
         which: &str,
         stub: &str,
-    ) -> Option<(TempDir, std::path::PathBuf, std::path::PathBuf, String, String)> {
+    ) -> Option<(
+        TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+        String,
+    )> {
         let (h, script, db) = meter_harness(stub);
         if which == "repo" {
             std::fs::copy(repo_meter_hook()?, &script).unwrap();
@@ -4560,7 +4566,11 @@ mod tests {
                 );
                 assert_eq!(rows.len(), 1, "[{which}] expected one row, got {rows:?}");
                 let cols: Vec<&str> = rows[0].split('\t').collect();
-                seen.push((cols[0].to_string(), cols[1].to_string(), cols[2].to_string()));
+                seen.push((
+                    cols[0].to_string(),
+                    cols[1].to_string(),
+                    cols[2].to_string(),
+                ));
             }
 
             let (g, r) = (&seen[0], &seen[1]);
@@ -4595,7 +4605,10 @@ mod tests {
             let cols: Vec<&str> = rows[0].split('\t').collect();
             seen.push((cols[1].to_string(), cols[2].to_string()));
         }
-        assert_eq!(seen[0], seen[1], "hooks disagree with no tokenizer: {seen:?}");
+        assert_eq!(
+            seen[0], seen[1],
+            "hooks disagree with no tokenizer: {seen:?}"
+        );
         assert_eq!(seen[0].0, "estimated");
         assert_eq!(seen[0].1, "10", "bytes/4 of 40 bytes");
     }
