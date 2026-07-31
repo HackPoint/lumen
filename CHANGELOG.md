@@ -1,5 +1,103 @@
 # Changelog
 
+## [1.5.1] — 2026-07-31
+
+A patch release, and the reason to install it is that 1.5.0's Linux CLI does not run.
+
+### The Linux CLI required a glibc most distributions do not have
+
+`lumen-v1.5.0-x86_64-unknown-linux-gnu.tar.gz` links against `GLIBC_2.39` and exits
+immediately on anything older:
+
+| distribution | glibc | 1.5.0 |
+| --- | --- | --- |
+| Ubuntu 24.04 | 2.39 | runs |
+| Debian 12 | 2.36 | `version 'GLIBC_2.39' not found` |
+| Ubuntu 22.04 LTS | 2.35 | `version 'GLIBC_2.39' not found` |
+
+The release workflow built it on `ubuntu-latest`, which GitHub moved to 24.04, so the
+binary took that runner's glibc as its floor. The GUI job had been pinned to `ubuntu-22.04`
+for a related reason; the CLI job never was. Anyone installing the CLI on a stable
+distribution — including through the Homebrew formula on Linux — received a binary that
+could not start. Every test passed the whole time: nothing running in-process can see a
+dynamic-link failure.
+
+Pinned to `ubuntu-22.04`, which lowers the floor to 2.35.
+
+### Install verification, per platform, before release rather than after
+
+`scripts/verify-install.sh` and `verify-install.ps1` check that an install *works*: the MCP
+server is driven over stdio with a real JSON-RPC handshake and asked for its tool list, the
+tokenizer is asked to count, the CLI is asked to refuse filing without `--yes`, and the
+intercept is checked for both fail-open guards. Every install defect found so far was
+invisible to a file-existence check — a bundled MCP server two days older than its UI, a
+June hook script with no guards, and now a binary that cannot link.
+
+A CI workflow runs them on macOS, Linux and Windows, plus a job that runs the freshly built
+Linux CLI inside `debian:12` and `ubuntu:22.04` containers. That job is the one that would
+have caught the break above: it deliberately runs the binary on distributions older than
+the one that built it. All ten checks are now required before a merge.
+
+### The fault button was rendered off the bottom of the tray popover
+
+The popover is a fixed 320x400 window whose card was stretched to it, with `overflow:
+hidden` turning overflow into silent clipping. The rows below the gauge are all
+conditional, and each one pushed the next further down: measured at 308px with none of
+them and 396px with a recorded fault and an update notice both showing, in a window with
+392px of usable height. The button was present, styled and impossible to click.
+
+The card sizes to its content now and the window follows it.
+
+### The Windows browser filing route could never succeed
+
+`cmd /C start "" <url>` passed the URL as an ordinary argument, and `cmd.exe` treats `&`
+as a command separator. Every prefilled issue URL contains `&body=`, so cmd tried to run
+the second half as a command and exited 1. The browser route exists so that someone
+without the GitHub CLI can still report a fault; on Windows it could not.
+
+### A failed tray left no way into the app
+
+Reported from the field on macOS 26 (#5): Lumen running with two processes, no menu-bar
+icon, and — because both windows start hidden — no popover, no main window, and no way to
+reach the fault reporter to report it. The tray build result was logged and otherwise
+ignored.
+
+The main window is now shown when the tray cannot be built. That is not a fix for whatever
+makes the tray fail, which remains undiagnosed and does not reproduce here on the same OS
+version; it is the difference between a degraded app and an unusable one. The identifying
+line is `TRAY: build failed:` in `~/Library/Logs/io.speedata.lumen/Lumen.log`.
+
+The same report caught the cask uninstalling a LaunchAgent that does not exist: it
+unloaded `io.speedata.lumen`, but `launchctl` matches on the agent's Label and the plugin
+writes `Lumen.plist` with Label `Lumen`. Every uninstall left a login item behind, still
+trying to launch a deleted app at each boot.
+
+### The developer meter hook recorded nothing
+
+`.claude/hooks/lumen_meter.sh` resolved its database as `<workspace>/lumen.db` — a file
+with no schema — so every insert failed with "no such table" and `|| true` discarded the
+error. It had also drifted to nine columns where the installed copy writes fifteen, losing
+`token_source` (making a bytes/4 estimate indistinguishable from a real count), `req_key`,
+`is_subagent`, `session_id` and `file_mtime`. Same shape as the intercept bug two releases
+ago: two copies of one script with nothing asserting they agree. There is a test now.
+
+### Notes
+
+- A notifier for new releases, for minor and major versions only. Patch releases are
+  silent: a notice that fires for every `x.y.Z` gets dismissed reflexively, and then the
+  one that mattered gets dismissed too. **This adds the only unprompted network request
+  Lumen makes** — an unauthenticated read of a public endpoint, no credential and no
+  identifier — documented under Security & privacy and disabled by `LUMEN_UPDATE_CHECK=0`.
+- Efficiency measurement on a real corpus: `cargo test --release -p lumen-mcp --test
+  efficiency -- --nocapture`. Measured on this repository, an outline costs **6.4%** of a
+  full read. The same harness reports where interception does *not* pay, and asserts it
+  rather than omitting it.
+- Print macros in the daemon could kill it. Its rule is "never `eprintln!` in this process"
+  because the GUI owns that pipe, but the rule named only stderr and four `println!` calls
+  survived it — one on the main thread during startup, where a panic ends the process.
+- Four classes were styled nowhere at all, and `.mcp.json` declared no servers, so a fresh
+  clone got none of the tools the Read intercept routes to.
+
 ## [1.5.0] — 2026-07-30
 
 ### The Read intercept could deadlock a session
