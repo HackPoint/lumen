@@ -89,16 +89,22 @@ fn supervisor_dies(child: &mut Child) {
     drop(child.stderr.take());
 }
 
-/// Wait for exit, returning whether it happened inside `GRACE`.
-fn exited_within_grace(child: &mut Child) -> bool {
+/// Wait for exit, returning the status if it happened inside `GRACE`.
+///
+/// The status, not a bool. When the unsupervised case started failing on Windows the
+/// assertion could only say "it exited", which is the one fact that was already obvious.
+/// An exit code of 101 means the daemon panicked — a broken pipe under a print macro, say
+/// — and 0 means it returned normally, which is a different bug with a different fix.
+/// Discarding it cost a diagnosis.
+fn exited_within_grace(child: &mut Child) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + GRACE;
     while Instant::now() < deadline {
-        if child.try_wait().unwrap().is_some() {
-            return true;
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    false
+    None
 }
 
 #[test]
@@ -107,7 +113,7 @@ fn a_supervised_daemon_exits_when_its_stdin_closes() {
 
     supervisor_dies(&mut f.child);
 
-    let exited = exited_within_grace(&mut f.child);
+    let exited = exited_within_grace(&mut f.child).is_some();
     if !exited {
         let _ = f.child.kill();
     }
@@ -128,13 +134,14 @@ fn an_unsupervised_daemon_ignores_a_closed_stdin() {
 
     supervisor_dies(&mut f.child);
 
-    let exited = exited_within_grace(&mut f.child);
+    let status = exited_within_grace(&mut f.child);
     let _ = f.child.kill();
     let _ = f.child.wait();
     assert!(
-        !exited,
-        "an unsupervised daemon must survive a closed stdin; exiting would break \
-         running the daemon by hand or from a service manager"
+        status.is_none(),
+        "an unsupervised daemon must survive a closed stdin; exiting would break running \
+         the daemon by hand or from a service manager. Exited with {status:?} — code 101 \
+         means it panicked, which for this process means a print macro met a closed pipe"
     );
 }
 
@@ -156,9 +163,54 @@ fn traffic_on_stdin_does_not_end_a_supervised_daemon() {
     );
     supervisor_dies(&mut f.child);
 
-    let exited = exited_within_grace(&mut f.child);
+    let exited = exited_within_grace(&mut f.child).is_some();
     if !exited {
         let _ = f.child.kill();
     }
     assert!(exited, "EOF after traffic must still shut the daemon down");
+}
+
+/// The daemon must survive its pipes closing *during startup*, not only after it.
+///
+/// The other tests give it 1500ms to settle before killing the supervisor, so they only
+/// ever exercise a daemon that has finished printing. On a slower machine startup is still
+/// in progress at that point — and a `println!` to a closed pipe panics on the main
+/// thread, which killed the process. It failed only on Windows CI, where the runner is
+/// slow enough to still be inside startup when the pipes go, and it read as a watchdog bug
+/// rather than as the daemon dying because it could not describe itself.
+///
+/// No settling sleep here on purpose: the pipes are closed as early as possible, which is
+/// the case the other tests cannot reach.
+#[test]
+fn an_unsupervised_daemon_survives_its_pipes_closing_during_startup() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let projects = dir.path().join("projects");
+    std::fs::create_dir_all(&projects).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-daemon"))
+        .env("LUMEN_DB", dir.path().join("ledger.db"))
+        .env("LUMEN_PROJECTS_DIR", &projects)
+        .env("LUMEN_WS_ADDR", "127.0.0.1:0")
+        .env_remove("LUMEN_SUPERVISED")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lumen-daemon");
+
+    // Immediately, while it is still logging its way through startup.
+    drop(child.stdin.take());
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+
+    std::thread::sleep(Duration::from_secs(3));
+    let exited = child.try_wait().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        exited.is_none(),
+        "the daemon died when its pipes closed during startup ({exited:?}); a daemon must \
+         not exit because it could not describe itself"
+    );
 }

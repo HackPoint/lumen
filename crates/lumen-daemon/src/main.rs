@@ -11,6 +11,11 @@ use tokio::sync::broadcast;
 
 /// Write a line to stderr, ignoring failure.
 ///
+/// Never `println!` or `eprintln!` in this process — use `logline!`. BOTH pipes belong
+/// to the GUI, so either macro panics once it dies. The rule named only stderr, and four
+/// `println!` calls survived it; one ran on the main thread during startup, so a GUI that
+/// died mid-startup took the daemon with it.
+///
 /// Never `eprintln!` in this process. Its stderr is a pipe whose read end belongs to
 /// the GUI, so the moment the GUI dies every `eprintln!` becomes a panic — and one of
 /// them fires every two seconds from the WebSocket restart loop. A daemon must not die
@@ -250,7 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!("initial import done, watching for changes...");
+    logline!("initial import done, watching for changes...");
 
     // ── Notify watcher task (latency path) ────────────────────────────────
     // Runs in its own task with an inner restart loop.  If the watcher
@@ -476,9 +481,11 @@ async fn ingest_from(
 
         if res.rows_affected() > 0 {
             new += 1;
-            println!(
+            logline!(
                 "+ turn {} ({} in / {} out)",
-                rec.message.id, u.input_tokens, u.output_tokens
+                rec.message.id,
+                u.input_tokens,
+                u.output_tokens
             );
             if broadcast_live {
                 let _ = tx.send(TurnMsg {
@@ -510,7 +517,7 @@ async fn ingest_from(
         }
     }
     if new > 0 {
-        println!("  ({new} new from {fname})");
+        logline!("  ({new} new from {fname})");
     }
 
     Ok(start + (last_nl as u64) + 1)
@@ -532,7 +539,7 @@ async fn ws_server(
         logline!("ws bind failed ({addr} in use?): {e}");
         e
     })?;
-    println!("WebSocket server listening on ws://{addr}");
+    logline!("WebSocket server listening on ws://{addr}");
     serve_ws(listener, pool, tx).await
 }
 
