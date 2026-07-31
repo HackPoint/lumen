@@ -27,7 +27,11 @@ on:
         required: false
 
 concurrency:
-  group: verify-install-${{ github.ref }}
+  # Keyed on the event as well as the ref. Keyed on ref alone, a manual
+  # `workflow_dispatch` cancelled the push-triggered run on the same commit — and these are
+  # required checks, so a cancelled run blocks the merge. Verifying a published release
+  # should not invalidate the checks for the commit that released it.
+  group: verify-install-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
