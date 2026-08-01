@@ -1,0 +1,176 @@
+{
+  "fixtures": {
+    "(inline)compress_logs": "e01e50e4310f7465",
+    "app.log": "938a893edd0f0d39",
+    "big.rs": "c1c363809b8ec51f",
+    "crash.log": "3f323125b2195ba1",
+    "decls.rs": "cc0c3f86f715224f",
+    "mod.py": "02488faac89903ab",
+    "notes.xyz": "022bbc8b20ff4e6f",
+    "service.ts": "f9ddbb42661666b4",
+    "tiny.rs": "bceb2d336dc108d4",
+    "unique.log": "f30477cd45835f47"
+  },
+  "scenarios": {
+    "compress_logs/incompressible": {
+      "tool": "compress_logs",
+      "full_tokens": 9472,
+      "returned_tokens": 9472,
+      "saved_tokens": 0,
+      "route": "compress_logs",
+      "is_error": false
+    },
+    "compress_logs/inline_text": {
+      "tool": "compress_logs",
+      "full_tokens": 6190,
+      "returned_tokens": 590,
+      "saved_tokens": 5600,
+      "route": "compress_logs",
+      "is_error": false
+    },
+    "compress_logs/repetitive_path": {
+      "tool": "compress_logs",
+      "full_tokens": 18380,
+      "returned_tokens": 1180,
+      "saved_tokens": 17200,
+      "route": "compress_logs",
+      "is_error": false
+    },
+    "compress_logs/stack_traces": {
+      "tool": "compress_logs",
+      "full_tokens": 9144,
+      "returned_tokens": 804,
+      "saved_tokens": 8340,
+      "route": "compress_logs",
+      "is_error": false
+    },
+    "ping/basic": {
+      "tool": "lumen_ping",
+      "full_tokens": 0,
+      "returned_tokens": 0,
+      "saved_tokens": 0,
+      "route": "(unmetered)",
+      "is_error": false
+    },
+    "recall_file/exact_one_name": {
+      "tool": "recall_file",
+      "full_tokens": 7495,
+      "returned_tokens": 768,
+      "saved_tokens": 6727,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "recall_file/exact_three_names": {
+      "tool": "recall_file",
+      "full_tokens": 7495,
+      "returned_tokens": 2250,
+      "saved_tokens": 5245,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "recall_file/no_match": {
+      "tool": "recall_file",
+      "full_tokens": 7495,
+      "returned_tokens": 230,
+      "saved_tokens": 7265,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "recall_file/no_selector": {
+      "tool": "recall_file",
+      "full_tokens": 7495,
+      "returned_tokens": 249,
+      "saved_tokens": 7246,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "recall_file/range_narrow": {
+      "tool": "recall_file",
+      "full_tokens": 7495,
+      "returned_tokens": 647,
+      "saved_tokens": 6848,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "recall_file/range_whole_file": {
+      "tool": "recall_file",
+      "full_tokens": 7495,
+      "returned_tokens": 7522,
+      "saved_tokens": -27,
+      "route": "would_inflate",
+      "is_error": false
+    },
+    "recall_file/substring_broad": {
+      "tool": "recall_file",
+      "full_tokens": 3334,
+      "returned_tokens": 66,
+      "saved_tokens": 3268,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "recall_file/substring_narrow": {
+      "tool": "recall_file",
+      "full_tokens": 3334,
+      "returned_tokens": 68,
+      "saved_tokens": 3266,
+      "route": "recall_file",
+      "is_error": false
+    },
+    "smart_read/full_mode": {
+      "tool": "smart_read",
+      "full_tokens": 7495,
+      "returned_tokens": 7506,
+      "saved_tokens": -11,
+      "route": "smart_read_full",
+      "is_error": false
+    },
+    "smart_read/outline_few_big_items": {
+      "tool": "smart_read",
+      "full_tokens": 7495,
+      "returned_tokens": 278,
+      "saved_tokens": 7217,
+      "route": "smart_read",
+      "is_error": false
+    },
+    "smart_read/outline_many_tiny_items": {
+      "tool": "smart_read",
+      "full_tokens": 720,
+      "returned_tokens": 746,
+      "saved_tokens": -26,
+      "route": "would_inflate",
+      "is_error": false
+    },
+    "smart_read/outline_python": {
+      "tool": "smart_read",
+      "full_tokens": 3519,
+      "returned_tokens": 328,
+      "saved_tokens": 3191,
+      "route": "smart_read",
+      "is_error": false
+    },
+    "smart_read/outline_tiny_file": {
+      "tool": "smart_read",
+      "full_tokens": 10,
+      "returned_tokens": 35,
+      "saved_tokens": -25,
+      "route": "would_inflate",
+      "is_error": false
+    },
+    "smart_read/outline_typescript": {
+      "tool": "smart_read",
+      "full_tokens": 3334,
+      "returned_tokens": 115,
+      "saved_tokens": 3219,
+      "route": "smart_read",
+      "is_error": false
+    },
+    "smart_read/outline_unsupported_language": {
+      "tool": "smart_read",
+      "full_tokens": 6400,
+      "returned_tokens": 6426,
+      "saved_tokens": -26,
+      "route": "ranked_no_defs",
+      "is_error": false
+    }
+  }
+}
