@@ -1264,7 +1264,7 @@ fi
 EXT=$(echo "${FILE_PATH##*.}" | tr '[:upper:]' '[:lower:]')
 case "$EXT" in
     rs|py|pyi|ts|tsx) FILE_TYPE="source" ;;
-    log|out|txt)      FILE_TYPE="log"    ;;
+    log|out|output|txt) FILE_TYPE="log"  ;;
     *)                exit 0             ;;
 esac
 
@@ -4521,6 +4521,110 @@ mod tests {
     /// appearing to work. A row missing token_source is indistinguishable from a bytes/4
     /// estimate, and one missing req_key cannot be deduplicated, so a partial writer
     /// quietly degrades every figure built on the ledger.
+    #[test]
+    fn the_generated_intercept_actually_redirects_a_large_output_file() {
+        // End to end through the real script: a .output file above the threshold must be blocked
+        // and pointed at compress_logs. The unit test above checks the list; this checks that the
+        // shell built from it behaves.
+        let h = TempDir::new().unwrap();
+        let script = h.path().join("intercept.sh");
+        std::fs::write(
+            &script,
+            desired_intercept_script("/tmp/x.db", &h.path().join("mcp").to_string_lossy()),
+        )
+        .unwrap();
+        // The guard needs an executable at LUMEN_MCP_BIN or it fails open before deciding.
+        let mcp = h.path().join("mcp");
+        std::fs::write(&mcp, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let big = h.path().join("build.output");
+        std::fs::write(&big, "a line of build output\n".repeat(400)).unwrap();
+
+        let payload = format!(
+            r#"{{"tool_name":"Read","tool_input":{{"file_path":"{}"}},"session_id":"out-e2e"}}"#,
+            big.to_string_lossy()
+        );
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .env("LUMEN_MCP_BIN", &mcp)
+            .env("TMPDIR", h.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.take().unwrap().write_all(payload.as_bytes())?;
+                c.wait_with_output()
+            })
+            .expect("run the intercept");
+
+        // Exit 2 is the block: the hook tells Claude Code to use the tool instead.
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "a 400-line .output file must be redirected, not passed through. stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let msg = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            msg.contains("compress_logs"),
+            "an .output file is a log, so it must be sent to compress_logs: {msg}"
+        );
+    }
+
+    #[test]
+    fn both_intercept_copies_route_every_log_extension_including_output() {
+        // The list lives in three places: lumen_core::coverage::LOG_EXTS, INTERCEPT_TEMPLATE here,
+        // and the repo's developer hook. `.output` was missing from all the shell copies because
+        // nobody was comparing them to the constant — so this drives the assertion from the
+        // constant rather than from a hand-written list that could drift the same way.
+        let generated = desired_intercept_script("/tmp/x.db", "/tmp/mcp");
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.claude/hooks/lumen_read_intercept.sh");
+
+        let mut copies = vec![("generated".to_string(), generated)];
+        if let Ok(body) = std::fs::read_to_string(&repo) {
+            copies.push(("repo".to_string(), body));
+        }
+
+        for (which, body) in &copies {
+            // The case arm itself, not the FILE_TYPE assignment: the generated copy puts both on
+            // one line while the repo copy splits them, so keying on the assignment finds the wrong
+            // line in one of them.
+            let arm = body
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("log|"))
+                .unwrap_or_else(|| panic!("[{which}] no log case arm found in the intercept"));
+            for ext in lumen_core::coverage::LOG_EXTS {
+                // Split on the case-arm delimiters rather than substring-matching: `out|` is a
+                // substring of `output|`, so a plain `contains` would report `.out` as routed even
+                // if only `.output` were present.
+                let arm_exts: Vec<&str> = arm
+                    .split(')')
+                    .next()
+                    .unwrap_or("")
+                    .split('|')
+                    .map(str::trim)
+                    .collect();
+                assert!(
+                    arm_exts.contains(ext),
+                    "[{which}] the log arm does not route .{ext}: {arm}"
+                );
+            }
+        }
+        assert!(
+            copies.len() == 2 || std::env::var("CI").is_err(),
+            "the repo hook copy should be present in a source checkout"
+        );
+    }
+
     #[test]
     fn both_meter_hooks_agree_on_the_provenance_they_record() {
         // Replaces a test that grepped both scripts for column *names*. That is why an exit-code
