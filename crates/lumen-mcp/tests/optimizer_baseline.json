@@ -3,6 +3,7 @@
     "(inline)compress_logs": "e01e50e4310f7465",
     "app.log": "938a893edd0f0d39",
     "big.rs": "c1c363809b8ec51f",
+    "build.output": "dfe6d57117e3675d",
     "crash.log": "3f323125b2195ba1",
     "decls.rs": "cc0c3f86f715224f",
     "mod.py": "02488faac89903ab",
@@ -25,6 +26,14 @@
       "full_tokens": 6190,
       "returned_tokens": 590,
       "saved_tokens": 5600,
+      "route": "compress_logs",
+      "is_error": false
+    },
+    "compress_logs/output_extension": {
+      "tool": "compress_logs",
+      "full_tokens": 13842,
+      "returned_tokens": 1062,
+      "saved_tokens": 12780,
       "route": "compress_logs",
       "is_error": false
     },

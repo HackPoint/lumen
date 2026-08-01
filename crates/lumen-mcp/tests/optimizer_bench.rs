@@ -313,6 +313,13 @@ fn scenarios() -> Vec<Scenario> {
             args: |p| json!({ "path": p }),
         },
         Scenario {
+            id: "compress_logs/output_extension",
+            tool: "compress_logs",
+            intent: "a .output file is a log; it was read whole until the list gained the word",
+            fixture: Some(("build.output", repetitive_log(18, 25))),
+            args: |p| json!({ "path": p }),
+        },
+        Scenario {
             id: "compress_logs/inline_text",
             tool: "compress_logs",
             intent: "inline text rather than a file, so there is no path to meter",

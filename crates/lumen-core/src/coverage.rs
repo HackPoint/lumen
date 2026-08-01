@@ -32,7 +32,12 @@
 pub const SOURCE_EXTS: &[&str] = &["rs", "py", "pyi", "ts", "mts", "cts", "tsx"];
 
 /// Extensions routed to `compress_logs` rather than to an outline.
-pub const LOG_EXTS: &[&str] = &["log", "out", "txt"];
+///
+/// `output` is here because `out` was, and the two are the same kind of file. A build or test run
+/// redirected to `something.output` was read whole — 54 recorded reads, 9,547 tokens at or above the
+/// threshold — purely because the list stopped one word short. Extension matching is exact, so
+/// `.output` never matched `out`.
+pub const LOG_EXTS: &[&str] = &["log", "out", "output", "txt"];
 
 /// Extensions the hooks actually intercept today.
 ///
@@ -175,6 +180,30 @@ mod tests {
         assert_eq!(classify("shot.png", Some(2039)), Scope::Unmeasurable);
         assert_eq!(classify("shot.png", Some(3)), Scope::Unmeasurable);
         assert_eq!(classify("a.dylib", None), Scope::Unmeasurable);
+    }
+
+    #[test]
+    fn output_files_are_intercepted_like_every_other_log_kind() {
+        // `.out` was in the list and `.output` was not, so a build or test run redirected to
+        // `something.output` was read whole. Extension matching is exact — `.output` never matched
+        // `out` — which is why one missing word cost 9,547 tokens across 54 recorded reads.
+        assert_eq!(classify("build.output", Some(500)), Scope::Optimizable);
+        assert_eq!(classify("/tmp/test.OUTPUT", Some(300)), Scope::Optimizable);
+        // Still subject to the threshold like anything else.
+        assert_eq!(classify("build.output", Some(10)), Scope::BelowThreshold);
+    }
+
+    #[test]
+    fn the_log_kinds_are_the_ones_compress_logs_can_actually_help_with() {
+        for e in LOG_EXTS {
+            assert_eq!(
+                classify(&format!("a.{e}"), Some(500)),
+                Scope::Optimizable,
+                "{e} is in LOG_EXTS but is not classified as optimizable"
+            );
+        }
+        // A near-miss that must stay out: `.outputs` is not `.output`.
+        assert_eq!(classify("a.outputs", Some(500)), Scope::UncoveredKind);
     }
 
     #[test]

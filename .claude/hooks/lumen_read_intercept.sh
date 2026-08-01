@@ -118,7 +118,7 @@ case "$EXT" in
     rs|py|pyi|ts|tsx)
         FILE_TYPE="source"
         ;;
-    log|out|txt)
+    log|out|output|txt)
         FILE_TYPE="log"
         ;;
     *)
