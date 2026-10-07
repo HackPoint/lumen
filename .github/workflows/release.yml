@@ -20,7 +20,7 @@ on:
 
 env:
   PNPM_VERSION: '10'
-  NODE_VERSION: '22'
+  NODE_VERSION: '24'
   TRIPLE: 'aarch64-apple-darwin'
 
 jobs:
@@ -77,7 +77,7 @@ jobs:
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ── 2. Version metadata ─────────────────────────────────────────────────
       - name: Extract version from tag
@@ -89,11 +89,11 @@ jobs:
           echo "tarball_name=lumen-v${VERSION}-aarch64-apple-darwin.tar.gz"   >> "$GITHUB_OUTPUT"
 
       # ── 3. Node + pnpm ──────────────────────────────────────────────────────
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -264,7 +264,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.build_ref }}
 
@@ -330,15 +330,15 @@ jobs:
       TRIPLE_WIN: 'x86_64-pc-windows-msvc'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.build_ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -424,7 +424,7 @@ jobs:
       TRIPLE: 'x86_64-unknown-linux-gnu'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.build_ref }}
 
@@ -446,11 +446,11 @@ jobs:
             curl \
             wget
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -538,7 +538,7 @@ jobs:
 
     steps:
       - name: Checkout lumen (for formula templates)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check tap credentials availability
         id: tap_token
@@ -568,7 +568,7 @@ jobs:
       # access), and update the TAP_DEPLOY_KEY secret with the private half.
       - name: Checkout homebrew-tap
         if: steps.tap_token.outputs.configured == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: HackPoint/homebrew-tap
           ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
