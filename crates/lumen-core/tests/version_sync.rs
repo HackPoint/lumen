@@ -87,10 +87,10 @@ fn every_version_file_agrees_with_the_crate_version() {
         }
     }
 
-    for rel in ["lumenator/src-tauri/Cargo.toml"] {
-        if let Some(v) = version_in(&root.join(rel)) {
-            checked.push((rel.to_string(), v));
-        }
+    // The app crate lives outside `crates/`, so the discovery above does not reach it.
+    let app = "lumenator/src-tauri/Cargo.toml";
+    if let Some(v) = version_in(&root.join(app)) {
+        checked.push((app.to_string(), v));
     }
 
     for rel in [

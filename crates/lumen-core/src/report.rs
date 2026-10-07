@@ -1781,6 +1781,19 @@ mod tests {
     }
 
     #[test]
+    fn sha256_hex_matches_the_published_test_vector() {
+        // The fingerprint is a dedupe key for issues already filed, so a `sha2` upgrade that
+        // changed the digest or its encoding would re-file every known fault. FIPS 180-2 "abc",
+        // one-shot and streamed, since `fingerprint` and `hooks_digest` take one path each.
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(sha256_hex(b"abc"), abc);
+        let mut hasher = Sha256::new();
+        hasher.update(b"a");
+        hasher.update(b"bc");
+        assert_eq!(hex(&hasher.finalize()), abc);
+    }
+
+    #[test]
     fn empty_fixture_renders_nothing() {
         assert!(
             render(

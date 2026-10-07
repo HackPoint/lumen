@@ -749,7 +749,7 @@ rm -f ~/.lumen_db_path
 
 ## Build from source
 
-**Prerequisites:** Rust (stable), Node 22.22.3+ (Angular 22's floor), pnpm
+**Prerequisites:** Rust (stable), Node 22.22.3+, 24.15+ or 26+ (Angular 22's floor — 24.0–24.14 is too old), pnpm
 
 On Linux, also install the GUI toolkit headers:
 

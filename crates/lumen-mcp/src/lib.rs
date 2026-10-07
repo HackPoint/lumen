@@ -1583,11 +1583,14 @@ mod tests {
             !lumen_stats::LUMEN_ROUTES.contains(&m.routed_via.as_str()),
             "smart_read_full must be excluded from the savings routes"
         );
-        // The overage is the one-line header and nothing more.
+        // The overage is the one-line header and nothing more. Measured beyond the path, because
+        // the path is the fixture's tempdir and its cost belongs to the runner: a macOS image
+        // update alone added four tokens and broke a fixed `< 40`. This header frames the path in
+        // 4-5 tokens; the old one, with its line and token counts, took 13-14.
+        let framing = m.returned_tokens - m.full_tokens - count_tokens(&path) as i64;
         assert!(
-            m.returned_tokens - m.full_tokens < 40,
-            "the full-mode header should cost a handful of tokens, not {}",
-            m.returned_tokens - m.full_tokens
+            framing < 8,
+            "the full-mode header should cost a handful of tokens beyond its path, not {framing}"
         );
     }
 

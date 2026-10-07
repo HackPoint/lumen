@@ -6,7 +6,7 @@ authors = ["HackPoint"]
 license = "MIT"
 repository = "https://github.com/HackPoint/lumen"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.90"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,7 +15,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.2", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
 serde_json = "1.0"
@@ -25,9 +25,9 @@ log = "0.4"
 # this crate and Tauri must agree on its version — and Tauri's own docs warn that
 # `tray-icon` may change in a minor release. An `=` pin turns a silent type mismatch
 # into a resolver error.
-tauri = { version = "=2.11.5", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "=2.12.1", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-log = "2"
-tauri-plugin-positioner = { version = "2.3.2", features = ["tray-icon"] }
+tauri-plugin-positioner = { version = "2.4.0", features = ["tray-icon"] }
 lumen-core = { path = "../../crates/lumen-core" }
 lumen-stats = { path = "../../crates/lumen-stats" }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
@@ -36,8 +36,8 @@ tokio-tungstenite = "0.30"
 futures-util = "0.3"
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
-dirs = "6.0.0"
-tauri-plugin-autostart = "2.5.1"
+dirs = "7.0.0"
+tauri-plugin-autostart = "2.7.0"
 # Already in the tree via Tauri, which uses it for tauri::Error::Anyhow.
 anyhow = "1"
 
@@ -55,7 +55,7 @@ anyhow = "1"
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", "NSDictionary", "NSArray", "NSValue"] }
 objc2-app-kit = { version = "0.3", features = ["NSStatusItem"] }
 objc2 = "0.6"
-tray-icon = "=0.24.2"
+tray-icon = "=0.25.1"
 
 [dev-dependencies]
 tempfile = "3"

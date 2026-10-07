@@ -276,7 +276,7 @@ fn is_exported(node: &Node, lang: TagLang, name: &str, top_level: bool) -> bool 
     match lang {
         TagLang::Rust => {
             for i in 0..node.child_count() {
-                if node.child(i as u32).map(|c| c.kind()) == Some("visibility_modifier") {
+                if node.child(i).map(|c| c.kind()) == Some("visibility_modifier") {
                     return true;
                 }
             }
@@ -355,7 +355,7 @@ pub fn extract_tags(src: &str, lang: TagLang) -> Option<(Vec<Def>, Vec<Ref>)> {
         let mut def_kind: Option<(DefKind, Node)> = None;
         let mut is_ref = false;
 
-        for cap in m.captures {
+        for cap in m.captures() {
             let cname = capture_names[cap.index as usize];
             if cname == "name" {
                 let text = &src[cap.node.byte_range()];
@@ -393,7 +393,7 @@ pub fn extract_tags(src: &str, lang: TagLang) -> Option<(Vec<Def>, Vec<Ref>)> {
             refs.push(Ref {
                 name,
                 byte_offset: m
-                    .captures
+                    .captures()
                     .iter()
                     .find(|c| capture_names[c.index as usize] == "name")
                     .map(|c| c.node.start_byte())

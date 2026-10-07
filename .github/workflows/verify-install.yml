@@ -39,7 +39,7 @@ jobs:
     name: Install verify (macOS, arm64)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -63,7 +63,7 @@ jobs:
     name: Install verify (Linux, x86_64)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -93,7 +93,7 @@ jobs:
         # Quoted: an unquoted `debian:12-slim` is a mapping to YAML, not a string.
         image: ["debian:12-slim", "ubuntu:22.04"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -123,7 +123,7 @@ jobs:
     name: Install verify (Windows, x86_64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -148,7 +148,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Verifies what users actually download, rather than what this commit builds. The
       # two can differ: `tauri build` reuses whatever sidecars were last staged.
