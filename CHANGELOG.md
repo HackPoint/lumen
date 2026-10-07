@@ -105,6 +105,26 @@ drift test compared column *names*, which is why it passed.
 That test now runs both copies against a stub tokenizer and compares what they record, across exit
 0, exit 3, exit 1 and a missing binary. Reintroducing the bug fails it by name.
 
+### Maintenance
+
+- chore(deps): Tauri 2.11.5 → 2.12.1, moved as one group: `tauri-build` 2.7.1, the autostart
+  2.7.0, log 2.10.0, notification 2.5.1, positioner 2.4.0 and shell 2.4.0 plugins, and
+  `@tauri-apps/api`/`cli` 2.12.1. The pinned `tray-icon` goes 0.24.2 → 0.25.1, the version Tauri
+  2.12 uses, not the newer 0.26. The GUI crate's `rust-version` is now 1.90, Tauri 2.12's floor.
+- chore(deps): tree-sitter 0.26 → 0.27, sha2 0.10 → 0.11, dirs 6 → 7, plus every
+  semver-compatible bump in `Cargo.lock`. A known-answer test now pins the SHA-256 output: the
+  fingerprint that deduplicates filed issues is built on it, so a digest change would re-file
+  every known fault.
+- chore(deps): Angular 22.0 → 22.2, vitest 4 → 5, zone.js 0.16.3, jsdom 30.1, postcss 8.5.29,
+  and a refresh of the npm lockfile. `@tauri-apps/plugin-opener` and the npm
+  `@tauri-apps/plugin-shell` are removed: nothing imported them, and the sidecar is spawned from
+  Rust.
+- ci: `actions/checkout` and `actions/setup-node` v4 → v7 and `pnpm/action-setup` v4 → v6, off the
+  deprecated Node 20 action runtime; the frontend now builds on Node 24 LTS.
+- chore: removed `lumenator/src-tauri/Cargo.lock`. `src-tauri` is a workspace member, so cargo
+  and the Tauri CLI both read the root lockfile; this one was unused and had been stale since
+  0.1.0.
+
 ### Notes
 
 - Fault reports filed from the app claimed `channel: "cli"`, because `Environment::collect`

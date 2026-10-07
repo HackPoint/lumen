@@ -14,7 +14,7 @@ concurrency:
 
 env:
   PNPM_VERSION: '10'
-  NODE_VERSION: '22'
+  NODE_VERSION: '24'
 
 jobs:
   check:
@@ -23,7 +23,7 @@ jobs:
 
     steps:
       # ── Checkout + toolchains ─────────────────────────────────────────────
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,11 +34,11 @@ jobs:
           workspaces: ". -> target"
           cache-on-failure: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -136,7 +136,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-22.04    # matches the release job: libwebkit2gtk-4.1 soname
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
