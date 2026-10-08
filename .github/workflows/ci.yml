@@ -249,7 +249,8 @@ jobs:
   #
   # Linux and Windows only. tauri-driver needs the platform's own WebDriver behind it,
   # WebKitWebDriver on Linux and msedgedriver on Windows; macOS has none for its web view, so
-  # the app cannot be driven there. The job after this one launches it on macOS instead.
+  # the app cannot be driven there. The job after this one launches it on macOS instead. On
+  # Windows the tests run unelevated; the step says why.
   app-e2e:
     name: App e2e (${{ matrix.os }})
     strategy:
@@ -336,13 +337,40 @@ jobs:
         run: pnpm tauri build --debug --no-bundle
 
       - name: App e2e
+        if: runner.os == 'Linux'
         working-directory: lumenator
+        run: xvfb-run -a node --test 'e2e/*.e2e.mjs'
+
+      # The runner's shell is elevated, and from WebView2 150 the web view of an elevated app
+      # ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, the variable msedgedriver opens its
+      # debugging port through: no session attaches, and every test fails with "DevToolsActivePort
+      # file doesn't exist" (tauri-apps/wry#1782). Lumen runs unelevated for its users, so the
+      # tests run it that way, through gsudo at medium integrity, with what the lowered token
+      # has to reach opened to it.
+      - name: App e2e (unelevated)
+        if: runner.os == 'Windows'
+        working-directory: lumenator
+        shell: pwsh
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a node --test 'e2e/*.e2e.mjs'
-          else
-            node --test 'e2e/*.e2e.mjs'
-          fi
+          $zip = Join-Path $env:RUNNER_TEMP 'gsudo.portable.zip'
+          Invoke-WebRequest https://github.com/gerardog/gsudo/releases/download/v2.6.1/gsudo.portable.zip -OutFile $zip
+          $sum = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($sum -ne '21130BF178D7B9891207F00BFF56F05B6B363CE9CEC7B2D084E45FB12EE51F44') { throw "gsudo.portable.zip: SHA-256 $sum" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'gsudo') -Force
+          $gsudo = Join-Path $env:RUNNER_TEMP 'gsudo\x64\gsudo.exe'
+          icacls $env:GITHUB_WORKSPACE /grant 'Everyone:(OI)(CI)F' /Q
+          icacls (Split-Path $env:LUMEN_E2E_NATIVE_DRIVER) /grant 'Everyone:(OI)(CI)RX' /Q
+          $run = Join-Path $env:RUNNER_TEMP 'app-e2e.ps1'
+          @(
+            "Set-Location '$PWD'"
+            "whoami /groups | Select-String 'Mandatory Label'"
+            "if (-not `$env:LUMEN_E2E_NATIVE_DRIVER) { throw 'gsudo did not pass the environment on' }"
+            "node --test 'e2e/*.e2e.mjs'"
+            'exit $LASTEXITCODE'
+          ) | Set-Content $run
+          whoami /groups | Select-String 'Mandatory Label'
+          & $gsudo --integrity Medium pwsh -NoProfile -File $run
+          exit $LASTEXITCODE
 
   # ── Issue #5, made on purpose ─────────────────────────────────────────────────
   # The bug that hid Lumen's icon was a preference only the reporter's machine held: macOS's

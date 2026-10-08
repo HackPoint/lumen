@@ -6,8 +6,9 @@
 //
 // After `bash build-sidecar.sh` and `pnpm tauri build --debug --no-bundle`, from lumenator/:
 //   Linux:          xvfb-run -a node --test 'e2e/*.e2e.mjs'
-//   Windows, in CI: node --test 'e2e/*.e2e.mjs', with LUMEN_E2E_NATIVE_DRIVER naming an
-//                   msedgedriver.exe of the WebView2 runtime's version
+//   Windows, in CI: node --test 'e2e/*.e2e.mjs', unelevated, with LUMEN_E2E_NATIVE_DRIVER
+//                   naming an msedgedriver.exe of the WebView2 runtime's version. Elevated, no
+//                   session attaches; ci.yml says why.
 // macOS has no WebDriver for its web view, so the app cannot be driven there this way.
 //
 // On Linux every test gives the app a home and data directory of its own, so nothing here
