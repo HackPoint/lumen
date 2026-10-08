@@ -80,6 +80,9 @@ describe('Hotspots', () => {
       totalTokensRead: 0, topFiles: [], distinctFiles: 0, top10SharePct: 0, totalUnchangedRereads: 0,
     }));
     expect(text()).toContain('No reads recorded yet');
+    // The ledger holds the reads of every project, and the screen shows all of them. Through
+    // 1.5.1 this said it would show the reads "in this project".
+    expect(text()).toContain('Once Claude Code reads files, in any project,');
     // A "0%" concentration would read as a measurement of nothing, and so would "0 tokens
     // read across 0 files" or "0 reads learned nothing new": no figure renders at all.
     for (const figure of [

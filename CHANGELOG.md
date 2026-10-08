@@ -242,6 +242,28 @@ a fourth that had been fixed shortly before:
 
 Each test was shown failing with its fix reverted and passing with it restored.
 
+### Hotspots gave files their largest size, and called every project "this project"
+
+The line count on the Hotspots screen is documented as the file's size at its most recent read.
+Since the screen arrived in 1.4.0 it was the largest size any read had recorded, so a file that
+shrank kept its old size there, and with it any advice to split it, after it was split. Running
+the report over this repository's own reads found it: `setup.rs`, in the worktree this release
+was made in, was read at 4,748 lines, then at 4,348 and 4,392 once a change here had shortened
+it, and the screen still said 4,748. It now gives the latest read's count; a read that recorded
+no count is passed over rather than taken for an empty file.
+
+The ledger has no notion of a project, so the report covers every project it holds, but its
+advice called a file's share of all of them its share of "everything this project has read",
+and its empty state spoke of "this project" too. Both now say what is measured. `Run.tsx`, which
+1.4.0's entry gave as this repository's heaviest file, has never been in this repository; those
+figures were the whole ledger's.
+
+The report also reads the ledger three times rather than four. Release builds of 1.5.1's report
+and this one ran on the same copy of a real ledger, 7,833 reads of 2,307 files: the median of 21
+calls went from 8.81 and 8.67 ms to 7.76 and 8.47 ms over two rounds, and with the same reads 25
+times over, from 218 and 204 ms to 138 and 137 ms. Every figure but the line counts, and the
+advice that quotes them, came out the same.
+
 ### Maintenance
 
 - build: `release.sh` read the commit subjects as `git log … 2>/dev/null | grep … || true`, so a

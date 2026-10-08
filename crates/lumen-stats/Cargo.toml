@@ -15,10 +15,11 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 # Not just for tests any more: connect() applies the shared schema migrations, so
 # the GUI cannot open a pre-1.1.0 database that lacks turns.is_subagent.
 lumen-core = { path = "../lumen-core" }
+# The context report hands SQLite the paths it reports as one JSON array.
+serde_json = "1"
 
 [dev-dependencies]
 # The tests build a real schema with the production DDL rather than a hand-rolled
 # copy, so a drift between schema.rs and these queries fails the test.
 tempfile = "3"
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

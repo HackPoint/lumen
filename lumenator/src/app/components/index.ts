@@ -212,7 +212,7 @@ export interface FileHotspot {
     name: string;
     reads: number;
     totalTokens: number;
-    /** Share of every token this project has read. */
+    /** Share of every token read, in every project the ledger holds. */
     sharePct: number;
     lines: number | null;
     /**
