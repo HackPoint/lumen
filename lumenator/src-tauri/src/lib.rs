@@ -604,6 +604,11 @@ fn reveal_main_window(app: &tauri::AppHandle, why: &str) {
         "FALLBACK: revealed the main window ({why}); visible={:?}",
         w.is_visible()
     );
+    // The page read startup health when it loaded, which for a reveal by the presence checks is
+    // six seconds before the reason existed. Without this the window they open says nothing.
+    if let Err(e) = app.emit("startup-health", why) {
+        log::warn!("FALLBACK: could not tell the window why it opened: {e}");
+    }
 }
 
 /// Check whether the status item is on screen, and repair it if it is not.
@@ -631,6 +636,10 @@ async fn verify_tray_presence(app: tauri::AppHandle) {
     const DELAYS_MS: [u64; 3] = [500, 1_500, 4_000];
     let simulate =
         health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
+    if !health::presence_is_checkable(cfg!(target_os = "macos"), simulate) {
+        log::warn!("TRAY: built; this platform cannot report whether it is visible");
+        return;
+    }
 
     let mut last = health::TrayPresence::Unknown;
     for (attempt, delay) in DELAYS_MS.iter().enumerate() {
@@ -686,8 +695,8 @@ fn tray_presence(app: &tauri::AppHandle) -> health::TrayPresence {
     let Some(tray) = app.tray_by_id(&TrayIconId::new("lumen-tray")) else {
         return health::TrayPresence::Absent;
     };
-    // Linux always returns None here, which is why the whole check is macOS-gated: treating
-    // that as Absent would report every Linux launch as broken.
+    // Linux always returns None here, which is why `verify_tray_presence` does not ask off
+    // macOS (`presence_is_checkable`): treating that as Absent reports every launch as broken.
     if !cfg!(target_os = "macos") {
         return health::TrayPresence::Unknown;
     }

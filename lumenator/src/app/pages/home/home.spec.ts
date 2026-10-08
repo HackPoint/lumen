@@ -245,11 +245,31 @@ describe('Home', () => {
     expect(fixture.nativeElement.querySelector('.restored')).not.toBeNull();
   });
 
-  it('asks the backend for startup health exactly once', async () => {
+  it('asks the backend for startup health once when nothing changes', async () => {
     await build(b => b.responses.set('lumen_startup_health', {
       degraded: false, tray: 'present', degradations: [],
     }));
     expect(bridge.countOf('lumen_startup_health')).toBe(1);
+  });
+
+  it('says why when the window is opened after it loaded', async () => {
+    // The tray checks give up six seconds after launch, long after this page read a healthy
+    // startup; the window they open must not be blank about why.
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'unknown (not yet verified)', degradations: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.degraded')).toBeNull();
+
+    bridge.responses.set('lumen_startup_health', {
+      degraded: true, tray: 'built but not visible: it was created but is not visible', degradations: [],
+    });
+    bridge.emit('startup-health', 'the menu-bar icon is not visible: it was created but is not visible');
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(bridge.countOf('lumen_startup_health')).toBe(2);
+    expect(fixture.nativeElement.querySelector('.degraded__tray')?.textContent).toContain('built but not visible');
   });
 
   // ── first run ──────────────────────────────────────────────────────────────

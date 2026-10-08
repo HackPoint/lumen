@@ -243,7 +243,15 @@ impl StartupHealth {
     }
 
     /// True the first time only. Used for the once-per-process log lines.
+    ///
+    /// Never true for a tray that failed to build: that one is missing from the start, and the
+    /// setup gate has already opened the window and said why. Claimed anyway, the first redraw
+    /// replaced "build failed" in the banner with "disappeared after startup" and opened the
+    /// window a second time.
     pub fn claim_missing_tray_warning(&self) -> bool {
+        if matches!(self.tray(), TrayState::Failed(_)) {
+            return false;
+        }
         !self.warned_missing_tray.swap(true, Ordering::Relaxed)
     }
 
@@ -290,6 +298,16 @@ pub fn simulated_tray_from(env: Option<&str>) -> SimulatedTray {
         Some("offscreen") => SimulatedTray::OffScreen,
         _ => SimulatedTray::None,
     }
+}
+
+/// Can the presence check after `RunEvent::Ready` tell anything on this platform?
+///
+/// Only AppKit says where a status item is. Everywhere else the check can only answer
+/// `Unknown`, and three `Unknown`s are not evidence of absence: read as one, they marked every
+/// Linux and Windows launch degraded and opened the main window six seconds in. A simulated
+/// absence is checked everywhere, since driving the fallback on any platform is its purpose.
+pub fn presence_is_checkable(macos: bool, simulate: SimulatedTray) -> bool {
+    macos || matches!(simulate, SimulatedTray::Absent | SimulatedTray::OffScreen)
 }
 
 /// Read the `NSStatusItem *` preferences, log every one found, and clear the keys that hide
@@ -602,6 +620,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tray_that_never_built_is_not_reported_missing_at_redraw() {
+        let h = StartupHealth::default();
+        h.set_tray(TrayState::Failed("simulated".into()));
+        assert!(!h.claim_missing_tray_warning());
+        assert_eq!(h.tray(), TrayState::Failed("simulated".into()));
+        // A tray that was built and then went missing is still reported, once.
+        let h = StartupHealth::default();
+        h.set_tray(TrayState::Present);
+        assert!(h.claim_missing_tray_warning());
+        assert!(!h.claim_missing_tray_warning());
+    }
+
+    #[test]
     fn a_restored_icon_is_reported_without_reading_as_degraded() {
         // The repair worked, so nothing is wrong: the window explains the icon, not a fault.
         let h = StartupHealth::default();
@@ -634,5 +665,15 @@ mod tests {
             SimulatedTray::OffScreen
         );
         assert_eq!(simulated_tray_from(Some("nonsense")), SimulatedTray::None);
+    }
+
+    #[test]
+    fn presence_is_checked_only_where_the_platform_can_answer() {
+        assert!(presence_is_checkable(true, SimulatedTray::None));
+        // Off macOS a real launch can only come back Unknown, so it is not checked at all.
+        assert!(!presence_is_checkable(false, SimulatedTray::None));
+        // A simulated absence still reaches the fallback there.
+        assert!(presence_is_checkable(false, SimulatedTray::Absent));
+        assert!(presence_is_checkable(false, SimulatedTray::OffScreen));
     }
 }
