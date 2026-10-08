@@ -36,10 +36,13 @@ status item's rect is checked at +500ms, +1.5s and +4s, and classified `Present`
 pretending). On `Absent` it asks AppKit directly to show the item. The build itself is not retried:
 its only macOS error paths are deterministic, so a second attempt cannot succeed.
 
-**Nothing in startup uses `?` or `expect` any more.** Three `?` on tray-menu construction and two
-`expect`s on the daemon sidecar could abort startup outright, and 1.5.1's fallback covered none of
-them. Every step now either succeeds or records a degradation, startup ends with one decision about
-reachability, and the app says so in a banner instead of presenting itself as healthy. A latent
+**Nothing in the tray or sidecar startup uses `?` or `expect` any more.** Three `?` on tray-menu
+construction and two `expect`s on the daemon sidecar could abort startup outright, and 1.5.1's
+fallback covered none of them. Every step of `setup` now either succeeds or records a degradation,
+startup ends with one decision about reachability, and the app says so in a banner instead of
+presenting itself as healthy. One `expect` is left, on `Builder::build` itself: if Tauri cannot
+build the app at all there is no window, no tray and no event loop to degrade to, and that failure
+still ends the process with a panic, as it did in 1.5.1. A latent
 trap came with it: `DaemonChild` was only managed on the success path while the exit handler called
 `state::<DaemonChild>()`, which panics if unmanaged — so degrading past a failed spawn would have
 traded a startup panic for a shutdown panic.

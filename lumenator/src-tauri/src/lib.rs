@@ -200,7 +200,8 @@ pub fn run() {
         })
         .manage(StartupHealth::default())
         .setup(|app| {
-            // Nothing below this line uses `?` or `expect`.
+            // Nothing in this closure uses `?` or `expect`. `Builder::build`, outside it, still
+            // does: a failure there leaves no window, tray or event loop to degrade to.
             //
             // Every step either succeeds or records a degradation, and setup ends with one
             // decision about whether the app is reachable. Before this rule, three `?` on
