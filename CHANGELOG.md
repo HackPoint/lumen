@@ -183,6 +183,20 @@ fixed instead:
 The scan reads text, and what it does not read is listed at the top of the test: PowerShell,
 workflow YAML, `${VAR:-N}` defaults, the frontend, and any fallback spelled another way.
 
+### Opting out of Bash metering did not survive Setup
+
+Through 1.5.1 the README said to stop recording Bash output by deleting the `Bash` entry under
+`PostToolUse` in `~/.claude/settings.json`. Setup's validator then reported the hooks unhealthy,
+"PostToolUse not registered: Bash", and the Setup run it asked for put the entry back, so
+command output was recorded again. Upgrading to this release asks for that Setup run in any home
+with a space in its path, and in every home on Windows, because the commands 1.5.1 registered
+never ran there.
+
+`LUMEN_METER_BASH=0` in the `env` block of `~/.claude/settings.json` now stops it, and Setup
+keeps that block. Reads are still metered. Setup also recognises a deleted entry, a Lumen meter
+on `Read` with none on `Bash` and no matcher retired in 1.2.1, which no release's Setup ever
+wrote, and carries it over as `LUMEN_METER_BASH=0` instead of recording again.
+
 ### Maintenance
 
 - build: `release.sh` read the commit subjects as `git log … 2>/dev/null | grep … || true`, so a

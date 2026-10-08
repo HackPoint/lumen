@@ -288,7 +288,12 @@ fn meter(input: &[u8], env: &Env, writer: &str) -> Outcome {
     let channel = meter::channel_from(env.var);
     match tool {
         "Read" => meter_read(&mut run, &d, channel, writer),
-        "Bash" => meter_bash(&mut run, &d, channel, writer),
+        // LUMEN_METER_BASH=0 records no command output. It goes in the `env` of
+        // ~/.claude/settings.json, which Setup keeps; removing the Bash entry instead
+        // lasts only until the next Setup run puts it back.
+        "Bash" if env.get("LUMEN_METER_BASH").as_deref() != Some("0") => {
+            meter_bash(&mut run, &d, channel, writer)
+        }
         _ => {}
     }
     run.out

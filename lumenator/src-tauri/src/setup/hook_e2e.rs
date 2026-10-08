@@ -1802,7 +1802,8 @@ fn a_fresh_install_is_valid_and_its_hooks_work() {
 /// switched off stays off. The commands 1.5.1 registered are bare paths, which in this
 /// home never ran; the validator says so and asks for Setup. Re-running it quotes them
 /// and keeps everything else the user had: settings, other hooks, other MCP servers,
-/// and opt-outs that go on working.
+/// and opt-outs that go on working. Among them is the Bash entry the user deleted, as
+/// the 1.5.1 README said to: Setup puts it back, and keeps it off as LUMEN_METER_BASH=0.
 #[test]
 fn an_upgrade_from_1_5_1_refreshes_the_scripts_and_keeps_what_the_user_set() {
     let rig = Rig::with_home("Jane Doe", SHIM_TOOLS);
@@ -1827,9 +1828,9 @@ fn an_upgrade_from_1_5_1_refreshes_the_scripts_and_keeps_what_the_user_set() {
                     audit,
                     {"type": "command", "command": native(&intercept)}
                 ]}],
+                // No Bash: the user deleted it, the opt-out 1.5.1 documented.
                 "PostToolUse": [
                     {"matcher": "Read", "hooks": [{"type": "command", "command": native(&meter)}]},
-                    {"matcher": "Bash", "hooks": [{"type": "command", "command": native(&meter)}]},
                     {"matcher": "Edit", "hooks": [fmt]}
                 ]
             }
@@ -1953,9 +1954,16 @@ fn an_upgrade_from_1_5_1_refreshes_the_scripts_and_keeps_what_the_user_set() {
         "Left off, as you set it — the toggle turns it back on"
     );
     assert!(!item.0.get());
+    let installed = steps.iter().find(|s| s.id == "hooks").unwrap();
+    assert!(
+        installed.detail.contains("LUMEN_METER_BASH=0"),
+        "{installed:?}"
+    );
     let s: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
     assert_eq!(s["model"], "opus");
-    assert_eq!(s["env"], opt_outs);
+    let mut kept = opt_outs.clone();
+    kept["LUMEN_METER_BASH"] = json!("0");
+    assert_eq!(s["env"], kept);
     assert_eq!(
         s["hooks"]["PreToolUse"][0]["hooks"],
         json!([audit, {"type": "command", "command": hook_command(&intercept)}])
@@ -2010,14 +2018,27 @@ fn an_upgrade_from_1_5_1_refreshes_the_scripts_and_keeps_what_the_user_set() {
     let gone = rig.proj.join("deleted.rs");
     rig.meter(&rig.captured("read_post.json", Some(&gone)), &env);
     assert!(!rig.spool.exists(), "{:?}", rig.faults());
+    let bash = rig.captured("bash_post.json", None);
+    let unrecorded = rig.meter(&bash, &env);
+    assert_eq!(unrecorded.stderr, "");
+    assert_eq!(
+        rig.rows().len(),
+        1,
+        "LUMEN_METER_BASH=0 records no command output"
+    );
 
-    // Their controls: without the opt-outs the same reads are blocked and recorded.
+    // Their controls: without the opt-outs the same reads are blocked and recorded,
+    // and the same command output is a row.
     let bare_env = rig.claude_env(READ_SESSION);
     let other = rig.file("other.rs", &source_lines(400));
     let blocked = rig.intercept(&rig.captured("read_pre.json", Some(&other)), &bare_env);
     assert_eq!(blocked.code, 2, "{blocked:?}");
     rig.meter(&rig.captured("read_post.json", Some(&gone)), &bare_env);
     assert_eq!(rig.faults().len(), 1, "{:?}", rig.faults());
+    rig.meter(&bash, &bare_env);
+    let routes: Vec<_> = rig.rows().into_iter().map(|r| r.routed_via).collect();
+    eprintln!("C3 upgrade [{OS}] rows, opted out and then not: {routes:?}");
+    assert_eq!(routes, ["builtin_read", "bash_output"]);
 }
 
 // ── The plugin's copies ─────────────────────────────────────────────────────

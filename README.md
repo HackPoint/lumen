@@ -701,9 +701,17 @@ local SQLite database and makes no network calls. What it records differs by too
   tokenized in memory, from the payload Claude Code hands the hook, and unless
   `LUMEN_DEBUG=1` is set it is never written anywhere — only the resulting count is stored.
 
-If you would rather not record `Bash` output at all, remove the `Bash` entry under
-`PostToolUse` in `~/.claude/settings.json`. Everything else keeps working; re-running
-Setup will add it back.
+If you would rather not record `Bash` output at all, set `LUMEN_METER_BASH` to `0` in the
+`env` block of `~/.claude/settings.json`:
+
+```json
+"env": { "LUMEN_METER_BASH": "0" }
+```
+
+It applies from the next Claude Code session. Reads are still metered, and Setup keeps
+the `env` block when it runs again or upgrades Lumen. Removing the `Bash` entry under
+`PostToolUse` also stops it, but only until the next time Setup runs, because Setup puts
+that entry back.
 
 ### Experimental: ranked outline (1.3.0, off by default)
 

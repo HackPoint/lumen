@@ -1478,6 +1478,16 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
         return SetupStep::err("hooks", "Install hooks", &e);
     }
 
+    // Setup puts the Bash entry back, so a user who deleted it, as the README said to
+    // through 1.5.1, would have command output recorded again. Their choice is carried
+    // over as the opt-out Setup keeps.
+    let keep_bash_off = bash_meter_removed(&root) && root["env"].get("LUMEN_METER_BASH").is_none();
+    if keep_bash_off {
+        if let Some(e) = not_an_object(&root, "env", "settings.json") {
+            return SetupStep::err("hooks", "Install hooks", &e);
+        }
+    }
+
     if path.exists() {
         if let Err(e) = back_up(&path) {
             return SetupStep::err("hooks", "Install hooks", &e);
@@ -1501,13 +1511,24 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
     for matcher in RETIRED_MATCHERS {
         unmerge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher);
     }
+    if keep_bash_off {
+        if !root["env"].is_object() {
+            root["env"] = serde_json::json!({});
+        }
+        root["env"]["LUMEN_METER_BASH"] = "0".into();
+    }
 
     match serde_json::to_string_pretty(&root) {
         Ok(s) => match write_atomic(&path, &s, 0) {
             Ok(_) => SetupStep::ok(
                 "hooks",
                 "Install hooks",
-                "Hooks merged into ~/.claude/settings.json",
+                if keep_bash_off {
+                    "Hooks merged into ~/.claude/settings.json; the Bash entry you removed \
+                     is kept off as LUMEN_METER_BASH=0 in its env"
+                } else {
+                    "Hooks merged into ~/.claude/settings.json"
+                },
             ),
             Err(e) => SetupStep::err(
                 "hooks",
@@ -1584,6 +1605,28 @@ fn unmerge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str) {
             arr.remove(i);
         }
     }
+}
+
+/// Whether the user took Bash out of the meter by deleting its entry, the opt-out the
+/// README gave through 1.5.1.
+///
+/// A Lumen meter on `Read` with none on `Bash` says so, and nothing else does: every
+/// Setup from 0.1.0 to 1.2.0 registered `Read` with the three retired matchers, and
+/// every one since registers `Read` with `Bash`. An install still carrying a retired
+/// matcher never had `Bash`, and gets it.
+fn bash_meter_removed(root: &serde_json::Value) -> bool {
+    let lumen_on = |matcher: &str| {
+        root["hooks"]["PostToolUse"].as_array().is_some_and(|arr| {
+            arr.iter().any(|e| {
+                e["matcher"].as_str() == Some(matcher)
+                    && e["hooks"].as_array().is_some_and(|hs| {
+                        hs.iter()
+                            .any(|h| h["command"].as_str().is_some_and(|c| c.contains("lumen_")))
+                    })
+            })
+        })
+    };
+    lumen_on("Read") && !lumen_on("Bash") && !RETIRED_MATCHERS.iter().any(|m| lumen_on(m))
 }
 
 // ── Main orchestration ────────────────────────────────────────────────────────
@@ -3642,6 +3685,10 @@ mod tests {
             post.iter().any(|e| e["matcher"] == "Bash"),
             "Bash is not registered, so the meter's Bash arm can never run"
         );
+        assert!(
+            v.get("env").is_none(),
+            "a fresh install opts out of nothing: {v}"
+        );
     }
 
     /// Upgrading an install that carries the pre-1.2.1 matchers must clean them up.
@@ -3685,6 +3732,67 @@ mod tests {
             vec!["Read", "Bash"],
             "an upgrade must drop the three dead matchers and add Bash"
         );
+        assert!(
+            v.get("env").is_none(),
+            "a 1.2.0 install never had Bash, so it opted out of nothing: {v}"
+        );
+    }
+
+    /// A user who deleted the Bash entry, as the README said to through 1.5.1, keeps
+    /// Bash output unrecorded after Setup. The entry comes back, as Setup's own
+    /// validator wants it, and with it LUMEN_METER_BASH=0, which later runs keep.
+    #[test]
+    fn a_removed_bash_entry_is_kept_off_as_lumen_meter_bash() {
+        let h = TempDir::new().unwrap();
+        let settings = global_settings_path_in(h.path());
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap()
+        };
+        settings_with_matchers(h.path(), &["Read"], &["Read"]);
+        let mut v = read();
+        v["env"] = serde_json::json!({"EDITOR": "vim"});
+        std::fs::write(&settings, v.to_string()).unwrap();
+
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
+        assert!(
+            step.detail.contains("LUMEN_METER_BASH=0"),
+            "{}",
+            step.detail
+        );
+        let v = read();
+        assert_eq!(
+            v["env"],
+            serde_json::json!({"EDITOR": "vim", "LUMEN_METER_BASH": "0"})
+        );
+        let matchers: Vec<&str> = v["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(matchers, vec!["Read", "Bash"]);
+        let st = validate_hooks_in(h.path());
+        assert!(st.healthy, "{}", st.detail);
+
+        let again = std::fs::read(&settings).unwrap();
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.detail, "Hooks merged into ~/.claude/settings.json");
+        assert!(
+            std::fs::read(&settings).unwrap() == again,
+            "a second run keeps it as it is"
+        );
+
+        // An `env` that is not an object is not written into.
+        settings_with_matchers(h.path(), &["Read"], &["Read"]);
+        let mut v = read();
+        v["env"] = serde_json::json!("vim");
+        std::fs::write(&settings, v.to_string()).unwrap();
+        let before = std::fs::read(&settings).unwrap();
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.status, StepStatus::Error, "{}", step.detail);
+        assert!(step.detail.contains("\"env\""), "{}", step.detail);
+        assert!(std::fs::read(&settings).unwrap() == before);
     }
 
     /// The cleanup must not take a user's own hook with it.

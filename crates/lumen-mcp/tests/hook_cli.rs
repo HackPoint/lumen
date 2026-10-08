@@ -37,6 +37,7 @@ const SCRUBBED: &[&str] = &[
     "LUMEN_HOOK_ENABLED",
     "LUMEN_LINE_THRESHOLD",
     "LUMEN_DEBUG",
+    "LUMEN_METER_BASH",
     "LUMEN_SESSION_ID",
     "LUMEN_CHANNEL",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -354,6 +355,33 @@ fn a_secret_on_the_command_line_never_reaches_the_ledger() {
         )
         .unwrap();
     assert_eq!(leaked, 0);
+}
+
+/// LUMEN_METER_BASH=0 records no command output, and nothing else changes: Read is
+/// still metered. It is the Bash opt-out that survives Setup, which keeps
+/// settings.json's `env` but puts a removed Bash entry back.
+#[test]
+fn lumen_meter_bash_zero_records_no_command_output_and_still_meters_reads() {
+    let s = sandbox();
+    let off = [("LUMEN_METER_BASH", "0")];
+    let bash = captured("bash_post.json", &s.proj, None);
+    let ran = s.meter(&bash, &off);
+    assert_eq!(
+        (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
+        (0, "", "")
+    );
+    assert!(!s.db.exists(), "nothing was metered, so no ledger");
+
+    let file = s.file("hello.rs", HELLO);
+    s.meter(&captured("read_post.json", &s.proj, Some(&file)), &off);
+    let routes: Vec<_> = s.rows().into_iter().map(|r| r.routed_via).collect();
+    assert_eq!(routes, ["builtin_read"]);
+
+    // The control: the same payload without it is a row.
+    s.meter(&bash, &[]);
+    let routes: Vec<_> = s.rows().into_iter().map(|r| r.routed_via).collect();
+    assert_eq!(routes, ["builtin_read", "bash_output"]);
+    assert!(!s.spool.exists(), "{:?}", s.faults());
 }
 
 /// R3, first half. A ledger from before the provenance columns used to swallow every
