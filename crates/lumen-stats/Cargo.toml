@@ -2,6 +2,7 @@
 name = "lumen-stats"
 version = "1.5.1"
 edition = "2024"
+rust-version.workspace = true
 
 # Read-only aggregate queries over the metering DB. These used to live inside the
 # Tauri GUI crate, which cannot build without bundled sidecar binaries — so none

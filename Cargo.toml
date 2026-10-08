@@ -8,3 +8,9 @@ members = [
     "crates/lumen-stats",
     "lumenator/src-tauri",
 ]
+
+# The oldest compiler this workspace builds on, inherited by every crate: sqlx 0.9 requires
+# 1.94.0, and every crate reaches it through lumen-core. The `msrv` job in ci.yml builds the
+# whole workspace on exactly this version, read from here, so the two cannot drift.
+[workspace.package]
+rust-version = "1.94.0"

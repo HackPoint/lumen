@@ -113,7 +113,12 @@ That test now runs both copies against a stub tokenizer and compares what they r
 - chore(deps): Tauri 2.11.5 → 2.12.1, moved as one group: `tauri-build` 2.7.1, the autostart
   2.7.0, log 2.10.0, notification 2.5.1, positioner 2.4.0 and shell 2.4.0 plugins, and
   `@tauri-apps/api`/`cli` 2.12.1. The pinned `tray-icon` goes 0.24.2 → 0.25.1, the version Tauri
-  2.12 uses, not the newer 0.26. The GUI crate's `rust-version` is now 1.90, Tauri 2.12's floor.
+  2.12 uses, not the newer 0.26.
+- build: every crate declares `rust-version` 1.94.0, inherited from the workspace. That is
+  sqlx 0.9's floor, and every crate reaches sqlx through lumen-core; the GUI crate alone
+  declared one before, 1.90, Tauri 2.12's floor, which the build could not honour. A new CI
+  job, `msrv`, reads the version from `Cargo.toml`, checks every crate declares it, and builds
+  the whole workspace, the Tauri crate included, on exactly that compiler.
 - chore(deps): tree-sitter 0.26 → 0.27, sha2 0.10 → 0.11, dirs 6 → 7, plus every
   semver-compatible bump in `Cargo.lock`. A known-answer test now pins the SHA-256 output: the
   fingerprint that deduplicates filed issues is built on it, so a digest change would re-file

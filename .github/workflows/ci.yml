@@ -198,3 +198,51 @@ jobs:
 
       - name: cargo clippy (Tauri crate on Linux)
         run: cargo clippy -p Lumen --all-targets -- -D warnings
+
+  # ── Minimum supported Rust ─────────────────────────────────────────────────
+  # `rust-version` is declared once, in the workspace Cargo.toml, at what the
+  # dependency set requires: sqlx 0.9 needs 1.94.0. Every other job builds on
+  # stable, so without this one the declared floor is a claim no compiler has
+  # checked. The toolchain is read from Cargo.toml rather than written here, so
+  # the two cannot drift. Linux, so the Tauri crate is in the build too.
+  msrv:
+    name: Build on the declared rust-version
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the declared rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: The compiler is the declared one, and every crate declares it
+        run: bash scripts/check-msrv.sh
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: cargo build (every crate, every target)
+        run: cargo build --workspace --all-targets --locked
