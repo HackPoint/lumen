@@ -1034,31 +1034,28 @@ fn script_needs_refresh(path: &Path, desired: &str) -> bool {
 // because the fault recorder ran on python3 as well. What is left in shell is
 // finding the binary, and reporting when it cannot.
 //
-// Three values are baked in by `shim`: `__LUMEN_MCP__`, `__LUMEN_DB__` and
-// `__LUMEN_SPOOL__`, each as one single-quoted shell word.
+// Each template is filled two ways. `shim` makes the copy Setup installs, with three
+// values baked in: `__LUMEN_MCP__`, `__LUMEN_DB__` and `__LUMEN_SPOOL__`, each as one
+// single-quoted shell word. `plugin_hooks::plugin_script` makes the Claude Code
+// plugin's copy in `.claude/hooks/`, which has nothing to bake — a plugin cannot know
+// where Lumen is installed. That copy used to be a separate script, and it drifted
+// until it wrote to a ledger with no schema and recorded nothing; one template for
+// both is the fix.
 
 const METER_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# lumen_meter.sh — installed by Lumen Setup. Regenerated automatically when it
-# drifts from the running build; do not hand-edit.
+# lumen_meter.sh — __LUMEN_ORIGIN__
 #
 # PostToolUse hook for Read and Bash. `lumen-mcp hook meter` does the metering;
 # this finds that binary, and when it cannot, leaves a fault and a line on stderr
 # instead of losing the event in silence. It needs bash, cat and date.
 #
-# Each baked value is a default, not a constant, so a test can point the hook at a
-# scratch ledger and a stub binary without editing it.
-default_mcp=__LUMEN_MCP__
-default_db=__LUMEN_DB__
-default_spool=__LUMEN_SPOOL__
-LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-$default_mcp}"
-export LUMEN_DB="${LUMEN_DB:-$default_db}"
-export LUMEN_FAULT_SPOOL="${LUMEN_FAULT_SPOOL:-$default_spool}"
+__LUMEN_LOCATE__
 
 # A failed exec falls through to the report below instead of ending the script.
 shopt -s execfail
 bin="$LUMEN_MCP_BIN"
 [ -x "$bin" ] || bin="$(command -v lumen-mcp 2>/dev/null)"
-[ -n "$bin" ] && exec "$bin" hook meter --writer lumen_meter.sh
+[ -n "$bin" ] && exec "$bin" hook meter --writer __LUMEN_WRITER__
 
 # Lumen was moved or removed. Exit 0 all the same: a meter must never fail the
 # tool call it observes.
@@ -1068,8 +1065,7 @@ consequence="this event was not metered"
 __LUMEN_REPORT__"#;
 
 const INTERCEPT_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# lumen_read_intercept.sh — installed by Lumen Setup. Regenerated automatically
-# when it drifts from the running build; do not hand-edit.
+# lumen_read_intercept.sh — __LUMEN_ORIGIN__
 #
 # PreToolUse hook for Read. `lumen-mcp hook intercept` decides whether a large
 # source or log file goes to the lumen tools (exit 2) or is read as asked (exit 0).
@@ -1077,14 +1073,7 @@ const INTERCEPT_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # through, with a fault and a line on stderr. LUMEN_HOOK_ENABLED=0 switches the
 # intercept off.
 #
-# Each baked value is a default, not a constant, so a test can point the hook at a
-# scratch ledger and a stub binary without editing it.
-default_mcp=__LUMEN_MCP__
-default_db=__LUMEN_DB__
-default_spool=__LUMEN_SPOOL__
-LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-$default_mcp}"
-export LUMEN_DB="${LUMEN_DB:-$default_db}"
-export LUMEN_FAULT_SPOOL="${LUMEN_FAULT_SPOOL:-$default_spool}"
+__LUMEN_LOCATE__
 
 # A failed exec falls through to the report below instead of ending the script.
 shopt -s execfail
@@ -1099,6 +1088,20 @@ cat >/dev/null
 kind=hook_fail_open
 consequence="this read was let through"
 __LUMEN_REPORT__"#;
+
+/// Where an installed shim says it came from.
+const INSTALLED_ORIGIN: &str = "installed by Lumen Setup.
+# Setup regenerates it when it drifts from the running build; do not hand-edit.";
+
+/// How an installed shim finds the binary, the ledger and the spool: Setup baked them.
+const INSTALLED_LOCATE: &str = r#"# Each baked value is a default, not a constant, so a test can point the hook at a
+# scratch ledger and a stub binary without editing it.
+default_mcp=__LUMEN_MCP__
+default_db=__LUMEN_DB__
+default_spool=__LUMEN_SPOOL__
+LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-$default_mcp}"
+export LUMEN_DB="${LUMEN_DB:-$default_db}"
+export LUMEN_FAULT_SPOOL="${LUMEN_FAULT_SPOOL:-$default_spool}""#;
 
 /// The end of both shims, reached only when `lumen-mcp` cannot run. It writes the
 /// fault `lumen_core::faults::FaultRecord::now_with_env` would have: the same
@@ -1320,6 +1323,9 @@ fn shim(template: &str, db: &str, mcp_bin: &str) -> String {
         .unwrap_or_default();
     with_stamp(
         &template
+            .replace("__LUMEN_ORIGIN__", INSTALLED_ORIGIN)
+            .replace("__LUMEN_LOCATE__", INSTALLED_LOCATE)
+            .replace("__LUMEN_WRITER__", "lumen_meter.sh")
             .replace("__LUMEN_REPORT__", REPORT_TAIL)
             .replace("__LUMEN_MCP__", &sh_quote(&shell_path(mcp_bin)))
             .replace("__LUMEN_DB__", &sh_quote(&shell_path(db)))
@@ -1916,6 +1922,9 @@ fn remove_lumen_hooks(root: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod hook_e2e;
+
+#[cfg(test)]
+mod plugin_hooks;
 
 #[cfg(test)]
 mod tests {

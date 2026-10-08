@@ -61,6 +61,15 @@ update_ruby_version() {
     sed -i '' "s/^  version \"[^\"]*\"/  version \"${new}\"/" "$file"
 }
 
+update_stamp_version() {
+    # The `# lumen-generator:` stamp on a generated hook script. A fault the script
+    # writes reports this version, so a stale one misattributes it.
+    local file="$1" new="$2"
+    [[ -f "$file" ]] || die "version file not found: $file"
+    grep -q '^# lumen-generator: ' "$file" || die "no generator stamp to bump in $file"
+    sed -i '' "s/^# lumen-generator: .*/# lumen-generator: ${new}/" "$file"
+}
+
 # ── pre-flight ────────────────────────────────────────────────────────────────
 
 require_cmd git
@@ -117,6 +126,17 @@ echo "  ✓ lumenator/src-tauri/tauri.conf.json"
 # one misreports which build's hooks and commands they have installed.
 update_json_version .claude-plugin/plugin.json "$NEW"
 echo "  ✓ .claude-plugin/plugin.json"
+
+# The plugin's hook scripts, generated from Setup's templates. setup::plugin_hooks
+# compares every byte, the stamp included, so they move with the version.
+PLUGIN_HOOKS=(
+    .claude/hooks/lumen_meter.sh
+    .claude/hooks/lumen_read_intercept.sh
+)
+for f in "${PLUGIN_HOOKS[@]}"; do
+    update_stamp_version "$f" "$NEW"
+    echo "  ✓ $f"
+done
 
 # Brew files: bump version only; CI will update sha256 after building artifacts.
 # Leaving sha256 stale is intentional — it's overwritten by the CI tap-update job
@@ -194,6 +214,7 @@ git add "${CARGO_TOML_FILES[@]}" \
     Formula/lumen-cli.rb \
     Casks/lumen-app.rb \
     .claude-plugin/plugin.json \
+    "${PLUGIN_HOOKS[@]}" \
     Cargo.lock \
     CHANGELOG.md
 

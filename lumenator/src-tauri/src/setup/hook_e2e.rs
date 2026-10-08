@@ -233,19 +233,7 @@ impl Rig {
 
     /// The lumen `command` registered for `matcher` under `phase`, as Setup wrote it.
     fn registered(&self, phase: &str, matcher: &str) -> String {
-        let path = global_settings_path_in(&self.home);
-        let settings: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        settings["hooks"][phase]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|e| e["matcher"] == matcher)
-            .flat_map(|e| e["hooks"].as_array().into_iter().flatten())
-            .filter_map(|h| h["command"].as_str())
-            .find(|c| c.contains("lumen_"))
-            .unwrap_or_else(|| panic!("no lumen hook for {phase} {matcher}: {settings}"))
-            .to_string()
+        registered_in(&global_settings_path_in(&self.home), phase, matcher)
     }
 
     /// `command` run as Claude Code runs a hook: its shell, `stdin` on stdin, the
@@ -385,15 +373,7 @@ impl Rig {
 
     /// Every record in the fault spool. A missing spool is no faults.
     fn faults(&self) -> Vec<FaultRecord> {
-        match std::fs::read_to_string(&self.spool) {
-            Ok(text) => text
-                .lines()
-                .map(|l| {
-                    serde_json::from_str(l).unwrap_or_else(|e| panic!("spool line {l:?}: {e}"))
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        faults_in(&self.spool)
     }
 
     /// What the last stub to run was handed, or None if none ran since the last call.
@@ -460,6 +440,53 @@ impl Rig {
     fn bash_version(&self) -> String {
         let ran = self.run("bash --version", b"", &[]);
         ran.stdout.lines().next().unwrap_or("").to_string()
+    }
+
+    /// The Claude Code plugin: this repository's `hooks/hooks.json` and the scripts in
+    /// `.claude/hooks/`, copied under a root named `name`, and given `built`, the real
+    /// lumen-mcp where a release build of the checkout puts it.
+    fn plugin(&self, name: &str, built: bool) -> PathBuf {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = self.root.path().join("plugins").join(name);
+        for rel in [
+            "hooks/hooks.json",
+            ".claude/hooks/lumen_meter.sh",
+            ".claude/hooks/lumen_read_intercept.sh",
+        ] {
+            let to = root.join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            // `copy` keeps the mode, and the scripts are run by path.
+            std::fs::copy(repo.join(rel), &to).unwrap();
+        }
+        if built {
+            let at = root
+                .join("target/release")
+                .join(format!("lumen-mcp{}", std::env::consts::EXE_SUFFIX));
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::copy(sidecar(), &at).unwrap();
+        }
+        root
+    }
+
+    /// The plugin's hook for the payload's tool under `phase`, run as Claude Code runs
+    /// a plugin's: the command as hooks.json has it, unexpanded, with the root in
+    /// `CLAUDE_PLUGIN_ROOT` — on Windows in forward slashes, as Claude Code passes it
+    /// to Git Bash.
+    fn plugin_hook(&self, root: &Path, phase: &str, payload: &Value, env: &[(&str, &str)]) -> Ran {
+        let tool = payload["tool_name"].as_str().expect("tool_name");
+        let command = registered_in(&root.join("hooks/hooks.json"), phase, tool);
+        let root = shell_path(&root.to_string_lossy());
+        let mut env = env.to_vec();
+        env.push(("CLAUDE_PLUGIN_ROOT", &root));
+        let ran = self.run(&command, &serde_json::to_vec(payload).unwrap(), &env);
+        assert_eq!(ran.stdout, "", "a plugin hook printed to stdout: {ran:?}");
+        if phase == "PostToolUse" {
+            assert_eq!(
+                ran.code, 0,
+                "the meter must never fail the tool call: {ran:?}"
+            );
+        }
+        ran
     }
 }
 
@@ -606,6 +633,33 @@ fn stub(at: &Path, name: &str) {
 
 fn write_json(path: &Path, v: &Value) {
     std::fs::write(path, serde_json::to_string_pretty(v).unwrap()).unwrap();
+}
+
+/// The lumen `command` for `matcher` under `phase` in a settings.json or a plugin's
+/// hooks.json, which share the shape.
+fn registered_in(path: &Path, phase: &str, matcher: &str) -> String {
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    settings["hooks"][phase]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["matcher"] == matcher)
+        .flat_map(|e| e["hooks"].as_array().into_iter().flatten())
+        .filter_map(|h| h["command"].as_str())
+        .find(|c| c.contains("lumen_"))
+        .unwrap_or_else(|| panic!("no lumen hook for {phase} {matcher}: {settings}"))
+        .to_string()
+}
+
+/// Every record in the spool at `path`. A missing spool is no faults.
+fn faults_in(path: &Path) -> Vec<FaultRecord> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("spool line {l:?}: {e}")))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, the shape `FaultRecord` writes.
@@ -1722,4 +1776,327 @@ fn an_upgrade_from_1_5_1_refreshes_the_scripts_and_keeps_what_the_user_set() {
     assert_eq!(blocked.code, 2, "{blocked:?}");
     rig.meter(&rig.captured("read_post.json", Some(&gone)), &bare_env);
     assert_eq!(rig.faults().len(), 1, "{:?}", rig.faults());
+}
+
+// ── The plugin's copies ─────────────────────────────────────────────────────
+//
+// The Claude Code plugin registers `hooks/hooks.json`, which runs the scripts in
+// `.claude/hooks/`: Setup's templates with nothing baked in (`setup::plugin_hooks`).
+// These run the checked-in copies the way Claude Code runs a plugin's hooks, on a
+// machine where Setup never ran. A plugin's root is wherever Claude Code put it, so
+// this one has a space, a `$`, a backtick and quotes in its name.
+
+const PLUGIN: &str = "lumen $HOME `x` 'q' (1.6.0)";
+/// What the plugin's meter writes in `writer_hook`.
+const PLUGIN_WRITER: &str = "repo:.claude/hooks/lumen_meter.sh";
+
+/// A Read and a Bash through the plugin's meter land as rows in the ledger lumen-mcp
+/// resolves for itself, and a large read is blocked, with no Setup anywhere.
+#[test]
+fn the_plugin_hooks_meter_and_block_without_setup() {
+    let rig = Rig::new();
+    let root = rig.plugin(PLUGIN, true);
+    assert!(
+        !global_settings_path_in(&rig.home).exists(),
+        "Setup never ran"
+    );
+
+    let file = rig.file("hello.rs", HELLO);
+    let read = rig.plugin_hook(
+        &root,
+        "PostToolUse",
+        &rig.captured("read_post.json", Some(&file)),
+        &rig.claude_env(READ_SESSION),
+    );
+    let bash = rig.plugin_hook(
+        &root,
+        "PostToolUse",
+        &rig.captured("bash_post.json", None),
+        &rig.claude_env(BASH_SESSION),
+    );
+    assert_eq!((read.stderr.as_str(), bash.stderr.as_str()), ("", ""));
+
+    let rows = rig.rows();
+    eprintln!("C2 plugin rows [{OS}] ({}): {rows:?}", rig.bash_version());
+    let path = file.to_string_lossy();
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.tool.as_str(),
+                r.path.as_str(),
+                r.routed_via.as_str(),
+                r.channel.as_str(),
+                r.session_id.as_deref(),
+                r.writer_hook.as_deref(),
+                r.token_source.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "Read",
+                path.as_ref(),
+                "builtin_read",
+                "cli",
+                Some(READ_SESSION),
+                Some(PLUGIN_WRITER),
+                Some("measured")
+            ),
+            (
+                "Bash",
+                "ls -la",
+                "bash_output",
+                "cli",
+                Some(BASH_SESSION),
+                Some(PLUGIN_WRITER),
+                Some("measured")
+            ),
+        ]
+    );
+    assert_eq!(rows[0].tokens_returned, count_tokens(HELLO) as i64);
+    assert!(rows[1].full_tokens > 0, "{:?}", rows[1]);
+
+    let big = rig.file("big.rs", &source_lines(400));
+    let blocked = rig.plugin_hook(
+        &root,
+        "PreToolUse",
+        &rig.captured("read_pre.json", Some(&big)),
+        &rig.claude_env(READ_SESSION),
+    );
+    eprintln!(
+        "C2 plugin block [{OS}] (exit {}):\n{}",
+        blocked.code, blocked.stderr
+    );
+    assert_eq!(blocked.code, 2, "{blocked:?}");
+    assert!(
+        blocked.stderr.starts_with(&format!(
+            "Lumen intercept: {} is 400 lines.\n",
+            big.to_string_lossy()
+        )),
+        "{blocked:?}"
+    );
+    assert!(!rig.spool.exists(), "{:?}", rig.faults());
+}
+
+/// Without a build in the checkout, the plugin's hooks use lumen-mcp on PATH.
+#[test]
+fn without_a_build_the_plugin_hooks_use_lumen_mcp_on_path() {
+    let rig = Rig::new();
+    let root = rig.plugin(PLUGIN, false);
+    std::fs::copy(
+        sidecar(),
+        rig.bin
+            .join(format!("lumen-mcp{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    let file = rig.file("hello.rs", HELLO);
+    let ran = rig.plugin_hook(
+        &root,
+        "PostToolUse",
+        &rig.captured("read_post.json", Some(&file)),
+        &rig.claude_env(READ_SESSION),
+    );
+    assert_eq!(ran.stderr, "");
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].writer_hook.as_deref(), Some(PLUGIN_WRITER));
+}
+
+/// Fail open through the plugin, with its negative control: a large read is blocked
+/// while the checkout's build is there; once it is gone and nothing is on PATH, the
+/// next one goes through, both hooks say where they looked, and the faults carry the
+/// session and the version stamped on the script.
+#[test]
+fn without_lumen_mcp_the_plugin_hooks_say_so_record_it_and_block_nothing() {
+    let rig = Rig::new();
+    let root = rig.plugin(PLUGIN, true);
+    let env = rig.claude_env(READ_SESSION);
+
+    let first = rig.file("first.rs", &source_lines(400));
+    let control = rig.plugin_hook(
+        &root,
+        "PreToolUse",
+        &rig.captured("read_pre.json", Some(&first)),
+        &env,
+    );
+    assert_eq!(
+        control.code, 2,
+        "control: with the build there, this is blocked"
+    );
+
+    std::fs::remove_file(
+        root.join("target/release")
+            .join(format!("lumen-mcp{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    let second = rig.file("second.rs", &source_lines(400));
+    let passed = rig.plugin_hook(
+        &root,
+        "PreToolUse",
+        &rig.captured("read_pre.json", Some(&second)),
+        &env,
+    );
+    let metered = rig.plugin_hook(
+        &root,
+        "PostToolUse",
+        &rig.captured("read_post.json", Some(&second)),
+        &env,
+    );
+    eprintln!(
+        "C2 plugin fail-open [{OS}]: intercept exit {} stderr {:?}; meter exit {} stderr {:?}",
+        passed.code, passed.stderr, metered.code, metered.stderr
+    );
+    // The script names the binary by the path it was run by, the root as Claude Code
+    // passed it.
+    let looked = PathBuf::from(format!(
+        "{}/.claude/hooks/../../target/release/lumen-mcp",
+        shell_path(&root.to_string_lossy())
+    ));
+    assert_eq!(passed.code, 0);
+    assert_eq!(passed.stderr, missing_line(&looked, LET_THROUGH));
+    assert_eq!(metered.stderr, missing_line(&looked, NOT_METERED));
+    let faults = rig.faults();
+    let got: Vec<_> = faults
+        .iter()
+        .map(|f| {
+            (
+                f.kind.as_str(),
+                f.variant.as_str(),
+                f.session_id.as_deref(),
+                f.version.as_deref(),
+                f.channel.as_str(),
+            )
+        })
+        .collect();
+    let version = Some(env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        got,
+        [
+            (
+                "hook_fail_open",
+                "lumen_mcp_missing",
+                Some(READ_SESSION),
+                version,
+                "cli"
+            ),
+            (
+                "meter_write_failed",
+                "lumen_mcp_missing",
+                Some(READ_SESSION),
+                version,
+                "cli"
+            )
+        ]
+    );
+    assert!(!rig.db.exists(), "nothing was metered");
+}
+
+/// The plugin's script, unlike Setup's, has no spool baked in, so when it reports it
+/// resolves the one lumen-mcp would have used. Each case runs both under the same
+/// environment — lumen-mcp from a built root, the script from a root without a build
+/// — and finds both faults in the one file the rule names, and nothing anywhere else.
+/// The cases add one rule each, so each also shows the rule before it losing.
+#[test]
+fn the_plugin_script_reports_where_lumen_mcp_would_have() {
+    let rig = Rig::new();
+    let built = rig.plugin(PLUGIN, true);
+    let unbuilt = rig.plugin("lumen unbuilt", false);
+    let dir = |name: &str| {
+        let d = rig.root.path().join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    let pointed = dir("pointed db").join("lumen.db");
+    let set = dir("env db").join("lumen.db");
+    let spool = dir("spool dir").join("faults here.jsonl");
+    let beside = |db: &Path| db.with_file_name("faults.jsonl");
+    // Native paths, as the app writes the pointer and a user sets a variable.
+    let native = |p: &Path| p.to_string_lossy().into_owned();
+    let pointer = rig.home.join(".lumen_db_path");
+    let candidates = [
+        rig.spool.clone(),
+        beside(&pointed),
+        beside(&set),
+        spool.clone(),
+        rig.proj.join("faults.jsonl"),
+    ];
+    let points = format!(" \t{}\t \r\n", native(&pointed));
+    let cases: [(&str, Option<&str>, Vec<(&str, String)>, &Path); 5] = [
+        ("the per-OS ledger", None, vec![], &rig.spool),
+        ("a blank pointer", Some(" \t\r\n"), vec![], &rig.spool),
+        ("the pointer", Some(&points), vec![], &beside(&pointed)),
+        (
+            "LUMEN_DB over the pointer",
+            Some(&points),
+            vec![("LUMEN_DB", native(&set))],
+            &beside(&set),
+        ),
+        (
+            "LUMEN_FAULT_SPOOL over both",
+            Some(&points),
+            vec![
+                ("LUMEN_DB", native(&set)),
+                ("LUMEN_FAULT_SPOOL", native(&spool)),
+            ],
+            &spool,
+        ),
+    ];
+    let big = rig.file("big.rs", &source_lines(400));
+    for (i, (label, pointing, extra, want)) in cases.iter().enumerate() {
+        for c in &candidates {
+            let _ = std::fs::remove_file(c);
+        }
+        match pointing {
+            Some(text) => std::fs::write(&pointer, text).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&pointer);
+            }
+        }
+        let session = format!("spool-case-{i}");
+        let mut payload = rig.captured("read_pre.json", Some(&big));
+        payload["session_id"] = Value::from(session.as_str());
+        let mut env = rig.claude_env(&session).to_vec();
+        env.extend(extra.iter().map(|(k, v)| (*k, v.as_str())));
+
+        let blocked = rig.plugin_hook(&built, "PreToolUse", &payload, &env);
+        assert_eq!(blocked.code, 2, "{label}: {blocked:?}");
+        let binary = rig.plugin_hook(&built, "PreToolUse", &payload, &env);
+        let shell = rig.plugin_hook(&unbuilt, "PreToolUse", &payload, &env);
+        assert_eq!(
+            (binary.code, shell.code),
+            (0, 0),
+            "{label}: {binary:?} {shell:?}"
+        );
+
+        let landed: Vec<(&Path, Vec<(String, String, Option<String>)>)> = candidates
+            .iter()
+            .filter(|c| c.exists())
+            .map(|c| {
+                let faults = faults_in(c)
+                    .into_iter()
+                    .map(|f| (f.kind, f.variant, f.session_id))
+                    .collect();
+                (c.as_path(), faults)
+            })
+            .collect();
+        eprintln!("spool [{OS}] {label}: {landed:?}");
+        let fault = |variant: &str| {
+            (
+                "hook_fail_open".to_string(),
+                variant.to_string(),
+                Some(session.clone()),
+            )
+        };
+        assert_eq!(
+            landed,
+            [(
+                *want,
+                vec![fault("retry_escape_valve"), fault("lumen_mcp_missing")]
+            )],
+            "{label}"
+        );
+    }
 }
