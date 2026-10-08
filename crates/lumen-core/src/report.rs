@@ -289,6 +289,7 @@ struct Group {
 pub const FAULT_KINDS: &[&str] = &[
     "hook_fail_open",
     "schema_drift",
+    "meter_write_failed",
     "ingest_failed",
     "reporter_degraded",
     "ws_restart",
@@ -298,21 +299,27 @@ pub const FAULT_KINDS: &[&str] = &[
 /// The impact line used for a kind the renderer does not recognise.
 const UNCLASSIFIED: &str = "Unclassified fault. See the table below.";
 
+/// Where a kind this build does not know sorts: after every known one.
+const CATCH_ALL_PRIORITY: u8 = 7;
+
 /// Sort order for the table and for picking the headline. A fired fail-open guard
 /// outranks everything: it means the routing contract broke in the field.
 fn kind_priority(kind: &str) -> u8 {
     match kind {
         "hook_fail_open" => 0,
         "schema_drift" => 1,
+        // A read that never reached the ledger. Below schema drift only because drift is
+        // the commonest cause of it, so the cause should head the report.
+        "meter_write_failed" => 2,
         // Silent data loss: the daemon logged and continued, so the gauge is wrong and
         // nothing said so. Ranks above the two that merely retry.
-        "ingest_failed" => 2,
+        "ingest_failed" => 3,
         // The report itself is incomplete. Not the fault being reported, but it changes
         // how much the rest of the report can be trusted.
-        "reporter_degraded" => 3,
-        "ws_restart" => 4,
-        "ranked_decline" => 5,
-        _ => 6,
+        "reporter_degraded" => 4,
+        "ws_restart" => 5,
+        "ranked_decline" => 6,
+        _ => CATCH_ALL_PRIORITY,
     }
 }
 
@@ -326,6 +333,11 @@ fn impact(kind: &str) -> &'static str {
         "schema_drift" => {
             "The database's `read_events` columns do not match the set this build expects. \
              Metering rows may be dropped or written to the wrong column."
+        }
+        "meter_write_failed" => {
+            "A Read or Bash call was not written to the ledger. Every figure Lumen shows is \
+             computed from that table, so savings and spend are low by whatever these calls \
+             carried — and this fault is the only trace they left."
         }
         "ingest_failed" => {
             "The daemon could not ingest a transcript and carried on. Those turns are \
@@ -528,6 +540,10 @@ fn headline(top: &Group, version: &str) -> String {
             if files == 1 { "" } else { "s" }
         ),
         "schema_drift" => "read_events schema drift".to_string(),
+        "meter_write_failed" => format!(
+            "metering write failed {}× ({}) — reads missing from the ledger",
+            top.count, top.variant
+        ),
         "ingest_failed" => format!(
             "ingest failed {}× ({}) — turns missing from the ledger",
             top.count, top.variant
@@ -2215,7 +2231,7 @@ mod tests {
                 "{kind} has no impact line — it would render as an unclassified fault"
             );
             assert!(
-                kind_priority(kind) < 6,
+                kind_priority(kind) < CATCH_ALL_PRIORITY,
                 "{kind} falls into the catch-all priority and would sort below everything"
             );
             let f = Fault {

@@ -58,8 +58,21 @@ fn unknown_channel() -> String {
 }
 
 impl FaultRecord {
-    /// A record stamped with this build's version and the current UTC second.
+    /// A record stamped with this build's version, the current UTC second, and the
+    /// session and channel of the process that hit it.
     pub fn now(kind: &str, variant: &str) -> Self {
+        Self::now_with_env(kind, variant, |k| std::env::var(k).ok())
+    }
+
+    /// [`now`](Self::now) with the environment passed in, so tests need not mutate
+    /// process-global state.
+    ///
+    /// Channel goes through the meter's own mapping of `CLAUDE_CODE_ENTRYPOINT`. Until
+    /// 1.6.0 it was read from `LUMEN_CHANNEL`, which nothing sets, so every fault recorded
+    /// here said `unknown` — while the shell recorder wrote `cli` as a literal, under VS
+    /// Code too. `LUMEN_CHANNEL` and `LUMEN_SESSION_ID` still win when set.
+    pub fn now_with_env(kind: &str, variant: &str, var: impl Fn(&str) -> Option<String>) -> Self {
+        let set = |k: &str| var(k).filter(|v| !v.is_empty());
         Self {
             ts: utc_now(),
             kind: kind.to_string(),
@@ -71,9 +84,10 @@ impl FaultRecord {
             path: None,
             lines: None,
             detail: None,
-            session_id: std::env::var("LUMEN_SESSION_ID").ok(),
+            session_id: set("LUMEN_SESSION_ID").or_else(|| set("CLAUDE_CODE_SESSION_ID")),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            channel: std::env::var("LUMEN_CHANNEL").unwrap_or_else(|_| "unknown".into()),
+            channel: set("LUMEN_CHANNEL")
+                .unwrap_or_else(|| crate::meter::channel_from(&var).to_string()),
         }
     }
 
@@ -142,6 +156,13 @@ pub fn record(rec: &FaultRecord) {
 /// spool, which cannot be done safely from tests running in parallel.
 pub fn record_at(path: &Path, rec: &FaultRecord) {
     let _ = append_line(path, rec);
+}
+
+/// [`record_at`], reporting whether the line landed — for a caller with somewhere else
+/// to say so. A hook's stderr reaches the user; when the spool is unwritable too, that
+/// line is the only trace a lost row leaves.
+pub fn try_record_at(path: &Path, rec: &FaultRecord) -> std::io::Result<()> {
+    append_line(path, rec)
 }
 
 /// Last recorded instant per `(kind, variant)`, for [`record_throttled`].
@@ -463,6 +484,84 @@ mod tests {
     #[test]
     fn an_empty_variant_becomes_the_sentinel() {
         assert_eq!(FaultRecord::now("k", "").variant, NO_VARIANT);
+    }
+
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    /// R4: a fault raised inside VS Code said `cli` (the shell recorder's literal) or
+    /// `unknown` (this one's, since nothing set `LUMEN_CHANNEL`). The E7 fix had reached
+    /// the meter and nothing else.
+    #[test]
+    fn a_fault_raised_under_vscode_records_vscode() {
+        let rec = FaultRecord::now_with_env(
+            "hook_fail_open",
+            "bad_payload",
+            env_of(&[("CLAUDE_CODE_ENTRYPOINT", "claude-vscode")]),
+        );
+        assert_eq!(rec.channel, "vscode");
+        let cli = FaultRecord::now_with_env("k", "v", env_of(&[("CLAUDE_CODE_ENTRYPOINT", "cli")]));
+        assert_eq!(cli.channel, "cli");
+        assert_eq!(
+            FaultRecord::now_with_env("k", "v", env_of(&[])).channel,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn an_explicit_channel_and_session_still_win() {
+        let rec = FaultRecord::now_with_env(
+            "k",
+            "v",
+            env_of(&[
+                ("CLAUDE_CODE_ENTRYPOINT", "claude-vscode"),
+                ("LUMEN_CHANNEL", "desktop"),
+                ("CLAUDE_CODE_SESSION_ID", "from-claude"),
+                ("LUMEN_SESSION_ID", "from-lumen"),
+            ]),
+        );
+        assert_eq!(rec.channel, "desktop");
+        assert_eq!(rec.session_id.as_deref(), Some("from-lumen"));
+    }
+
+    /// The session a hook ran in is in its environment; a fault that drops it cannot be
+    /// joined back to the reads it lost. An empty value is absence, not a session.
+    #[test]
+    fn the_claude_code_session_is_recorded_and_an_empty_one_is_not() {
+        let rec =
+            FaultRecord::now_with_env("k", "v", env_of(&[("CLAUDE_CODE_SESSION_ID", "s-42")]));
+        assert_eq!(rec.session_id.as_deref(), Some("s-42"));
+        let empty = FaultRecord::now_with_env("k", "v", env_of(&[("CLAUDE_CODE_SESSION_ID", "")]));
+        assert_eq!(empty.session_id, None);
+    }
+
+    /// R5: every shell-recorded fault said `"version": None`, so a filed issue could not
+    /// say which build wrote it.
+    #[test]
+    fn every_fault_carries_the_version_that_wrote_it() {
+        let rec = FaultRecord::now_with_env("k", "v", env_of(&[]));
+        assert_eq!(rec.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn try_record_reports_a_spool_it_could_not_write() {
+        let dir = TempDir::new().unwrap();
+        let ok = spool_in(&dir);
+        try_record_at(&ok, &FaultRecord::now("k", "v")).unwrap();
+        assert_eq!(spool_len_at(&ok), 1);
+
+        let missing = dir.path().join("no/such/dir/faults.jsonl");
+        assert!(try_record_at(&missing, &FaultRecord::now("k", "v")).is_err());
+        assert!(
+            !missing.parent().unwrap().exists(),
+            "the spool must not create directories"
+        );
     }
 
     /// The throttle is what keeps a 2s retry loop from flooding the spool.

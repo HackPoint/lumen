@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
 
+pub mod hook;
+
 pub const SERVER_NAME: &str = "lumen";
 // Taken from the crate, not written out. Hardcoded, it said 0.2.0 while the crate was
 // 1.5.0 — so the startup banner and every `initialize` response reported a version
@@ -202,7 +204,7 @@ fn session_id() -> Option<String> {
 
 /// Modification time of `path` in unix seconds, or None when it is not a real file
 /// (compress_logs on inline text has no file behind it).
-fn file_mtime(path: &str) -> Option<i64> {
+pub(crate) fn file_mtime(path: &str) -> Option<i64> {
     std::fs::metadata(path)
         .ok()?
         .modified()
