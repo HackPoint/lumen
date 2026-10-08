@@ -145,8 +145,49 @@ developer machine emptied that machine's fault spool into a throwaway ledger: a 
 scratch home's spool was gone after `cargo test -p lumen-core --lib db_reader`. The tests now name
 their spool, and the same probe leaves the canary in place through the whole `lumen-core` suite.
 
+### A fallback that hides a failure now fails a test
+
+**The guard asked for in 1.2.1 was never written.** A failure replaced by a value that looks real
+has shipped four times: the DMG tokenizer, 1.1.3's ingest, the meter's `|| echo 0`, and the INSERT
+above. A test now scans the production Rust and every shell script, Setup's hook templates
+included, for `|| echo <number>`, `|| true`, `unwrap_or(<number>)`, `unwrap_or_default()` and
+writes whose result is thrown away, and fails on any that its allowlist does not name with a
+reason. It finds 57 today, under 56 entries, each saying why that one is not a measurement; an
+entry that matches nothing fails the test as stale. Added in a scratch commit,
+`lines=$(wc -l < "$1" 2>/dev/null || echo 0)` in the meter template failed it by name:
+`setup.rs:1071 [|| echo <number>] in const METER_TEMPLATE`.
+
+Where the honest reason would have described something wrong that the user can see, the code was
+fixed instead:
+
+- **The issue reporter's token file.** The curl config carrying the GitHub token was written at
+  the umask's mode and chmodded afterwards, the chmod's failure dropped, and written through
+  whatever already sat at its predictable name — on Linux, in a `/tmp` every user can write to.
+  It and the issue body are now created owner-only by the call that creates them, and an
+  existing name, a symlink included, is never written through.
+- **Setup and Uninstall rewrote a config whose backup had failed.** The copy to `.lumen_bak` was
+  `let _`, so the one undo might not exist and nothing said so. The step now fails and leaves the
+  file as it was.
+- **App startup dropped three errors.** Creating the data directory, the copy that moves the
+  ledger over from `com.tauri.dev` — which logged "Migrated" whatever the copy did — and writing
+  `~/.lumen_db_path` are now logged as errors, so they reach `Lumen.log` in a release build.
+- **A poisoned lock emptied the degraded banner.** After a panic while the startup health was
+  locked, its reads returned no degradations and an unchecked tray, which is a healthy launch, so
+  no banner. The locks are now read through the poisoning.
+- **Calibration rows were dropped with `let _`.** A refused row is now logged, once per process.
+  It is not filed as a fault: the rows feed only `correction_factor`, which nothing in the app or
+  the CLI shows.
+- **A login-item marker that could not be written is logged.** Without it the next launch takes
+  the item for never registered, and turns it back on if the user had turned it off.
+
+The scan reads text, and what it does not read is listed at the top of the test: PowerShell,
+workflow YAML, `${VAR:-N}` defaults, the frontend, and any fallback spelled another way.
+
 ### Maintenance
 
+- build: `release.sh` read the commit subjects as `git log … 2>/dev/null | grep … || true`, so a
+  `git log` that failed — a bad range, say — wrote a release entry with no notes in it. `git log`
+  now runs once and unguarded and stops the release; `|| true` covers only grep finding nothing.
 - chore(deps): Tauri 2.11.5 → 2.12.1, moved as one group: `tauri-build` 2.7.1, the autostart
   2.7.0, log 2.10.0, notification 2.5.1, positioner 2.4.0 and shell 2.4.0 plugins, and
   `@tauri-apps/api`/`cli` 2.12.1. The pinned `tray-icon` goes 0.24.2 → 0.25.1, the version Tauri

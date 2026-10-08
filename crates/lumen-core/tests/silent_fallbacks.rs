@@ -22,7 +22,12 @@
 //! (a fault, a stderr line, a returned error), or explain itself here.
 //!
 //! A text scan, not a parser. It finds the shapes this codebase has used, not every way
-//! there is to write one.
+//! there is to write one. Not read at all: PowerShell, the workflow YAML, the frontend,
+//! and Rust outside `src/` (`build.rs`, benches, examples). Read but not recognised: a
+//! shell default (`${VAR:-0}`), `2>/dev/null` with nothing after it, `if let Ok(..)` or an
+//! `Err(_) => {}` arm that drops the error, a fallback to `false` or to a string, a number
+//! behind a named constant, and a write through a call not in [`WRITES`] (`writeln!`,
+//! a helper that wraps `fs::write`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
