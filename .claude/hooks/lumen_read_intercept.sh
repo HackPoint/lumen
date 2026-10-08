@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lumen-generator: 1.5.1
+# lumen-generator: 1.6.0
 # lumen_read_intercept.sh — the Claude Code plugin's copy of the hook
 # Lumen Setup installs, generated from the same template in setup.rs. Do not
 # hand-edit; regenerate with `LUMEN_BLESS_HOOKS=1 cargo test -p Lumen`.

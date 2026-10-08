@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] — 2026-10-08
 
 Two things this release is really about: the menu-bar icon that never appeared for one user, and
 the discovery that two of the three "honesty" figures published in 1.5.1's efficiency report were
