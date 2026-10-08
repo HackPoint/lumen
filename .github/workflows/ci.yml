@@ -74,15 +74,10 @@ jobs:
         working-directory: lumenator
         run: pnpm test
 
-  # ── Cross-platform CLI/core job: Linux + Windows ───────────────────────────
-  # The `lumen` CLI and the core/daemon/mcp/stats crates are pure cross-platform
-  # Rust. SQLite is compiled from source (rusqlite `bundled`), so no system
-  # libsqlite3 is needed on any OS. The GUI is covered by its own jobs: macOS in
-  # `check`, Linux in `gui-linux` below.
   # ── End-to-end gate ─────────────────────────────────────────────────────────
   #
   # A separate job so it is a named status check that branch protection can require.
-  # These tests also run inside `cargo test --all-targets` in the jobs above, but a
+  # These tests also run inside `cargo test --all-targets` in `check` and `test`, but a
   # protection rule can require a job, not a subset of one — and the point of this gate
   # is that "the chain from a file on disk to the figure on screen still works" cannot be
   # merged past.
@@ -94,7 +89,7 @@ jobs:
   #                 SQLite + a live WebSocket frame -> the same aggregates
   #
   # Ubuntu rather than macOS: it is the cheapest runner, and nothing in either chain is
-  # platform-specific. The per-OS jobs above already prove the code compiles and passes
+  # platform-specific. The per-OS `test` job below proves the code compiles and passes
   # everywhere.
   e2e:
     name: E2E (read path + ingest path)
@@ -127,16 +122,38 @@ jobs:
       - name: E2E — decision metering
         run: cargo test -p lumen-mcp --test ranked_metering -- --nocapture
 
+  # ── Every crate, every target, on all three: macOS, Linux, Windows ───────────
+  # The same tests everywhere, the Tauri crate included: its build needs the sidecars,
+  # so they are built first, and on Linux the GTK/WebKit headers. Before anything is
+  # built, the probe prints what a hook's shell finds on the runner, unedited.
+  #
+  # The hook end-to-end tests run on their own first, with their output shown: each
+  # installs with Setup into a temp home, hands a payload Claude Code really sent to the
+  # registered command in the shell Claude Code uses there (/bin/sh on macOS and Linux,
+  # Git Bash on Windows), and prints the row that landed. They run again in the full
+  # suite; this step is where to read them.
   test:
     name: Test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Git Bash on Windows: the shell Claude Code runs hooks with there.
+        shell: bash
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Probe the hook environment
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            bash scripts/probe-hook-env.sh
+          else
+            /bin/sh scripts/probe-hook-env.sh
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -145,13 +162,30 @@ jobs:
           workspaces: ". -> target"
           cache-on-failure: true
 
-      - name: Build CLI (proves cross-platform compile)
-        run: cargo build -p lumen-cli --release
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
 
-      # lumen-cli and lumen-stats were missing here, so the TUI rendering code
-      # and every rollup query went untested on Linux and Windows entirely.
-      - name: cargo test (all non-Tauri crates)
-        run: cargo test -p lumen-core -p lumen-cli -p lumen-daemon -p lumen-mcp -p lumen-stats --all-targets
+      # Release builds of lumen-mcp, lumen-daemon and the CLI, staged where the Tauri
+      # build and the hook tests look for them.
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: Hook e2e (install -> captured payload -> hook -> ledger row)
+        run: cargo test -p Lumen --lib setup::hook_e2e -- --nocapture --test-threads=1
+
+      - name: cargo test (every crate, every target)
+        run: cargo test --workspace --all-targets
 
   # ── Linux GUI job ──────────────────────────────────────────────────────────
   # Now that Lumen ships a Linux AppImage and .deb, the Tauri crate has to build

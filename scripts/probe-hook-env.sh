@@ -86,7 +86,7 @@ probe 'py -3 --version'
 if [ "$WINDOWS" = 1 ]; then
     # The App Execution Aliases: a python3 here with no Python installed is the
     # Microsoft Store stub, which `command -v` finds and which cannot run a script.
-    probe 'ls -l "$LOCALAPPDATA/Microsoft/WindowsApps" | grep -i python'
+    probe 'ls -l "$(cygpath -u "$LOCALAPPDATA")/Microsoft/WindowsApps" | grep -i python'
 fi
 
 section "What the 1.5.1 scripts ran: the rest, in the forms they used"
