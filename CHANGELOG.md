@@ -448,6 +448,11 @@ advice that quotes them, came out the same.
   It used to leave out the Tauri crate, where Setup and the hooks live. The hook end-to-end tests
   run first, with their output shown. Captured hook payloads are checked out byte for byte as Claude
   Code sent them (`.gitattributes`).
+- ci: a compiler warning fails the `test` job on all three platforms, as clippy fails one in `check`,
+  which runs on macOS only. Every Linux and Windows build had warned that two constants of
+  `lumen doctor`, used only on macOS, were never used, and no job failed on it. They are compiled
+  on macOS only now. In a Linux container, the job's flags fail the build with the constants as
+  they were, and pass it with them gated.
 - test: the first Windows run failed three tests that wrote `~/.claude.json` by splicing a path into
   a JSON string with `format!`. A Windows temp path made `\U`, an invalid escape. They now write the
   file through serde.

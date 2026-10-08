@@ -147,6 +147,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
+    # A warning fails the build here as clippy fails it in `check`, which runs on macOS only:
+    # code compiled out on macOS warned on Linux and Windows, unread, until 1.6.0.
+    env:
+      RUSTFLAGS: -D warnings
     defaults:
       run:
         # Git Bash on Windows: the shell Claude Code runs hooks with there.

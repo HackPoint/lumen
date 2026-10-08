@@ -277,8 +277,10 @@ fn describe(x: &Finding) -> String {
 
 /// The preference domains Lumen has written status-item state under. Both are real — this
 /// machine has `NSStatusItem Preferred Position Item-0` in each, with different values.
+#[cfg(target_os = "macos")]
 pub const PREF_DOMAINS: [&str; 2] = ["io.speedata.lumen", "Lumen"];
 
+#[cfg(target_os = "macos")]
 const MENU_BAR_MANAGERS: [&str; 7] = [
     "Bartender",
     "Ice",
