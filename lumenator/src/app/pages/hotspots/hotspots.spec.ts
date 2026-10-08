@@ -315,6 +315,20 @@ describe('Hotspots', () => {
     expect(button('File issue')).toBeUndefined();
   });
 
+  it('says why a report could not be rendered, and offers nothing to file', async () => {
+    await mount(report());
+    bridge.failures.add('get_fault_report');
+
+    button('Check for faults')!.click();
+    await tick();
+
+    const err = (fixture.nativeElement as HTMLElement).querySelector('.fr__error');
+    expect(err?.getAttribute('role')).toBe('alert');
+    expect(err?.textContent).toContain('fake: get_fault_report failed');
+    expect(button('File issue')).toBeUndefined();
+    expect(text()).not.toContain('No faults recorded');
+  });
+
   it('surfaces a filing failure instead of claiming success', async () => {
     await mount(report());
     bridge.responses.set('get_fault_report', faultReport());

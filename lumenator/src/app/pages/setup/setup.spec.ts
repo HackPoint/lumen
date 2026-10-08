@@ -308,4 +308,89 @@ describe('Setup', () => {
     expect(box!.type).toBe('checkbox');
     expect(box!.checked).toBe(true);
   });
+
+  // ── The rendered controls ──────────────────────────────────────────────────
+  //
+  // Each action above is tested by calling it. These click the buttons a user clicks,
+  // which is the only way to know each one is wired to the right action.
+
+  function button(label: string): HTMLButtonElement {
+    const all = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.setup__actions button'),
+    );
+    const found = all.find((b) => b.textContent?.trim() === label);
+    expect(found, label).toBeDefined();
+    return found!;
+  }
+
+  async function settled(): Promise<void> {
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    fixture.detectChanges();
+  }
+
+  it('runs setup again from Run Again', async () => {
+    await build();
+    button('Run Again').click();
+    await settled();
+    expect(bridge.countOf('lumen_run_setup')).toBe(2);
+  });
+
+  it('opens the dashboard from Open Lumen', async () => {
+    await build();
+    const spy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
+    button('Open Lumen').click();
+    expect(spy).toHaveBeenCalledWith(['/']);
+  });
+
+  it('uninstalls from Uninstall', async () => {
+    await build((b) => b.responses.set('lumen_uninstall', []));
+    button('Uninstall').click();
+    await settled();
+    expect(bridge.countOf('lumen_uninstall')).toBe(1);
+  });
+
+  it('installs the CLI from Install CLI, says so while it runs, then shows the result', async () => {
+    let finish!: (steps: unknown) => void;
+    await build();
+    // Held open, so the in-flight label can be seen before the result replaces it.
+    bridge.invoke = (<T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      bridge.calls.push({ cmd, args });
+      if (cmd === 'lumen_install_cli') return new Promise<T>((r) => { finish = r as (s: unknown) => void; });
+      return Promise.resolve(bridge.responses.get(cmd) as T);
+    }) as FakeTauriBridge['invoke'];
+
+    button('Install CLI').click();
+    fixture.detectChanges();
+    const running = button('Installing…');
+    expect(running.disabled).toBe(true);
+
+    finish([step('cli', 'Ok', 'Linked /usr/local/bin/lumen')]);
+    await settled();
+    expect(button('Install CLI').disabled).toBe(false);
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('✓ Linked /usr/local/bin/lumen');
+  });
+
+  it('switches launch-at-login from the rendered toggle', async () => {
+    await build((b) => {
+      b.responses.set('lumen_autostart_enabled', false);
+      b.responses.set('lumen_set_autostart', true);
+    });
+    const box = (fixture.nativeElement as HTMLElement).querySelector<HTMLInputElement>('.setup__toggle-input')!;
+    box.click();
+    await settled();
+    expect(bridge.lastArgsOf('lumen_set_autostart')).toEqual({ enable: true });
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('appears in your menu bar automatically');
+  });
+
+  it('shows why the toggle could not be switched', async () => {
+    await build((b) => {
+      b.responses.set('lumen_autostart_enabled', false);
+      b.failures.add('lumen_set_autostart');
+    });
+    (fixture.nativeElement as HTMLElement).querySelector<HTMLInputElement>('.setup__toggle-input')!.click();
+    await settled();
+    const err = (fixture.nativeElement as HTMLElement).querySelector('.setup__error');
+    expect(err?.textContent).toContain('lumen_set_autostart failed');
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('You will need to open Lumen yourself');
+  });
 });

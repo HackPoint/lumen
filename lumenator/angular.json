@@ -87,8 +87,14 @@
             ],
             "coverage": true,
             "coverageReporters": [
+              "text",
               "text-summary",
+              "json-summary",
               "lcov"
+            ],
+            "coverageInclude": [
+              "src/app/**/*.ts",
+              "src/app/**/*.html"
             ],
             "coverageExclude": [
               "src/main.ts",
@@ -97,6 +103,7 @@
               "src/app/tauri-bridge.ts"
             ],
             "coverageThresholds": {
+              "perFile": true,
               "statements": 90,
               "branches": 85,
               "functions": 90,

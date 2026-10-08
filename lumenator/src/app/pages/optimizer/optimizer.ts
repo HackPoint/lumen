@@ -69,13 +69,6 @@ export class Optimizer implements OnInit {
             : 'Counts are exact for Lumen tool calls; some older events have unverified provenance.',
     );
 
-    readonly provenanceTip = computed(() =>
-        this.s.unverifiedProvenanceRows() === 0
-            ? 'When Lumen intercepts a read, this is how many fewer tokens it returned — counted to the token.'
-            : 'When Lumen intercepts a read, this is how many fewer tokens it returned. '
-              + 'Events recorded before Lumen tracked token provenance may include estimates.',
-    );
-
     readonly savingsNote = computed(() =>
         this.s.unverifiedProvenanceRows() === 0
             ? 'caused · measured · verifiable · grows with use'

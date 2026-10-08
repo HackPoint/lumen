@@ -227,6 +227,74 @@ describe('Optimizer', () => {
     expect(o.maxChanSaved()).toBe(1);
   });
 
+  // ── what the breakdowns render ─────────────────────────────────────────────
+
+  function rows(section: string): string[] {
+    return Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll(`section[aria-label="${section}"] .breakdown__row`),
+    ).map((r) => (r.textContent ?? '').replace(/\s+/g, ' ').trim());
+  }
+
+  it('renders a row per channel, labelled with its mode', async () => {
+    await build(report({
+      lifetimeOptimizedTokens: 1_500,
+      lifetimeFullTokens: 3_000,
+      byChannel: [
+        { channel: 'cli', calls: 2, savedTokens: 1_000, fullTokens: 2_000 },
+        { channel: 'vscode', calls: 1, savedTokens: 500, fullTokens: 1_000 },
+      ],
+    }));
+    expect(rows('Savings by channel')).toEqual([
+      `CLI (Full mode) ${(1_000).toLocaleString()} tok · 2 calls`,
+      `VS Code (Soft mode) ${(500).toLocaleString()} tok · 1 call`,
+    ]);
+  });
+
+  it('renders no channel section until a channel has a row', async () => {
+    await build();
+    expect(fixture.nativeElement.querySelector('section[aria-label="Savings by channel"]')).toBeNull();
+  });
+
+  it('says "1 call", not "1 calls", for a single tool call', async () => {
+    await build(report({
+      lifetimeOptimizedTokens: 10,
+      lifetimeFullTokens: 20,
+      byTool: [{ tool: 'mcp__lumen__smart_read', calls: 1, savedTokens: 10, fullTokens: 20 }],
+    }));
+    expect(text()).toContain('tok · 1 call');
+    expect(text()).not.toContain('1 calls');
+  });
+
+  it('renders the missed reads as context, with their count and tokens', async () => {
+    await build(report({ currentChannel: 'cli', missedCalls: 3, missedFullTokens: 12_000 }));
+    const note = (fixture.nativeElement as HTMLElement).querySelector('.missed__val');
+    expect(note?.textContent?.replace(/\s+/g, ' ').trim()).toBe(`3 calls · ${(12_000).toLocaleString()} tokens`);
+    expect(text()).toContain('never counted as savings');
+  });
+
+  it('says "1 call" for a single missed read', async () => {
+    await build(report({ currentChannel: 'cli', missedCalls: 1, missedFullTokens: 40 }));
+    expect((fixture.nativeElement as HTMLElement).querySelector('.missed__val')?.textContent)
+      .toMatch(/^\s*1 call\s/);
+  });
+
+  it('badges the Hotspots tab with the recorded fault count', async () => {
+    bridge = new FakeTauriBridge();
+    bridge.responses.set('get_optimizer_stats', report());
+    bridge.responses.set('get_usage', usage());
+    bridge.responses.set('get_fault_count', 2);
+    TestBed.configureTestingModule({
+      providers: [provideRouter([]), { provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Optimizer);
+    fixture.detectChanges();
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    fixture.detectChanges();
+    const badge = (fixture.nativeElement as HTMLElement).querySelector('.tab-nav__badge');
+    expect(badge?.textContent?.trim()).toBe('2');
+    expect(badge?.getAttribute('aria-label')).toBe('2 faults recorded');
+  });
+
   // ── labels ─────────────────────────────────────────────────────────────────
 
   it('strips the mcp prefix from tool names', async () => {

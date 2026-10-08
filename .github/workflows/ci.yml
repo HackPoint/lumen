@@ -69,7 +69,14 @@ jobs:
         run: pnpm build
 
       # The frontend suite enforces its own coverage thresholds via the
-      # `test` target in angular.json, so a drop in coverage fails here.
+      # `test` target in angular.json, per file: a file under any of them fails
+      # here by name, however high the total stays. Every file under src/app is
+      # measured whether a spec loads it or not, except what coverageExclude lists:
+      #   src/main.ts                  the bootstrap call, which runs only in a window
+      #   src/**/*.spec.ts             the specs
+      #   src/app/tauri-bridge.fake.ts the test double the specs drive the app through
+      #   src/app/tauri-bridge.ts      one-line calls into @tauri-apps/api, which
+      #                                throws outside a Tauri window
       - name: pnpm test
         working-directory: lumenator
         run: pnpm test
