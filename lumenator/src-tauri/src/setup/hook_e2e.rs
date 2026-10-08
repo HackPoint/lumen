@@ -508,6 +508,72 @@ fn link_tool(bin: &Path, tool: &str) {
 #[cfg(not(unix))]
 fn link_tool(_bin: &Path, _tool: &str) {}
 
+/// This machine's Python 3, as `python3` in `bin`; returns the one it found.
+///
+/// On macOS and Linux a link to the first `python3` in /bin, /usr/bin, then PATH. On
+/// Windows a `#!/bin/sh` that runs the first `python3.exe` or `python.exe` on PATH
+/// outside WindowsApps, where the App Execution Aliases are: Git Bash runs a script by
+/// its shebang, and an interpreter linked away from its directory loses its DLLs.
+/// Each candidate is asked for its major version, so a stub that offers to install
+/// Python is passed over rather than taken for one.
+fn python3_into(bin: &Path) -> PathBuf {
+    let host = std::env::var_os("PATH").unwrap_or_default();
+    let (names, dirs): (&[&str], Vec<PathBuf>) = if cfg!(windows) {
+        (
+            &["python3.exe", "python.exe"],
+            std::env::split_paths(&host)
+                .filter(|d| !d.to_string_lossy().contains("WindowsApps"))
+                .collect(),
+        )
+    } else {
+        (
+            &["python3"],
+            [PathBuf::from("/bin"), PathBuf::from("/usr/bin")]
+                .into_iter()
+                .chain(std::env::split_paths(&host))
+                .collect(),
+        )
+    };
+    let found = names
+        .iter()
+        .flat_map(|name| dirs.iter().map(move |d| d.join(name)))
+        .filter(|p| p.is_file())
+        .find(|p| {
+            Command::new(p)
+                .args(["-c", "import sys; print(sys.version_info[0])"])
+                .output()
+                .is_ok_and(|o| {
+                    o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "3"
+                })
+        })
+        .unwrap_or_else(|| panic!("no Python 3 on this machine's PATH to put on a hook's"));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&found, bin.join("python3")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::write(
+        bin.join("python3"),
+        format!(
+            "#!/bin/sh\nexec {} \"$@\"\n",
+            sh_quote(&shell_path(&found.to_string_lossy()))
+        ),
+    )
+    .unwrap();
+    found
+}
+
+/// The `python3` App Execution Alias Windows installs, where this machine has it, and
+/// the coreutils `timeout` that bounds a run of it.
+fn store_alias() -> Option<(PathBuf, PathBuf)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let alias =
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(r"Microsoft\WindowsApps\python3.exe");
+    let timeout = git_bash().parent()?.parent()?.join(r"usr\bin\timeout.exe");
+    // An alias is a reparse point that only the AppX layer resolves; look at the link.
+    (std::fs::symlink_metadata(&alias).is_ok() && timeout.is_file()).then_some((alias, timeout))
+}
+
 /// The program, arguments and PATH Claude Code 2.1.270 runs a hook `command` with.
 ///
 /// On Windows it runs Git Bash with that bash's directory first on PATH, and when the
@@ -1567,8 +1633,11 @@ fn a_python3_that_only_offers_the_store_meters_and_blocks() {
 /// on exit 0. The intercept lets a 400-line read through in silence. Neither leaves a
 /// fault: the fault recorder ran on python3 as well.
 ///
-/// The control, on macOS and Linux: python3 back on PATH, and the same scripts write a
-/// row and block, so the silence is python3's absence and nothing else.
+/// On Windows, where the runner has it, the same again with `python3` the real App
+/// Execution Alias: found by `command -v`, and still nothing written or blocked.
+///
+/// The control: a real Python 3 as `python3`, and the same scripts write a row and
+/// block, so the silence is python3's absence and nothing else.
 ///
 /// After: Setup from this build on the same machine — a row and a block.
 #[test]
@@ -1622,23 +1691,57 @@ fn without_python3_the_1_5_1_hooks_did_nothing_and_these_hooks_work() {
     assert_eq!(let_through.code, 0, "{let_through:?}");
     assert!(!rig.spool.exists(), "{:?}", rig.faults());
 
-    if cfg!(unix) {
-        link_tool(&rig.bin, "python3");
-        rig.meter(&read, &env);
-        let control = rig.file("control.rs", &source_lines(400));
-        let blocked = rig.intercept(&rig.captured("read_pre.json", Some(&control)), &env);
-        let rows = rig.rows();
-        eprintln!(
-            "R2 control [{OS}], python3 on PATH: rows {rows:?}; intercept exit {}",
-            blocked.code
-        );
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].token_source.as_deref(), Some("estimated"));
-        assert_eq!(blocked.code, 2, "{blocked:?}");
-        std::fs::remove_file(rig.bin.join("python3")).unwrap();
-    } else {
-        eprintln!("R2 control [{OS}]: skipped — this runner has no python3 to put on PATH");
+    match store_alias() {
+        Some((alias, timeout)) => {
+            std::fs::write(
+                rig.bin.join("python3"),
+                format!(
+                    "#!/bin/sh\nexec {} 20 {} \"$@\"\n",
+                    sh_quote(&shell_path(&timeout.to_string_lossy())),
+                    sh_quote(&shell_path(&alias.to_string_lossy()))
+                ),
+            )
+            .unwrap();
+            let probe = rig.probe("1.5.1, python3 is the real Store alias", PYTHON_PROBE);
+            let metered = rig.meter(&read, &env);
+            let aliased = rig.file("alias.rs", &source_lines(400));
+            let let_through = rig.intercept(&rig.captured("read_pre.json", Some(&aliased)), &env);
+            eprintln!(
+                "R2 Store alias [{OS}] {}: meter exit {} stderr {:?}; intercept exit {} stderr {:?}",
+                alias.display(),
+                metered.code,
+                metered.stderr,
+                let_through.code,
+                let_through.stderr
+            );
+            assert!(
+                probe.stdout.lines().any(|l| l == "python3: found"),
+                "{probe:?}"
+            );
+            assert!(rig.rows().is_empty(), "{:?}", rig.rows());
+            assert_eq!(let_through.code, 0, "{let_through:?}");
+            assert!(!rig.spool.exists(), "{:?}", rig.faults());
+            std::fs::remove_file(rig.bin.join("python3")).unwrap();
+        }
+        None => eprintln!(
+            "R2 Store alias [{OS}]: not run — this machine has no python3 App Execution Alias"
+        ),
     }
+
+    let python = python3_into(&rig.bin);
+    rig.meter(&read, &env);
+    let control = rig.file("control.rs", &source_lines(400));
+    let blocked = rig.intercept(&rig.captured("read_pre.json", Some(&control)), &env);
+    let rows = rig.rows();
+    eprintln!(
+        "R2 control [{OS}], python3 is {}: rows {rows:?}; intercept exit {}",
+        python.display(),
+        blocked.code
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].token_source.as_deref(), Some("estimated"));
+    assert_eq!(blocked.code, 2, "{blocked:?}");
+    std::fs::remove_file(rig.bin.join("python3")).unwrap();
 
     let kept = rig.rows().len();
     rig.install(&real);
@@ -2242,7 +2345,9 @@ fn the_plugin_script_reports_where_lumen_mcp_would_have() {
 
 // ── scripts/verify-hooks.sh ──────────────────────────────────────────────────
 
-/// What `scripts/verify-hooks.sh` runs, apart from the hooks and `sqlite3`.
+/// What `scripts/verify-hooks.sh` runs, apart from the hooks and `sqlite3`. Linked on
+/// macOS and Linux only: on Windows Git Bash brings them.
+#[cfg(unix)]
 const VERIFY_TOOLS: &[&str] = &[
     "bash", "cat", "date", "grep", "ln", "mkdir", "mktemp", "rm", "sed", "tr",
 ];

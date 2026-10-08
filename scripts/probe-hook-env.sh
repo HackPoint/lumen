@@ -87,6 +87,12 @@ if [ "$WINDOWS" = 1 ]; then
     # The App Execution Aliases: a python3 here with no Python installed is the
     # Microsoft Store stub, which `command -v` finds and which cannot run a script.
     probe 'ls -l "$(cygpath -u "$LOCALAPPDATA")/Microsoft/WindowsApps" | grep -i python'
+    # Run by path, since a Python earlier on PATH shadows it, with an argument as the
+    # 1.5.1 scripts ran it, and bounded in case it waits on the Store.
+    probe 'command -v timeout'
+    if [ -x /usr/bin/timeout ]; then
+        probe '/usr/bin/timeout 20 "$(cygpath -u "$LOCALAPPDATA")/Microsoft/WindowsApps/python3.exe" --version'
+    fi
 fi
 
 section "What the 1.5.1 scripts ran: the rest, in the forms they used"
