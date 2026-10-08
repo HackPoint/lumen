@@ -375,7 +375,7 @@ pub struct OptimizerReport {
     /// from `missed_calls` because no optimization was available to miss, and
     /// reported separately so the exclusion is visible rather than implied.
     pub unmeasurable_calls: i64,
-    /// How many rows in the lifetime window have no recorded token provenance.
+    /// How many rows in the lifetime window carry a token count not known to be measured.
     ///
     /// Rows written before 1.1.5 carry no `token_source`, and on installs whose
     /// baked tokenizer path was dead the hook silently substituted `bytes / 4`.
@@ -383,7 +383,8 @@ pub struct OptimizerReport {
     /// count instead of the claim. Deliberately "unverified", not "estimated":
     /// asserting they are all estimates would be its own unmeasured claim.
     pub unverified_provenance_rows: i64,
-    /// Total rows considered, so the frontend can render "N of M".
+    /// Rows that carry a count, so the frontend can render "N of M". Reads marked
+    /// `unsupported` have none and are in neither figure.
     pub provenance_total_rows: i64,
 
     /// Net dollar value of interception: what the avoided tokens are worth, less what the
@@ -491,11 +492,17 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     // ── Token provenance ─────────────────────────────────────────────────────
     // Counted over every metered row, not just lumen routes: a user's confidence in
     // the effectiveness figure depends on the whole ledger being measured.
+    //
+    // A row marked 'unsupported' — an image, a binary — carries no count, and says so,
+    // so it is on neither side. Counted as unverified, every screenshot read made the
+    // Optimizer say the ledger was partly unverified, on an install that has never
+    // estimated a count.
     let (unverified_provenance_rows, provenance_total_rows): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(CASE WHEN token_source IS NULL OR token_source <> 'measured'
                                   THEN 1 ELSE 0 END),0),
                 COUNT(*)
-         FROM read_events",
+         FROM read_events
+         WHERE COALESCE(token_source, '') <> 'unsupported'",
     )
     .fetch_one(pool)
     .await

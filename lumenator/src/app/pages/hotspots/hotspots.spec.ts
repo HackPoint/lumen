@@ -76,10 +76,19 @@ describe('Hotspots', () => {
   });
 
   it('shows an empty state rather than zeros before anything is read', async () => {
-    await mount(report({ totalTokensRead: 0, topFiles: [], distinctFiles: 0 }));
+    await mount(report({
+      totalTokensRead: 0, topFiles: [], distinctFiles: 0, top10SharePct: 0, totalUnchangedRereads: 0,
+    }));
     expect(text()).toContain('No reads recorded yet');
-    // A "0%" concentration would read as a measurement of nothing.
-    expect(text()).not.toContain('Concentration');
+    // A "0%" concentration would read as a measurement of nothing, and so would "0 tokens
+    // read across 0 files" or "0 reads learned nothing new": no figure renders at all.
+    for (const figure of [
+      'Concentration', 'Tokens read', 'across', 'Re-read unchanged', 'learned nothing', '%', 'NaN',
+    ]) {
+      expect(text()).not.toContain(figure);
+    }
+    expect(fixture.nativeElement.querySelector('.hs__summary')).toBeNull();
+    expect(fixture.nativeElement.querySelectorAll('.hs__row').length).toBe(0);
   });
 
   it('survives a backend that is not there', async () => {

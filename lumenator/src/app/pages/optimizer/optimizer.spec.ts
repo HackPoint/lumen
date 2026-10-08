@@ -279,6 +279,52 @@ describe('Optimizer', () => {
     expect(text().toLowerCase()).not.toContain('remaining');
   });
 
+  // ── Token provenance ───────────────────────────────────────────────────────
+  //
+  // "Never estimated" and "verifiable" are said only over a ledger that supports them.
+  // These read the rendered page, not the signals behind it: the sentence on screen is
+  // the claim, and it is what has to change when the data cannot back it.
+
+  describe('token provenance', () => {
+    const data = { lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 };
+
+    function rendered(selector: string): string {
+      const el = (fixture.nativeElement as HTMLElement).querySelector(selector);
+      return (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    it('says exact, and verifiable, when every count was measured', async () => {
+      await build(report({ ...data, unverifiedProvenanceRows: 0, provenanceTotalRows: 7_192 }));
+      expect(rendered('.hero__secondary'))
+        .toContain('Counted to the token by a local tokenizer, never estimated.');
+      expect(rendered('.savings-card--caused .savings-card__note'))
+        .toBe('caused · measured · verifiable · grows with use');
+      expect(fixture.nativeElement.querySelector('.hero__warn')).toBeNull();
+      expect(text()).not.toContain('unverified');
+    });
+
+    it('says N of M unverified, and not verifiable, when some counts were not measured', async () => {
+      await build(report({ ...data, unverifiedProvenanceRows: 2_584, provenanceTotalRows: 7_192 }));
+      expect(rendered('.hero__secondary')).not.toContain('never estimated');
+      expect(rendered('.hero__secondary'))
+        .toContain('Counts are exact for Lumen tool calls; some older events have unverified provenance.');
+      expect(rendered('.hero__warn')).toContain(
+        `${(2_584).toLocaleString()} of ${(7_192).toLocaleString()} metered events have `
+        + 'unverified token provenance',
+      );
+      expect(rendered('.savings-card--caused .savings-card__note'))
+        .toBe('caused · partly unverified · grows with use');
+    });
+
+    it('qualifies the claim over a single unverified count', async () => {
+      // The boundary: one row is enough to make "never estimated" false.
+      await build(report({ ...data, unverifiedProvenanceRows: 1, provenanceTotalRows: 1 }));
+      expect(rendered('.hero__warn')).toContain('1 of 1 metered events');
+      expect(rendered('.savings-card--caused .savings-card__note')).toContain('partly unverified');
+      expect(text()).not.toContain('never estimated');
+    });
+  });
+
 
   // ── The dollar headline (1.4.0) ────────────────────────────────────────────
   //
@@ -344,6 +390,11 @@ describe('Optimizer', () => {
         roundCostUsd: 0,
       }));
       expect(text()).toContain('Not enough recorded turns yet to price a round');
+      // Not "+$0.00, roughly break-even" beside it: that is a figure, and a verdict.
+      const hero = fixture.nativeElement.querySelector('.hero__num') as HTMLElement;
+      expect(hero.textContent?.trim()).toBe('—');
+      expect(fixture.nativeElement.querySelector('.hero__ring')?.textContent).not.toContain('$');
+      expect(text()).not.toContain('break-even');
     });
 
     it('surfaces R, because the result is most sensitive to it', async () => {
