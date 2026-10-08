@@ -168,11 +168,19 @@ pub fn ensure_autostart_once(a: &dyn AutoStart, marker: &Path, current_exe: &str
         return false;
     }
 
+    // Not retried and not fatal, but said: without the marker the next launch takes the
+    // item for never registered, and switches it back on if the user has turned it off.
     let record = || {
-        if let Some(dir) = marker.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        let written = marker
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(marker, current_exe));
+        if let Err(e) = written {
+            log::warn!(
+                "could not record the login item in {}: {e}; turning it off may not last past the next launch",
+                marker.display()
+            );
         }
-        let _ = std::fs::write(marker, current_exe);
     };
 
     match a.is_enabled() {
@@ -1333,6 +1341,22 @@ fn shim(template: &str, db: &str, mcp_bin: &str) -> String {
     )
 }
 
+/// Copy a Claude Code config to its `.lumen_bak` before Lumen rewrites it.
+///
+/// A failed copy used to be dropped and the rewrite went ahead regardless, so the one
+/// undo for a rewrite that removed something might not exist, and nothing said so. The
+/// callers now leave the file as it is when this fails.
+fn back_up(path: &Path) -> Result<(), String> {
+    let bak = path.with_extension("json.lumen_bak");
+    std::fs::copy(path, &bak).map(|_| ()).map_err(|e| {
+        format!(
+            "cannot back up {} to {}: {e} — left unchanged",
+            path.display(),
+            bak.display()
+        )
+    })
+}
+
 /// A Claude Code config file as a JSON object, or why Setup must not write it.
 ///
 /// Absent or blank is a fresh start. Anything else that does not parse is refused,
@@ -1385,10 +1409,10 @@ fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str) -> SetupStep {
         return SetupStep::err("mcp", "Register MCP server", &e);
     }
 
-    // Backup before modifying
     if path.exists() {
-        let bak = path.with_extension("json.lumen_bak");
-        let _ = std::fs::copy(&path, &bak);
+        if let Err(e) = back_up(&path) {
+            return SetupStep::err("mcp", "Register MCP server", &e);
+        }
     }
 
     // No LUMEN_TOK: nothing has read it since the hooks moved into lumen-mcp, and
@@ -1454,10 +1478,10 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
         return SetupStep::err("hooks", "Install hooks", &e);
     }
 
-    // Backup
     if path.exists() {
-        let bak = path.with_extension("json.lumen_bak");
-        let _ = std::fs::copy(&path, &bak);
+        if let Err(e) = back_up(&path) {
+            return SetupStep::err("hooks", "Install hooks", &e);
+        }
     }
 
     // Ensure hooks object exists
@@ -1694,22 +1718,18 @@ fn run_uninstall_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
         {
             Some(mut v) if v.is_object() => {
                 remove_mcp_entry(&mut v);
-                let _ = std::fs::copy(&claude_json, claude_json.with_extension("json.lumen_bak"));
-                match serde_json::to_string_pretty(&v)
-                    .ok()
-                    .and_then(|s| write_atomic(&claude_json, &s, 0).ok())
-                {
-                    Some(_) => steps.push(SetupStep::ok(
-                        "mcp",
-                        "Remove MCP entry",
-                        "Removed from ~/.claude.json",
-                    )),
-                    None => steps.push(SetupStep::err(
-                        "mcp",
-                        "Remove MCP entry",
-                        "Could not write ~/.claude.json",
-                    )),
-                }
+                let written = back_up(&claude_json).and_then(|()| {
+                    serde_json::to_string_pretty(&v)
+                        .ok()
+                        .and_then(|s| write_atomic(&claude_json, &s, 0).ok())
+                        .ok_or_else(|| "Could not write ~/.claude.json".to_string())
+                });
+                steps.push(match written {
+                    Ok(()) => {
+                        SetupStep::ok("mcp", "Remove MCP entry", "Removed from ~/.claude.json")
+                    }
+                    Err(e) => SetupStep::err("mcp", "Remove MCP entry", &e),
+                });
             }
             _ => steps.push(SetupStep::skip(
                 "mcp",
@@ -1734,22 +1754,20 @@ fn run_uninstall_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
         {
             Some(mut v) if v.is_object() => {
                 remove_lumen_hooks(&mut v);
-                let _ = std::fs::copy(&settings, settings.with_extension("json.lumen_bak"));
-                match serde_json::to_string_pretty(&v)
-                    .ok()
-                    .and_then(|s| write_atomic(&settings, &s, 0).ok())
-                {
-                    Some(_) => steps.push(SetupStep::ok(
+                let written = back_up(&settings).and_then(|()| {
+                    serde_json::to_string_pretty(&v)
+                        .ok()
+                        .and_then(|s| write_atomic(&settings, &s, 0).ok())
+                        .ok_or_else(|| "Could not write ~/.claude/settings.json".to_string())
+                });
+                steps.push(match written {
+                    Ok(()) => SetupStep::ok(
                         "hooks",
                         "Remove hooks",
                         "Removed from ~/.claude/settings.json",
-                    )),
-                    None => steps.push(SetupStep::err(
-                        "hooks",
-                        "Remove hooks",
-                        "Could not write ~/.claude/settings.json",
-                    )),
-                }
+                    ),
+                    Err(e) => SetupStep::err("hooks", "Remove hooks", &e),
+                });
             }
             _ => steps.push(SetupStep::skip(
                 "hooks",
@@ -3433,6 +3451,48 @@ mod tests {
         assert!(std::fs::read_to_string(&bak)
             .unwrap()
             .contains("numStartups"));
+    }
+
+    /// The backup used to be `let _ = fs::copy(..)`: when it failed, Setup and Uninstall
+    /// rewrote the file anyway, with no undo behind them and nothing said. A directory
+    /// where the backup goes makes the copy fail on every OS.
+    #[test]
+    fn a_config_that_cannot_be_backed_up_is_left_as_it_is() {
+        let h = TempDir::new().unwrap();
+        let claude_json = claude_json_path_in(h.path());
+        let settings = global_settings_path_in(h.path());
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let mcp_before = r#"{"mcpServers":{"lumen":{"command":"/old/lumen-mcp"}}}"#;
+        let hooks_before = r#"{"hooks":{"PostToolUse":[]}}"#;
+        std::fs::write(&claude_json, mcp_before).unwrap();
+        std::fs::write(&settings, hooks_before).unwrap();
+        for path in [&claude_json, &settings] {
+            std::fs::create_dir(path.with_extension("json.lumen_bak")).unwrap();
+        }
+
+        let mut steps = vec![
+            step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db"),
+            step_install_hooks_in(h.path()),
+        ];
+        steps.extend(
+            run_uninstall_in(h.path(), &FakeAutoStart::default())
+                .into_iter()
+                .filter(|s| s.id == "mcp" || s.id == "hooks"),
+        );
+
+        assert_eq!(steps.len(), 4, "{steps:?}");
+        for step in &steps {
+            assert_eq!(
+                step.status,
+                StepStatus::Error,
+                "{}: {}",
+                step.id,
+                step.detail
+            );
+            assert!(step.detail.contains("cannot back up"), "{}", step.detail);
+        }
+        assert_eq!(std::fs::read_to_string(&claude_json).unwrap(), mcp_before);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), hooks_before);
     }
 
     /// `~/.claude.json` is Claude Code's own state: projects, history, account. Setup

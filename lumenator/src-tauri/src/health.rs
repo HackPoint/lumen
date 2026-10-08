@@ -22,7 +22,7 @@
 //! and the decisions are what carry tests.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 /// What the log level should be, given `LUMEN_LOG` and the build profile.
 ///
@@ -208,31 +208,35 @@ pub struct StartupHealth {
     explained_restore: AtomicBool,
 }
 
+// The locks are taken through a poisoning: a panic elsewhere while one was held leaves a
+// list or a state that is still whole, and reading it as empty would show a healthy launch.
 impl StartupHealth {
     /// Record a step that failed without aborting startup.
     pub fn degrade(&self, step: &str, detail: impl std::fmt::Display) {
         let line = format!("{step}: {detail}");
         log::error!("DEGRADED {line}");
-        if let Ok(mut v) = self.degradations.lock() {
-            v.push(line);
-        }
+        self.degradations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(line);
     }
 
     pub fn set_tray(&self, state: TrayState) {
-        if let Ok(mut t) = self.tray.lock() {
-            *t = state;
-        }
+        *self.tray.lock().unwrap_or_else(PoisonError::into_inner) = state;
     }
 
     pub fn tray(&self) -> TrayState {
-        self.tray.lock().map(|t| t.clone()).unwrap_or_default()
+        self.tray
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn degradations(&self) -> Vec<String> {
         self.degradations
             .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// True the first time only. Used for the once-per-process log lines.
@@ -347,6 +351,31 @@ pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Men
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_poisoned_lock_still_shows_what_went_wrong() {
+        let health = std::sync::Arc::new(StartupHealth::default());
+        health.degrade("daemon", "spawn failed");
+        health.set_tray(TrayState::Failed("no menu".into()));
+        let held = health.clone();
+        let _ = std::thread::spawn(move || {
+            let _d = held.degradations.lock().unwrap();
+            let _t = held.tray.lock().unwrap();
+            panic!("poisoning both locks on purpose");
+        })
+        .join();
+        assert!(health.degradations.is_poisoned() && health.tray.is_poisoned());
+
+        health.degrade("tray", "absent");
+        assert_eq!(
+            health.degradations(),
+            ["daemon: spawn failed", "tray: absent"]
+        );
+        assert_eq!(health.tray(), TrayState::Failed("no menu".into()));
+        assert!(health.is_degraded(), "the banner must still show");
+        health.set_tray(TrayState::Present);
+        assert_eq!(health.tray(), TrayState::Present);
+    }
 
     #[test]
     fn the_log_level_defaults_differ_by_profile_but_are_never_off() {

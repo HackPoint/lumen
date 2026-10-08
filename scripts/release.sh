@@ -167,10 +167,13 @@ else
     SINCE_MSG="(all commits — no prior tag)"
 fi
 
-FEATS=$(git log --format='%s' "$LOG_RANGE" 2>/dev/null | grep -E '^feat(\(|!|:)' || true)
-FIXES=$(git log --format='%s' "$LOG_RANGE" 2>/dev/null | grep -E '^fix(\(|!|:)'  || true)
-CHORES=$(git log --format='%s' "$LOG_RANGE" 2>/dev/null | grep -E '^chore(\(|!|:)' | grep -v 'release' || true)
-OTHERS=$(git log --format='%s' "$LOG_RANGE" 2>/dev/null | grep -Ev '^(feat|fix|chore|docs|style|refactor|test|ci|build)(\(|!|:)' || true)
+# git log once and unguarded, so a failure stops the release instead of becoming empty
+# notes; the `|| true` below then covers only grep's exit 1 for "no such commits".
+SUBJECTS=$(git log --format='%s' "$LOG_RANGE")
+FEATS=$(grep -E '^feat(\(|!|:)' <<<"$SUBJECTS" || true)
+FIXES=$(grep -E '^fix(\(|!|:)' <<<"$SUBJECTS" || true)
+CHORES=$(grep -E '^chore(\(|!|:)' <<<"$SUBJECTS" | grep -v 'release' || true)
+OTHERS=$(grep -Ev '^(feat|fix|chore|docs|style|refactor|test|ci|build)(\(|!|:)' <<<"$SUBJECTS" || true)
 
 ENTRY="## [$NEW] — $(date +%Y-%m-%d)\n"
 [[ -n "$FEATS"  ]] && ENTRY+="\n### Features\n$(echo "$FEATS"  | sed 's/^/- /')\n"

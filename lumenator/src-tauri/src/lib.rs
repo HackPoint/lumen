@@ -272,11 +272,20 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map(|d| {
-                    std::fs::create_dir_all(&d).ok();
+                    // The daemon's open of the ledger fails next and says so; this says why.
+                    if let Err(e) = std::fs::create_dir_all(&d) {
+                        log::error!("STARTUP: cannot create {}: {e}", d.display());
+                    }
                     d.join("lumen.db")
                 })
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "lumen.db".to_string());
+                .unwrap_or_else(|e| {
+                    log::error!(
+                        "STARTUP: no app-data directory ({e}); the ledger is lumen.db in the \
+                         working directory, where lumen-mcp will not find it"
+                    );
+                    "lumen.db".to_string()
+                });
 
             unsafe {
                 std::env::set_var("LUMEN_DB", &db_path);
@@ -291,8 +300,20 @@ pub fn run() {
                 if let Some(home) = dirs::home_dir() {
                     let old_db = home.join("Library/Application Support/com.tauri.dev/lumen.db");
                     if old_db.exists() {
-                        let _ = std::fs::copy(&old_db, &db_path);
-                        log::info!("Migrated DB from com.tauri.dev to io.speedata.lumen");
+                        // This logged success whatever the copy did. A failure is not retried:
+                        // the daemon creates a ledger at db_path next, and this runs only while
+                        // there is none. The old file is left as it was.
+                        match std::fs::copy(&old_db, &db_path) {
+                            Ok(_) => {
+                                log::info!("Migrated DB from com.tauri.dev to io.speedata.lumen")
+                            }
+                            Err(e) => log::error!(
+                                "STARTUP: could not copy {} to {db_path}: {e}. History from \
+                                 before the rename stays in the old file; this starts an empty \
+                                 ledger.",
+                                old_db.display()
+                            ),
+                        }
                     }
                 }
             }
@@ -300,8 +321,15 @@ pub fn run() {
             // Write pointer file so lumen-mcp can auto-discover the same DB path.
             // dirs::home_dir() rather than $HOME: Windows sets USERPROFILE, not
             // HOME, so reading the env var directly skipped this entirely there.
+            //
+            // Without it lumen-mcp, the CLI and the plugin's hooks fall back to the per-OS
+            // path. That is this one everywhere except Linux with XDG_DATA_HOME set, where
+            // they would use a ledger this app never reads.
             if let Some(home) = dirs::home_dir() {
-                let _ = std::fs::write(home.join(".lumen_db_path"), &db_path);
+                let pointer = home.join(".lumen_db_path");
+                if let Err(e) = std::fs::write(&pointer, &db_path) {
+                    log::error!("STARTUP: cannot write {}: {e}", pointer.display());
+                }
             }
 
             // spawn the bundled daemon as a sidecar, passing the DB path via env

@@ -1243,8 +1243,13 @@ fn curl(
     token: Option<&str>,
     body: Option<&str>,
 ) -> Result<(u16, String), String> {
-    let cfg_path = scratch_path("lumen-curl", "cfg");
-    let body_path = scratch_path("lumen-curl", "json");
+    let body_path = match body {
+        Some(b) => Some(
+            stage_private("lumen-curl", "json", b)
+                .map_err(|e| format!("cannot stage request body: {e}"))?,
+        ),
+        None => None,
+    };
 
     let mut cfg = String::new();
     cfg.push_str("silent\nshow-error\n");
@@ -1255,22 +1260,27 @@ fn curl(
     if let Some(t) = token {
         cfg.push_str(&format!("header = \"Authorization: Bearer {t}\"\n"));
     }
-    if let Some(b) = body {
-        std::fs::write(&body_path, b).map_err(|e| format!("cannot stage request body: {e}"))?;
-        cfg.push_str(&format!("data-binary = @{}\n", body_path.display()));
+    if let Some(p) = &body_path {
+        cfg.push_str(&format!("data-binary = @{}\n", p.display()));
     }
     cfg.push_str(&format!("url = {url}\n"));
     cfg.push_str("write-out = \"\\n%{http_code}\"\n");
 
-    write_private(&cfg_path, &cfg)?;
-    let out = std::process::Command::new("curl")
-        .arg("--config")
-        .arg(&cfg_path)
-        .output();
-    let _ = std::fs::remove_file(&cfg_path);
-    let _ = std::fs::remove_file(&body_path);
+    let cfg_path = stage_private("lumen-curl", "cfg", &cfg);
+    let out = match &cfg_path {
+        Ok(p) => std::process::Command::new("curl")
+            .arg("--config")
+            .arg(p)
+            .output()
+            .map_err(|e| format!("cannot run curl: {e}")),
+        Err(e) => Err(format!("cannot stage curl config: {e}")),
+    };
+    // Whatever happened: the config holds the token.
+    for path in cfg_path.iter().chain(&body_path) {
+        let _ = std::fs::remove_file(path);
+    }
 
-    let out = out.map_err(|e| format!("cannot run curl: {e}"))?;
+    let out = out?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() && text.is_empty() {
         return Err(format!(
@@ -1284,13 +1294,46 @@ fn curl(
     Ok((code, body.to_string()))
 }
 
-/// Write a file only the owner can read. The curl config carries a bearer token.
-fn write_private(path: &Path, contents: &str) -> Result<(), String> {
-    std::fs::write(path, contents).map_err(|e| format!("cannot stage curl config: {e}"))?;
+/// Stage `contents` in a new scratch file only its owner can read, and return its path.
+///
+/// The curl config carries a bearer token. It used to be written with `fs::write` and
+/// chmodded afterwards: the token sat at the umask's mode until the chmod, a failed chmod
+/// was dropped, and the write went through whatever already sat at the predictable name —
+/// on Linux, in a /tmp every user can write to. A name that exists is skipped rather than
+/// written through: a crash between staging and cleanup leaves one behind, and a later
+/// process given the same pid would otherwise fail on it.
+fn stage_private(stem: &str, ext: &str, contents: &str) -> std::io::Result<PathBuf> {
+    const ATTEMPTS: usize = 8;
+    for _ in 0..ATTEMPTS {
+        let path = scratch_path(stem, ext);
+        match create_private(&path, contents) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("{ATTEMPTS} scratch names in a row already existed"),
+    ))
+}
+
+/// Create `path` holding `contents`, readable by its owner alone; refuse if it exists.
+///
+/// `create_new` refuses an existing path, a symlink included, so nothing is written
+/// through one. On unix the mode is set by the call that creates the file, so there is
+/// no moment at which the contents are readable by anyone else.
+fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut file = opts.open(path)?;
+    if let Err(e) = file.write_all(contents.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
     }
     Ok(())
 }
@@ -1623,8 +1666,8 @@ fn open_in_browser(ep: &Endpoints, url: &str) -> Result<(), String> {
 /// `gh` reads `--body-file -` from stdin, which `Command::output` cannot supply without
 /// a writer thread. A temp file is simpler and leaves the body inspectable if gh fails.
 fn write_via_tempfile(ep: &Endpoints, args: &[&str], body: &str) -> Result<String, String> {
-    let path = scratch_path("lumen-issue", "md");
-    std::fs::write(&path, body).map_err(|e| format!("cannot stage issue body: {e}"))?;
+    let path = stage_private("lumen-issue", "md", body)
+        .map_err(|e| format!("cannot stage issue body: {e}"))?;
 
     let mut full: Vec<&str> = args.to_vec();
     let p = path.to_string_lossy().into_owned();
@@ -2478,6 +2521,53 @@ mod tests {
                 "{raw} leaked a private directory name as {label}"
             );
             assert!(label.starts_with("<redacted:external>"), "got {label}");
+        }
+    }
+
+    #[test]
+    fn a_staged_file_is_owner_only_and_holds_what_was_staged() {
+        let staged = "header = \"Authorization: Bearer t0ken\"\n";
+        let path = stage_private("lumen-test-private", "cfg", staged).unwrap();
+        let read = std::fs::read_to_string(&path);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&path).map(|m| m.permissions().mode() & 0o777)
+        };
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(read.unwrap(), staged);
+        #[cfg(unix)]
+        assert_eq!(mode.unwrap(), 0o600, "the token file must be owner-only");
+    }
+
+    #[test]
+    fn staging_never_writes_through_a_name_that_exists() {
+        // What a planted file in a shared /tmp would be. The old writer opened it with
+        // `fs::write`, which truncates an existing file and follows a symlink.
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.cfg");
+        std::fs::write(&existing, "someone else's").unwrap();
+
+        let err = create_private(&existing, "token").unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "someone else's"
+        );
+
+        #[cfg(unix)]
+        {
+            let victim = dir.path().join("victim");
+            std::fs::write(&victim, "untouched").unwrap();
+            let planted = dir.path().join("planted.cfg");
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+            let err = create_private(&planted, "token").unwrap_err();
+
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
         }
     }
 }
