@@ -832,18 +832,41 @@ fn decline_routes() -> Vec<&'static str> {
 ///
 /// The drain runs first so a fault recorded seconds ago by a hook is in this report.
 pub fn load_faults_from_db(conn: &rusqlite::Connection) -> Result<Vec<Fault>, String> {
+    load_faults_with_spool(conn, crate::faults::spool_path().as_deref())
+}
+
+/// [`load_faults_from_db`] with the spool named, not resolved from the environment: a
+/// test that resolved it drained the spool of whatever home it ran under, the
+/// developer's own included. `None` drains nothing.
+pub fn load_faults_with_spool(
+    conn: &rusqlite::Connection,
+    spool: Option<&Path>,
+) -> Result<Vec<Fault>, String> {
     let mut out = Vec::new();
     let mut degraded: Vec<String> = Vec::new();
 
     // Every read below degrades instead of aborting. A stale or damaged database is
     // precisely what this report exists to describe, so a reporter that dies on one
     // cannot do its job — it would fail exactly when it is most needed.
-    if let Err(e) = crate::faults::drain_spool(conn) {
+    if let Some(spool) = spool
+        && let Err(e) = crate::faults::drain_spool_at(conn, spool)
+    {
         degraded.push(format!("spool drain: {e}"));
     }
     match spooled_faults(conn) {
         Ok(mut f) => out.append(&mut f),
         Err(e) => degraded.push(format!("faults table: {e}")),
+    }
+    // Whatever the drain left: everything, when the ledger would not take it. Before
+    // 1.6.0 a read-only ledger reduced a lost row to "spool drain: attempt to write a
+    // readonly database", and the next report to nothing at all.
+    if let Some(spool) = spool {
+        match crate::faults::peek_spool_at(spool) {
+            Ok(recs) => out.append(&mut pending_faults(&recs)),
+            // Not the path: it is under the home directory, and a report renders no
+            // absolute path.
+            Err(e) => degraded.push(format!("spool: {e}")),
+        }
     }
     match declines(conn) {
         Ok(mut f) => out.append(&mut f),
@@ -897,6 +920,48 @@ fn spooled_faults(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Fault>> {
     rows.collect()
 }
 
+/// Spool records the ledger has not taken, grouped as [`spooled_faults`] groups the
+/// table, so a fault reads the same before and after it reaches the ledger.
+fn pending_faults(recs: &[crate::faults::FaultRecord]) -> Vec<Fault> {
+    type Key<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>);
+    let mut groups: BTreeMap<Key, Fault> = BTreeMap::new();
+    for r in recs {
+        let key = (
+            r.kind.as_str(),
+            r.variant.as_str(),
+            r.path.as_deref(),
+            r.detail.as_deref(),
+        );
+        match groups.get_mut(&key) {
+            Some(f) => {
+                f.count += 1;
+                f.lines = r.lines.or(f.lines);
+                if f.first_seen.as_deref().is_none_or(|t| r.ts.as_str() < t) {
+                    f.first_seen = Some(r.ts.clone());
+                }
+                if f.last_seen.as_deref().is_none_or(|t| r.ts.as_str() > t) {
+                    f.last_seen = Some(r.ts.clone());
+                }
+            }
+            None => {
+                let f = Fault {
+                    kind: r.kind.clone(),
+                    path: r.path.clone(),
+                    lines: r.lines,
+                    detail: r.detail.clone(),
+                    count: 1,
+                    first_seen: Some(r.ts.clone()),
+                    last_seen: Some(r.ts.clone()),
+                    ..Default::default()
+                }
+                .with_variant(r.variant.clone());
+                groups.insert(key, f);
+            }
+        }
+    }
+    groups.into_values().collect()
+}
+
 /// Ranked declines were already metered by the MCP server; they need a reader, not a
 /// writer. `lines` is selected only when present, so a database predating it still
 /// yields its declines instead of erroring the whole report.
@@ -946,17 +1011,34 @@ fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
 /// counting them would keep a badge permanently lit for something nobody needs to act on
 /// — which trains people to ignore the badge.
 ///
-/// Read-only: it does not drain, so refreshing a badge on navigation writes nothing.
-pub fn actionable_fault_count(conn: &rusqlite::Connection) -> u64 {
-    let recorded: i64 = conn
-        .query_row("SELECT count(*) FROM faults", [], |r| r.get(0))
-        .unwrap_or(0);
-    recorded.max(0) as u64 + lumen_core_spool_len()
+/// Read-only: it does not drain, create or migrate, so refreshing a badge on navigation
+/// writes nothing. The spool is counted whether or not the ledger opens: a fault the
+/// ledger would not take is the one most worth showing, and until 1.6.0 a ledger that
+/// would not open put the badge out instead. A ledger that exists and cannot be read
+/// counts as one fault, so the badge leads to the report that names it; no ledger yet
+/// is none.
+pub fn actionable_fault_count(db: Option<&Path>, spool: Option<&Path>) -> u64 {
+    let recorded = match db.filter(|p| p.exists()) {
+        None => 0,
+        Some(p) => crate::meter::open_read_only(p)
+            .and_then(|c| recorded_faults(&c))
+            .unwrap_or(1),
+    };
+    recorded + spool.map_or(0, |p| crate::faults::spool_len_at(p) as u64)
 }
 
-/// Indirection so the count can be unit-tested without a spool on disk.
-fn lumen_core_spool_len() -> u64 {
-    crate::faults::spool_len() as u64
+/// Rows in `faults`, and none in a ledger that predates the table.
+fn recorded_faults(conn: &rusqlite::Connection) -> rusqlite::Result<u64> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'faults')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_table {
+        return Ok(0);
+    }
+    conn.query_row("SELECT count(*) FROM faults", [], |r| r.get::<_, i64>(0))
+        .map(|n| n.max(0) as u64)
 }
 
 /// A live comparison of `read_events` against the column set this build expects.
@@ -1949,7 +2031,7 @@ mod tests {
             .unwrap();
         }
 
-        let faults = load_faults_from_db(&conn).expect("reader runs");
+        let faults = load_faults_with_spool(&conn, None).expect("reader runs");
 
         let valve = faults
             .iter()
@@ -1972,6 +2054,103 @@ mod tests {
         );
     }
 
+    /// A spool of `n` lost rows, in a temp dir of its own.
+    fn spool_of(n: usize) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let spool = dir.path().join("faults.jsonl");
+        for _ in 0..n {
+            crate::faults::record_at(
+                &spool,
+                &crate::faults::FaultRecord::now(crate::meter::METER_WRITE_FAILED, "insert")
+                    .with_path("src/a.rs")
+                    .with_detail("attempt to write a readonly database"),
+            );
+        }
+        (dir, spool)
+    }
+
+    /// B1. The badge counts what is waiting whatever state the ledger is in, and counting
+    /// creates nothing.
+    #[test]
+    fn the_fault_count_includes_the_spool_whatever_the_ledger() {
+        let (dir, spool) = spool_of(2);
+
+        let absent = dir.path().join("lumen.db");
+        assert_eq!(actionable_fault_count(Some(&absent), Some(&spool)), 2);
+        assert!(!absent.exists(), "counting created {}", absent.display());
+
+        let garbage = dir.path().join("garbage.db");
+        std::fs::write(&garbage, vec![b'x'; 4096]).unwrap();
+        assert_eq!(
+            actionable_fault_count(Some(&garbage), Some(&spool)),
+            3,
+            "an unreadable ledger is one more"
+        );
+
+        let old = dir.path().join("old.db");
+        rusqlite::Connection::open(&old)
+            .unwrap()
+            .execute_batch("CREATE TABLE read_events (ts TEXT)")
+            .unwrap();
+        assert_eq!(
+            actionable_fault_count(Some(&old), None),
+            0,
+            "no faults table is no faults"
+        );
+
+        let ledger = dir.path().join("ledger.db");
+        crate::meter::connect_db(&ledger)
+            .unwrap()
+            .execute(
+                "INSERT INTO faults(ts,kind,variant,channel) \
+                 VALUES('2026-10-08T00:00:00Z','ws_restart','-','cli')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(actionable_fault_count(Some(&ledger), Some(&spool)), 3);
+        assert_eq!(actionable_fault_count(Some(&ledger), None), 1);
+        assert_eq!(actionable_fault_count(None, None), 0);
+    }
+
+    /// B1. A ledger that will not take writes: the report names the row it lost on every
+    /// visit, and once the ledger takes writes the fault is drained and listed once.
+    #[test]
+    fn a_report_on_a_read_only_ledger_names_the_lost_row() {
+        let (_dir, spool) = spool_of(1);
+        let conn = db_with_schema();
+        conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        let lost = |faults: &[Fault]| -> Vec<(String, u64, Option<String>)> {
+            faults
+                .iter()
+                .filter(|f| f.kind == crate::meter::METER_WRITE_FAILED)
+                .map(|f| (f.variant().to_string(), f.count, f.path.clone()))
+                .collect()
+        };
+        let want = [("insert".to_string(), 1, Some("src/a.rs".to_string()))];
+
+        for visit in 1..=2 {
+            let faults = load_faults_with_spool(&conn, Some(&spool)).expect("reader runs");
+            assert_eq!(lost(&faults), want, "visit {visit}: {faults:?}");
+            assert!(
+                faults.iter().any(|f| f.kind == "reporter_degraded"
+                    && f.detail
+                        .as_deref()
+                        .is_some_and(|d| d.starts_with("spool drain:"))),
+                "visit {visit}: {faults:?}"
+            );
+            assert_eq!(crate::faults::spool_len_at(&spool), 1, "visit {visit}");
+        }
+
+        conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+        let faults = load_faults_with_spool(&conn, Some(&spool)).expect("reader runs");
+        assert_eq!(lost(&faults), want, "drained, and listed once: {faults:?}");
+        assert!(
+            faults.iter().all(|f| f.kind != "reporter_degraded"),
+            "{faults:?}"
+        );
+        assert_eq!(crate::faults::spool_len_at(&spool), 0);
+    }
+
     #[test]
     fn db_reader_reports_drift_on_a_stale_read_events() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1987,7 +2166,7 @@ mod tests {
         )
         .unwrap();
 
-        let faults = load_faults_from_db(&conn).expect("reader runs");
+        let faults = load_faults_with_spool(&conn, None).expect("reader runs");
         let drift = faults
             .iter()
             .find(|f| f.kind == "schema_drift")

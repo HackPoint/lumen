@@ -835,32 +835,41 @@ async fn get_fault_report(app: tauri::AppHandle) -> Result<Option<FaultReport>, 
     tauri::async_runtime::spawn_blocking(move || {
         let path = lumen_core::meter::db_path()
             .ok_or_else(|| "cannot resolve a database path".to_string())?;
-        let conn = lumen_core::meter::connect_db(&path)
-            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-
-        let faults = lumen_core::report::load_faults_from_db(&conn)?;
         // "gui", not the default "cli": this report is being filed from the app's own button,
         // and a report that misnames its own channel misleads the one reader who trusts it.
         let mut env = lumen_core::report::Environment::collect_for("gui");
         env.tray = tray;
         env.startup_degradations = degradations;
-
-        // Metadata-only by default, exactly as the CLI renders it. Embedding source is a
-        // deliberate opt-in with a manifest, which is not something a button can offer.
-        let opts = lumen_core::report::RenderOpts::default();
-        Ok(
-            lumen_core::report::render(&faults, &env, &opts).map(|body| FaultReport {
-                title: lumen_core::report::title_from(&body),
-                fingerprint: lumen_core::report::fingerprint(&faults, &env),
-                kinds: faults.len(),
-                occurrences: faults.iter().map(|f| f.count).sum(),
-                repo: lumen_core::report::DEFAULT_REPO.to_string(),
-                body,
-            }),
-        )
+        fault_report_at(&path, lumen_core::faults::spool_path().as_deref(), &env)
     })
     .await
     .map_err(|e| format!("fault report task failed: {e}"))?
+}
+
+/// [`get_fault_report`] against a ledger and spool it is given, so a test drives what
+/// the screen shows without resolving either from the environment.
+fn fault_report_at(
+    db: &std::path::Path,
+    spool: Option<&std::path::Path>,
+    env: &lumen_core::report::Environment,
+) -> Result<Option<FaultReport>, String> {
+    let conn = lumen_core::meter::connect_db(db)
+        .map_err(|e| format!("cannot open {}: {e}", db.display()))?;
+    let faults = lumen_core::report::load_faults_with_spool(&conn, spool)?;
+
+    // Metadata-only by default, exactly as the CLI renders it. Embedding source is a
+    // deliberate opt-in with a manifest, which is not something a button can offer.
+    let opts = lumen_core::report::RenderOpts::default();
+    Ok(
+        lumen_core::report::render(&faults, env, &opts).map(|body| FaultReport {
+            title: lumen_core::report::title_from(&body),
+            fingerprint: lumen_core::report::fingerprint(&faults, env),
+            kinds: faults.len(),
+            occurrences: faults.iter().map(|f| f.count).sum(),
+            repo: lumen_core::report::DEFAULT_REPO.to_string(),
+            body,
+        }),
+    )
 }
 
 /// Check whether a newer Lumen has been released, for minor and major bumps only.
@@ -953,22 +962,19 @@ fn fetch_latest_release(repo: &str) -> Option<String> {
 ///
 /// Separate from [`get_fault_report`] because a badge refreshes on every navigation and
 /// rendering a whole issue body for a number would be absurd. Read-only: it does not
-/// drain the spool, so opening a screen is never a write.
+/// drain the spool, create the ledger or migrate it, so opening a screen is never a
+/// write. Until 1.6.0 it opened the ledger with `connect_db`, which creates and migrates
+/// it, and a ledger that would not open put the badge out while faults were waiting.
 #[tauri::command]
 async fn get_fault_count() -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let Some(path) = lumen_core::meter::db_path() else {
-            return Ok(0);
-        };
-        // A database that will not open is not a reason to fail a navigation; the badge
-        // simply stays dark and the report screen reports the real error.
-        match lumen_core::meter::connect_db(&path) {
-            Ok(conn) => Ok(lumen_core::report::actionable_fault_count(&conn)),
-            Err(_) => Ok(0),
-        }
+        lumen_core::report::actionable_fault_count(
+            lumen_core::meter::db_path().as_deref(),
+            lumen_core::faults::spool_path().as_deref(),
+        )
     })
     .await
-    .map_err(|e| format!("fault count task failed: {e}"))?
+    .map_err(|e| format!("fault count task failed: {e}"))
 }
 
 /// Width of the tray popover. Fixed: it is positioned under the tray icon and a varying

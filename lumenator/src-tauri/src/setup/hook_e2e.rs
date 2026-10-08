@@ -1174,6 +1174,145 @@ fn a_captured_bash_payload_lands_as_a_bash_output_row() {
     assert!(!rig.spool.exists(), "{:?}", rig.faults());
 }
 
+// ── B1: a row the ledger refused, as the app shows it ────────────────────────
+
+/// B1, through the installed hook and the real sidecar, read back by what the badge and
+/// the report screen call. A read against a read-only ledger is a fault the badge counts
+/// and the report names, on every visit; the same read against the restored ledger
+/// lands its row and adds no fault.
+#[test]
+fn a_row_the_ledger_refused_is_shown_and_restoring_it_lands_the_row() {
+    let rig = Rig::new();
+    rig.install(&rig.real_mcp());
+    let file = rig.file("hello.rs", HELLO);
+    let payload = rig.captured("read_post.json", Some(&file));
+    let env = rig.claude_env(READ_SESSION);
+    let gui = lumen_core::report::Environment {
+        os: OS.to_string(),
+        channel: "gui".to_string(),
+        ..Default::default()
+    };
+    let badge = || lumen_core::report::actionable_fault_count(Some(&rig.db), Some(&rig.spool));
+    let report = || crate::fault_report_at(&rig.db, Some(&rig.spool), &gui).expect("renders");
+    let row = "| meter_write_failed | insert | 1 | 1 |";
+
+    // Negative control: a ledger that takes the row, and nothing for the app to show.
+    let ok = rig.meter(&payload, &env);
+    assert_eq!(ok.stderr, "");
+    assert_eq!(rig.rows().len(), 1);
+    assert_eq!(badge(), 0, "{:?}", rig.faults());
+    assert!(report().is_none(), "a report with nothing in it");
+
+    set_readonly(&rig.db, true);
+    // As root the permission bit is ignored and there is nothing to test; say so rather
+    // than pass.
+    assert!(
+        std::fs::File::options().append(true).open(&rig.db).is_err(),
+        "premise: {} must be unwritable to this user",
+        rig.db.display()
+    );
+    let refused = rig.meter(&payload, &env);
+    eprintln!(
+        "B1 [{OS}] raw stderr, read-only ledger:\n{}raw spool:\n{}",
+        refused.stderr,
+        std::fs::read_to_string(&rig.spool).unwrap_or_default()
+    );
+    assert!(
+        refused.stderr.contains("this Read was not metered"),
+        "{refused:?}"
+    );
+    assert_eq!(rig.rows().len(), 1, "the refused row must not have landed");
+    // The read left the ledger's sidecars with its 0444, and nothing removes them on the
+    // way out: restoring the ledger alone is what this half proves is enough.
+    eprintln!("B1 [{OS}] after the refused read: {}", sidecars(&rig.db));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shm = rig.db.with_extension("db-shm");
+        let mode = std::fs::metadata(&shm).map(|m| m.permissions().mode() & 0o777);
+        assert_eq!(mode.ok(), Some(0o444), "premise: {}", sidecars(&rig.db));
+    }
+    assert_eq!(badge(), 1, "the badge, before the report");
+    for visit in 1..=2 {
+        let r = report().expect("a report");
+        eprintln!(
+            "B1 [{OS}] report, visit {visit}: {} kinds, {} occurrences, badge {}\n{}",
+            r.kinds,
+            r.occurrences,
+            badge(),
+            r.body
+        );
+        assert!(r.body.contains(row), "visit {visit}:\n{}", r.body);
+        assert!(r
+            .body
+            .contains("spool drain: attempt to write a readonly database"));
+        assert_eq!(badge(), 1, "the badge, after report visit {visit}");
+    }
+    set_readonly(&rig.db, false);
+    eprintln!("B1 [{OS}] the ledger restored: {}", sidecars(&rig.db));
+
+    let restored = rig.meter(&payload, &env);
+    eprintln!(
+        "B1 [{OS}] raw stderr, restored ledger: {:?}",
+        restored.stderr
+    );
+    assert_eq!(restored.stderr, "");
+    assert_eq!(rig.rows().len(), 2, "the restored ledger takes the row");
+    assert_eq!(
+        rig.faults().len(),
+        1,
+        "and no new fault: {:?}",
+        rig.faults()
+    );
+    let r = report().expect("the refused row is still to be reported");
+    eprintln!(
+        "B1 [{OS}] report, restored: {} kinds, {} occurrences, badge {}\n{}",
+        r.kinds,
+        r.occurrences,
+        badge(),
+        r.body
+    );
+    assert!(r.body.contains(row), "{}", r.body);
+    assert!(!r.body.contains("reporter_degraded"), "{}", r.body);
+    assert_eq!(badge(), 1, "drained into the ledger and counted once");
+    assert_eq!(rig.faults().len(), 0, "the spool is drained");
+}
+
+/// `lumen.db` and its sidecars, with their modes where the platform has them.
+fn sidecars(db: &Path) -> String {
+    let name = db.file_name().unwrap().to_string_lossy().into_owned();
+    let mut found: Vec<String> = std::fs::read_dir(db.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&name))
+        .map(|e| {
+            let meta = e.metadata().unwrap();
+            #[cfg(unix)]
+            let mode = format!(
+                "{:o}",
+                std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777
+            );
+            #[cfg(not(unix))]
+            let mode = if meta.permissions().readonly() {
+                "ro"
+            } else {
+                "rw"
+            }
+            .to_string();
+            format!("{} {mode} {}B", e.file_name().to_string_lossy(), meta.len())
+        })
+        .collect();
+    found.sort();
+    found.join(", ")
+}
+
+fn set_readonly(p: &Path, on: bool) {
+    let mut perms = std::fs::metadata(p).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(on);
+    std::fs::set_permissions(p, perms).unwrap();
+}
+
 /// The redirect through the installed hook: 299 lines pass, 400 are blocked once with
 /// the redirect on stderr, the marker lands in the TMPDIR Claude Code passed, and the
 /// retry the message promises goes through and is recorded.

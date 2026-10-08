@@ -253,6 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = Path::new(&db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    lumen_core::meter::restore_sidecar_write_bits(Path::new(&db_path));
     let conn = format!("sqlite:{db_path}?mode=rwc");
     let pool = SqlitePoolOptions::new().connect(&conn).await?;
     logline!("lumen-daemon using db: {db_path}");

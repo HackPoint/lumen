@@ -120,6 +120,7 @@ pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std
 
 /// Open (or create) the lumen SQLite DB, apply DDL + additive migrations.
 fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    restore_sidecar_write_bits(path);
     let conn = Connection::open(path)?;
     conn.execute_batch(DDL)?;
     for migration in MIGRATIONS {
@@ -146,6 +147,42 @@ pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
 }
+
+/// Give the ledger's `-wal` and `-shm` back the write bits the ledger itself has.
+///
+/// SQLite creates both with the ledger's mode. Opened while the ledger is read-only, it
+/// leaves a read-only `-shm` behind, and that outlives the ledger's own permissions being
+/// restored: SQLite then opens it read-only and refuses every write with "attempt to
+/// write a readonly database", against a ledger that is writable again. One Read metered
+/// during the read-only spell is enough. SQLite repairs an empty `-wal` on open; a `-shm`
+/// is never empty once used, and nothing else repairs it.
+///
+/// Metadata and chmod only. Opening the ledger here would drop any lock this process
+/// already holds on it: POSIX locks belong to the process, and any close releases them.
+#[cfg(unix)]
+pub fn restore_sidecar_write_bits(db: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(ledger) = std::fs::metadata(db) else {
+        return;
+    };
+    let want = ledger.permissions().mode() & 0o222;
+    for suffix in ["-wal", "-shm"] {
+        let mut side = db.as_os_str().to_owned();
+        side.push(suffix);
+        let Ok(meta) = std::fs::metadata(&side) else {
+            continue;
+        };
+        let mode = meta.permissions().mode() & 0o7777;
+        if mode & want != want {
+            // Owned by someone else, it stays as it is: the write it refuses is a fault.
+            let _ = std::fs::set_permissions(&side, std::fs::Permissions::from_mode(mode | want));
+        }
+    }
+}
+
+/// Windows keeps no mode to copy: there is nothing to restore.
+#[cfg(not(unix))]
+pub fn restore_sidecar_write_bits(_db: &std::path::Path) {}
 
 /// Provenance of a ranked-outline decision, recorded alongside the row.
 ///
@@ -1027,8 +1064,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("ro.db");
         drop(connect_db(&path).unwrap());
-        // Rollback journal, so the read-only file is the whole database; WAL would
-        // keep a writable -wal beside it.
+        // Rollback journal, so the read-only file is the whole database. The ledger runs
+        // in WAL, where the read-only spell also leaves read-only sidecars: next test.
         Connection::open(&path)
             .unwrap()
             .execute_batch("PRAGMA journal_mode=DELETE")
@@ -1044,6 +1081,49 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         insert_hook_event_at(&path, &hook_row()).expect("restored permissions must write");
         assert_eq!(count_events(&connect_db(&path).unwrap()), 1);
+    }
+
+    /// The same falsification on the ledger as it runs, in WAL. A read during the
+    /// read-only spell leaves a `-shm` with the ledger's 0444; restoring the ledger alone
+    /// left every later insert refused, against a writable ledger.
+    #[cfg(unix)]
+    #[test]
+    fn a_wal_ledger_restored_from_read_only_takes_writes_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lumen.db");
+        let shm = dir.path().join("lumen.db-shm");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let chmod =
+            |m: u32| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m)).unwrap();
+        insert_hook_event_at(&path, &hook_row()).unwrap();
+        assert!(
+            !shm.exists(),
+            "premise: the last connection out removed the -shm"
+        );
+
+        chmod(0o444);
+        // As root the mode is ignored and there is nothing to test.
+        assert!(
+            std::fs::File::options().append(true).open(&path).is_err(),
+            "premise: the ledger must be read-only to this user"
+        );
+        let err = insert_hook_event_at(&path, &hook_row()).expect_err("read-only must fail");
+        assert!(err.detail.contains("readonly"), "{err}");
+        assert_eq!(
+            mode(&shm),
+            0o444,
+            "premise: SQLite gave the -shm the ledger's mode"
+        );
+
+        chmod(0o644);
+        insert_hook_event_at(&path, &hook_row()).expect("the restored ledger must take the row");
+        assert_eq!(count_events(&open_read_only(&path).unwrap()), 2);
+        assert_eq!(
+            mode(&path),
+            0o644,
+            "the ledger itself is left as the user set it"
+        );
     }
 
     #[test]

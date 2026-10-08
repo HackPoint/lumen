@@ -108,6 +108,43 @@ drift test compared column *names*, which is why it passed.
 That test now runs both copies against a stub tokenizer and compares what they record, across exit
 0, exit 3, exit 1 and a missing binary. Reintroducing the bug fails it by name.
 
+### A Read the ledger refused is a fault the app shows
+
+**1.5.1 dropped it without a trace.** The installed meter ran its INSERT as
+`python3 -c '…' 2>/dev/null || true`, so a ledger that would not take the row — read-only,
+locked past the timeout, no `python3` — lost the Read with no row, no fault and no message.
+Metering now runs in `lumen-mcp hook meter`, and a refused INSERT is a `meter_write_failed`
+record in the fault spool, carrying the file, its line count and SQLite's error, plus a line on
+stderr.
+
+**The app did not show it.** Three defects stood between that record and the screen:
+
+- The badge opened the ledger with `connect_db`, which creates and migrates it, on every
+  navigation, and a ledger that would not open put the badge out while faults sat in the spool.
+  It now opens the ledger read-only and counts the spool whatever the ledger does; a ledger that
+  exists and cannot be read counts as one fault, so the badge leads to the report that names it.
+- The report drained the spool into the ledger that had just refused the row. The batch stayed in
+  `faults.jsonl.draining`, which nothing counted or listed: the first visit to the report put the
+  badge out, and the report showed "spool drain: attempt to write a readonly database" and never
+  the Read that was lost. A refused drain now puts the batch back, and the report lists what the
+  spool holds beside what the ledger does, on every visit.
+- A batch left aside was read as UTF-8 or not at all: one torn multi-byte character and the whole
+  batch was never read, and the next drain deleted it after a merge whose failure it ignored. It
+  is now read lossily, line by line, and a merge that fails leaves the batch where it is.
+
+**Restoring the ledger was not enough to take writes again.** SQLite creates `lumen.db-wal` and
+`lumen.db-shm` with the ledger's own mode. A Read metered while the ledger was read-only, with no
+`-shm` there already, left a 0444 `-shm` behind; once the ledger's permissions were restored,
+every insert was still refused with "attempt to write a readonly database", against a writable
+ledger. Every writer now gives the two sidecars the write bits the ledger has before opening it
+(Unix; Windows keeps no mode to copy). The library test of this case had switched the ledger to a
+rollback journal, so it never ran the journal mode the ledger uses.
+
+**The report tests drained the spool of whatever home they ran under.** `cargo test` on a
+developer machine emptied that machine's fault spool into a throwaway ledger: a canary fault in a
+scratch home's spool was gone after `cargo test -p lumen-core --lib db_reader`. The tests now name
+their spool, and the same probe leaves the canary in place through the whole `lumen-core` suite.
+
 ### Maintenance
 
 - chore(deps): Tauri 2.11.5 → 2.12.1, moved as one group: `tauri-build` 2.7.1, the autostart
