@@ -334,15 +334,25 @@ fn exe_dir() -> PathBuf {
 }
 
 fn find_binary(name: &str) -> Option<PathBuf> {
+    find_binary_from(&exe_dir(), name)
+}
+
+/// [`find_binary`] from an explicit directory, so the lookup is testable.
+///
+/// `name` is the bare sidecar name; the file is `name` plus the platform's
+/// executable suffix. Windows bundles `lumen-mcp.exe`, and a probe for plain
+/// `lumen-mcp` cannot match it.
+fn find_binary_from(start: &Path, name: &str) -> Option<PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     // 1. Release path: sibling of the main exe
-    let beside = exe_dir().join(name);
+    let beside = start.join(&file);
     if beside.exists() {
         return Some(beside);
     }
     // 2. Dev path: walk up looking for workspace/target/release/<name>
-    let mut probe = exe_dir();
+    let mut probe = start.to_path_buf();
     for _ in 0..8 {
-        let candidate = probe.join("target/release").join(name);
+        let candidate = probe.join("target/release").join(&file);
         if candidate.exists() {
             return Some(candidate);
         }
@@ -402,7 +412,7 @@ fn stable_binary(name: &str) -> Option<PathBuf> {
     if std::fs::create_dir_all(&bin_dir).is_err() {
         return Some(found); // fall back rather than failing setup outright
     }
-    let dest = bin_dir.join(name);
+    let dest = bin_dir.join(found.file_name().unwrap_or(name.as_ref()));
     if std::fs::copy(&found, &dest).is_err() {
         return Some(found);
     }
@@ -414,8 +424,17 @@ fn stable_binary(name: &str) -> Option<PathBuf> {
     Some(dest)
 }
 
-fn db_path() -> String {
-    std::env::var("LUMEN_DB").unwrap_or_else(|_| db_path_in(&home()))
+/// The two values Setup bakes into the hook scripts: the ledger they write and the
+/// `lumen-mcp` they exec. `mcp` is empty when this build cannot find its sidecar.
+///
+/// Resolved from `home` rather than the real home, so a test that installs into a
+/// scratch home validates against what it installed.
+fn baked_paths(home: &Path) -> (String, String) {
+    let db = std::env::var("LUMEN_DB").unwrap_or_else(|_| db_path_in(home));
+    let mcp = stable_binary("lumen-mcp")
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    (db, mcp)
 }
 
 /// The metering DB inside the per-OS data directory. Derived from
@@ -568,7 +587,7 @@ pub struct ArtifactStatus {
 /// forever, while every report looked successful.
 ///
 /// Returns a description of what it repaired, or None when nothing was needed.
-pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) -> Option<String> {
+pub fn ensure_scripts_fresh_in(home: &Path, db: &str, mcp_bin: &str) -> Option<String> {
     let dir = lumen_dir_in(home);
     // Absent directory means setup never ran; that is not drift, and creating
     // scripts for someone who never set Lumen up would be unasked-for.
@@ -578,7 +597,7 @@ pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) 
 
     let mut repaired = Vec::new();
     for (name, desired) in [
-        ("lumen_meter.sh", desired_meter_script(db, tok)),
+        ("lumen_meter.sh", desired_meter_script(db, mcp_bin)),
         (
             "lumen_read_intercept.sh",
             desired_intercept_script(db, mcp_bin),
@@ -604,22 +623,16 @@ pub fn ensure_scripts_fresh_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) 
 /// Repair drifted hook scripts against the real home, resolving the same paths
 /// Setup would bake. Called once at startup.
 pub fn ensure_scripts_fresh() -> Option<String> {
-    let tok = stable_binary("lumen-tok")
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if tok.is_empty() {
-        // Nothing to bake, so regenerating would write a script that cannot count
-        // tokens. Leave the existing one and let validation report it.
-        log::warn!("lumen-tok not found; leaving hook scripts untouched");
+    let home = home();
+    let (db, mcp) = baked_paths(&home);
+    if mcp.is_empty() {
+        // Nothing to bake. The scripts on disk may name a lumen-mcp that still runs,
+        // and a rewrite would replace it with a PATH lookup that may not. Leave them
+        // and let validation report it.
+        log::warn!("lumen-mcp not found; leaving hook scripts untouched");
         return None;
     }
-    // Empty when lumen-mcp cannot be found. The generated script then falls back to
-    // `command -v lumen-mcp`, and failing that fails open — which is the correct
-    // behaviour for a machine where the server genuinely is not installed.
-    let mcp = stable_binary("lumen-mcp")
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    ensure_scripts_fresh_in(&home(), &db_path(), &tok, &mcp)
+    ensure_scripts_fresh_in(&home, &db, &mcp)
 }
 
 /// The reported artifacts, against the real home. Exposed to the Setup screen.
@@ -632,13 +645,20 @@ pub fn lumen_artifact_health() -> Vec<ArtifactStatus> {
 ///
 /// Nothing here writes. A user acts on the result via the Setup screen.
 pub fn validate_reported_artifacts_in(home: &Path) -> Vec<ArtifactStatus> {
+    let (db, mcp) = baked_paths(home);
+    validate_reported_artifacts_with(home, &db, &mcp)
+}
+
+/// [`validate_reported_artifacts_in`] against explicit baked values: the scripts are
+/// current when they match what this build would write for `db` and `mcp_bin`.
+fn validate_reported_artifacts_with(home: &Path, db: &str, mcp_bin: &str) -> Vec<ArtifactStatus> {
     // Iterating PERSISTED_ARTIFACTS rather than hardcoding a list is what makes the
     // registry load-bearing: add an artifact and forget to handle it here, and the
     // wildcard arm reports it as unchecked instead of silently omitting it.
     PERSISTED_ARTIFACTS
         .iter()
         .map(|id| match *id {
-            "scripts" => validate_scripts_in(home),
+            "scripts" => validate_scripts_in(home, db, mcp_bin),
             "mcp" => validate_mcp_in(home),
             "hooks" => validate_hooks_in(home),
             "autostart" => ArtifactStatus {
@@ -657,7 +677,7 @@ pub fn validate_reported_artifacts_in(home: &Path) -> Vec<ArtifactStatus> {
 }
 
 /// Are the hook scripts current with this build?
-fn validate_scripts_in(home: &Path) -> ArtifactStatus {
+fn validate_scripts_in(home: &Path, db: &str, mcp_bin: &str) -> ArtifactStatus {
     let dir = lumen_dir_in(home);
     if !dir.exists() {
         return ArtifactStatus {
@@ -666,17 +686,11 @@ fn validate_scripts_in(home: &Path) -> ArtifactStatus {
             detail: "not installed — run Setup".into(),
         };
     }
-    let tok = stable_binary("lumen-tok")
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let mcp = stable_binary("lumen-mcp")
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
     let stale: Vec<&str> = [
-        ("lumen_meter.sh", desired_meter_script(&db_path(), &tok)),
+        ("lumen_meter.sh", desired_meter_script(db, mcp_bin)),
         (
             "lumen_read_intercept.sh",
-            desired_intercept_script(&db_path(), &mcp),
+            desired_intercept_script(db, mcp_bin),
         ),
     ]
     .into_iter()
@@ -719,11 +733,18 @@ fn validate_cli() -> ArtifactStatus {
 }
 
 fn validate_mcp_in(home: &Path) -> ArtifactStatus {
-    let claude_json = claude_json_path_in(home);
-    let mcp = std::fs::read_to_string(&claude_json)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("mcpServers")?.get("lumen").cloned());
+    // An unreadable file is reported as one. "No lumen entry — run Setup" would send
+    // the user to a Setup that refuses the same file.
+    let mcp = match read_config_object(&claude_json_path_in(home)) {
+        Ok(v) => v.get("mcpServers").and_then(|m| m.get("lumen")).cloned(),
+        Err(e) => {
+            return ArtifactStatus {
+                id: "mcp".into(),
+                healthy: false,
+                detail: e,
+            }
+        }
+    };
     match mcp {
         None => ArtifactStatus {
             id: "mcp".into(),
@@ -741,7 +762,9 @@ fn validate_mcp_in(home: &Path) -> ArtifactStatus {
                 for (k, v) in env {
                     if let Some(p) = v.as_str() {
                         // LUMEN_DB is created on demand, so its absence is normal.
-                        if k != "LUMEN_DB" && p.starts_with('/') && !Path::new(p).exists() {
+                        // `is_absolute`, not a leading '/': on Windows a path starts
+                        // with a drive letter, and the check skipped every one.
+                        if k != "LUMEN_DB" && Path::new(p).is_absolute() && !Path::new(p).exists() {
                             dead.push(format!("{k} {p}"));
                         }
                     }
@@ -779,14 +802,26 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
     // It carries no stamp of its own — settings.json's schema is Claude Code's, and
     // injecting an unknown key risks rejection by a validator we do not own — so the
     // desired state is compared directly instead.
+    //
+    // A command is read the way Claude Code reads it, not as a path. Before 1.6.0
+    // Setup registered the bare path, and a home with a space in it made that two
+    // words: the file existed, so this reported healthy, and the hook never ran.
     let settings = global_settings_path_in(home);
     let mut dangling: Vec<String> = Vec::new();
+    let mut unquoted: Vec<String> = Vec::new();
     let mut found = 0usize;
     let mut registered: Vec<(&str, String)> = Vec::new();
 
-    if let Some(v) = std::fs::read_to_string(&settings)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    let v = match read_config_object(&settings) {
+        Ok(v) => v,
+        Err(e) => {
+            return ArtifactStatus {
+                id: "hooks".into(),
+                healthy: false,
+                detail: e,
+            }
+        }
+    };
     {
         for phase in ["PreToolUse", "PostToolUse"] {
             if let Some(arr) = v["hooks"][phase].as_array() {
@@ -798,8 +833,13 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
                                 if c.contains("lumen_") {
                                     found += 1;
                                     registered.push((phase, matcher.clone()));
-                                    if !Path::new(c).exists() {
-                                        dangling.push(c.to_string());
+                                    if command_needs_quotes(c) {
+                                        unquoted.push(c.to_string());
+                                    } else {
+                                        let p = hook_command_path(c);
+                                        if !Path::new(&p).exists() {
+                                            dangling.push(p);
+                                        }
                                     }
                                 }
                             }
@@ -823,6 +863,12 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
     let mut problems: Vec<String> = Vec::new();
     if !dangling.is_empty() {
         problems.push(format!("dangling: {}", dangling.join("; ")));
+    }
+    if !unquoted.is_empty() {
+        problems.push(format!(
+            "will not run as registered (unquoted path): {} — re-run Setup",
+            unquoted.join("; ")
+        ));
     }
     let absent: Vec<&str> = METER_MATCHERS
         .iter()
@@ -898,7 +944,7 @@ pub const PERSISTED_ARTIFACTS: &[&str] = &["scripts", "mcp", "hooks", "autostart
 
 /// Steps that persist nothing and so need no freshness check.
 ///
-/// "detect" — not "claude": the id comes from `step_detect_claude`'s own
+/// "detect" — not "claude": the id comes from `step_detect_claude_in`'s own
 /// `SetupStep::ok("detect", …)`. The registry test below caught this the first
 /// time it ran, which is the behaviour it exists for.
 // Consumed by the coverage test, not by production code: the contract is enforced
@@ -981,354 +1027,186 @@ fn script_needs_refresh(path: &Path, desired: &str) -> bool {
 
 // ── Script templates ──────────────────────────────────────────────────────────
 //
-// The meter script is embedded with two path placeholders substituted at
-// install time.  The intercept script has no path dependencies.
+// Both hooks are shims around `lumen-mcp hook` since 1.6.0. They used to be bash
+// driving python3, stat, wc, mktemp and date, and each was a portability hazard: on
+// a machine with no `python3` — python.org's Windows layout ships `python` and `py`
+// — the meter wrote nothing and the intercept blocked nothing, and neither said so,
+// because the fault recorder ran on python3 as well. What is left in shell is
+// finding the binary, and reporting when it cannot.
+//
+// Three values are baked in by `shim`: `__LUMEN_MCP__`, `__LUMEN_DB__` and
+// `__LUMEN_SPOOL__`, each as one single-quoted shell word.
 
 const METER_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # lumen_meter.sh — installed by Lumen Setup. Regenerated automatically when it
 # drifts from the running build; do not hand-edit.
 #
-# PostToolUse hook. Records built-in Read events (the "missed optimization"
-# baseline) and Bash output volume. mcp__lumen__* tools self-meter in-process.
+# PostToolUse hook for Read and Bash. `lumen-mcp hook meter` does the metering;
+# this finds that binary, and when it cannot, leaves a fault and a line on stderr
+# instead of losing the event in silence. It needs bash, cat and date.
 #
-# Reads no file contents beyond tokenizing the file that was already read, writes
-# only to the local SQLite DB, makes no network calls, and executes nothing from
-# the payload.
-# Both are overridable. The generated path is the default, not a constant: with it
-# hardcoded there was no way to exercise this script without writing to the real
-# ledger, so the installed hook — the one that actually runs — was the only part of
-# the pipeline that could not be tested.
-LUMEN_DB="${LUMEN_DB:-__LUMEN_DB__}"
-LUMEN_TOK="${LUMEN_TOK:-__LUMEN_TOK__}"
+# Each baked value is a default, not a constant, so a test can point the hook at a
+# scratch ledger and a stub binary without editing it.
+default_mcp=__LUMEN_MCP__
+default_db=__LUMEN_DB__
+default_spool=__LUMEN_SPOOL__
+LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-$default_mcp}"
+export LUMEN_DB="${LUMEN_DB:-$default_db}"
+export LUMEN_FAULT_SPOOL="${LUMEN_FAULT_SPOOL:-$default_spool}"
 
-set -uo pipefail
+# A failed exec falls through to the report below instead of ending the script.
+shopt -s execfail
+bin="$LUMEN_MCP_BIN"
+[ -x "$bin" ] || bin="$(command -v lumen-mcp 2>/dev/null)"
+[ -n "$bin" ] && exec "$bin" hook meter --writer lumen_meter.sh
 
-INPUT=$(cat)
-
-if [ "${LUMEN_DEBUG:-}" = "1" ]; then
-    printf '%s' "$INPUT" > /tmp/lumen_hook_dump.json
-fi
-
-# Channel comes from the environment Claude Code exports, not a hardcoded string.
-# It used to be the literal 'cli' on every row, which made the "By channel"
-# breakdown a constant dressed up as a measurement.
-case "${CLAUDE_CODE_ENTRYPOINT:-}" in
-    *vscode*) CHANNEL="vscode" ;;
-    "")       CHANNEL="unknown" ;;
-    *)        CHANNEL="cli" ;;
-esac
-SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
-
-# An explicit template, not `mktemp -t lumen_bash_out`. BSD mktemp accepts a bare
-# prefix and appends its own suffix; GNU mktemp requires at least three X's and
-# fails outright on a template without them. So on Linux OUT_FILE came back empty,
-# python3 raised FileNotFoundError opening "", the `|| exit 0` below swallowed it,
-# and the hook recorded nothing at all — silently, on every read, since 1.1.5. The
-# script-level tests that would have caught it did not exist until 1.2.1.
-OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/lumen_bash_out.XXXXXX" 2>/dev/null)"
-if [ -z "${OUT_FILE:-}" ] || [ ! -f "$OUT_FILE" ]; then
-    # Say so rather than disappearing. Still exit 0: a metering hook must never
-    # fail the tool call it is observing.
-    echo "lumen_meter: cannot create a temp file under ${TMPDIR:-/tmp}; skipping" >&2
-    exit 0
-fi
-trap 'rm -f "$OUT_FILE"' EXIT
-
-# One python call, not four: the old script spawned a fresh interpreter per field.
-# Fields are TAB-separated so no value needs shell quoting. Any Bash output is
-# written to OUT_FILE rather than passed through the shell.
-FIELDS=$(printf '%s' "$INPUT" | LUMEN_OUT="$OUT_FILE" python3 -c '
-import json, os, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-tool = d.get("tool_name") or ""
-ti = d.get("tool_input") or {}
-tr = d.get("tool_response")
-path = ti.get("file_path") or ""
-cmd = ti.get("command") or ""
-out = ""
-if isinstance(tr, dict):
-    out = (tr.get("stdout") or "") + (tr.get("stderr") or "")
-elif isinstance(tr, str):
-    out = tr
-with open(os.environ["LUMEN_OUT"], "w") as f:
-    f.write(out)
-clean = lambda s: s.replace("\t", " ").replace("\n", " ")
-
-def cmd_label(s):
-    # Program and subcommand only — "cargo test", "git status", "npm run".
-    #
-    # Not the whole command line. A command line routinely carries credentials
-    # (curl -H "Authorization: Bearer ...", psql "postgres://u:p@host") and this
-    # value is stored in a database that gets backed up and shipped around. The
-    # measurement is output volume by kind of command, which two tokens answer
-    # fully. Leading VAR=value assignments are dropped first so that
-    # `TOKEN=secret curl ...` records "curl" rather than the secret.
-    toks = clean(s).split()
-    while toks and "=" in toks[0] and not toks[0].startswith("-"):
-        toks.pop(0)
-    return " ".join(toks[:2])[:60]
-
-sys.stdout.write("\t".join([tool, clean(path), cmd_label(cmd)]))
-') || exit 0
-[ -n "${FIELDS:-}" ] || exit 0
-
-TOOL_NAME=$(printf '%s' "$FIELDS" | cut -f1)
-FILE_PATH=$(printf '%s' "$FIELDS" | cut -f2)
-COMMAND=$(printf '%s' "$FIELDS" | cut -f3)
-
-# Count the tokens in the file named by $1. Emits "<count> <provenance>" on one
-# line, where provenance is measured | unsupported | estimated.
-#
-# The provenance must travel with the value. An earlier version set a TOKEN_SOURCE
-# variable inside the function, but every call site is a command substitution — a
-# subshell — so the assignment was discarded and estimates were recorded as
-# "measured". Laundering an estimate as a measurement is worse than no label.
-#
-# Takes a path rather than reading stdin. With `count_tokens < "$f"` the tokenizer
-# and the fallback shared one file descriptor and therefore one offset, so whatever
-# the tokenizer consumed before failing was missing from the fallback's count. Each
-# redirect below opens the file independently.
-count_tokens() {
-    _f="$1"
-    if [ -x "$LUMEN_TOK" ]; then
-        _c=$("$LUMEN_TOK" < "$_f" 2>/dev/null)
-        _rc=$?
-        [ "$_rc" -eq 0 ] && { printf '%s measured\n' "$_c"; return 0; }
-        # Exit 3 means the input is not text. A PNG has no token count, and
-        # inventing one is not a lesser error than admitting it: bytes/4 overstates
-        # a screenshot by ~40x, and that fabricated number is what put a 4.3M-token
-        # "optimization opportunity" in front of a feature decision.
-        [ "$_rc" -eq 3 ] && { printf '0 unsupported\n'; return 0; }
-    fi
-    # A genuinely broken tokenizer still gets a row — a row beats no row — but the
-    # estimate is labelled and logged rather than passed off as a measurement.
-    echo "lumen_meter: LUMEN_TOK unusable at $LUMEN_TOK — recording an estimate" >&2
-    printf '%s estimated\n' "$(wc -c < "$_f" | awk '{print int($1/4)}')"
-}
-
-# Modification time as a Unix timestamp, on both stat dialects.
-#
-# Validating the output instead of trusting the exit code, because the obvious
-# `stat -f %m "$f" || stat -c %Y "$f"` is wrong in a way that exit codes hide: on
-# BSD `-f` is "format", but on GNU `-f` is "display filesystem status". So on Linux
-# the first branch SUCCEEDED and printed six lines of filesystem information, the
-# fallback never ran, and that multi-line value was spliced into a newline-delimited
-# field list — shifting every field after it and making the insert throw. Requiring
-# a pure integer catches that regardless of which dialect is present or what it
-# returns.
-file_mtime() {
-    _m=$(stat -c %Y "$1" 2>/dev/null)
-    case "${_m:-x}" in *[!0-9]*) _m=$(stat -f %m "$1" 2>/dev/null) ;; esac
-    case "${_m:-x}" in *[!0-9]*) _m="" ;; esac
-    printf '%s' "$_m"
-}
-
-TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-case "$TOOL_NAME" in
-Read)
-    [ -n "$FILE_PATH" ] && [ -f "$FILE_PATH" ] || exit 0
-    LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
-    _r=$(count_tokens "$FILE_PATH")
-    FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
-    MTIME=$(file_mtime "$FILE_PATH")
-    ROUTE="builtin_read"; REQ_KEY="$FILE_PATH"; RETURNED="$FULL_TOKENS"; TARGET="$FILE_PATH"
-    ;;
-Bash)
-    # Observation only. No PreToolUse on Bash, no interception, no wrapper.
-    _r=$(count_tokens "$OUT_FILE")
-    FULL_TOKENS=${_r%% *}; TOKEN_SOURCE=${_r##* }
-    LINE_COUNT=""; MTIME=""
-    ROUTE="bash_output"; REQ_KEY=""; RETURNED=0; TARGET="$COMMAND"
-    # Nothing measurable means nothing worth a row. Unlike a Read, where the event
-    # itself is the datum, a Bash call with no output carries no information.
-    [ "${FULL_TOKENS:-0}" -gt 0 ] || exit 0
-    ;;
-*)
-    exit 0
-    ;;
-esac
-
-# Bind every value as a parameter. tool_input.command is attacker-influenced text
-# and must never be interpolated into SQL.
-LUMEN_ARGS="$LUMEN_DB
-$TS
-$TOOL_NAME
-$TARGET
-$LINE_COUNT
-$RETURNED
-$FULL_TOKENS
-$ROUTE
-$CHANNEL
-$SESSION_ID
-$MTIME
-$REQ_KEY
-$TOKEN_SOURCE"
-printf '%s' "$LUMEN_ARGS" | python3 -c '
-import sqlite3, sys
-f = sys.stdin.read().split("\n")
-if len(f) < 13:
-    sys.exit(0)
-db, ts, tool, path, lines, ret, full, route, chan, sid, mtime, req, tsrc = f[:13]
-n = lambda v: int(v) if v not in ("", None) else None
-con = sqlite3.connect(db, timeout=5)
-con.execute(
-    "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,"
-    "saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,"
-    "writer_hook,token_source) VALUES(?,?,?,?,?,?,0,?,?,?,?,?,0,?,?)",
-    (ts, tool, path, n(lines), n(ret), n(full), route, chan,
-     sid or None, n(mtime), req or None, "lumen_meter.sh", tsrc),
-)
-con.commit()
-con.close()
-' 2>/dev/null || true
-
-exit 0
-"#;
+# Lumen was moved or removed. Exit 0 all the same: a meter must never fail the
+# tool call it observes.
+cat >/dev/null
+kind=meter_write_failed
+consequence="this event was not metered"
+__LUMEN_REPORT__"#;
 
 const INTERCEPT_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# lumen_read_intercept.sh — installed by Lumen Setup.
+# lumen_read_intercept.sh — installed by Lumen Setup. Regenerated automatically
+# when it drifts from the running build; do not hand-edit.
 #
-# This hook blocks the only other way to read the file, so it must never block when
-# the tools it redirects to cannot run. Two fail-open guards enforce that:
-#   1. lumen-mcp missing        — the MCP server cannot be serving; do not block.
-#   2. same file intercepted    — the model was already told to use Lumen, so if it
-#      twice in one session       is back on the built-in Read that route failed.
+# PreToolUse hook for Read. `lumen-mcp hook intercept` decides whether a large
+# source or log file goes to the lumen tools (exit 2) or is read as asked (exit 0).
+# Without that binary the MCP server cannot be running either, so the read is let
+# through, with a fault and a line on stderr. LUMEN_HOOK_ENABLED=0 switches the
+# intercept off.
 #
-# Both write: guard 2 needs one marker file per session under TMPDIR, and a fired
-# guard appends one line to the fault spool. Never SQLite from here — this hook
-# gates whether the model may read a file at all and must not wait on a lock.
-# Set LUMEN_CAPTURE=0 to keep the guards but record nothing.
-set -euo pipefail
+# Each baked value is a default, not a constant, so a test can point the hook at a
+# scratch ledger and a stub binary without editing it.
+default_mcp=__LUMEN_MCP__
+default_db=__LUMEN_DB__
+default_spool=__LUMEN_SPOOL__
+LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-$default_mcp}"
+export LUMEN_DB="${LUMEN_DB:-$default_db}"
+export LUMEN_FAULT_SPOOL="${LUMEN_FAULT_SPOOL:-$default_spool}"
 
-INPUT=$(cat)
-HOOK_ENABLED="${LUMEN_HOOK_ENABLED:-1}"
-THRESHOLD="${LUMEN_LINE_THRESHOLD:-300}"
-LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-__LUMEN_MCP__}"
-SPOOL="${LUMEN_FAULT_SPOOL:-__LUMEN_SPOOL__}"
+# A failed exec falls through to the report below instead of ending the script.
+shopt -s execfail
+bin="$LUMEN_MCP_BIN"
+[ -x "$bin" ] || bin="$(command -v lumen-mcp 2>/dev/null)"
+[ -n "$bin" ] && exec "$bin" hook intercept
 
-if [ "$HOOK_ENABLED" = "0" ]; then
-    exit 0
-fi
+# Lumen was moved or removed. Exit 0: the tools a block would send the model to
+# are served by the binary that is missing.
+cat >/dev/null
+[ "${LUMEN_HOOK_ENABLED:-1}" = "0" ] && exit 0
+kind=hook_fail_open
+consequence="this read was let through"
+__LUMEN_REPORT__"#;
 
-# Append one hook_fail_open record. Best-effort: a hook that cannot record a fault
-# must not turn that into a second fault, so every failure here is swallowed.
-record_fault() {
-    [ "${LUMEN_CAPTURE:-1}" != "0" ] || return 0
-    [ -n "$SPOOL" ] || return 0
-    python3 - "$SPOOL" "$1" "$2" "$3" "$4" <<'PY' 2>/dev/null || true
-import json, sys, time
+/// The end of both shims, reached only when `lumen-mcp` cannot run. It writes the
+/// fault `lumen_core::faults::FaultRecord::now_with_env` would have: the same
+/// session and channel rules, and the version of the build that generated the
+/// script, read from its own stamp.
+const REPORT_TAIL: &str = r##"if [ -n "$bin" ]; then variant=lumen_mcp_unrunnable; else variant=lumen_mcp_missing; fi
+echo "lumen: cannot run lumen-mcp (looked for '$LUMEN_MCP_BIN', then on PATH); $consequence" >&2
+[ "${LUMEN_CAPTURE:-1}" = "0" ] && exit 0
 
-spool, guard, path, lines, session = sys.argv[1:6]
-record = {
-    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    "kind": "hook_fail_open",
-    "variant": guard,
-    "path": path,
-    "lines": int(lines) if lines.isdigit() else None,
-    "detail": None,
-    "session_id": session or None,
-    "version": None,
-    "channel": "cli",
-}
-with open(spool, "a") as fh:
-    fh.write(json.dumps(record) + "\n")
-PY
-}
-
-# Tab-separated so one python3 process covers all three fields.
-PARSED=$(python3 -c '
-import sys, json
-d = json.loads(sys.argv[1])
-print("\t".join([
-    d.get("tool_name", ""),
-    d.get("tool_input", {}).get("file_path", ""),
-    str(d.get("session_id", "")),
-]))
-' "$INPUT" 2>/dev/null || echo "")
-
-TOOL_NAME=""; FILE_PATH=""; SESSION_ID=""
-IFS=$'\t' read -r TOOL_NAME FILE_PATH SESSION_ID <<<"$PARSED" || true
-
-if [ "$TOOL_NAME" != "Read" ]; then
-    exit 0
-fi
-
-if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
-    exit 0
-fi
-
-EXT=$(echo "${FILE_PATH##*.}" | tr '[:upper:]' '[:lower:]')
-case "$EXT" in
-    rs|py|pyi|ts|tsx) FILE_TYPE="source" ;;
-    log|out|output|txt) FILE_TYPE="log"  ;;
-    *)                exit 0             ;;
+# A value enters the JSON line only if it cannot break it.
+json() { case "$1" in "" | *[!A-Za-z0-9._-]*) printf 'null' ;; *) printf '"%s"' "$1" ;; esac; }
+version=""
+while IFS= read -r line; do
+    case "$line" in "# lumen-generator: "*) version="${line#"# lumen-generator: "}"; break ;; esac
+done 2>/dev/null <"$0"
+# lumen_core::meter::channel_from, in shell.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    *vscode*) channel=vscode ;;
+    ?*) channel=cli ;;
+    *) if [ -n "${VSCODE_PID+x}${VSCODE_CWD+x}" ]; then channel=vscode; else channel=unknown; fi ;;
 esac
+case "${LUMEN_CHANNEL:-}" in "" | *[!A-Za-z0-9._-]*) ;; *) channel="$LUMEN_CHANNEL" ;; esac
+printf '{"ts":"%s","kind":"%s","variant":"%s","path":null,"lines":null,"detail":null,"session_id":%s,"version":%s,"channel":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$kind" "$variant" \
+    "$(json "${LUMEN_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}")" "$(json "$version")" "$channel" \
+    2>/dev/null >>"$LUMEN_FAULT_SPOOL" \
+    || echo "lumen: nor could the fault be written to '$LUMEN_FAULT_SPOOL'" >&2
+exit 0
+"##;
 
-LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null | tr -d '[:space:]' || echo 0)
-LINE_COUNT="${LINE_COUNT:-0}"
-if [ "$LINE_COUNT" -lt "$THRESHOLD" ]; then
-    exit 0
-fi
+/// `s` as one single-quoted shell word. Inside single quotes nothing is special
+/// except the quote itself, which closes, escapes and reopens: `'\''`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
 
-# Both guards sit below the extension and threshold checks, not above them: a fired
-# guard means "this read would have been redirected and could not be", so a file we
-# were never going to intercept must not be recorded as a routing failure.
+/// A path as the hook's shell should see it.
+fn shell_path(p: &str) -> String {
+    shell_path_for(p, cfg!(windows))
+}
 
-# Guard 1: no lumen-mcp on this machine means the MCP server cannot be serving
-# smart_read/recall_file/compress_logs, so redirecting there would strand the model.
-if [ ! -x "$LUMEN_MCP_BIN" ] && ! command -v lumen-mcp >/dev/null 2>&1; then
-    record_fault "lumen_mcp_missing" "$FILE_PATH" "$LINE_COUNT" "$SESSION_ID"
-    exit 0
-fi
+/// On Windows, forward slashes. Claude Code runs hooks there through Git Bash, and
+/// both bash and Claude Code's own command scan treat an unquoted backslash as an
+/// escape; `C:/Users/…` means the same file to bash, to Windows and to Rust. On
+/// every other platform a backslash is an ordinary filename byte and is kept.
+fn shell_path_for(p: &str, windows: bool) -> String {
+    if windows {
+        p.replace('\\', "/")
+    } else {
+        p.to_string()
+    }
+}
 
-# Guard 2: one redirect per file per session.
-SESSION_KEY="${SESSION_ID//[^A-Za-z0-9_-]/}"
-STATE_FILE="${TMPDIR:-/tmp}"
-STATE_FILE="${STATE_FILE%/}/lumen_intercept_${SESSION_KEY:-nosession}"
+/// The `command` registered in settings.json for a hook script: its path as one
+/// quoted word.
+///
+/// Claude Code hands this to `/bin/sh -c` on macOS and Linux and to Git Bash's
+/// `bash -c` on Windows, and on Windows it first scans the command's first word —
+/// quotes stripped, backslash escapes taken — and prefixes `bash ` when that word
+/// ends in `.sh`. A bare path broke at the first space in it everywhere, and on
+/// Windows lost every backslash to that scan. Quoted, the scan sees the whole path
+/// on both platforms.
+fn hook_command(script: &Path) -> String {
+    sh_quote(&shell_path(&script.to_string_lossy()))
+}
 
-if [ -f "$STATE_FILE" ] && grep -Fxq -- "$FILE_PATH" "$STATE_FILE" 2>/dev/null; then
-    record_fault "retry_escape_valve" "$FILE_PATH" "$LINE_COUNT" "$SESSION_ID"
-    exit 0
-fi
-printf '%s\n' "$FILE_PATH" >> "$STATE_FILE" 2>/dev/null || true
+/// The program a hook `command` runs, read the way Claude Code reads it.
+///
+/// This is Claude Code's first-word scan (2.1.x): a quote runs to its partner — an
+/// unterminated one to the end — a backslash takes the next character as is, and
+/// whitespace outside quotes ends the word.
+fn hook_command_path(command: &str) -> String {
+    let mut out = String::new();
+    let mut chars = command.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                for d in chars.by_ref() {
+                    if d == c {
+                        break;
+                    }
+                    out.push(d);
+                }
+            }
+            '\\' => out.push(chars.next().unwrap_or('\\')),
+            c if c.is_whitespace() => break,
+            c => out.push(c),
+        }
+    }
+    out
+}
 
-if [ "$FILE_TYPE" = "log" ]; then
-    cat >&2 <<MSG
-Lumen intercept: ${FILE_PATH} is ${LINE_COUNT} lines (log/output file).
-Before reading the full file, call:
-  lumen:compress_logs(path="${FILE_PATH}")
-This collapses repeated lines and stack frames deterministically (typically 40-80%
-token reduction). Analyze the compressed output; the full file is still readable
-via smart_read(mode="full") if needed.
-
-If the lumen tools are unavailable to you (server down, permission denied), retry
-this exact Read — it will be allowed through. Do not abandon the task.
-MSG
-else
-    cat >&2 <<MSG
-Lumen intercept: ${FILE_PATH} is ${LINE_COUNT} lines.
-Instead of reading the full file, call:
-  1. lumen:smart_read(path="${FILE_PATH}")       → structural outline, ~5-10% token cost
-  2. lumen:recall_file(path="${FILE_PATH}", names=["<item>"]) → fetch only what you need
-This typically saves 80-93% of context vs. reading the whole file.
-Use smart_read(mode="full") only if you truly need every line.
-
-If the lumen tools are unavailable to you (server down, permission denied), retry
-this exact Read — it will be allowed through. Do not abandon the task.
-MSG
-fi
-
-exit 2
-"#;
+/// Would this command run as a different program than the path it names?
+///
+/// True for a bare path holding anything the shell does not take literally: a
+/// space splits it, a backslash escapes, a `$` expands. Those are the commands
+/// Setup registered before 1.6.0 that never ran.
+fn command_needs_quotes(command: &str) -> bool {
+    let c = command.trim();
+    !c.starts_with(['\'', '"'])
+        && c.chars()
+            .any(|ch| !(ch.is_alphanumeric() || "/._-+:@%,".contains(ch)))
+}
 
 // ── Step implementations ──────────────────────────────────────────────────────
 
-fn step_detect_claude() -> SetupStep {
-    let dot_claude = home().join(".claude");
+fn step_detect_claude_in(home: &Path) -> SetupStep {
+    let dot_claude = home.join(".claude");
     if !dot_claude.exists() {
         return SetupStep::err(
             "detect",
@@ -1336,7 +1214,7 @@ fn step_detect_claude() -> SetupStep {
             "~/.claude/ not found. Install Claude Code (https://claude.ai/code) first.",
         );
     }
-    let has_cli = which_claude();
+    let has_cli = claude_on_path(std::env::var_os("PATH").as_deref());
     if has_cli {
         SetupStep::ok("detect", "Detect Claude Code", "Claude Code CLI detected")
     } else {
@@ -1348,15 +1226,20 @@ fn step_detect_claude() -> SetupStep {
     }
 }
 
-fn which_claude() -> bool {
-    std::process::Command::new("which")
-        .arg("claude")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Is `claude` on this PATH? Scanned directly rather than by running `which`, which
+/// Windows does not ship; there the npm install is `claude.cmd`.
+fn claude_on_path(path: Option<&std::ffi::OsStr>) -> bool {
+    let names: &[&str] = if cfg!(windows) {
+        &["claude.exe", "claude.cmd", "claude"]
+    } else {
+        &["claude"]
+    };
+    path.is_some_and(|p| {
+        std::env::split_paths(p).any(|dir| names.iter().any(|n| dir.join(n).is_file()))
+    })
 }
 
-fn step_install_scripts_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) -> SetupStep {
+fn step_install_scripts_in(home: &Path, db: &str, mcp_bin: &str) -> SetupStep {
     let dir = lumen_dir_in(home);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return SetupStep::err(
@@ -1373,7 +1256,11 @@ fn step_install_scripts_in(home: &Path, db: &str, tok: &str, mcp_bin: &str) -> S
     // a script without it stops firing silently, which is worse than the
     // truncation window write_atomic closes.
     for (path, content, what) in [
-        (&meter_path, desired_meter_script(db, tok), "lumen_meter.sh"),
+        (
+            &meter_path,
+            desired_meter_script(db, mcp_bin),
+            "lumen_meter.sh",
+        ),
         (
             &intercept_path,
             desired_intercept_script(db, mcp_bin),
@@ -1412,56 +1299,84 @@ fn with_stamp(script: &str) -> String {
 }
 
 /// The meter script this build would install, stamped for diagnostics.
-fn desired_meter_script(db: &str, tok: &str) -> String {
-    with_stamp(
-        &METER_TEMPLATE
-            .replace("__LUMEN_DB__", db)
-            .replace("__LUMEN_TOK__", tok),
-    )
+fn desired_meter_script(db: &str, mcp_bin: &str) -> String {
+    shim(METER_TEMPLATE, db, mcp_bin)
 }
 
-/// The intercept script this build would install.
-///
-/// Two paths are baked: the `lumen-mcp` binary the fail-open probe stats, and the
-/// fault spool a fired guard appends to. Both used to be absent, and the script
-/// resolved nothing — but a hook that blocks the only other way to read a file
-/// cannot decide whether to block without knowing the redirect target exists, and
-/// the README documents the two writes this now performs.
-///
-/// Deriving the spool from the database rather than resolving it in bash keeps one
-/// answer for where it lives: `lumen report` looks beside the database, and a second
-/// resolution order in shell is how the two would drift apart.
+/// The intercept script this build would install, stamped for diagnostics.
 fn desired_intercept_script(db: &str, mcp_bin: &str) -> String {
-    let spool = std::path::Path::new(db)
+    shim(INTERCEPT_TEMPLATE, db, mcp_bin)
+}
+
+/// A template with the shared tail and the three baked values filled in.
+///
+/// The spool is derived from the database rather than resolved in shell, so there
+/// is one answer for where it lives: `lumen report` looks beside the database, and
+/// a second resolution order in a script is how the two would drift apart.
+fn shim(template: &str, db: &str, mcp_bin: &str) -> String {
+    let spool = Path::new(db)
         .parent()
         .map(|d| d.join("faults.jsonl").to_string_lossy().into_owned())
         .unwrap_or_default();
     with_stamp(
-        &INTERCEPT_TEMPLATE
-            .replace("__LUMEN_MCP__", mcp_bin)
-            .replace("__LUMEN_SPOOL__", &spool),
+        &template
+            .replace("__LUMEN_REPORT__", REPORT_TAIL)
+            .replace("__LUMEN_MCP__", &sh_quote(&shell_path(mcp_bin)))
+            .replace("__LUMEN_DB__", &sh_quote(&shell_path(db)))
+            .replace("__LUMEN_SPOOL__", &sh_quote(&shell_path(&spool))),
     )
 }
 
-fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> SetupStep {
+/// A Claude Code config file as a JSON object, or why Setup must not write it.
+///
+/// Absent or blank is a fresh start. Anything else that does not parse is refused,
+/// not replaced: Setup used to read an unparseable `~/.claude.json` as `{}` and
+/// write back an object holding only Lumen, so one stray comma cost the user every
+/// other MCP server they had, kept only in the `.lumen_bak` copy beside it.
+fn read_config_object(path: &Path) -> Result<serde_json::Value, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    if text.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.is_object() => Ok(v),
+        Ok(_) => Err(format!(
+            "{} is not a JSON object; left untouched — fix or remove it, then re-run Setup",
+            path.display()
+        )),
+        Err(e) => Err(format!(
+            "{} is not valid JSON ({e}); left untouched — fix or remove it, then re-run Setup",
+            path.display()
+        )),
+    }
+}
+
+/// Why `key` in `root` cannot hold Lumen's entry, if it cannot. Absent or null is
+/// fine; any other non-object would have to be replaced to proceed, and is the
+/// user's to fix.
+fn not_an_object(root: &serde_json::Value, key: &str, file: &str) -> Option<String> {
+    match root.get(key) {
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::Object(_)) => None,
+        Some(_) => Some(format!(
+            "\"{key}\" in {file} is not an object; left untouched — fix it, then re-run Setup"
+        )),
+    }
+}
+
+fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str) -> SetupStep {
     let path = claude_json_path_in(home);
 
-    // Parse or start fresh
-    let mut root: serde_json::Value = if path.exists() {
-        match std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-        {
-            Some(v) => v,
-            None => serde_json::json!({}),
-        }
-    } else {
-        serde_json::json!({})
+    let mut root = match read_config_object(&path) {
+        Ok(v) => v,
+        Err(e) => return SetupStep::err("mcp", "Register MCP server", &e),
     };
-
-    // Ensure it's an object
-    if !root.is_object() {
-        root = serde_json::json!({});
+    // Indexing into a non-object below would panic rather than fail the step.
+    if let Some(e) = not_an_object(&root, "mcpServers", "~/.claude.json") {
+        return SetupStep::err("mcp", "Register MCP server", &e);
     }
 
     // Backup before modifying
@@ -1470,20 +1385,21 @@ fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> Setu
         let _ = std::fs::copy(&path, &bak);
     }
 
+    // No LUMEN_TOK: nothing has read it since the hooks moved into lumen-mcp, and
+    // re-registering is what removes the one an earlier version wrote.
     let entry = serde_json::json!({
         "type":    "stdio",
         "command": mcp_bin,
         "args":    [],
         "env": {
-            "LUMEN_DB":  db,
-            "LUMEN_TOK": tok
+            "LUMEN_DB":  db
         }
     });
 
     root["mcpServers"]["lumen"] = entry;
 
     match serde_json::to_string_pretty(&root) {
-        Ok(s) => match std::fs::write(&path, s) {
+        Ok(s) => match write_atomic(&path, &s, 0) {
             Ok(_) => SetupStep::ok(
                 "mcp",
                 "Register MCP server",
@@ -1501,11 +1417,8 @@ fn step_register_mcp_in(home: &Path, mcp_bin: &str, db: &str, tok: &str) -> Setu
 
 fn step_install_hooks_in(home: &Path) -> SetupStep {
     let dir = lumen_dir_in(home);
-    let meter = dir.join("lumen_meter.sh").to_string_lossy().to_string();
-    let intercept = dir
-        .join("lumen_read_intercept.sh")
-        .to_string_lossy()
-        .to_string();
+    let meter = hook_command(&dir.join("lumen_meter.sh"));
+    let intercept = hook_command(&dir.join("lumen_read_intercept.sh"));
 
     let path = global_settings_path_in(home);
 
@@ -1516,21 +1429,23 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
         }
     }
 
-    // Parse or start fresh
-    let mut root: serde_json::Value = if path.exists() {
-        match std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-        {
-            Some(v) => v,
-            None => serde_json::json!({}),
-        }
-    } else {
-        serde_json::json!({})
+    let mut root = match read_config_object(&path) {
+        Ok(v) => v,
+        Err(e) => return SetupStep::err("hooks", "Install hooks", &e),
     };
-
-    if !root.is_object() {
-        root = serde_json::json!({});
+    let shape = not_an_object(&root, "hooks", "settings.json").or_else(|| {
+        ["PreToolUse", "PostToolUse"].into_iter().find_map(|phase| {
+            match root.get("hooks").and_then(|h| h.get(phase)) {
+                None | Some(serde_json::Value::Null) | Some(serde_json::Value::Array(_)) => None,
+                Some(_) => Some(format!(
+                    "\"hooks.{phase}\" in settings.json is not a list; left untouched — fix \
+                     it, then re-run Setup"
+                )),
+            }
+        })
+    });
+    if let Some(e) = shape {
+        return SetupStep::err("hooks", "Install hooks", &e);
     }
 
     // Backup
@@ -1558,7 +1473,7 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
     }
 
     match serde_json::to_string_pretty(&root) {
-        Ok(s) => match std::fs::write(&path, s) {
+        Ok(s) => match write_atomic(&path, &s, 0) {
             Ok(_) => SetupStep::ok(
                 "hooks",
                 "Install hooks",
@@ -1650,10 +1565,23 @@ fn run_setup(autostart: &dyn AutoStart) -> Vec<SetupStep> {
 /// Setup against an explicit home, so the step list can be asserted in a test
 /// without touching the developer's real ~/.claude.
 fn run_setup_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
+    let (db, mcp) = baked_paths(home);
+    run_setup_with(home, autostart, &db, &mcp)
+}
+
+/// Setup with the baked values explicit, so a test can install hooks that exec a
+/// binary it chose and write a ledger it owns. An empty `mcp_bin` means this build
+/// could not find its sidecar.
+fn run_setup_with(
+    home: &Path,
+    autostart: &dyn AutoStart,
+    db_str: &str,
+    mcp_str: &str,
+) -> Vec<SetupStep> {
     let mut steps = Vec::new();
 
     // 1. Detect Claude Code
-    let detect = step_detect_claude();
+    let detect = step_detect_claude_in(home);
     let fatal = detect.status == StepStatus::Error;
     steps.push(detect);
     if fatal {
@@ -1671,32 +1599,19 @@ fn run_setup_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
         return steps;
     }
 
-    // 2. Resolve binary paths
-    let mcp_bin = stable_binary("lumen-mcp");
-    let tok_bin = stable_binary("lumen-tok");
-
-    let mcp_str = mcp_bin
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let tok_str = tok_bin
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let db_str = db_path();
-
-    // 3. Install scripts (needs tok path for templating)
-    if tok_str.is_empty() {
+    // 2. Install scripts. Both hooks exec lumen-mcp, so without it there is
+    // nothing they can run.
+    if mcp_str.is_empty() {
         steps.push(SetupStep::err(
             "scripts",
             "Install hook scripts",
-            "lumen-tok binary not found — rebuild sidecars with build-sidecar.sh",
+            "lumen-mcp binary not found — rebuild sidecars with build-sidecar.sh",
         ));
     } else {
-        steps.push(step_install_scripts_in(home, &db_str, &tok_str, &mcp_str));
+        steps.push(step_install_scripts_in(home, db_str, mcp_str));
     }
 
-    // 4. Register MCP (needs mcp path)
+    // 3. Register MCP (needs mcp path)
     if mcp_str.is_empty() {
         steps.push(SetupStep::err(
             "mcp",
@@ -1704,10 +1619,10 @@ fn run_setup_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
             "lumen-mcp binary not found — rebuild sidecars with build-sidecar.sh",
         ));
     } else {
-        steps.push(step_register_mcp_in(home, &mcp_str, &db_str, &tok_str));
+        steps.push(step_register_mcp_in(home, mcp_str, db_str));
     }
 
-    // 5. Install hooks (needs scripts installed first)
+    // 4. Install hooks (needs scripts installed first)
     let scripts_ok = steps
         .iter()
         .any(|s| s.id == "scripts" && s.status == StepStatus::Ok);
@@ -1721,12 +1636,28 @@ fn run_setup_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
         ));
     }
 
-    // 6. Register the login item. Deliberately last: it is the only step that
+    // 5. Register the login item. Deliberately last: it is the only step that
     // touches something outside ~/.claude, and it must be inside the all_good
     // check below so a warning here still lets setup complete.
-    steps.push(step_enable_autostart(autostart));
+    //
+    // Not over an opt-out. The marker is written once a login item existed, so the
+    // marker with the item off means somebody turned it off. 1.6.0 asks Windows
+    // users to re-run Setup to repair their hook commands, and that repair must not
+    // switch the login item back on as a side effect: 1.1.2 shipped exactly that,
+    // from the startup check.
+    let opted_out =
+        autostart_marker_in(home).exists() && matches!(autostart.is_enabled(), Ok(false));
+    steps.push(if opted_out {
+        SetupStep::ok(
+            AUTOSTART_ID,
+            AUTOSTART_LABEL,
+            "Left off, as you set it — the toggle turns it back on",
+        )
+    } else {
+        step_enable_autostart(autostart)
+    });
 
-    // 7. Write marker on full success
+    // 6. Write marker on full success
     let all_good = steps
         .iter()
         .all(|s| s.status == StepStatus::Ok || s.status == StepStatus::Warn);
@@ -1760,7 +1691,7 @@ fn run_uninstall_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
                 let _ = std::fs::copy(&claude_json, claude_json.with_extension("json.lumen_bak"));
                 match serde_json::to_string_pretty(&v)
                     .ok()
-                    .and_then(|s| std::fs::write(&claude_json, s).ok())
+                    .and_then(|s| write_atomic(&claude_json, &s, 0).ok())
                 {
                     Some(_) => steps.push(SetupStep::ok(
                         "mcp",
@@ -1800,7 +1731,7 @@ fn run_uninstall_in(home: &Path, autostart: &dyn AutoStart) -> Vec<SetupStep> {
                 let _ = std::fs::copy(&settings, settings.with_extension("json.lumen_bak"));
                 match serde_json::to_string_pretty(&v)
                     .ok()
-                    .and_then(|s| std::fs::write(&settings, s).ok())
+                    .and_then(|s| write_atomic(&settings, &s, 0).ok())
                 {
                     Some(_) => steps.push(SetupStep::ok(
                         "hooks",
@@ -1984,6 +1915,9 @@ fn remove_lumen_hooks(root: &mut serde_json::Value) {
 }
 
 #[cfg(test)]
+mod hook_e2e;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -2028,8 +1962,10 @@ mod tests {
         // Paths that genuinely resolve, so no liveness check can flag this.
         let db = h.path().join("lumen.db");
         let tok = h.path().join("lumen-tok");
-        std::fs::write(&db, "").unwrap();
-        std::fs::write(&tok, "").unwrap();
+        let mcp = h.path().join("lumen-mcp");
+        for f in [&db, &tok, &mcp] {
+            std::fs::write(f, "").unwrap();
+        }
         let script = h.path().join("lumen_meter.sh");
         std::fs::write(
             &script,
@@ -2037,9 +1973,7 @@ mod tests {
         )
         .unwrap();
 
-        let desired = METER_TEMPLATE
-            .replace("__LUMEN_DB__", &db.to_string_lossy())
-            .replace("__LUMEN_TOK__", &tok.to_string_lossy());
+        let desired = desired_meter_script(&db.to_string_lossy(), &mcp.to_string_lossy());
 
         assert!(
             script_needs_refresh(&script, &desired),
@@ -2054,9 +1988,7 @@ mod tests {
         // Negative control: the repair must not rewrite a healthy artifact.
         let h = TempDir::new().unwrap();
         let script = h.path().join("lumen_meter.sh");
-        let desired = METER_TEMPLATE
-            .replace("__LUMEN_DB__", "/tmp/x.db")
-            .replace("__LUMEN_TOK__", "/tmp/lumen-tok");
+        let desired = desired_meter_script("/tmp/x.db", "/tmp/lumen-mcp");
         std::fs::write(&script, &desired).unwrap();
         assert!(!script_needs_refresh(&script, &desired));
     }
@@ -2067,12 +1999,12 @@ mod tests {
         // every artifact on every machine.
         let h = TempDir::new().unwrap();
         let script = h.path().join("lumen_meter.sh");
-        let desired = METER_TEMPLATE
-            .replace("__LUMEN_DB__", "/tmp/x.db")
-            .replace("__LUMEN_TOK__", "/tmp/lumen-tok");
-        std::fs::write(&script, with_stamp(&desired)).unwrap();
+        let desired = desired_meter_script("/tmp/x.db", "/tmp/lumen-mcp");
+        let older = desired.replace(&stamp_line(), &format!("{GENERATOR_PREFIX} 0.0.1\n"));
+        assert_ne!(older, desired, "the fixture must carry a different stamp");
+        std::fs::write(&script, &older).unwrap();
         assert!(
-            !script_needs_refresh(&script, &with_stamp(&desired)),
+            !script_needs_refresh(&script, &desired),
             "only the stamp differs, so nothing functional changed"
         );
     }
@@ -2082,7 +2014,7 @@ mod tests {
         // A stamp on line 1 makes the kernel ignore #! and the hook silently
         // stops firing — a regression worse than anything this release fixes.
         for script in [
-            desired_meter_script("/tmp/db", "/tmp/tok"),
+            desired_meter_script("/tmp/x.db", "/tmp/lumen-mcp"),
             desired_intercept_script("/tmp/x.db", "/tmp/lumen-mcp"),
         ] {
             assert!(
@@ -2115,9 +2047,8 @@ mod tests {
         // Inputs unchanged, so an input fingerprint matches; the content does not.
         let h = TempDir::new().unwrap();
         let script = h.path().join("lumen_meter.sh");
-        let desired = METER_TEMPLATE
-            .replace("__LUMEN_DB__", "/tmp/x.db")
-            .replace("__LUMEN_TOK__", "/tmp/lumen-tok");
+        let desired = desired_meter_script("/tmp/x.db", "/tmp/lumen-mcp");
+        assert!(desired.contains("exit 0"));
         std::fs::write(&script, desired.replace("exit 0", "exit 1")).unwrap();
         assert!(script_needs_refresh(&script, &desired));
     }
@@ -2393,12 +2324,25 @@ mod tests {
         // The test that makes a fourth instance of the run_setup-only bug
         // impossible. Add a step and forget its freshness check, and its id is
         // unaccounted for here.
+        //
+        // With ~/.claude present, so every step runs rather than being skipped under
+        // its id: a skipped step proves the id exists, not that the step does.
         let h = TempDir::new().unwrap();
-        let emitted: std::collections::BTreeSet<String> =
-            run_setup_in(h.path(), &FakeAutoStart::default())
-                .into_iter()
-                .map(|s| s.id)
-                .collect();
+        std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+        let db = h.path().join("data/lumen.db");
+        let mcp = h.path().join("lumen-mcp");
+        std::fs::write(&mcp, "").unwrap();
+        let steps = run_setup_with(
+            h.path(),
+            &FakeAutoStart::default(),
+            &db.to_string_lossy(),
+            &mcp.to_string_lossy(),
+        );
+        assert!(
+            steps.iter().all(|s| s.status != StepStatus::Skip),
+            "every step must have run: {steps:?}"
+        );
+        let emitted: std::collections::BTreeSet<String> = steps.into_iter().map(|s| s.id).collect();
         let accounted: std::collections::BTreeSet<String> = PERSISTED_ARTIFACTS
             .iter()
             .chain(NON_PERSISTING.iter())
@@ -3347,12 +3291,7 @@ mod tests {
     #[test]
     fn installing_scripts_writes_both_hooks_executable() {
         let h = TempDir::new().unwrap();
-        let step = step_install_scripts_in(
-            h.path(),
-            "/tmp/lumen.db",
-            "/bin/lumen-tok",
-            "/bin/lumen-mcp",
-        );
+        let step = step_install_scripts_in(h.path(), "/tmp/lumen.db", "/bin/lumen-mcp");
         assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
 
         let dir = lumen_dir_in(h.path());
@@ -3375,24 +3314,33 @@ mod tests {
     #[test]
     fn the_meter_script_is_templated_with_the_real_paths() {
         let h = TempDir::new().unwrap();
-        step_install_scripts_in(h.path(), "/my/lumen.db", "/my/lumen-tok", "/my/lumen-mcp");
-        let body = std::fs::read_to_string(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
-        assert!(body.contains("/my/lumen.db"), "DB path must be substituted");
-        assert!(
-            body.contains("/my/lumen-tok"),
-            "tok path must be substituted"
-        );
-        assert!(
-            !body.contains("__LUMEN_DB__") && !body.contains("__LUMEN_TOK__"),
-            "no placeholder may survive templating:\n{body}"
-        );
+        step_install_scripts_in(h.path(), "/my/lumen.db", "/my/lumen-mcp");
+        for name in ["lumen_meter.sh", "lumen_read_intercept.sh"] {
+            let body = std::fs::read_to_string(lumen_dir_in(h.path()).join(name)).unwrap();
+            assert!(
+                body.contains("default_db='/my/lumen.db'"),
+                "{name}: DB path"
+            );
+            assert!(
+                body.contains("default_mcp='/my/lumen-mcp'"),
+                "{name}: binary path"
+            );
+            assert!(
+                body.contains("default_spool='/my/faults.jsonl'"),
+                "{name}: the spool sits beside the DB, where `lumen report` reads it"
+            );
+            assert!(
+                !body.contains("__LUMEN_"),
+                "{name}: no placeholder may survive templating:\n{body}"
+            );
+        }
     }
 
     #[test]
     fn reinstalling_scripts_overwrites_stale_paths() {
         let h = TempDir::new().unwrap();
-        step_install_scripts_in(h.path(), "/old.db", "/old-tok", "/old-mcp");
-        step_install_scripts_in(h.path(), "/new.db", "/new-tok", "/new-mcp");
+        step_install_scripts_in(h.path(), "/old.db", "/old-mcp");
+        step_install_scripts_in(h.path(), "/new.db", "/new-mcp");
         let body = std::fs::read_to_string(lumen_dir_in(h.path()).join("lumen_meter.sh")).unwrap();
         assert!(body.contains("/new.db"));
         assert!(!body.contains("/old.db"), "the stale path must be gone");
@@ -3403,7 +3351,7 @@ mod tests {
     #[test]
     fn registering_the_mcp_server_creates_claude_json() {
         let h = TempDir::new().unwrap();
-        let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
 
         let v: serde_json::Value =
@@ -3412,8 +3360,38 @@ mod tests {
         let entry = &v["mcpServers"]["lumen"];
         assert_eq!(entry["type"], "stdio");
         assert_eq!(entry["command"], "/bin/lumen-mcp");
-        assert_eq!(entry["env"]["LUMEN_DB"], "/db");
-        assert_eq!(entry["env"]["LUMEN_TOK"], "/tok");
+        assert_eq!(
+            entry["env"],
+            serde_json::json!({"LUMEN_DB": "/db"}),
+            "nothing reads LUMEN_TOK since the hooks moved into lumen-mcp"
+        );
+    }
+
+    /// An upgrade from 1.5.1 must take out the LUMEN_TOK that version registered,
+    /// and leave every other server and key exactly as it found them.
+    #[test]
+    fn re_registering_drops_the_lumen_tok_an_earlier_version_wrote() {
+        let h = TempDir::new().unwrap();
+        std::fs::write(
+            claude_json_path_in(h.path()),
+            r#"{"mcpServers":{"lumen":{"type":"stdio","command":"/old/lumen-mcp","args":[],
+                "env":{"LUMEN_DB":"/db","LUMEN_TOK":"/old/lumen-tok"}},
+                "other":{"command":"/other","env":{"LUMEN_TOK":"theirs"}}}}"#,
+        )
+        .unwrap();
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
+                .unwrap();
+        assert_eq!(
+            v["mcpServers"]["lumen"]["env"],
+            serde_json::json!({"LUMEN_DB": "/db"})
+        );
+        assert_eq!(
+            v["mcpServers"]["other"],
+            serde_json::json!({"command": "/other", "env": {"LUMEN_TOK": "theirs"}}),
+            "a foreign server is not ours to edit, even where it uses the same name"
+        );
     }
 
     #[test]
@@ -3425,7 +3403,7 @@ mod tests {
         )
         .unwrap();
 
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
 
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
@@ -3440,7 +3418,7 @@ mod tests {
         let h = TempDir::new().unwrap();
         let path = claude_json_path_in(h.path());
         std::fs::write(&path, r#"{"numStartups":1}"#).unwrap();
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         let bak = path.with_extension("json.lumen_bak");
         assert!(bak.exists(), "a backup must be taken before rewriting");
         assert!(std::fs::read_to_string(&bak)
@@ -3448,26 +3426,74 @@ mod tests {
             .contains("numStartups"));
     }
 
+    /// `~/.claude.json` is Claude Code's own state: projects, history, account. Setup
+    /// used to answer a parse error by starting from `{}` and writing that back, so
+    /// one stray byte cost the user everything in the file but a `.lumen_bak`. A file
+    /// Setup cannot parse is now left exactly as it is, and the step says why.
     #[test]
-    fn registering_recovers_from_a_corrupt_claude_json() {
-        // Rather than refusing forever, setup starts fresh — the original is
-        // still recoverable from the .lumen_bak copy.
+    fn registering_refuses_a_corrupt_claude_json_and_leaves_it_byte_identical() {
         let h = TempDir::new().unwrap();
-        std::fs::write(claude_json_path_in(h.path()), "{ not json at all").unwrap();
-        let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
-        assert_eq!(step.status, StepStatus::Ok);
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(claude_json_path_in(h.path())).unwrap())
-                .unwrap();
-        assert_eq!(v["mcpServers"]["lumen"]["command"], "/bin/lumen-mcp");
+        let path = claude_json_path_in(h.path());
+        std::fs::write(&path, "{ not json at all").unwrap();
+        let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
+        assert_eq!(step.status, StepStatus::Error, "{}", step.detail);
+        assert!(step.detail.contains("not valid JSON"), "{}", step.detail);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json at all");
+        assert!(
+            !path.with_extension("json.lumen_bak").exists(),
+            "a refusal writes nothing, not even the backup"
+        );
+    }
+
+    /// Valid JSON of the wrong shape. `root["mcpServers"]["lumen"] = …` panics when
+    /// `mcpServers` is an array or a string, and a panic in a Tauri command is not
+    /// a step that fails: it is a Setup that never answers.
+    #[test]
+    fn registering_refuses_a_claude_json_of_the_wrong_shape() {
+        for odd in [
+            r#"{"mcpServers":[]}"#,
+            r#"{"mcpServers":"lumen"}"#,
+            r#"[{"mcpServers":{}}]"#,
+            "null",
+        ] {
+            let h = TempDir::new().unwrap();
+            let path = claude_json_path_in(h.path());
+            std::fs::write(&path, odd).unwrap();
+            let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
+            assert_eq!(step.status, StepStatus::Error, "{odd}: {}", step.detail);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                odd,
+                "{odd} was rewritten"
+            );
+        }
+    }
+
+    /// The negative control for the two refusals: an empty file and a null
+    /// `mcpServers` are what a first run looks like, and must still register.
+    #[test]
+    fn registering_accepts_an_empty_claude_json_and_a_null_mcp_servers() {
+        for start in ["", "  \n", r#"{"mcpServers":null,"numStartups":3}"#] {
+            let h = TempDir::new().unwrap();
+            let path = claude_json_path_in(h.path());
+            std::fs::write(&path, start).unwrap();
+            let step = step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
+            assert_eq!(step.status, StepStatus::Ok, "{start:?}: {}", step.detail);
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                v["mcpServers"]["lumen"]["command"], "/bin/lumen-mcp",
+                "{start:?}"
+            );
+        }
     }
 
     #[test]
     fn registering_is_idempotent() {
         let h = TempDir::new().unwrap();
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         let first = std::fs::read_to_string(claude_json_path_in(h.path())).unwrap();
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         let second = std::fs::read_to_string(claude_json_path_in(h.path())).unwrap();
         assert_eq!(first, second, "re-running setup must be a no-op");
     }
@@ -3485,13 +3511,19 @@ mod tests {
         )
         .unwrap();
 
+        // The program each command runs, read the way Claude Code reads it: the
+        // command is a quoted path now, so it no longer ends in `.sh` as text.
+        let program =
+            |e: &serde_json::Value| hook_command_path(e["hooks"][0]["command"].as_str().unwrap());
+        let dir = lumen_dir_in(h.path());
+
         let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre.len(), 1, "one PreToolUse matcher: Read");
         assert_eq!(pre[0]["matcher"], "Read");
-        assert!(pre[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .ends_with("lumen_read_intercept.sh"));
+        assert_eq!(
+            program(&pre[0]),
+            shell_path(&dir.join("lumen_read_intercept.sh").to_string_lossy())
+        );
 
         let post = v["hooks"]["PostToolUse"].as_array().unwrap();
         let matchers: Vec<&str> = post
@@ -3502,26 +3534,25 @@ mod tests {
             matchers,
             vec!["Read", "Bash"],
             "the meter handles exactly Read and Bash; the mcp__lumen__* tools meter \
-             themselves in-process, so registering them only forked a bash and a \
-             python3 per call to reach `exit 0`"
+             themselves in-process, so registering them only started a hook per call \
+             to do nothing"
         );
         for e in post {
-            assert!(
-                e["hooks"][0]["command"]
-                    .as_str()
-                    .unwrap()
-                    .ends_with("lumen_meter.sh"),
+            assert_eq!(
+                program(e),
+                shell_path(&dir.join("lumen_meter.sh").to_string_lossy()),
                 "every PostToolUse matcher points at the meter"
             );
         }
     }
 
-    /// Bash must be routed to the meter, or the script's `Bash)` branch is dead code.
+    /// Bash must be routed to the meter, or the meter's Bash arm is dead code.
     ///
     /// It was exactly that from E7 until 1.2.1: the branch existed, nothing invoked
     /// it, and `bash_output` had zero rows in 51 days. The old version of this test
     /// asserted the four-matcher list and so actively locked the gap in place, which
-    /// is why this assertion is separate and named for the consequence.
+    /// is why this assertion is separate and named for the consequence. That the arm
+    /// does something once reached is `hook_e2e::a_captured_bash_payload_lands_as_a_bash_output_row`.
     #[test]
     fn the_bash_branch_of_the_meter_is_actually_reachable() {
         let h = TempDir::new().unwrap();
@@ -3534,11 +3565,7 @@ mod tests {
         let post = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert!(
             post.iter().any(|e| e["matcher"] == "Bash"),
-            "Bash is not registered, so METER_TEMPLATE's `Bash)` arm can never run"
-        );
-        assert!(
-            METER_TEMPLATE.contains("\nBash)"),
-            "the meter must still have a Bash arm for the registration to reach"
+            "Bash is not registered, so the meter's Bash arm can never run"
         );
     }
 
@@ -3617,312 +3644,6 @@ mod tests {
         assert_eq!(hooks[0]["command"], "/opt/someone-elses-tool.sh");
     }
 
-    /// A hardcoded DB path made the installed hook the one component that could not
-    /// be exercised without writing to the user's real ledger.
-    #[test]
-    fn the_generated_meter_lets_lumen_db_be_overridden() {
-        let script = desired_meter_script("/tmp/generated.db", "/tmp/generated-tok");
-        assert!(
-            script.contains(r#"LUMEN_DB="${LUMEN_DB:-"#),
-            "LUMEN_DB must default to the generated path, not be fixed to it"
-        );
-        assert!(
-            script.contains(r#"LUMEN_TOK="${LUMEN_TOK:-"#),
-            "LUMEN_TOK likewise, so a test can point at a stub tokenizer"
-        );
-    }
-
-    // ── The generated meter, executed ────────────────────────────────────────
-    //
-    // Everything above inspects the template as text. These run it. The whole class
-    // of bug this release fixes lived in the gap between the two: a `Bash)` arm that
-    // was never reached, a TOKEN_SOURCE assignment swallowed by a subshell, a
-    // fallback that shared a file offset with the tokenizer it was replacing. None
-    // of those are visible in a string comparison.
-    //
-    // A stub tokenizer stands in for lumen-tok so the exit-code branches can be
-    // driven directly and the test needs no built binary. `tok_cli.rs` covers the
-    // real binary's side of the same contract.
-
-    /// Build a meter script wired to `db` and a stub tokenizer, and a temp home.
-    fn meter_harness(stub: &str) -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
-        let h = TempDir::new().unwrap();
-        let db = h.path().join("ledger.db");
-        let tok = h.path().join("stub-tok");
-        std::fs::write(&tok, stub).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tok, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        // Real schema, so a column the meter inserts but the schema lacks fails here
-        // rather than silently in production.
-        let out = std::process::Command::new("python3")
-            .arg("-c")
-            .arg("import sqlite3,sys; sqlite3.connect(sys.argv[1]).executescript(sys.argv[2])")
-            .arg(&db)
-            .arg(lumen_core::schema::DDL)
-            .output()
-            .expect("python3 must be present; the meter itself requires it");
-        assert!(
-            out.status.success(),
-            "schema setup failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-
-        let script = h.path().join("lumen_meter.sh");
-        std::fs::write(
-            &script,
-            desired_meter_script(&db.to_string_lossy(), &tok.to_string_lossy()),
-        )
-        .unwrap();
-        (h, script, db)
-    }
-
-    /// The repository's developer copy of the meter hook, if this is a source checkout.
-    ///
-    /// `None` in a packaged build, where the tests that use it skip rather than fail.
-    fn repo_meter_hook() -> Option<std::path::PathBuf> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.claude/hooks/lumen_meter.sh");
-        p.canonicalize().ok().filter(|p| p.is_file())
-    }
-
-    /// Stage one of the two meter copies against the same temp db and stub tokenizer.
-    ///
-    /// The generated script bakes both paths in; the repo copy resolves them at run time, so it
-    /// has to be handed them through the env overrides it honours. Returning the env means the
-    /// caller passes it for both and the two are driven identically — which is the whole point.
-    fn staged_meter(
-        which: &str,
-        stub: &str,
-    ) -> Option<(
-        TempDir,
-        std::path::PathBuf,
-        std::path::PathBuf,
-        String,
-        String,
-    )> {
-        let (h, script, db) = meter_harness(stub);
-        if which == "repo" {
-            std::fs::copy(repo_meter_hook()?, &script).unwrap();
-        }
-        let tok = h.path().join("stub-tok").to_string_lossy().into_owned();
-        let dbs = db.to_string_lossy().into_owned();
-        Some((h, script, db, dbs, tok))
-    }
-
-    /// Feed `payload` to `script`; return the rows it wrote as tab-joined strings.
-    fn run_meter(
-        script: &std::path::Path,
-        db: &std::path::Path,
-        payload: &str,
-        env: &[(&str, &str)],
-    ) -> Vec<String> {
-        let mut cmd = std::process::Command::new("bash");
-        cmd.arg(script)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.spawn().expect("spawn bash");
-        {
-            use std::io::Write;
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(payload.as_bytes())
-                .unwrap();
-        }
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            out.status.success(),
-            "the meter must always exit 0 so it never fails a tool call: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-
-        let q = std::process::Command::new("python3")
-            .arg("-c")
-            .arg(
-                "import sqlite3,sys\n\
-                 for r in sqlite3.connect(sys.argv[1]).execute(\
-                 'SELECT routed_via,token_source,full_tokens,tokens_returned,path,\
-                 COALESCE(req_key,\\'-\\'),COALESCE(session_id,\\'-\\'),\
-                 COALESCE(file_mtime,-1) \
-                 FROM read_events ORDER BY rowid'):\n\
-                 \x20   print('\\t'.join(str(c) for c in r))",
-            )
-            .arg(db)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&q.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    fn read_payload(path: &str) -> String {
-        format!(
-            r#"{{"tool_name":"Read","tool_input":{{"file_path":"{path}"}},"tool_response":"ok"}}"#
-        )
-    }
-
-    #[test]
-    fn a_measured_read_is_recorded_as_measured() {
-        let (h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 4242\n");
-        let target = h.path().join("some.rs");
-        std::fs::write(&target, "fn main() {}\n").unwrap();
-
-        let rows = run_meter(
-            &script,
-            &db,
-            &read_payload(&target.to_string_lossy()),
-            &[("CLAUDE_CODE_SESSION_ID", "sess-abc")],
-        );
-        assert_eq!(rows.len(), 1, "one Read, one row: {rows:?}");
-        let f: Vec<&str> = rows[0].split('\t').collect();
-        assert_eq!(f[0], "builtin_read");
-        assert_eq!(
-            f[1], "measured",
-            "a zero exit from the tokenizer is a measurement"
-        );
-        assert_eq!(f[2], "4242", "the tokenizer's number, verbatim");
-        assert_eq!(f[6], "sess-abc", "the session id must reach the row");
-
-        // The mtime is asserted because reading it is dialect-specific and the two
-        // dialects disagree in a way an exit code hides: BSD `stat -f` is "format",
-        // GNU `stat -f` is "display filesystem status". The GNU form succeeded and
-        // returned six lines of filesystem data, which shifted every field after it
-        // and made the insert throw — so this assertion is what tells us the value
-        // is a timestamp on whichever platform is running the test, rather than
-        // whatever else `stat` felt like printing.
-        let mtime: i64 = f[7].parse().expect("file_mtime must be an integer");
-        assert!(
-            mtime > 1_600_000_000,
-            "file_mtime must be a plausible Unix timestamp, got {mtime}"
-        );
-    }
-
-    /// Exit 3 means "not text". The row must say so and carry no invented count.
-    #[test]
-    fn an_unreadable_binary_is_recorded_as_unsupported_with_no_count() {
-        // Exits 3 like the real lumen-tok on a PNG. Note it prints nothing.
-        let (h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\nexit 3\n");
-        let target = h.path().join("shot.png");
-        std::fs::write(&target, [0x89u8, b'P', b'N', b'G', 0xFF, 0xFE, 0x80]).unwrap();
-
-        let rows = run_meter(&script, &db, &read_payload(&target.to_string_lossy()), &[]);
-        assert_eq!(rows.len(), 1, "the read still gets a row: {rows:?}");
-        let f: Vec<&str> = rows[0].split('\t').collect();
-        assert_eq!(f[1], "unsupported", "provenance must name the reason");
-        assert_eq!(
-            f[2], "0",
-            "no count exists for a PNG; bytes/4 would overstate it ~40x"
-        );
-    }
-
-    /// A genuinely broken tokenizer still yields a row, labelled as an estimate.
-    /// This is the negative control for the test above: if the script treated every
-    /// nonzero exit as 'unsupported', this would fail.
-    #[test]
-    fn a_broken_tokenizer_is_recorded_as_an_estimate_not_as_unsupported() {
-        let (h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\nexit 1\n");
-        let target = h.path().join("some.rs");
-        // 40 bytes -> bytes/4 = 10.
-        std::fs::write(&target, "0123456789012345678901234567890123456789").unwrap();
-
-        let rows = run_meter(&script, &db, &read_payload(&target.to_string_lossy()), &[]);
-        let f: Vec<&str> = rows[0].split('\t').collect();
-        assert_eq!(
-            f[1], "estimated",
-            "exit 1 is a broken tokenizer, which is not the same as unmeasurable input"
-        );
-        assert_eq!(
-            f[2], "10",
-            "the fallback must see the whole file: it reads the path, not a file \
-             descriptor whose offset the tokenizer already advanced"
-        );
-    }
-
-    /// The fix for the hardcoded path, proven by where the row lands.
-    #[test]
-    fn lumen_db_in_the_environment_redirects_the_row() {
-        let (h, script, generated_db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 7\n");
-        let elsewhere = h.path().join("redirected.db");
-        std::process::Command::new("python3")
-            .arg("-c")
-            .arg("import sqlite3,sys; sqlite3.connect(sys.argv[1]).executescript(sys.argv[2])")
-            .arg(&elsewhere)
-            .arg(lumen_core::schema::DDL)
-            .output()
-            .unwrap();
-
-        let target = h.path().join("some.rs");
-        std::fs::write(&target, "fn main() {}\n").unwrap();
-        let payload = read_payload(&target.to_string_lossy());
-
-        let rows = run_meter(
-            &script,
-            &elsewhere,
-            &payload,
-            &[("LUMEN_DB", &elsewhere.to_string_lossy())],
-        );
-        assert_eq!(rows.len(), 1, "the override target received the row");
-        assert!(
-            run_meter(&script, &generated_db, "{}", &[]).is_empty(),
-            "and the generated default stayed empty"
-        );
-    }
-
-    /// The arm that was unreachable until 1.2.1.
-    #[test]
-    fn a_bash_call_is_metered_from_its_output() {
-        let (_h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 99\n");
-        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"AWS_SECRET=hunter2 cargo test --workspace --all-targets"},"tool_response":{"stdout":"lots of output\n","stderr":""}}"#;
-
-        let rows = run_meter(&script, &db, payload, &[]);
-        assert_eq!(rows.len(), 1, "Bash must produce a row now: {rows:?}");
-        let f: Vec<&str> = rows[0].split('\t').collect();
-        assert_eq!(f[0], "bash_output");
-        assert_eq!(f[2], "99", "full_tokens is the output's token count");
-        assert_eq!(f[3], "0", "observation only: nothing was saved");
-        assert_eq!(
-            f[4], "cargo test",
-            "only the program and subcommand are stored, with the leading \
-             VAR=value assignment dropped so the secret never reaches the database"
-        );
-    }
-
-    /// A Bash call that produced nothing carries no information and gets no row.
-    #[test]
-    fn a_bash_call_with_no_output_is_not_recorded() {
-        let (_h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 0\n");
-        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":"","stderr":""}}"#;
-        assert!(run_meter(&script, &db, payload, &[]).is_empty());
-    }
-
-    /// The lumen tools meter themselves; the script must not double-count them.
-    #[test]
-    fn an_mcp_tool_call_writes_nothing() {
-        let (_h, script, db) = meter_harness("#!/bin/sh\ncat >/dev/null\necho 5\n");
-        for tool in [
-            "mcp__lumen__smart_read",
-            "mcp__lumen__recall_file",
-            "mcp__lumen__compress_logs",
-        ] {
-            let payload =
-                format!(r#"{{"tool_name":"{tool}","tool_input":{{}},"tool_response":"x"}}"#);
-            assert!(
-                run_meter(&script, &db, &payload, &[]).is_empty(),
-                "{tool} must not be metered by the hook"
-            );
-        }
-    }
-
     /// Write a settings.json with the given lumen matchers, and touch the scripts so
     /// the dangling-path check passes and only the matcher comparison is under test.
     fn settings_with_matchers(home: &Path, pre: &[&str], post: &[&str]) {
@@ -3936,7 +3657,7 @@ mod tests {
         let entry = |m: &str, cmd: &Path| {
             serde_json::json!({
                 "matcher": m,
-                "hooks": [{"type": "command", "command": cmd.to_string_lossy()}]
+                "hooks": [{"type": "command", "command": hook_command(cmd)}]
             })
         };
         std::fs::write(
@@ -4029,60 +3750,6 @@ mod tests {
         );
     }
 
-    /// Two shell-dialect traps, each of which silently disabled the meter on Linux.
-    ///
-    /// The functional tests above are what actually catch these — they run on Linux in
-    /// CI, which is where both were found. These string assertions exist so the reason
-    /// is visible at the point where someone might reintroduce them, rather than only
-    /// as a puzzling row-count mismatch on another platform.
-    #[test]
-    fn the_meter_avoids_the_two_shell_dialect_traps() {
-        // Comment lines are stripped first. Both traps are *described* in the
-        // template's own comments, so a naive `contains` matches the explanation of
-        // the bug and not the bug — which is exactly what happened when this test was
-        // written.
-        let code: String = METER_TEMPLATE
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            !code.contains("mktemp -t "),
-            "GNU mktemp rejects a -t template with fewer than three X's, so the temp \
-             file came back empty and the hook recorded nothing at all on Linux from \
-             1.1.5 to 1.2.0. Pass an explicit path template instead."
-        );
-        assert!(
-            code.contains("lumen_bash_out.XXXXXX"),
-            "the temp template needs its own X's; both dialects accept that form"
-        );
-        assert!(
-            !code.contains("stat -f %m \"$FILE_PATH\""),
-            "on GNU, `stat -f` is 'display filesystem status', not 'format' — it \
-             SUCCEEDS and prints six lines of filesystem data, so an `||` fallback \
-             never runs and the multi-line value shifts every field after it. \
-             Validate the output instead of trusting the exit code."
-        );
-        assert!(
-            code.contains("file_mtime()"),
-            "mtime must go through the dialect-validating helper"
-        );
-    }
-
-    /// The command label must not carry credentials into the database.
-    #[test]
-    fn the_meter_records_only_the_program_and_subcommand() {
-        assert!(
-            METER_TEMPLATE.contains("def cmd_label("),
-            "the command must be reduced to a label, not stored whole"
-        );
-        assert!(
-            !METER_TEMPLATE.contains("clean(cmd)[:200]"),
-            "storing 200 characters of a command line captures tokens and passwords"
-        );
-    }
-
     #[test]
     fn installing_hooks_preserves_unrelated_settings() {
         let h = TempDir::new().unwrap();
@@ -4117,19 +3784,77 @@ mod tests {
         assert_eq!(first, second, "re-running setup must not duplicate hooks");
     }
 
+    /// settings.json that does not parse is refused, not replaced.
+    ///
+    /// This test used to assert the opposite: Setup read the file as `{}`, wrote back
+    /// an object holding only Lumen's hooks, and counted it a success because a backup
+    /// existed. Every permission, environment variable and foreign hook the user had
+    /// was gone from the live file. The same rule now covers ~/.claude.json, where the
+    /// loss was every other MCP server.
     #[test]
-    fn installing_hooks_recovers_from_corrupt_settings() {
+    fn installing_hooks_refuses_corrupt_settings_and_leaves_them_byte_identical() {
         let h = TempDir::new().unwrap();
         std::fs::create_dir_all(h.path().join(".claude")).unwrap();
-        std::fs::write(global_settings_path_in(h.path()), "]]not json[[").unwrap();
+        let settings = global_settings_path_in(h.path());
+        std::fs::write(&settings, "]]not json[[").unwrap();
+        let before = fingerprint(&settings);
+
         let step = step_install_hooks_in(h.path());
-        assert_eq!(step.status, StepStatus::Ok);
+
+        assert_eq!(step.status, StepStatus::Error, "{}", step.detail);
+        assert!(step.detail.contains("not valid JSON"), "{}", step.detail);
+        assert_eq!(fingerprint(&settings), before, "the file must be untouched");
         assert!(
-            global_settings_path_in(h.path())
-                .with_extension("json.lumen_bak")
-                .exists(),
-            "the unreadable original is still backed up"
+            !settings.with_extension("json.lumen_bak").exists(),
+            "nothing was replaced, so there is nothing to back up"
         );
+        // The validator says the same thing rather than "no lumen hooks — run Setup",
+        // which would send the user to a Setup that refuses the same file.
+        let st = validate_hooks_in(h.path());
+        assert!(!st.healthy);
+        assert!(st.detail.contains("not valid JSON"), "{}", st.detail);
+    }
+
+    /// The negative control: a valid file of the right shape is merged as before.
+    #[test]
+    fn installing_hooks_accepts_an_empty_file_and_a_null_hooks_key() {
+        for body in [
+            "",
+            "  \n",
+            r#"{"hooks":null}"#,
+            r#"{"hooks":{"PreToolUse":null}}"#,
+        ] {
+            let h = TempDir::new().unwrap();
+            std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+            std::fs::write(global_settings_path_in(h.path()), body).unwrap();
+            let step = step_install_hooks_in(h.path());
+            assert_eq!(step.status, StepStatus::Ok, "{body:?}: {}", step.detail);
+        }
+    }
+
+    /// A `hooks` value Setup would have to replace to proceed is the user's to fix.
+    /// Indexing into it would otherwise panic the Setup command.
+    #[test]
+    fn installing_hooks_refuses_settings_of_the_wrong_shape() {
+        for body in [
+            r#"[]"#,
+            r#"{"hooks":[]}"#,
+            r#"{"hooks":"x"}"#,
+            r#"{"hooks":{"PostToolUse":{"matcher":"Read"}}}"#,
+        ] {
+            let h = TempDir::new().unwrap();
+            std::fs::create_dir_all(h.path().join(".claude")).unwrap();
+            let settings = global_settings_path_in(h.path());
+            std::fs::write(&settings, body).unwrap();
+            let step = step_install_hooks_in(h.path());
+            assert_eq!(step.status, StepStatus::Error, "{body}: {}", step.detail);
+            assert!(
+                step.detail.contains("left untouched"),
+                "{body}: {}",
+                step.detail
+            );
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), body);
+        }
     }
 
     // ── run_uninstall_in ─────────────────────────────────────────────────────
@@ -4137,8 +3862,8 @@ mod tests {
     #[test]
     fn uninstall_removes_everything_setup_installed() {
         let h = TempDir::new().unwrap();
-        step_install_scripts_in(h.path(), "/db", "/tok", "/mcp");
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_install_scripts_in(h.path(), "/db", "/mcp");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         step_install_hooks_in(h.path());
 
         let steps = run_uninstall_in(h.path(), &FakeAutoStart::default());
@@ -4186,7 +3911,7 @@ mod tests {
         )
         .unwrap();
 
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         step_install_hooks_in(h.path());
         run_uninstall_in(h.path(), &FakeAutoStart::default());
 
@@ -4224,7 +3949,7 @@ mod tests {
     #[test]
     fn uninstall_is_idempotent() {
         let h = TempDir::new().unwrap();
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         step_install_hooks_in(h.path());
         run_uninstall_in(h.path(), &FakeAutoStart::default());
         let steps = run_uninstall_in(h.path(), &FakeAutoStart::default());
@@ -4290,8 +4015,8 @@ mod tests {
         std::fs::write(claude_json_path_in(h.path()), claude_before).unwrap();
         std::fs::write(global_settings_path_in(h.path()), settings_before).unwrap();
 
-        step_install_scripts_in(h.path(), "/db", "/tok", "/mcp");
-        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db", "/tok");
+        step_install_scripts_in(h.path(), "/db", "/mcp");
+        step_register_mcp_in(h.path(), "/bin/lumen-mcp", "/db");
         step_install_hooks_in(h.path());
         run_uninstall_in(h.path(), &FakeAutoStart::default());
 
@@ -4313,6 +4038,250 @@ mod tests {
             .is_empty());
     }
 
+    // ── Setup re-run over an autostart opt-out ───────────────────────────────
+
+    /// A home Setup can complete in: `~/.claude` present and a lumen-mcp to bake.
+    fn setup_home(home: &Path) -> (String, String) {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let mcp = home.join("lumen-mcp");
+        std::fs::write(&mcp, "").unwrap();
+        (
+            home.join("data/lumen.db").to_string_lossy().to_string(),
+            mcp.to_string_lossy().to_string(),
+        )
+    }
+
+    /// 1.6.0 tells Windows users to re-run Setup to repair their hook commands. A
+    /// re-run that switched the login item back on would be 1.1.2's bug again, through
+    /// a second door.
+    #[test]
+    fn re_running_setup_leaves_a_login_item_the_user_turned_off_alone() {
+        let h = TempDir::new().unwrap();
+        let (db, mcp) = setup_home(h.path());
+        let a = FakeAutoStart::default();
+        // The startup registration, then the user's toggle.
+        assert!(ensure_autostart_once(
+            &a,
+            &autostart_marker_in(h.path()),
+            EXE
+        ));
+        a.disable().unwrap();
+
+        let steps = run_setup_with(h.path(), &a, &db, &mcp);
+
+        let step = find(&steps, AUTOSTART_ID);
+        assert_eq!(step.status, StepStatus::Ok, "{step:?}");
+        assert!(step.detail.contains("Left off"), "{}", step.detail);
+        assert!(!a.enabled.get(), "Setup switched the login item back on");
+        assert_eq!(
+            a.enable_calls.get(),
+            1,
+            "only the startup registration enabled it"
+        );
+        assert!(
+            marker_path_in(h.path()).exists(),
+            "an opt-out is not a failed step"
+        );
+    }
+
+    /// The negative control: with no marker nobody turned anything off, and Setup
+    /// registers the login item as it always has.
+    #[test]
+    fn setup_registers_the_login_item_when_nothing_was_turned_off() {
+        let h = TempDir::new().unwrap();
+        let (db, mcp) = setup_home(h.path());
+        let a = FakeAutoStart::default();
+
+        let steps = run_setup_with(h.path(), &a, &db, &mcp);
+
+        assert_eq!(find(&steps, AUTOSTART_ID).status, StepStatus::Ok);
+        assert!(a.enabled.get());
+        assert_eq!(a.enable_calls.get(), 1);
+    }
+
+    /// An unreadable state is not an opt-out. The marker alone proves nothing, so this
+    /// warns as it always did instead of claiming the user chose it.
+    #[test]
+    fn an_unreadable_login_item_with_a_marker_still_warns() {
+        let h = TempDir::new().unwrap();
+        let (db, mcp) = setup_home(h.path());
+        let marker = autostart_marker_in(h.path());
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, EXE).unwrap();
+
+        let steps = run_setup_with(h.path(), &FakeAutoStart::broken_read(), &db, &mcp);
+
+        let step = find(&steps, AUTOSTART_ID);
+        assert_eq!(step.status, StepStatus::Warn, "{step:?}");
+        assert!(!step.detail.contains("Left off"), "{}", step.detail);
+    }
+
+    // ── hook commands: what Claude Code runs is the script Setup wrote ───────
+
+    /// Each registered command must scan back to the file it names, for the homes that
+    /// broke the bare path: a space, a quote, shell metacharacters, a tab.
+    #[test]
+    fn a_registered_command_names_its_script_whole() {
+        for p in [
+            "/Users/Jane Doe/.claude/lumen/lumen_meter.sh",
+            "/home/o'brien/.claude/lumen/lumen_meter.sh",
+            "/home/$USER `id`/.claude/lumen/lumen_meter.sh",
+            "/home/tab\there/.claude/lumen/lumen_meter.sh",
+            "/home/plain/.claude/lumen/lumen_meter.sh",
+        ] {
+            let cmd = hook_command(Path::new(p));
+            assert_eq!(hook_command_path(&cmd), shell_path(p), "{cmd}");
+            assert!(!command_needs_quotes(&cmd), "{cmd}");
+        }
+    }
+
+    /// The Windows failure. Claude Code's scan takes a backslash as an escape, so a bare
+    /// `C:\Users\…` loses every separator before bash is even started.
+    #[test]
+    fn a_windows_path_survives_the_scan_only_with_forward_slashes() {
+        let win = r"C:\Users\Jane\.claude\lumen\lumen_meter.sh";
+        assert_eq!(
+            hook_command_path(win),
+            "C:UsersJane.claudelumenlumen_meter.sh"
+        );
+        assert!(command_needs_quotes(win), "the validator must flag it");
+
+        let cmd = sh_quote(&shell_path_for(win, true));
+        assert_eq!(cmd, "'C:/Users/Jane/.claude/lumen/lumen_meter.sh'");
+        assert_eq!(
+            hook_command_path(&cmd),
+            "C:/Users/Jane/.claude/lumen/lumen_meter.sh"
+        );
+        assert!(!command_needs_quotes(&cmd));
+    }
+
+    /// Off Windows a backslash is an ordinary filename byte. Rewriting it would name a
+    /// different file.
+    #[test]
+    fn a_backslash_is_kept_in_a_unix_path() {
+        assert_eq!(shell_path_for(r"/tmp/a\b.sh", false), r"/tmp/a\b.sh");
+        let cmd = sh_quote(&shell_path_for(r"/tmp/a\b.sh", false));
+        assert_eq!(hook_command_path(&cmd), r"/tmp/a\b.sh");
+    }
+
+    /// The pre-1.6.0 registration in a home with a space. Every script exists, so the
+    /// old dangling check passed and this reported healthy while no hook ran.
+    #[test]
+    fn an_unquoted_command_is_reported_even_though_its_script_exists() {
+        let root = TempDir::new().unwrap();
+        let home = root.path().join("Jane Doe");
+        settings_with_matchers(&home, &["Read"], &["Read", "Bash"]);
+        // Each command as the bare path 1.5.1 wrote.
+        let path = global_settings_path_in(&home);
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for phase in ["PreToolUse", "PostToolUse"] {
+            for e in v["hooks"][phase].as_array_mut().unwrap() {
+                let c = &mut e["hooks"][0]["command"];
+                *c = json!(hook_command_path(c.as_str().unwrap()));
+            }
+        }
+        std::fs::write(&path, v.to_string()).unwrap();
+
+        let st = validate_hooks_in(&home);
+        assert!(!st.healthy, "{}", st.detail);
+        assert!(st.detail.contains("unquoted path"), "{}", st.detail);
+        assert!(
+            !st.detail.contains("dangling"),
+            "every script exists: {}",
+            st.detail
+        );
+
+        step_install_hooks_in(&home);
+        let st = validate_hooks_in(&home);
+        assert!(st.healthy, "re-running Setup must repair it: {}", st.detail);
+    }
+
+    /// The negative control. A bare path with nothing the shell splits or expands runs
+    /// as written, and flagging it would send every macOS user of 1.5.1 to re-run Setup
+    /// for nothing.
+    #[test]
+    fn a_bare_path_the_shell_takes_literally_is_not_flagged() {
+        assert!(!command_needs_quotes(
+            "/Users/jane/.claude/lumen/lumen_meter.sh"
+        ));
+        assert!(!command_needs_quotes(
+            "/home/j.doe-1/.claude/lumen/lumen_meter.sh"
+        ));
+    }
+
+    // ── find_binary_from ─────────────────────────────────────────────────────
+
+    /// Windows bundles `lumen-mcp.exe`. Probing for the bare name never matched it, so
+    /// Setup there reported the sidecar missing beside a working binary.
+    #[test]
+    fn the_sidecar_is_found_under_this_platforms_file_name() {
+        let d = TempDir::new().unwrap();
+        let file = format!("lumen-mcp{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(d.path().join(&file), "").unwrap();
+        assert_eq!(
+            find_binary_from(d.path(), "lumen-mcp"),
+            Some(d.path().join(file))
+        );
+    }
+
+    #[test]
+    fn a_sidecar_under_another_platforms_name_is_not_found() {
+        let d = TempDir::new().unwrap();
+        let other = if cfg!(windows) {
+            "lumen-mcp"
+        } else {
+            "lumen-mcp.exe"
+        };
+        std::fs::write(d.path().join(other), "").unwrap();
+        assert_eq!(find_binary_from(d.path(), "lumen-mcp"), None);
+    }
+
+    /// The dev layout: the app runs from `target/debug` and the sidecar was built into
+    /// `target/release`.
+    #[test]
+    fn a_dev_build_finds_the_release_sidecar_by_walking_up() {
+        let d = TempDir::new().unwrap();
+        let release = d.path().join("target/release");
+        let start = d.path().join("target/debug/deps");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::create_dir_all(&start).unwrap();
+        let file = format!("lumen-mcp{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(release.join(&file), "").unwrap();
+        assert_eq!(
+            find_binary_from(&start, "lumen-mcp"),
+            Some(release.join(file))
+        );
+    }
+
+    // ── claude_on_path ───────────────────────────────────────────────────────
+
+    /// npm installs `claude.cmd` on Windows, and `which` does not exist there.
+    #[test]
+    fn claude_is_found_on_path_under_this_platforms_name() {
+        let d = TempDir::new().unwrap();
+        let name = if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        };
+        std::fs::write(d.path().join(name), "").unwrap();
+        let path =
+            std::env::join_paths([d.path().join("nonexistent").as_path(), d.path()]).unwrap();
+        assert!(claude_on_path(Some(&path)));
+    }
+
+    #[test]
+    fn claude_is_not_found_where_it_is_not() {
+        let d = TempDir::new().unwrap();
+        // A directory of that name is not a program, and neither is a lookalike.
+        std::fs::create_dir(d.path().join("claude")).unwrap();
+        std::fs::write(d.path().join("claude-code"), "").unwrap();
+        let path = std::env::join_paths([d.path()]).unwrap();
+        assert!(!claude_on_path(Some(&path)));
+        assert!(!claude_on_path(None));
+    }
+
     // ── marker / setup-needed detection ──────────────────────────────────────
 
     #[test]
@@ -4332,389 +4301,6 @@ mod tests {
             marker.starts_with(dir.path()),
             "the marker must live under the supplied home, never the real one"
         );
-    }
-    // ── The shipped intercept's fail-open guards ──────────────────────────────
-    //
-    // These exist because the guards were fixed in .claude/hooks/ — the developer
-    // copy — and shipped nowhere. Setup generates its own script from
-    // INTERCEPT_TEMPLATE, so the two are separate sources and drifted silently:
-    // every installed Lumen kept the deadlock while the repo looked fixed. The
-    // drift test below is the one that would have caught it; the rest run the
-    // generated script for real, because "contains the string" is what let a
-    // script that could not fail open look fixed.
-
-    /// Write the generated script to `dir` and return its path.
-    fn staged_intercept(dir: &Path, mcp_bin: &str) -> PathBuf {
-        let db = dir.join("lumen.db");
-        let script = dir.join("lumen_read_intercept.sh");
-        std::fs::write(
-            &script,
-            desired_intercept_script(&db.to_string_lossy(), mcp_bin),
-        )
-        .unwrap();
-        let mut perm = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
-        std::fs::set_permissions(&script, perm).unwrap();
-        script
-    }
-
-    /// A file comfortably over the 300-line threshold.
-    fn big_source(dir: &Path) -> PathBuf {
-        let p = dir.join("big.rs");
-        std::fs::write(&p, "fn f() {}\n".repeat(400)).unwrap();
-        p
-    }
-
-    /// Run the hook with a Read payload. Returns (exit code, stderr).
-    fn run_intercept(script: &Path, file: &Path, session: &str, mcp_bin: &str) -> (i32, String) {
-        let payload = serde_json::json!({
-            "tool_name": "Read",
-            "session_id": session,
-            "tool_input": { "file_path": file.to_string_lossy() },
-        })
-        .to_string();
-
-        let mut child = std::process::Command::new("bash")
-            .arg(script)
-            .env("LUMEN_MCP_BIN", mcp_bin)
-            // A minimal PATH so `command -v lumen-mcp` cannot find a real one and
-            // make the missing-binary case silently pass for the wrong reason.
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("bash is available");
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(payload.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        (
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    #[test]
-    fn the_shipped_intercept_blocks_a_first_large_read() {
-        let h = TempDir::new().unwrap();
-        let script = staged_intercept(h.path(), "/bin/sh"); // exists ⇒ guard 1 passes
-        let big = big_source(h.path());
-
-        let (code, err) = run_intercept(&script, &big, "s1", "/bin/sh");
-        assert_eq!(code, 2, "a large read must still be redirected");
-        assert!(err.contains("Lumen intercept:"));
-        // Without this sentence the model has no way to know an escape exists, which
-        // is what turned the block into an abandoned task in the field.
-        assert!(
-            err.contains("will be allowed through"),
-            "the block must state that a retry is allowed: {err}"
-        );
-    }
-
-    #[test]
-    fn the_shipped_intercept_fails_open_when_lumen_mcp_is_missing() {
-        let h = TempDir::new().unwrap();
-        let script = staged_intercept(h.path(), "/nonexistent/lumen-mcp");
-        let big = big_source(h.path());
-
-        let (code, _) = run_intercept(&script, &big, "s2", "/nonexistent/lumen-mcp");
-        assert_eq!(
-            code, 0,
-            "with no server to route to, blocking leaves the model no way to read at all"
-        );
-    }
-
-    #[test]
-    fn the_shipped_intercept_releases_a_repeated_read() {
-        let h = TempDir::new().unwrap();
-        let script = staged_intercept(h.path(), "/bin/sh");
-        let big = big_source(h.path());
-
-        let (first, _) = run_intercept(&script, &big, "s3-unique-abc", "/bin/sh");
-        let (second, _) = run_intercept(&script, &big, "s3-unique-abc", "/bin/sh");
-        assert_eq!(first, 2, "first read is redirected");
-        assert_eq!(
-            second, 0,
-            "a model back on the built-in Read has already been told to use Lumen"
-        );
-    }
-
-    #[test]
-    fn the_shipped_intercept_spools_a_fired_guard() {
-        let h = TempDir::new().unwrap();
-        let script = staged_intercept(h.path(), "/nonexistent/lumen-mcp");
-        let big = big_source(h.path());
-
-        run_intercept(&script, &big, "s4", "/nonexistent/lumen-mcp");
-
-        // Beside the database, which is where `lumen report` looks for it.
-        let spool = h.path().join("faults.jsonl");
-        let text = std::fs::read_to_string(&spool).expect("a fired guard is recorded");
-        let rec: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-        assert_eq!(rec["kind"], "hook_fail_open");
-        assert_eq!(rec["variant"], "lumen_mcp_missing");
-        assert_eq!(rec["session_id"], "s4");
-    }
-
-    #[test]
-    fn a_file_below_the_threshold_is_neither_blocked_nor_recorded() {
-        let h = TempDir::new().unwrap();
-        let script = staged_intercept(h.path(), "/nonexistent/lumen-mcp");
-        let small = h.path().join("small.rs");
-        std::fs::write(&small, "fn f() {}\n".repeat(10)).unwrap();
-
-        let (code, _) = run_intercept(&script, &small, "s5", "/nonexistent/lumen-mcp");
-        assert_eq!(code, 0);
-        assert!(
-            !h.path().join("faults.jsonl").exists(),
-            "a read we were never going to intercept is not a routing failure"
-        );
-    }
-
-    /// The test that would have caught the drift: whatever guards the developer copy
-    /// has, the shipped script must have too. Comparing behaviour-bearing markers
-    /// rather than whole text, because the two legitimately differ — the shipped one
-    /// has paths baked in and carries a build stamp.
-    #[test]
-    fn the_shipped_and_developer_intercepts_agree_on_their_guards() {
-        let repo_copy = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(".claude/hooks/lumen_read_intercept.sh");
-        let dev = match std::fs::read_to_string(&repo_copy) {
-            Ok(t) => t,
-            // Absent in a packaged build; nothing to compare against.
-            Err(_) => return,
-        };
-        let shipped = desired_intercept_script("/tmp/x.db", "/tmp/lumen-mcp");
-
-        for marker in [
-            "lumen_mcp_missing",
-            "retry_escape_valve",
-            "will be allowed through",
-            "LUMEN_CAPTURE",
-            "hook_fail_open",
-        ] {
-            assert!(
-                dev.contains(marker),
-                "developer copy lost {marker} — fix it there too"
-            );
-            assert!(
-                shipped.contains(marker),
-                "shipped script is missing {marker}; the fix did not reach real installs"
-            );
-        }
-    }
-
-    /// The developer meter hook and the installed one must record the same columns.
-    ///
-    /// They drifted to nine columns against fifteen, and the developer copy also resolved
-    /// the database as <workspace>/lumen.db — a path with no schema — so every INSERT
-    /// failed and `|| true` discarded the error. It recorded nothing for weeks while
-    /// appearing to work. A row missing token_source is indistinguishable from a bytes/4
-    /// estimate, and one missing req_key cannot be deduplicated, so a partial writer
-    /// quietly degrades every figure built on the ledger.
-    #[test]
-    fn the_generated_intercept_actually_redirects_a_large_output_file() {
-        // End to end through the real script: a .output file above the threshold must be blocked
-        // and pointed at compress_logs. The unit test above checks the list; this checks that the
-        // shell built from it behaves.
-        let h = TempDir::new().unwrap();
-        let script = h.path().join("intercept.sh");
-        std::fs::write(
-            &script,
-            desired_intercept_script("/tmp/x.db", &h.path().join("mcp").to_string_lossy()),
-        )
-        .unwrap();
-        // The guard needs an executable at LUMEN_MCP_BIN or it fails open before deciding.
-        let mcp = h.path().join("mcp");
-        std::fs::write(&mcp, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let big = h.path().join("build.output");
-        std::fs::write(&big, "a line of build output\n".repeat(400)).unwrap();
-
-        let payload = format!(
-            r#"{{"tool_name":"Read","tool_input":{{"file_path":"{}"}},"session_id":"out-e2e"}}"#,
-            big.to_string_lossy()
-        );
-        let out = std::process::Command::new("bash")
-            .arg(&script)
-            .env("LUMEN_MCP_BIN", &mcp)
-            .env("TMPDIR", h.path())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut c| {
-                use std::io::Write;
-                c.stdin.take().unwrap().write_all(payload.as_bytes())?;
-                c.wait_with_output()
-            })
-            .expect("run the intercept");
-
-        // Exit 2 is the block: the hook tells Claude Code to use the tool instead.
-        assert_eq!(
-            out.status.code(),
-            Some(2),
-            "a 400-line .output file must be redirected, not passed through. stderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let msg = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            msg.contains("compress_logs"),
-            "an .output file is a log, so it must be sent to compress_logs: {msg}"
-        );
-    }
-
-    #[test]
-    fn both_intercept_copies_route_every_log_extension_including_output() {
-        // The list lives in three places: lumen_core::coverage::LOG_EXTS, INTERCEPT_TEMPLATE here,
-        // and the repo's developer hook. `.output` was missing from all the shell copies because
-        // nobody was comparing them to the constant — so this drives the assertion from the
-        // constant rather than from a hand-written list that could drift the same way.
-        let generated = desired_intercept_script("/tmp/x.db", "/tmp/mcp");
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.claude/hooks/lumen_read_intercept.sh");
-
-        let mut copies = vec![("generated".to_string(), generated)];
-        if let Ok(body) = std::fs::read_to_string(&repo) {
-            copies.push(("repo".to_string(), body));
-        }
-
-        for (which, body) in &copies {
-            // The case arm itself, not the FILE_TYPE assignment: the generated copy puts both on
-            // one line while the repo copy splits them, so keying on the assignment finds the wrong
-            // line in one of them.
-            let arm = body
-                .lines()
-                .map(str::trim)
-                .find(|l| l.starts_with("log|"))
-                .unwrap_or_else(|| panic!("[{which}] no log case arm found in the intercept"));
-            for ext in lumen_core::coverage::LOG_EXTS {
-                // Split on the case-arm delimiters rather than substring-matching: `out|` is a
-                // substring of `output|`, so a plain `contains` would report `.out` as routed even
-                // if only `.output` were present.
-                let arm_exts: Vec<&str> = arm
-                    .split(')')
-                    .next()
-                    .unwrap_or("")
-                    .split('|')
-                    .map(str::trim)
-                    .collect();
-                assert!(
-                    arm_exts.contains(ext),
-                    "[{which}] the log arm does not route .{ext}: {arm}"
-                );
-            }
-        }
-        assert!(
-            copies.len() == 2 || std::env::var("CI").is_err(),
-            "the repo hook copy should be present in a source checkout"
-        );
-    }
-
-    #[test]
-    fn both_meter_hooks_agree_on_the_provenance_they_record() {
-        // Replaces a test that grepped both scripts for column *names*. That is why an exit-code
-        // bug walked straight past it: the developer copy did
-        //
-        //     FULL_TOKENS=$("$LUMEN_TOK" < "$FILE_PATH" 2>/dev/null || echo 0)
-        //     TOKEN_SOURCE="measured"
-        //
-        // discarding the exit code, so a PNG — which lumen-tok rejects with exit 3 — was written
-        // as `full_tokens=0, token_source='measured'`. An unsupported file laundered as a
-        // measurement, in the one column that exists to tell those two apart. Every column name
-        // matched, so the old test was satisfied.
-        //
-        // This one runs both scripts and compares what they actually record.
-        let cases: [(&str, &str, &str); 3] = [
-            // stub tokenizer                                     expected source  expected tokens
-            ("#!/bin/sh\ncat >/dev/null\necho 4242\n", "measured", "4242"),
-            // Exit 3 is EXIT_NOT_TEXT: the tokenizer ran and said this is not text. A fact about
-            // the file, not a failure — and it must not become a bytes/4 guess, which overstates
-            // a screenshot by roughly 40x.
-            ("#!/bin/sh\ncat >/dev/null\nexit 3\n", "unsupported", "0"),
-            // Any other non-zero: the tokenizer is broken, so an estimate is all there is, and it
-            // must be labelled as one.
-            ("#!/bin/sh\ncat >/dev/null\nexit 1\n", "estimated", ""),
-        ];
-
-        let Some(_) = repo_meter_hook() else {
-            eprintln!("skipping: no repo hook copy (packaged build)");
-            return;
-        };
-
-        for (stub, want_source, want_tokens) in cases {
-            let mut seen: Vec<(String, String, String)> = Vec::new();
-            for which in ["generated", "repo"] {
-                let (h, script, db, dbs, tok) = staged_meter(which, stub).unwrap();
-                let f = h.path().join("subject.rs");
-                std::fs::write(&f, "fn main() {}\n").unwrap();
-                let rows = run_meter(
-                    &script,
-                    &db,
-                    &read_payload(&f.to_string_lossy()),
-                    &[("LUMEN_DB", &dbs), ("LUMEN_TOK", &tok)],
-                );
-                assert_eq!(rows.len(), 1, "[{which}] expected one row, got {rows:?}");
-                let cols: Vec<&str> = rows[0].split('\t').collect();
-                seen.push((
-                    cols[0].to_string(),
-                    cols[1].to_string(),
-                    cols[2].to_string(),
-                ));
-            }
-
-            let (g, r) = (&seen[0], &seen[1]);
-            assert_eq!(
-                g, r,
-                "the two meter hooks disagree for stub {stub:?}: generated {g:?} vs repo {r:?}"
-            );
-            assert_eq!(g.1, want_source, "wrong token_source for stub {stub:?}");
-            if !want_tokens.is_empty() {
-                assert_eq!(g.2, want_tokens, "wrong full_tokens for stub {stub:?}");
-            }
-            assert_eq!(g.0, "builtin_read");
-        }
-    }
-
-    #[test]
-    fn both_meter_hooks_agree_that_a_missing_tokenizer_is_an_estimate() {
-        let Some(_) = repo_meter_hook() else { return };
-        let mut seen = Vec::new();
-        for which in ["generated", "repo"] {
-            let (h, script, db, dbs, _tok) = staged_meter(which, "#!/bin/sh\nexit 0\n").unwrap();
-            let f = h.path().join("subject.rs");
-            // 40 bytes -> a bytes/4 estimate of 10.
-            std::fs::write(&f, "0123456789".repeat(4)).unwrap();
-            let missing = h.path().join("no-such-tok").to_string_lossy().into_owned();
-            let rows = run_meter(
-                &script,
-                &db,
-                &read_payload(&f.to_string_lossy()),
-                &[("LUMEN_DB", &dbs), ("LUMEN_TOK", &missing)],
-            );
-            let cols: Vec<&str> = rows[0].split('\t').collect();
-            seen.push((cols[1].to_string(), cols[2].to_string()));
-        }
-        assert_eq!(
-            seen[0], seen[1],
-            "hooks disagree with no tokenizer: {seen:?}"
-        );
-        assert_eq!(seen[0].0, "estimated");
-        assert_eq!(seen[0].1, "10", "bytes/4 of 40 bytes");
     }
 
     /// The cask must uninstall the LaunchAgent that actually exists.

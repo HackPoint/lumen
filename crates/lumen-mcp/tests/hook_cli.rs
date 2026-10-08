@@ -606,19 +606,23 @@ fn a_large_source_read_is_blocked_once_and_the_retry_is_let_through() {
     assert_eq!(f["session_id"], READ_SESSION);
 }
 
+/// `.output` included: until #24 the list stopped at `out`, matching is exact, and a
+/// large `.output` was read whole.
 #[test]
 fn a_large_log_read_is_sent_to_compress_logs() {
     let s = sandbox();
-    let log = s.file("build.log", &"ok\n".repeat(400));
-    let ran = s.intercept(&captured("read_pre.json", &s.proj, Some(&log)), &[]);
-    assert_eq!(ran.code, 2, "{ran:?}");
-    assert!(
-        ran.stderr.contains(&format!(
-            "lumen:compress_logs(path=\"{}\")",
-            log.to_string_lossy()
-        )),
-        "{ran:?}"
-    );
+    for name in ["build.log", "task.output"] {
+        let log = s.file(name, &"ok\n".repeat(400));
+        let ran = s.intercept(&captured("read_pre.json", &s.proj, Some(&log)), &[]);
+        assert_eq!(ran.code, 2, "{name}: {ran:?}");
+        assert!(
+            ran.stderr.contains(&format!(
+                "lumen:compress_logs(path=\"{}\")",
+                log.to_string_lossy()
+            )),
+            "{name}: {ran:?}"
+        );
+    }
 }
 
 /// Each case the intercept must let through silently: below the threshold, a kind it
