@@ -2100,3 +2100,203 @@ fn the_plugin_script_reports_where_lumen_mcp_would_have() {
         );
     }
 }
+
+// ── scripts/verify-hooks.sh ──────────────────────────────────────────────────
+
+/// What `scripts/verify-hooks.sh` runs, apart from the hooks and `sqlite3`.
+const VERIFY_TOOLS: &[&str] = &[
+    "bash", "cat", "date", "grep", "ln", "mkdir", "mktemp", "rm", "sed", "tr",
+];
+
+/// `scripts/verify-hooks.sh --expect <this build> <dir>`, as a user runs it: by path
+/// on macOS and Linux, through Git Bash on Windows, with the rig's home and temp dir.
+/// PATH holds the tools it needs and `sqlite3` if this machine has one, so a
+/// `lumen-mcp` installed here cannot stand in for the one Setup baked. Returns the
+/// exit code, each result line as (PASS|FAIL|SKIP, text), and the raw output.
+fn verify_hooks(rig: &Rig, dir: &Path) -> (i32, Vec<(String, String)>, String) {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/verify-hooks.sh");
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new(git_bash());
+        c.arg(shell_path(&script.to_string_lossy()));
+        c
+    } else {
+        Command::new(&script)
+    };
+    let tools = rig.root.path().join("verify-bin");
+    std::fs::create_dir_all(&tools).unwrap();
+    #[cfg(unix)]
+    {
+        for tool in VERIFY_TOOLS {
+            link_tool(&tools, tool);
+        }
+        let host = std::env::var_os("PATH").unwrap_or_default();
+        if let Some(found) = std::env::split_paths(&host)
+            .map(|d| d.join("sqlite3"))
+            .find(|p| p.is_file())
+        {
+            std::os::unix::fs::symlink(found, tools.join("sqlite3")).unwrap();
+        }
+    }
+    // Windows: Git Bash puts its own directories first, as it does for a hook.
+    let mut path = vec![tools];
+    if let Some(root) = std::env::var_os("SYSTEMROOT") {
+        path.push(PathBuf::from(root).join("System32"));
+    }
+    let out = cmd
+        .args(["--expect", env!("CARGO_PKG_VERSION")])
+        .arg(shell_path(&dir.to_string_lossy()))
+        .env("PATH", std::env::join_paths(path).unwrap())
+        .env("HOME", &rig.home)
+        .env("USERPROFILE", &rig.home)
+        .env("TMPDIR", &rig.tmp)
+        .env("TMP", &rig.tmp)
+        .env("TEMP", &rig.tmp)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run scripts/verify-hooks.sh");
+    let raw = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let results = raw
+        .lines()
+        .filter_map(|line| {
+            let plain = without_colour(line);
+            let line = plain.trim_start();
+            ["PASS", "FAIL", "SKIP"].iter().find_map(|status| {
+                let text = line.strip_prefix(status)?.strip_prefix("  ")?;
+                Some((status.to_string(), text.to_string()))
+            })
+        })
+        .collect();
+    (out.status.code().unwrap_or(-1), results, raw)
+}
+
+/// `line` without its ANSI colour codes.
+fn without_colour(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            chars.by_ref().find(|&c| c == 'm');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The texts of the results with `status`.
+fn with_status<'a>(results: &'a [(String, String)], status: &str) -> Vec<&'a str> {
+    results
+        .iter()
+        .filter(|(s, _)| s == status)
+        .map(|(_, t)| t.as_str())
+        .collect()
+}
+
+/// The verify-hooks scratch directories left in the rig's temp dir.
+fn scratch_left(rig: &Rig) -> Vec<PathBuf> {
+    std::fs::read_dir(&rig.tmp)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("lumen-verify-hooks."))
+        })
+        .collect()
+}
+
+/// What Setup installs passes every check, and checking it touched nothing of the
+/// rig's: the hooks ran against the script's own scratch ledger, which it removed.
+#[test]
+fn verify_hooks_passes_the_hooks_setup_installs() {
+    let rig = Rig::new();
+    rig.install(&rig.real_mcp());
+    let (code, results, raw) = verify_hooks(&rig, &lumen_dir_in(&rig.home));
+    eprintln!("verify-hooks [{OS}] Setup's hooks: exit {code}\n{raw}");
+    assert_eq!(results.len(), 13, "{raw}");
+    assert_eq!(with_status(&results, "FAIL"), Vec::<&str>::new(), "{raw}");
+    // The rows are read with sqlite3, and only its absence may skip that.
+    for skipped in with_status(&results, "SKIP") {
+        assert!(
+            skipped.ends_with("there is no sqlite3 here to read its rows"),
+            "{raw}"
+        );
+    }
+    assert_eq!(code, 0, "{raw}");
+    assert!(!rig.spool.exists(), "{:?}", rig.faults());
+    assert!(
+        !rig.db.exists() || rig.rows().is_empty(),
+        "{:?}",
+        rig.rows()
+    );
+    assert_eq!(scratch_left(&rig), Vec::<PathBuf>::new());
+}
+
+/// Negative control. The 1.5.1 hooks fail by name and are not run: nothing they
+/// would have written exists, and they would have needed a python3 PATH lacks.
+#[test]
+fn verify_hooks_fails_the_hooks_1_5_1_installed_without_running_them() {
+    let rig = Rig::new();
+    rig.v151_scripts();
+    let (code, results, raw) = verify_hooks(&rig, &lumen_dir_in(&rig.home));
+    eprintln!("verify-hooks [{OS}] 1.5.1's hooks: exit {code}\n{raw}");
+    let failed = with_status(&results, "FAIL");
+    assert_eq!(failed.len(), 2, "{raw}");
+    for (text, name) in failed
+        .iter()
+        .zip(["lumen_meter.sh", "lumen_read_intercept.sh"])
+    {
+        assert!(
+            text.starts_with(&format!(
+                "{name}, written by Lumen 1.5.1, predates `lumen-mcp hook`"
+            )),
+            "{raw}"
+        );
+    }
+    assert_eq!(
+        results.last().map(|(s, t)| (s.as_str(), t.as_str())),
+        Some(("SKIP", "not run — fix the failures above first")),
+        "{raw}"
+    );
+    assert_eq!(code, 1, "{raw}");
+    assert!(!rig.db.exists() && !rig.spool.exists());
+    assert_eq!(scratch_left(&rig), Vec::<PathBuf>::new());
+}
+
+/// Lumen moved or removed. The hooks still exit 0 and every guard is still in the
+/// script for a grep to find; the check this replaced passed them. Run, they meter
+/// nothing and block nothing, and verify-hooks says so.
+#[test]
+fn verify_hooks_fails_hooks_whose_lumen_mcp_is_gone() {
+    let rig = Rig::new();
+    let mcp = rig.real_mcp();
+    rig.install(&mcp);
+    std::fs::remove_file(&mcp).unwrap();
+    let (code, results, raw) = verify_hooks(&rig, &lumen_dir_in(&rig.home));
+    eprintln!("verify-hooks [{OS}] lumen-mcp gone: exit {code}\n{raw}");
+    let failed = with_status(&results, "FAIL");
+    for check in [
+        "meter: a Read gave exit 0, stdout [], stderr [lumen: cannot run lumen-mcp",
+        "intercept: a 400-line file gave exit 0, stdout [], stderr [lumen: cannot run lumen-mcp",
+    ] {
+        assert!(
+            failed.iter().any(|t| t.starts_with(check)),
+            "{check}\n{raw}"
+        );
+    }
+    // What the hooks did do, they did as they should.
+    let passed = with_status(&results, "PASS");
+    for check in ["intercept without lumen-mcp", "meter without lumen-mcp"] {
+        assert!(
+            passed.iter().any(|t| t.starts_with(check)),
+            "{check}\n{raw}"
+        );
+    }
+    assert_eq!(code, 1, "{raw}");
+    assert!(!rig.spool.exists(), "{:?}", rig.faults());
+    assert_eq!(scratch_left(&rig), Vec::<PathBuf>::new());
+}
