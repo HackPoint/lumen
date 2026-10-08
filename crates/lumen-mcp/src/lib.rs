@@ -535,11 +535,13 @@ pub fn handle_tools_list() -> Value {
         {
             "name": "compress_logs",
             "description": "Deterministically compact a log file or text dump — collapses \
-    consecutive identical lines, stack trace runs (Java/Node/Python/Rust), and blank-line noise \
-    into annotated short form with exact counts. Not LLM summarization: fully reversible, no \
-    information loss, just compaction. Use BEFORE analyzing error logs, crash dumps, verbose \
-    build output, or any large repetitive text to reduce what you need to read. Accepts a file \
-    path OR inline text. Reports original vs compressed tokens.",
+    consecutive identical lines, stack trace runs (Java/Node/Python/Rust), and blank-line runs \
+    into annotated short form. Not LLM summarization, and not lossless: three or more identical \
+    lines are kept once with the count of the rest, but a stack trace of five or more frames \
+    keeps its first two and its last, and the frames between are dropped, leaving only their \
+    count. Read the file itself if you need them. Use BEFORE analyzing error logs, crash dumps, \
+    verbose build output, or any large repetitive text to reduce what you need to read. Accepts \
+    a file path OR inline text. Reports original vs compressed tokens.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

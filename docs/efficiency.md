@@ -44,14 +44,12 @@ Recorded reads between 2026-06-07 and 2026-07-31. The ledger is live — it grow
 work, including from the reads that produced this page — so re-running the test gives slightly
 larger numbers, not the same ones.
 
-**1,573 intercepted reads, 11.03M tokens saved.** Priced through the same `Econ` model the UI
-headline uses:
+**1,573 intercepted reads, 11.03M tokens saved.**
 
-| | |
-| --- | --- |
-| gross value of the saving | $427.35 |
-| cost of the extra round each intercept forces | −$328.14 |
-| **net** | **$99.21** |
+The dollar value this section gave is withdrawn (1.6.0). It was priced through the `Econ`
+model the UI headline uses, whose rounds-remaining input `R` is one assumed constant
+(`DEFAULT_ROUNDS_REMAINING`, 65) rather than derived per call, so the figure was that
+assumption multiplied out. The test still prints it; it is not published as a measurement.
 
 The missed-optimization baseline — what the un-intercepted reads cost — is **3,500,277 tokens**.
 The raw figure is 6,931,572, and **half of that is binary files** whose token count came from a
@@ -172,8 +170,8 @@ record, across exit 0, exit 3, exit 1 and a missing binary. Reintroducing the bu
 
 ## 4. Where interception does not pay
 
-Break-even is **5,383 avoided tokens per read** — below that, the extra round the block
-forces costs more than the outline saves. **17 of 31 files fall short**:
+At the assumed `R`, break-even is **5,383 avoided tokens per read** — below that, the extra
+round the block forces costs more than the outline saves. **17 of 31 files fall short**:
 
 | avoided | lines | file |
 | --- | --- | --- |
@@ -184,9 +182,9 @@ forces costs more than the outline saves. **17 of 31 files fall short**:
 | 3,315 | 409 | `crates/lumen-core/src/update.rs` |
 
 They cluster just above 300 lines, which is what you would expect: a file barely over the
-threshold cannot avoid much. Net across the corpus is still positive (+$2.64), so the
-threshold pays in aggregate — but "the optimizer saves 94%" is false for these files, and
-the test names them rather than averaging them away.
+threshold cannot avoid much. Net across the corpus came out positive at that `R`, so the
+threshold pays in aggregate under that assumption — but "the optimizer saves 94%" is false
+for these files, and the test names them rather than averaging them away.
 
 Raising the threshold is the obvious response and it is not clearly right: the loss on a
 310-line file is small and bounded, while the gain on `setup.rs` is 41,649 tokens. Left at
@@ -199,10 +197,10 @@ Raising the threshold is the obvious response and it is not clearly right: the l
 The percentage is the honest way to describe **one intercepted read**: an outline of
 `setup.rs` costs 3.4% of the file.
 
-Dollars are the honest way to describe **the feature**. A percentage cannot express the
-round-trip an intercept forces, which is why 1.4.0 replaced the ratio headline: the
-denominator is the read Lumen prevented, and the numerator has to include the read it
-caused instead.
+Dollars are the honest way to describe **the feature**, once `R` is derived per call. A
+percentage cannot express the round-trip an intercept forces, which is why 1.4.0 replaced
+the ratio headline: the denominator is the read Lumen prevented, and the numerator has to
+include the read it caused instead. Until then no dollar figure is published here.
 
 Both are in the tests. Neither is asserted to be positive — `the_net_value_prices_in_the_
 round_interception_costs` deliberately prints a negative net if that is what the corpus

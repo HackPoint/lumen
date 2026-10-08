@@ -134,6 +134,19 @@ pub fn connect_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     open_db(path)
 }
 
+/// Open an existing ledger to read it: nothing is created, migrated or written.
+///
+/// For whatever reads a ledger it does not own, the tests that read this machine's above
+/// all. [`connect_db`] migrates, and a build whose migrations differ from the installed
+/// app's rewrites the installed app's schema: a 1.6.0 test run dropped
+/// `read_events.is_subagent` from a live 1.5.1 ledger, and 1.5.1 added it back.
+pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
 /// Provenance of a ranked-outline decision, recorded alongside the row.
 ///
 /// All-NULL by default, which is what every other writer produces: the hook and the
@@ -411,6 +424,50 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn read_events_columns(path: &std::path::Path) -> Vec<String> {
+        let conn = open_read_only(path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('read_events')")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_read_only_open_leaves_an_older_schema_as_it_found_it() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lumen.db");
+        // A ledger as 1.5.1 left it, with the column this build's migrations drop.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(DDL).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE read_events ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+        )
+        .unwrap();
+        drop(conn);
+
+        let ro = open_read_only(&path).unwrap();
+        let write = ro.execute_batch("ALTER TABLE read_events DROP COLUMN is_subagent");
+        assert!(write.is_err(), "a read-only connection changed the schema");
+        drop(ro);
+        assert!(read_events_columns(&path).contains(&"is_subagent".to_string()));
+
+        // What connect_db does to the same file, and why nothing that reads another
+        // install's ledger may use it.
+        drop(connect_db(&path).unwrap());
+        assert!(!read_events_columns(&path).contains(&"is_subagent".to_string()));
+    }
+
+    #[test]
+    fn a_read_only_open_creates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("absent.db");
+        assert!(open_read_only(&path).is_err());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn epoch_day_zero_is_1970_01_01() {

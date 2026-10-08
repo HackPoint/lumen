@@ -196,13 +196,14 @@ fn an_outline_costs_a_fraction_of_the_file_it_describes() {
         );
     }
 
-    // The documented claim is 5-10% of a full read. Asserted as a ceiling: if an outline
-    // ever costs more than a fifth of its file, the README is no longer true and this must
-    // fail before a release repeats it.
+    // No figure is claimed for this any more, to the model or in the README: the copy that
+    // said "5-10%" is gone. The ceiling stays. Outlines costing a fifth of the files they
+    // describe would make interception a poor trade on this corpus, and that should fail
+    // here before a release ships it.
     let aggregate = outlines as f64 / full as f64;
     assert!(
         aggregate < 0.20,
-        "outlines cost {:.1}% of a full read; the claim is 5-10%",
+        "outlines cost {:.1}% of a full read, over the 20% ceiling",
         aggregate * 100.0
     );
     // Even the worst file must beat reading it whole, or interception made that read worse.
@@ -313,7 +314,9 @@ fn the_recorded_savings_are_priced_and_their_provenance_is_known() {
     let Some(db) = lumen_core::meter::db_path() else {
         return;
     };
-    let Ok(conn) = lumen_core::meter::connect_db(&db) else {
+    // Read-only: this is the installed app's ledger, and its schema is not this build's to
+    // migrate.
+    let Ok(conn) = lumen_core::meter::open_read_only(&db) else {
         return;
     };
 
@@ -378,7 +381,9 @@ fn the_recorded_ledger_agrees_with_itself() {
     let Some(db) = lumen_core::meter::db_path() else {
         return;
     };
-    let Ok(conn) = lumen_core::meter::connect_db(&db) else {
+    // Read-only: this is the installed app's ledger, and its schema is not this build's to
+    // migrate.
+    let Ok(conn) = lumen_core::meter::open_read_only(&db) else {
         return;
     };
     let Ok(mut stmt) = conn.prepare(
