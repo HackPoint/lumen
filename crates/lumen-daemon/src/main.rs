@@ -559,7 +559,11 @@ async fn ingest_from(
         if !rec.is_billable() {
             continue;
         }
-        let u = rec.message.usage.as_ref().unwrap();
+        // Not unwrapped. `is_billable` is what guarantees the usage, and it lives in
+        // lumen-core: an edit there would otherwise panic the daemon here.
+        let Some(u) = rec.message.usage.as_ref() else {
+            continue;
+        };
 
         let res = sqlx::query(
             "INSERT OR IGNORE INTO turns
@@ -1013,6 +1017,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1, "the one good line must still be inserted");
+    }
+
+    // ── An assistant record with no usage is skipped, not fatal ────────────────
+
+    #[tokio::test]
+    async fn an_assistant_record_with_null_usage_is_skipped_not_fatal() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+
+        let jsonl = dir.path().join("session.jsonl");
+        let no_usage = BILLABLE_LINE
+            .replace("__ID__", "msg-no-usage")
+            .replace(
+                r#""usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}"#,
+                r#""usage":null"#,
+            );
+        assert!(no_usage.contains(r#""usage":null"#), "{no_usage}");
+        let good = BILLABLE_LINE.replace("__ID__", "msg-after");
+        write_jsonl(&jsonl, &[&no_usage, &good]);
+
+        let (tx, _rx) = broadcast::channel(4);
+        let result = ingest_from(&pool, &jsonl, 0, &tx, false).await;
+        assert!(result.is_ok(), "ingest_from failed: {result:?}");
+
+        let ids: Vec<String> = sqlx::query_scalar("SELECT message_id FROM turns")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["msg-after".to_string()]);
     }
 
     // ── Regression: duplicate message_id → single DB row ─────────────────────
