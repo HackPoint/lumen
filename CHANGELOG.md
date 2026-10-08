@@ -2,9 +2,83 @@
 
 ## [1.6.0] — 2026-10-08
 
-Two things this release is really about: the menu-bar icon that never appeared for one user, and
-the discovery that two of the three "honesty" figures published in 1.5.1's efficiency report were
-themselves wrong.
+Three things this release is really about: the hooks, which on a machine with no `python3` did
+nothing and said nothing, and now run in `lumen-mcp`; the menu-bar icon that never appeared for
+one user; and the discovery that two of the three "honesty" figures published in 1.5.1's
+efficiency report were themselves wrong.
+
+### The hooks did nothing without `python3`, and said nothing
+
+**On a machine with no `python3`, 1.5.1's hooks were inert.** Both were bash scripts that ran
+`python3` to write a row or decide a block, and the recorder that would have reported a failure ran
+on `python3` too. Where PATH has no `python3`, which is the case with Python from python.org's
+classic Windows installer (it adds `python` and `py`) or with no Python at all, the meter exited 0
+having written nothing. Its one word, `python3: command not found`, went to a stderr that Claude
+Code does not show on exit 0. The intercept let a 400-line read through, and neither left a fault.
+It was the same on CI's Windows runner with `python3` as the App Execution Alias Windows puts there
+when Python is not installed: `command -v` finds it, and nothing is written or blocked. With a real
+Python 3 as `python3`, the same scripts write the row and block the read, so the silence was
+`python3`'s absence and nothing else.
+
+**The hooks are now shims over `lumen-mcp hook`.** Metering, the intercept's decision and the fault
+records moved into `lumen-mcp`, the binary the MCP server already runs as, so the hooks need no
+Python and count tokens in-process. What is left in shell needs bash, cat and date, and does one
+thing. When `lumen-mcp` cannot be found or run, it says so on stderr and in the fault spool, as
+`lumen_mcp_missing` or `lumen_mcp_unrunnable`, and lets the tool call through: without that binary
+the MCP server is not running either, so a block would send the model to tools it cannot call.
+
+Tests now run the commands Setup registers the way Claude Code runs them, with payloads Claude
+Code really sent and the real `lumen-mcp`, in CI on macOS, Ubuntu and Windows. The shell is
+`/bin/sh -c` on macOS and Linux and Git Bash on Windows. A Read lands as a row, a Bash command as a
+`bash_output` row, and a large read is blocked once. With `lumen-mcp` deleted, the same read is let
+through and reported. With no Python, with `python` and `py` only, and with a `python3` that
+behaves as the Store alias does, the hooks meter and block. Before anything is built, a probe
+prints what a hook's shell finds on each runner, unedited.
+
+**Faults say where they came from.** The intercept's recorder wrote `"channel": "cli"` and
+`"version": null` as literals. A fault raised under VS Code said `cli`, and an issue `lumen report`
+filed from a hook fault carried no build version. The Rust recorder read its channel from
+`LUMEN_CHANNEL`, which nothing sets, so its faults said `unknown`. Faults now take their channel
+from `CLAUDE_CODE_ENTRYPOINT`, as the meter's rows do, and carry the version of the build that
+raised them. The shims write their own fault when there is no binary to do it; it follows the same
+channel rules and reads the version from the stamp in the script.
+
+**Registered commands are quoted.** Setup registered each hook as a bare path. In a home with a
+space in it, the shell split the path at the space. On Windows an unquoted backslash is an escape,
+both to bash and to Claude Code's scan of the command, so
+`C:\Users\Jane\.claude\lumen\lumen_meter.sh` arrived as `C:UsersJane.claudelumenlumen_meter.sh`.
+Those hooks never ran. Each command is now the script's path as one single-quoted word, with forward
+slashes on Windows. Setup's validator reports a bare path that holds anything the shell does not
+take literally, and asks for Setup to be run.
+
+**An upgrade keeps what the user set.** The upgrade test installs 1.5.1's own scripts and
+registration in a home named `Jane Doe`. The first launch of this build rewrites the two scripts.
+It leaves `settings.json` and `~/.claude.json` byte for byte as they were, and a login item the user
+switched off stays off. Setup then quotes the commands and keeps everything else: the user's other
+hooks and MCP servers, and `LUMEN_HOOK_ENABLED=0` and `LUMEN_CAPTURE=0`, which go on working.
+
+**The plugin's hooks are Setup's.** The scripts in the Claude Code plugin's `.claude/hooks/` were
+`python3` scripts of their own, and still inserted `is_subagent`. They are now generated from
+Setup's templates with nothing baked in, and a test fails if the committed copies differ by a byte
+(`LUMEN_BLESS_HOOKS=1` regenerates them). The plugin's `hooks.json` now quotes the plugin root and
+registers the meter on `Bash`, as Setup does. It drops the three `mcp__lumen__*` matchers that
+Setup retired in 1.2.1.
+
+**`verify-install` runs the hooks instead of grepping them.** It checked the intercept for the
+names of its fail-open guards. That passed 1.5.1's hooks and failed this release's, whose guards
+are in `lumen-mcp`. It also passed hooks whose `lumen-mcp` was gone, which meter and block nothing.
+`scripts/verify-hooks.sh` runs the installed hooks as Claude Code does, against a scratch ledger,
+and judges them by the rows, blocks and faults they leave. Both verify-install scripts call it, the
+PowerShell one under Git Bash. Hooks from before `lumen-mcp hook` are reported and not run: nothing
+in them promises to write to the scratch ledger rather than the real one.
+
+Three faults in verify-install itself are fixed:
+
+- `--bin-dir` was the first place it looked rather than the only one, so the app bundle's binaries
+  answered for the build being checked.
+- A flag given without its value hung it. It now exits 2.
+- On Windows, `-BinDir` passed the GUI check falsely: the build's `lumen.exe` answered for
+  `Lumen.exe` on a case-insensitive filesystem.
 
 ### The menu-bar icon, and why nothing was logged
 
@@ -90,6 +164,34 @@ the ranked language detector and not by the structural one, so `smart_read` on a
 produced a one-item whole-file "outline" and metered it as a ~95% saving of a file it never looked
 inside.
 
+### The model was told figures nobody measured
+
+The model routes on what it is told. Every block told it that an outline costs "~5-10%" of the
+file and "typically saves 80-93% of context", or for a log "typically 40-80%". This repository's
+`CLAUDE.md` said each `smart_read` of a large file saves "3000–4500 tokens". `compress_logs`
+described itself as "fully reversible, no information loss". None of it came from the ledger, and
+the last was false: the middle of a long stack trace is dropped and only its frame count is kept.
+
+The tool descriptions, the intercept's message, `CLAUDE.md`, `MESSAGING_CONTRACT.md` and the
+README now carry no figure, since every tool reply already reports what that call saved.
+`compress_logs` says what it drops. `model_copy.rs` fails on any percentage, approximate number,
+token count or "typically" in the tool list or `CLAUDE.md`, and the intercept's message is
+checked the same way. The dollar figures that rested on the assumed rounds-remaining constant `R`,
+in the README and `docs/efficiency.md`, are withdrawn until `R` is derived per call.
+
+### The Optimizer called screenshots unverified, and priced what it could not
+
+Provenance counted every row not marked `measured` as unverified, image reads included. Those rows
+carry no count and say so, as `unsupported`. So the first screenshot read turned "never estimated"
+into "partly unverified", with a note that the events predated provenance tracking. Image reads are
+now on neither side of "N of M". On the ledger where this was found, 3,192 of 7,800 became 2,584
+of 7,192; the 608 removed were all PNG and JPEG reads. The note no longer says that every
+unverified row predates tracking, since `estimated` rows were tracked.
+
+An unpriced net value rendered "+$0.00, roughly break-even" beside "no net figure is claimed". It
+now renders a dash. The tests read the rendered page, and each one failed with its condition
+removed.
+
 ### No tool can return more than the file it was asked about
 
 170 recorded calls had cost more than a plain read — 92,347 tokens, and that is a floor, because
@@ -163,6 +265,26 @@ rollback journal, so it never ran the journal mode the ledger uses.
 developer machine emptied that machine's fault spool into a throwaway ledger: a canary fault in a
 scratch home's spool was gone after `cargo test -p lumen-core --lib db_reader`. The tests now name
 their spool, and the same probe leaves the canary in place through the whole `lumen-core` suite.
+
+### `read_events.is_subagent` is gone
+
+Every writer inserted a literal 0 into it, so every row said "main agent", and a
+`GROUP BY is_subagent` looked exactly like a measurement. The 1.1.5 notes called it a placeholder
+awaiting a source of truth. None exists for every writer: Claude Code hands hooks an `agent_id`
+only inside a subagent, and an MCP tool call carries no agent identity at all. Nothing read the
+column, so a migration drops it, and the inserts and queries no longer name it. Nothing is lost,
+since every stored value was the literal. `a_populated_1_5_1_database_loses_is_subagent_and_keeps_every_value`
+runs the migration on a 1.5.1 table holding rows. Where the drop cannot run, an insert still lands,
+because the column has a default and the insert never names it. `turns.is_subagent`, which the
+daemon derives from the transcript's path, stays.
+
+**A test run changed an installed ledger's schema.** `crates/lumen-mcp/tests/efficiency.rs`
+measures the ledger of the machine it runs on. It opened that ledger with `connect_db`, which
+creates and migrates. While this release was being made, it ran on a machine with 1.5.1 installed
+and applied this migration to the live ledger. 1.5.1's own migration then added the column back, at
+the end of the table. No value was lost, because the column held only the literal. Tests that read
+a ledger they do not own now open it with `meter::open_read_only`, which creates, migrates and
+writes nothing.
 
 ### A fallback that hides a failure now fails a test
 
@@ -248,6 +370,25 @@ a fourth that had been fixed shortly before:
 
 Each test was shown failing with its fix reverted and passing with it restored.
 
+### Frontend coverage is enforced per file
+
+The coverage thresholds applied to the total. It passed while eight files sat under them, so
+`pnpm test` exited 0: `home.html` at 79.82% of statements and 0% of functions, `setup.html` at 0%
+of functions, and `panel.ts` at 83.33%. The thresholds now hold for each file. Files that no spec
+loads are measured too; before, they were left out of the report altogether (`app.component.ts`,
+`app.config.ts`, `app.routes.ts`).
+
+Tests were written for what that exposed:
+
+- the rendered controls on Home, Setup and the panel;
+- the Optimizer's per-channel rows and missed reads;
+- the tooltip's placement;
+- the session warnings and refresh timer;
+- the app shell's routes.
+
+The Optimizer's `provenanceTip`, unused since 1.4.0, is gone. What is still excluded is listed in
+`ci.yml` with the reason.
+
 ### Hotspots gave files their largest size, and called every project "this project"
 
 The line count on the Hotspots screen is documented as the file's size at its most recent read.
@@ -298,6 +439,19 @@ advice that quotes them, came out the same.
   (macOS)` on `macos-14`, described above. `tauri-driver` is pinned to 2.1.0 and installed with
   `--locked`. On Windows the job fetches the msedgedriver that matches the runner's WebView2
   runtime, and falls back to the one the runner image ships.
+- ci: the `test` job runs on macOS as well as Ubuntu and Windows, and runs every crate and target.
+  It used to leave out the Tauri crate, where Setup and the hooks live. The hook end-to-end tests
+  run first, with their output shown. Captured hook payloads are checked out byte for byte as Claude
+  Code sent them (`.gitattributes`).
+- test: the first Windows run failed three tests that wrote `~/.claude.json` by splicing a path into
+  a JSON string with `format!`. A Windows temp path made `\U`, an invalid escape. They now write the
+  file through serde.
+- ci: the `Verify install` workflow runs `verify-hooks.sh` on each OS, against the plugin's hooks in
+  a scratch home, with the build's `lumen-mcp`.
+- fix(daemon): an assistant record with `usage: null` is skipped. The daemon unwrapped the usage and
+  relied on `is_billable`, in `lumen-core`, to have checked it, so an edit there would have
+  panicked the daemon at ingest. The test was shown failing with `is_billable` edited to stop
+  checking, and passing with the unwrap replaced.
 - chore: removed `lumenator/src-tauri/Cargo.lock`. `src-tauri` is a workspace member, so cargo
   and the Tauri CLI both read the root lockfile; this one was unused and had been stale since
   0.1.0.
@@ -313,6 +467,13 @@ advice that quotes them, came out the same.
 - Test fixtures shaped like toys were hiding behind the guard: `"fn alpha() {}\nfn beta() {}"` is
   eight tokens, so any reply about it legitimately costs more than reading it. Fifteen tests were
   asserting the inflation guard rather than the behaviour they were written for.
+- The hook tests run the hooks as Claude Code 2.1.270 spawns them: the shell, the `bash ` prefix on
+  Windows, the environment it builds. That is read from Claude Code, not run: no test starts Claude
+  Code itself.
+- A 1.5.1 process still running after the upgrade, such as an MCP server that Claude Code started
+  before it, re-adds `is_subagent` each time it opens the ledger, and 1.6.0 drops it again. 1.6.0's
+  inserts land either way, which is tested. 1.5.1's add the column back before inserting, so they
+  land too, unless a drop falls between the two. That was read from 1.5.1's code, not tested.
 
 ## [1.5.1] — 2026-07-31
 
