@@ -2127,18 +2127,31 @@ mod tests {
         );
     }
 
+    /// `~/.claude.json` as Setup writes it: serialized, so a Windows path's backslashes
+    /// are escaped. Spliced into a JSON string by hand, `C:\Users\…` is an invalid `\U`
+    /// escape and the file does not parse.
+    fn mcp_entry_json(command: &Path, env: serde_json::Value) -> String {
+        serde_json::json!({
+            "mcpServers": {
+                "lumen": { "command": command, "env": env },
+                "other": { "command": "/bin/sh" }
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn a_dangling_env_path_in_the_mcp_entry_is_reported() {
-        // This is the tokenizer bug itself: LUMEN_TOK pointing into an ejected DMG.
+        // This is the tokenizer bug itself: LUMEN_TOK pointing into an ejected DMG. Made
+        // under the temp dir so that it is absolute on Windows too, where "/Volumes/…"
+        // is not and is rightly skipped.
         let h = TempDir::new().unwrap();
         let real = h.path().join("lumen-mcp");
         std::fs::write(&real, "").unwrap();
+        let gone = h.path().join("dmg.gone").join("lumen-tok");
         write_claude_json(
             h.path(),
-            &format!(
-                r#"{{"mcpServers":{{"lumen":{{"command":"{}","env":{{"LUMEN_TOK":"/Volumes/dmg.gone/lumen-tok"}}}}}}}}"#,
-                real.display()
-            ),
+            &mcp_entry_json(&real, serde_json::json!({ "LUMEN_TOK": gone })),
         );
         let s = validate_reported_artifacts_in(h.path());
         assert!(!status(&s, "mcp").healthy);
@@ -2149,15 +2162,14 @@ mod tests {
     fn a_missing_lumen_db_path_is_not_treated_as_dangling() {
         // The database is created on demand, so its absence is normal and must not
         // be reported as breakage — a false alarm trains users to ignore the report.
+        // Absolute everywhere, so it is the LUMEN_DB exemption that passes it.
         let h = TempDir::new().unwrap();
         let real = h.path().join("lumen-mcp");
         std::fs::write(&real, "").unwrap();
+        let db = h.path().join("not").join("created").join("yet.db");
         write_claude_json(
             h.path(),
-            &format!(
-                r#"{{"mcpServers":{{"lumen":{{"command":"{}","env":{{"LUMEN_DB":"/not/created/yet.db"}}}}}}}}"#,
-                real.display()
-            ),
+            &mcp_entry_json(&real, serde_json::json!({ "LUMEN_DB": db })),
         );
         assert!(status(&validate_reported_artifacts_in(h.path()), "mcp").healthy);
     }
@@ -2169,13 +2181,7 @@ mod tests {
         let h = TempDir::new().unwrap();
         let real = h.path().join("lumen-mcp");
         std::fs::write(&real, "").unwrap();
-        write_claude_json(
-            h.path(),
-            &format!(
-                r#"{{"mcpServers":{{"lumen":{{"command":"{}","env":{{}}}},"other":{{"command":"/bin/sh"}}}}}}"#,
-                real.display()
-            ),
-        );
+        write_claude_json(h.path(), &mcp_entry_json(&real, serde_json::json!({})));
         let path = claude_json_path_in(h.path());
         let before = fingerprint(&path);
 
