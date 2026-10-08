@@ -456,6 +456,13 @@ advice that quotes them, came out the same.
 - test: the first Windows run failed three tests that wrote `~/.claude.json` by splicing a path into
   a JSON string with `format!`. A Windows temp path made `\U`, an invalid escape. They now write the
   file through serde.
+- test: a `lumen-daemon` test failed once on macOS, in the run meant to gate this release. Its
+  daemons start in parallel, and on macOS std creates a child's pipes and marks them close-on-exec
+  in two steps, so a daemon another test started in between inherited the supervised daemon's
+  stdin. Holding it open, it kept back the EOF the test waits for, and the supervised daemon
+  outlived its 10 s grace. The tests in `supervisor_exit.rs` now spawn one daemon at a time. A
+  scratch test that gave a copy of that stdin to a second process failed the same way, and its
+  daemon exited 57 ms after the second process did.
 - ci: the `Verify install` workflow runs `verify-hooks.sh` on each OS, against the plugin's hooks in
   a scratch home, with the build's `lumen-mcp`.
 - fix(daemon): an assistant record with `usage: null` is skipped. The daemon unwrapped the usage and
