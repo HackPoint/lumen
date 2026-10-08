@@ -118,8 +118,14 @@ recorded as `full_tokens=0, token_source='measured'`: an unsupported file launde
 measurement, in the one column that exists to tell those apart. The installed copy was correct. The
 drift test compared column *names*, which is why it passed.
 
-That test now runs both copies against a stub tokenizer and compares what they record, across exit
-0, exit 3, exit 1 and a missing binary. Reintroducing the bug fails it by name.
+The hook is now a shim over `lumen-mcp hook meter`, as the installed one is, so there is one meter
+and no copy to drift. A file that is not UTF-8 is recorded as 0 `unsupported`, and
+`a_file_that_is_not_utf8_is_recorded_as_unsupported_with_no_count` fails if it is recorded as
+`measured`. That test and two others were missing until just before release. The shell meter's
+tests went with the shell meter, and three rules they held were tested nowhere else: this one, no
+row for a command that printed nothing, and no second count for Lumen's own tools. Each was checked
+by breaking it with the whole `lumen-mcp` suite running, and each time exactly one test failed, on a
+line this change added.
 
 ### A Read the ledger refused is a fault the app shows
 

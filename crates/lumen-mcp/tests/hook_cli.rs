@@ -165,7 +165,7 @@ impl Sandbox {
     }
 
     /// A file in the project directory, stamped with [`MTIME`].
-    fn file(&self, name: &str, body: &str) -> PathBuf {
+    fn file(&self, name: &str, body: impl AsRef<[u8]>) -> PathBuf {
         let p = self.proj.join(name);
         std::fs::write(&p, body).unwrap();
         std::fs::File::options()
@@ -303,6 +303,36 @@ fn a_partial_read_is_recorded_at_the_whole_file() {
     assert_eq!(r.lines, Some(3));
 }
 
+/// A file that is not UTF-8, an image say, has no token count, and its row says so: 0,
+/// labelled `unsupported`. A PNG once went into the ledger as 0 `measured`, in the one
+/// column there to tell those apart. Until 1.6.0 a test held the shell meter to this;
+/// it went when the shell meter did. The capture is a text Read aimed at a PNG: the
+/// meter counts the file on disk and never reads the response, so an image Read takes
+/// the same path.
+#[test]
+fn a_file_that_is_not_utf8_is_recorded_as_unsupported_with_no_count() {
+    let s = sandbox();
+    // A PNG's first bytes. 0x89 cannot begin a UTF-8 sequence.
+    let png = s.file("logo.png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
+    let ran = s.meter(&captured("read_post.json", &s.proj, Some(&png)), &[]);
+    assert_eq!(ran.stderr, "");
+    // The control: the same bytes without the 0x89 are UTF-8, and measured.
+    let text = s.file("logo.txt", b"PNG\r\n\x1a\n\0\0\0\rIHDR");
+    s.meter(&captured("read_post.json", &s.proj, Some(&text)), &[]);
+
+    let rows = s.rows();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let (r, control) = (&rows[0], &rows[1]);
+    assert_eq!(r.token_source.as_deref(), Some("unsupported"));
+    assert_eq!(
+        (r.tokens_returned, r.full_tokens, r.saved_tokens),
+        (0, 0, 0)
+    );
+    assert_eq!(control.token_source.as_deref(), Some("measured"));
+    assert!(control.full_tokens > 0, "{control:?}");
+    assert!(!s.spool.exists(), "{:?}", s.faults());
+}
+
 /// Bash output is observed, never intercepted: one `bash_output` row, labelled with the
 /// program and subcommand only.
 #[test]
@@ -331,6 +361,31 @@ fn a_captured_bash_call_lands_as_a_bash_output_row() {
     assert_eq!((r.file_mtime, r.req_key.as_deref()), (None, None));
     assert_eq!(r.token_source.as_deref(), Some("measured"));
     assert!(!s.spool.exists(), "{:?}", s.faults());
+}
+
+/// Lumen's own tools meter themselves, so the hook must not count them a second time.
+/// Only `tool_name` differs from the Read capture, and `tool_input.file_path` stays: a
+/// meter that took any tool with a path for a Read would have a file to count.
+#[test]
+fn a_lumen_tool_call_is_not_metered_twice() {
+    let s = sandbox();
+    let file = s.file("hello.rs", HELLO);
+    for tool in [
+        "mcp__lumen__smart_read",
+        "mcp__lumen__recall_file",
+        "mcp__lumen__compress_logs",
+    ] {
+        let mut payload = captured("read_post.json", &s.proj, Some(&file));
+        payload["tool_name"] = Value::from(tool);
+        let ran = s.meter(&payload, &[]);
+        assert_eq!(ran.stderr, "", "{tool}");
+    }
+    assert!(!s.db.exists(), "a lumen tool call was metered by the hook");
+    assert!(!s.spool.exists(), "{:?}", s.faults());
+
+    // The control: the same payload as a Read is a row.
+    s.meter(&captured("read_post.json", &s.proj, Some(&file)), &[]);
+    assert_eq!(s.rows().len(), 1);
 }
 
 /// The command line is not stored. A leading assignment is the commonest way a secret
@@ -584,7 +639,7 @@ fn a_hook_with_no_subcommand_is_a_usage_error() {
 #[test]
 fn a_large_source_read_is_blocked_once_and_the_retry_is_let_through() {
     let s = sandbox();
-    let big = s.file("big.rs", &source_lines(400));
+    let big = s.file("big.rs", source_lines(400));
     let payload = captured("read_pre.json", &s.proj, Some(&big));
     let path = big.to_string_lossy();
 
@@ -640,7 +695,7 @@ fn a_large_source_read_is_blocked_once_and_the_retry_is_let_through() {
 fn a_large_log_read_is_sent_to_compress_logs() {
     let s = sandbox();
     for name in ["build.log", "task.output"] {
-        let log = s.file(name, &"ok\n".repeat(400));
+        let log = s.file(name, "ok\n".repeat(400));
         let ran = s.intercept(&captured("read_pre.json", &s.proj, Some(&log)), &[]);
         assert_eq!(ran.code, 2, "{name}: {ran:?}");
         assert!(
@@ -658,9 +713,9 @@ fn a_large_log_read_is_sent_to_compress_logs() {
 #[test]
 fn the_intercept_passes_what_it_does_not_route() {
     let s = sandbox();
-    let small = s.file("small.rs", &source_lines(299));
-    let notes = s.file("notes.md", &"line\n".repeat(400));
-    let big = s.file("big.rs", &source_lines(400));
+    let small = s.file("small.rs", source_lines(299));
+    let notes = s.file("notes.md", "line\n".repeat(400));
+    let big = s.file("big.rs", source_lines(400));
     let missing = s.proj.join("missing.rs");
     let read = |file: &Path| captured("read_pre.json", &s.proj, Some(file));
     let off = [("LUMEN_HOOK_ENABLED", "0")];

@@ -168,6 +168,12 @@ The test now runs **both** copies against a stub tokenizer and compares what the
 record, across exit 0, exit 3, exit 1 and a missing binary. Reintroducing the bug fails it with
 `generated ("unsupported") vs repo ("measured")`.
 
+That test drove the shell meters, and went with them. From 1.6.0 the installed meter hook and
+the repository's copy are both shims over one meter, `lumen-mcp hook meter`, which counts with
+`lumen-tok`'s tokenizer in-process: there are no copies to compare and no exit code to drop.
+`a_file_that_is_not_utf8_is_recorded_as_unsupported_with_no_count`, in
+`crates/lumen-mcp/tests/hook_cli.rs`, holds it to the same rule.
+
 ## 4. Where interception does not pay
 
 At the assumed `R`, break-even is **5,383 avoided tokens per read** — below that, the extra

@@ -876,5 +876,6 @@ mod tests {
         let out = hook("meter", empty, &var, tmp.path());
         assert!(out.stderr.is_empty(), "{out:?}");
         assert_eq!(spool_lines(&spool).len(), 1);
+        assert!(!db.exists(), "an empty output was recorded");
     }
 }
