@@ -438,7 +438,12 @@ advice that quotes them, came out the same.
 - ci: two new jobs, `App e2e` on `ubuntu-22.04` and `windows-latest`, and `Issue 5 launch check
   (macOS)` on `macos-14`, described above. `tauri-driver` is pinned to 2.1.0 and installed with
   `--locked`. On Windows the job fetches the msedgedriver that matches the runner's WebView2
-  runtime, and falls back to the one the runner image ships.
+  runtime, and falls back to the one the runner image ships. There the tests run unelevated,
+  through gsudo 2.6.1 (pinned, its checksum checked) at medium integrity. The first Windows run was
+  elevated, as the runner's shell is, and failed all five tests with "DevToolsActivePort file
+  doesn't exist": from WebView2 150 an elevated app's web view ignores
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, which msedgedriver opens its debugging port through
+  (tauri-apps/wry#1782). The runtime and the driver were the same version, 153.0.4234.48.
 - ci: the `test` job runs on macOS as well as Ubuntu and Windows, and runs every crate and target.
   It used to leave out the Tauri crate, where Setup and the hooks live. The hook end-to-end tests
   run first, with their output shown. Captured hook payloads are checked out byte for byte as Claude
