@@ -37,6 +37,16 @@ status item's rect is checked at +500ms, +1.5s and +4s, and classified `Present`
 pretending). On `Absent` it asks AppKit directly to show the item. The build itself is not retried:
 its only macOS error paths are deterministic, so a second attempt cannot succeed.
 
+**The check runs only where it can answer.** Only macOS gives a status item a place to judge
+against the menu bar; elsewhere the check can only say "unknown". As first written for this
+release, three unknowns counted as an absent tray, so on Linux every launch logged the tray as not
+visible and opened its window six seconds in. Off macOS the tray is now left "unknown (not yet
+verified)" and the window stays closed. That has a cost: a Linux desktop with no tray host, such as
+GNOME without an AppIndicator extension, is not detected, and since `lumen show` and re-opening the
+app work only on macOS, Lumen is as unreachable there as it was in 1.5.1. Where the checks do give
+up, the window they open now says why. Home had read the startup health once, at load, so that
+window opened with an empty banner.
+
 **Nothing in the tray or sidecar startup uses `?` or `expect` any more.** Three `?` on tray-menu
 construction and two `expect`s on the daemon sidecar could abort startup outright, and 1.5.1's
 fallback covered none of them. Every step of `setup` now either succeeds or records a degradation,
@@ -48,9 +58,9 @@ trap came with it: `DaemonChild` was only managed on the success path while the 
 `state::<DaemonChild>()`, which panics if unmanaged — so degrading past a failed spawn would have
 traded a startup panic for a shutdown panic.
 
-**And there are now ways in that do not involve the tray.** `open -a Lumen` or double-clicking the
-app reveals the window (previously it did nothing at all). `lumen show` asks a running instance to
-surface. `lumen doctor` prints what a bug report needs in one paste — status-item preferences across
+**And on macOS there are now ways in that do not involve the tray.** `open -a Lumen` or
+double-clicking the app reveals the window (previously it did nothing at all). `lumen show` asks a
+running instance to surface. `lumen doctor` prints what a bug report needs in one paste — status-item preferences across
 both domains, processes, menu-bar managers, log and database paths — with the likely cause named
 and its one-line fix. It reads the visibility flag in both forms macOS writes,
 `NSStatusItem Visible …` and `NSStatusItem VisibleCC …`, as the app's own repair does. The
@@ -200,6 +210,38 @@ keeps that block. Reads are still metered. Setup also recognises a deleted entry
 on `Read` with none on `Bash` and no matcher retired in 1.2.1, which no release's Setup ever
 wrote, and carries it over as `LUMEN_METER_BASH=0` instead of recording again.
 
+### The app, launched and driven, before release
+
+Until now the tests ran functions, binaries, and pages against a stand-in for the backend; none
+launched the app. Two CI jobs now do.
+
+**App e2e, on Linux and Windows.** `tauri-driver` launches the debug build over WebDriver and the
+tests read what it shows: a tray that cannot be built leaves the window open, saying so legibly;
+the Optimizer and Hotspots screens show what a ledger written by the real `lumen-mcp` holds,
+checked against SQLite directly; an empty ledger shows the empty states; a healthy launch keeps
+its window closed past the tray checks; a tray reported absent opens the window once they give
+up, saying why. macOS has no WebDriver for its web view, so the app is not driven there.
+
+**Issue #5, made on purpose, on macOS.** The preference behind issue #5 existed on nobody's
+machine but the reporter's, so a job now creates it: both forms set false, the built app
+launched, then the preferences, the icon, the window and what the window says are checked; a
+second launch with nothing set must do none of it. It writes the app's preferences as the
+logged-in user, so the script refuses to run outside CI.
+
+Their first runs found three faults, all in this release's own unreleased changes, and confirmed
+a fourth that had been fixed shortly before:
+
+- Off macOS every launch opened its window six seconds in (above).
+- A tray that failed to build was reported again at the first redraw as having "disappeared
+  after startup", replacing the real reason in the banner and opening the window a second time.
+- The window the tray checks open had an empty banner (above).
+- The degraded banner named CSS variables that nothing defines, so in the light theme its bold
+  text measured 1.03:1 against its background and the rest 2.21:1 and 2.69:1. They are now
+  14.17:1, 4.26:1 and 3.98:1. The last is the app's secondary-text colour everywhere, still
+  short of the 4.5:1 WCAG AA asks of body text, and not changed here.
+
+Each test was shown failing with its fix reverted and passing with it restored.
+
 ### Maintenance
 
 - build: `release.sh` read the commit subjects as `git log … 2>/dev/null | grep … || true`, so a
@@ -224,6 +266,10 @@ wrote, and carries it over as `LUMEN_METER_BASH=0` instead of recording again.
   Rust.
 - ci: `actions/checkout` and `actions/setup-node` v4 → v7 and `pnpm/action-setup` v4 → v6, off the
   deprecated Node 20 action runtime; the frontend now builds on Node 24 LTS.
+- ci: two new jobs, `App e2e` on `ubuntu-22.04` and `windows-latest`, and `Issue 5 launch check
+  (macOS)` on `macos-14`, described above. `tauri-driver` is pinned to 2.1.0 and installed with
+  `--locked`. On Windows the job fetches the msedgedriver that matches the runner's WebView2
+  runtime, and falls back to the one the runner image ships.
 - chore: removed `lumenator/src-tauri/Cargo.lock`. `src-tauri` is a workspace member, so cargo
   and the Tauri CLI both read the root lockfile; this one was unused and had been stale since
   0.1.0.

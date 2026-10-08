@@ -4,11 +4,16 @@
 // and the Optimizer and Hotspots screens rendering figures that came out of SQLite through
 // the Tauri commands rather than from a test double.
 //
-// Linux, after `bash build-sidecar.sh` and `pnpm tauri build --debug --no-bundle`:
-//   xvfb-run -a node --test 'e2e/*.e2e.mjs'
+// After `bash build-sidecar.sh` and `pnpm tauri build --debug --no-bundle`, from lumenator/:
+//   Linux:          xvfb-run -a node --test 'e2e/*.e2e.mjs'
+//   Windows, in CI: node --test 'e2e/*.e2e.mjs', with LUMEN_E2E_NATIVE_DRIVER naming an
+//                   msedgedriver.exe of the WebView2 runtime's version
+// macOS has no WebDriver for its web view, so the app cannot be driven there this way.
 //
-// Every test gives the app a home and data directory of its own, so nothing here reads or
-// writes the ledger, the hooks or the settings of the machine it runs on.
+// On Linux every test gives the app a home and data directory of its own, so nothing here
+// reads or writes the ledger, the hooks or the settings of the machine it runs on. Windows
+// takes those directories from the user's profile whatever the environment says, so there the
+// tests refuse to run outside CI, and on a runner use its profile, emptied before each test.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -32,14 +37,17 @@ const LIB_RS = path.join(ROOT, 'lumenator', 'src-tauri', 'src', 'lib.rs');
 // after RunEvent::Ready.
 const PRESENCE_CHECKS_MS = 6_000;
 
-if (process.platform !== 'linux') {
+const WINDOWS = process.platform === 'win32';
+
+if (!(process.platform === 'linux' || (WINDOWS && process.env.CI))) {
   // Elsewhere the app's data and home directories come from the OS rather than from the
   // environment, so a run could not be kept off the real ledger.
-  throw new Error('these tests run on Linux only; see the header');
+  throw new Error('these tests run on Linux, and on Windows only in CI; see the header');
 }
 
 /** A home and data directory of the test's own, holding the marker that Setup has run. */
 function sandbox() {
+  if (WINDOWS) return runnerProfile();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lumen-e2e-'));
   const home = path.join(dir, 'home');
   // Without it Home sends the window to the Setup screen, which is not what is under test.
@@ -59,6 +67,31 @@ function sandbox() {
   const appData = path.join(env.XDG_DATA_HOME, 'io.speedata.lumen');
   fs.mkdirSync(appData, { recursive: true });
   return { env, db: path.join(appData, 'lumen.db'), logs: path.join(appData, 'logs') };
+}
+
+/**
+ * The CI runner's own profile, where Windows puts the app's ledger (%APPDATA%) and log
+ * (%LOCALAPPDATA%) whatever the environment says, with what an earlier test left removed.
+ */
+function runnerProfile() {
+  // Whatever the previous test launched and its driver's tree kill missed: a daemon whose app
+  // was closed first is no longer under the driver, and while it runs it holds 127.0.0.1:9999,
+  // which the next app's daemon then cannot bind.
+  for (const exe of ['Lumen.exe', 'lumen-daemon.exe']) spawnSync('taskkill', ['/IM', exe, '/T', '/F']);
+  const appData = path.join(process.env.APPDATA, 'io.speedata.lumen');
+  const logs = path.join(process.env.LOCALAPPDATA, 'io.speedata.lumen', 'logs');
+  const db = path.join(appData, 'lumen.db');
+  // Retried: the previous test's app and daemon release their handles as they exit.
+  const gone = { recursive: true, force: true, maxRetries: 20, retryDelay: 250 };
+  for (const f of [db, `${db}-wal`, `${db}-shm`, logs]) fs.rmSync(f, gone);
+  fs.mkdirSync(appData, { recursive: true });
+  const marker = path.join(os.homedir(), '.claude', 'lumen', '.setup_done');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, '');
+  const env = { ...process.env };
+  delete env.LUMEN_DB;
+  delete env.LUMEN_SIMULATE_TRAY;
+  return { env, db, logs };
 }
 
 /** Read `file` through the real lumen-mcp's smart_read, as Claude Code does, into the ledger. */
@@ -145,6 +178,17 @@ const VISIBILITY = `
 const SHOWN = VISIBILITY.replace('shown => ({', 'shown => shown && ({');
 
 const HEALTH = `return window.__TAURI_INTERNALS__.invoke('lumen_startup_health');`;
+
+/**
+ * True, with the test marked skipped and the reason given, when the machine could not build a
+ * tray icon at all. What follows is then about a tray this run does not have.
+ */
+async function noTrayHere(t, s) {
+  const h = await s.run(HEALTH);
+  if (!/^build failed/.test(h.tray)) return false;
+  t.skip(`this machine cannot host a tray icon: ${h.tray}`);
+  return true;
+}
 
 const digits = s => (s ?? '').replace(/\D/g, '');
 
@@ -266,8 +310,10 @@ test('an empty ledger shows the empty states rather than zeros dressed as data',
 test('a healthy launch keeps its window closed past the tray checks', async t => {
   const sb = sandbox();
   await withApp(t, sb, {}, async s => {
-    // Linux cannot say where a tray icon is, so the checks have nothing to find. Read as an
-    // absence, that opened this window six seconds into every launch and marked it degraded.
+    if (await noTrayHere(t, s)) return;
+    // Off macOS the app cannot say where a tray icon is, so the checks have nothing to find.
+    // Read as an absence, that opened this window six seconds into every launch and marked it
+    // degraded.
     const until = Date.now() + PRESENCE_CHECKS_MS + 3_000;
     const seen = [];
     while (Date.now() < until) {
@@ -287,6 +333,7 @@ test('a tray reported absent opens the window once the checks give up', async t 
   const sb = sandbox();
   await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'absent' }, async s => {
     const start = Date.now();
+    if (await noTrayHere(t, s)) return;
     assert.equal((await s.run(VISIBILITY)).shown, false, 'shown before any check had run');
     const v = await s.until('the main window to be shown', SHOWN, PRESENCE_CHECKS_MS + 10_000);
     t.diagnostic(`shown after ${Date.now() - start} ms: ${JSON.stringify(v)}`);

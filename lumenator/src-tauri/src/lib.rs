@@ -695,8 +695,9 @@ fn tray_presence(app: &tauri::AppHandle) -> health::TrayPresence {
     let Some(tray) = app.tray_by_id(&TrayIconId::new("lumen-tray")) else {
         return health::TrayPresence::Absent;
     };
-    // Linux always returns None here, which is why `verify_tray_presence` does not ask off
-    // macOS (`presence_is_checkable`): treating that as Absent reports every launch as broken.
+    // Off macOS there is nothing to judge a rect against: Linux gives none at all, and what
+    // follows reads the macOS menu bar. `verify_tray_presence` does not ask there
+    // (`presence_is_checkable`); treating Unknown as Absent reported every launch as broken.
     if !cfg!(target_os = "macos") {
         return health::TrayPresence::Unknown;
     }

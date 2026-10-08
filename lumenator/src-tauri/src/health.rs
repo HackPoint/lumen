@@ -302,10 +302,11 @@ pub fn simulated_tray_from(env: Option<&str>) -> SimulatedTray {
 
 /// Can the presence check after `RunEvent::Ready` tell anything on this platform?
 ///
-/// Only AppKit says where a status item is. Everywhere else the check can only answer
-/// `Unknown`, and three `Unknown`s are not evidence of absence: read as one, they marked every
-/// Linux and Windows launch degraded and opened the main window six seconds in. A simulated
-/// absence is checked everywhere, since driving the fallback on any platform is its purpose.
+/// `tray_presence` asks only on macOS, where the icon's place is judged against the menu bar.
+/// Everywhere else it answers `Unknown`, and three `Unknown`s are not evidence of absence: read
+/// as one, they marked every Linux and Windows launch degraded and opened the main window six
+/// seconds in. A simulated absence is checked everywhere, since driving the fallback on any
+/// platform is its purpose.
 pub fn presence_is_checkable(macos: bool, simulate: SimulatedTray) -> bool {
     macos || matches!(simulate, SimulatedTray::Absent | SimulatedTray::OffScreen)
 }

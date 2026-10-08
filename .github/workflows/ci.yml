@@ -76,7 +76,8 @@ jobs:
       #   src/**/*.spec.ts             the specs
       #   src/app/tauri-bridge.fake.ts the test double the specs drive the app through
       #   src/app/tauri-bridge.ts      one-line calls into @tauri-apps/api, which
-      #                                throws outside a Tauri window
+      #                                throws outside a Tauri window; the App e2e job
+      #                                runs it, in the built app
       - name: pnpm test
         working-directory: lumenator
         run: pnpm test
@@ -239,6 +240,160 @@ jobs:
 
       - name: cargo clippy (Tauri crate on Linux)
         run: cargo clippy -p Lumen --all-targets -- -D warnings
+
+  # ── The built app, driven through WebDriver ──────────────────────────────────
+  # The debug build of the app itself, launched by tauri-driver: whether it opens its window
+  # when it should and only then, says why when it does, and whether the Optimizer and Hotspots
+  # screens show what a ledger the real lumen-mcp wrote holds. lumenator/e2e/app.e2e.mjs says
+  # what each test covers.
+  #
+  # Linux and Windows only. tauri-driver needs the platform's own WebDriver behind it,
+  # WebKitWebDriver on Linux and msedgedriver on Windows; macOS has none for its web view, so
+  # the app cannot be driven there. The job after this one launches it on macOS instead.
+  app-e2e:
+    name: App e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Linux build dependencies, WebKitWebDriver and Xvfb
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential \
+            webkit2gtk-driver \
+            xvfb \
+            xauth
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --version 2.1.0 --locked
+
+      # msedgedriver has to match the WebView2 runtime the app runs in, which need not be the
+      # Edge browser the runner image ships a driver for. That one is the fallback.
+      - name: Fetch the msedgedriver of the WebView2 runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $v = $null
+          foreach ($key in "HKLM:\SOFTWARE\WOW6432Node\$client", "HKLM:\SOFTWARE\$client", "HKCU:\Software\$client") {
+            $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
+            if ($pv) { $v = $pv; Write-Output "WebView2 runtime $v ($key)"; break }
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'msedgedriver'
+          $driver = Join-Path $dir 'msedgedriver.exe'
+          try {
+            if (-not $v) { throw 'no WebView2 runtime version in the registry' }
+            Invoke-WebRequest "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" -OutFile "$dir.zip"
+            Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+          } catch {
+            Write-Output "no msedgedriver $v to download ($_); using the runner image's"
+            $driver = Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe'
+          }
+          & $driver --version
+          "LUMEN_E2E_NATIVE_DRIVER=$driver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the app (debug, not bundled)
+        working-directory: lumenator
+        run: pnpm tauri build --debug --no-bundle
+
+      - name: App e2e
+        working-directory: lumenator
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a node --test 'e2e/*.e2e.mjs'
+          else
+            node --test 'e2e/*.e2e.mjs'
+          fi
+
+  # ── Issue #5, made on purpose ─────────────────────────────────────────────────
+  # The bug that hid Lumen's icon was a preference only the reporter's machine held: macOS's
+  # "NSStatusItem Visible <autosave>" set false by a ⌘-drag. This sets it, in both forms,
+  # launches the built app, and checks the preference is cleared, the icon is on screen and the
+  # window opens saying why; then that a launch with nothing set does none of it. It writes the
+  # app's preferences as the logged-in user, which is why it runs here and refuses to elsewhere.
+  issue5:
+    name: Issue 5 launch check (macOS)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the app bundle (debug)
+        working-directory: lumenator
+        run: pnpm tauri build --debug --bundles app
+
+      - name: Plant the hidden-icon preference and launch
+        run: bash scripts/issue5-launch-check.sh target/debug/bundle/macos/Lumen.app "$RUNNER_TEMP/issue5"
+
+      - name: Keep what the launch showed
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue5-launch-check
+          path: ${{ runner.temp }}/issue5
+          if-no-files-found: warn
 
   # ── Minimum supported Rust ─────────────────────────────────────────────────
   # `rust-version` is declared once, in the workspace Cargo.toml, at what the
