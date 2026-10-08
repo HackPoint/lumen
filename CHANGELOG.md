@@ -51,8 +51,10 @@ traded a startup panic for a shutdown panic.
 app reveals the window (previously it did nothing at all). `lumen show` asks a running instance to
 surface. `lumen doctor` prints what a bug report needs in one paste — status-item preferences across
 both domains, processes, menu-bar managers, log and database paths — with the likely cause named
-and its one-line fix. The fallback also switches to `Regular` activation while degraded, because an
-Accessory process has no Dock icon and a window it "shows" has nothing to bring it forward.
+and its one-line fix. It reads the visibility flag in both forms macOS writes,
+`NSStatusItem Visible …` and `NSStatusItem VisibleCC …`, as the app's own repair does. The
+fallback also switches to `Regular` activation while degraded, because an Accessory process has
+no Dock icon and a window it "shows" has nothing to bring it forward.
 
 ### Two of the three published honesty figures were wrong
 
