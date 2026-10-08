@@ -27,8 +27,9 @@ inside. It is per-user preference state, which is why it does not reproduce on a
 
 Lumen now clears that preference before building the tray, and says so rather than silently
 overriding a choice someone may have made deliberately: on the launch that repairs it, the window
-opens once with an explanation. `TrayIcon::set_visible(true)` is *not* the fix — it only re-creates
-a missing item and never calls `NSStatusItem::setVisible`.
+opens once and says what hid the icon, that hiding it never stopped Lumen, and that **Quit Lumen**
+in the icon's menu does. `TrayIcon::set_visible(true)` is *not* the fix — it only re-creates a
+missing item and never calls `NSStatusItem::setVisible`.
 
 **"Built" is not "visible", and is no longer treated as such.** After the event loop starts, the
 status item's rect is checked at +500ms, +1.5s and +4s, and classified `Present` / `Absent` /

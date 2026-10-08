@@ -29,20 +29,28 @@ defaults read io.speedata.lumen | grep NSStatusItem
 defaults read Lumen | grep NSStatusItem
 ```
 
-Check both — Lumen has written under both domain names. You are looking for:
+Check both — Lumen has written under both domain names. You are looking for either of:
 
 ```
 "NSStatusItem Visible Item-0" = 0;
+"NSStatusItem VisibleCC Item-0" = 0;
 ```
 
-If it is there and `0`, that is the cause. Restore it:
+The second is the form current macOS writes, `CC` for Control Center, which manages status items
+there. If either is there and `0`, that is the cause. Restore it by deleting the key you found, in
+the domain you found it in:
 
 ```sh
 defaults delete io.speedata.lumen "NSStatusItem Visible Item-0"
+defaults delete io.speedata.lumen "NSStatusItem VisibleCC Item-0"
 defaults delete Lumen "NSStatusItem Visible Item-0"
+defaults delete Lumen "NSStatusItem VisibleCC Item-0"
 killall Lumen
 open -a Lumen
 ```
+
+From 1.6.0 Lumen does this itself on launch and opens its window to say so, and `lumen doctor`
+names the key it found.
 
 A `NSStatusItem Preferred Position` key on its own is normal and harmless — that is just where
 the icon last sat.

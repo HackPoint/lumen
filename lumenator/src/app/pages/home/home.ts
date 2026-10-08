@@ -13,6 +13,8 @@ interface StartupHealth {
     degraded: boolean;
     tray: string;
     degradations: string[];
+    /** The hidden-icon preferences this launch cleared. A backend before 1.6.0 omits it. */
+    restored?: string[];
 }
 
 @Component({
@@ -36,9 +38,21 @@ export class Home implements OnInit {
      */
     readonly health = signal<StartupHealth | null>(null);
 
+    /**
+     * The hidden-icon preferences this launch cleared, if any.
+     *
+     * macOS keeps a status item hidden on every launch once it has been ⌘-dragged off the menu
+     * bar. Lumen clears that and opens this window for it; the window has to say why, or the icon
+     * coming back reads as the app overriding the user, who is never told how to stop it.
+     */
+    readonly restored = signal<string[]>([]);
+
     ngOnInit(): void {
         this.bridge.invoke<StartupHealth>('lumen_startup_health')
-            .then(h => { if (h?.degraded) this.health.set(h); })
+            .then(h => {
+                if (h?.degraded) this.health.set(h);
+                if (h?.restored?.length) this.restored.set(h.restored);
+            })
             .catch(() => { /* non-fatal: an older backend simply has no such command */ });
         this.bridge.invoke<boolean>('lumen_setup_needed')
             .then(needed => { if (needed) this.router.navigate(['/setup']); })

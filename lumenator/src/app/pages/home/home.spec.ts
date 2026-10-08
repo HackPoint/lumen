@@ -202,6 +202,49 @@ describe('Home', () => {
     expect(items[1].textContent).toContain('could not build the menu');
   });
 
+  // ── restored-icon notice ───────────────────────────────────────────────────
+  //
+  // The launch that clears a hidden-icon preference opens this window. Without a word here the
+  // icon coming back reads as the app overriding the user, and whoever ⌘-dragged it away on
+  // purpose is never told how to stop Lumen.
+
+  it('explains a restored icon on the launch that restored it', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [],
+      restored: ['NSStatusItem Visible Item-0'],
+    }));
+    const el = fixture.nativeElement.querySelector('.restored');
+    expect(el).not.toBeNull();
+    expect(el.textContent).toContain('hidden by macOS');
+    expect(el.querySelector('strong')?.textContent).toBe('Quit Lumen');
+    // The repair worked, so it is not presented as a fault.
+    expect(fixture.nativeElement.querySelector('.degraded')).toBeNull();
+  });
+
+  it('says nothing about the icon when nothing was restored', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [], restored: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.restored')).toBeNull();
+  });
+
+  it('says nothing about the icon when the backend predates the field', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.restored')).toBeNull();
+  });
+
+  it('shows both when a restored icon is still not visible', async () => {
+    // Clearing the preference cannot make room in a full menu bar; the banner says that part.
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: true, tray: 'built but not visible: off-screen', degradations: [],
+      restored: ['NSStatusItem Visible Item-0'],
+    }));
+    expect(fixture.nativeElement.querySelector('.degraded')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.restored')).not.toBeNull();
+  });
+
   it('asks the backend for startup health exactly once', async () => {
     await build(b => b.responses.set('lumen_startup_health', {
       degraded: false, tray: 'present', degradations: [],

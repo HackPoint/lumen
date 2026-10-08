@@ -462,11 +462,13 @@ pub fn run() {
             // If a hidden-icon preference was cleared, say so once. The icon reappearing with
             // no explanation reads as the app fighting the user — and someone who ⌘-dragged it
             // away deliberately needs to be told that is not how to remove it, and what is.
+            // The window shows that explanation from `lumen_startup_health`'s `restored`.
             if !restored.is_empty() && health.claim_restore_explanation() {
                 log::warn!(
                     "TRAY: restored a hidden menu-bar icon ({} pref(s))",
                     restored.len()
                 );
+                health.set_restored(restored);
                 reveal_main_window(app.handle(), "the menu-bar icon was restored");
             }
 
@@ -773,20 +775,31 @@ fn update_tray(app: tauri::AppHandle, percent: u8, status: String) {
     }
 }
 
-/// What degraded during startup, and whether the tray is actually visible.
+/// What degraded during startup, whether the tray is actually visible, and which hidden-icon
+/// preferences this launch cleared.
 ///
-/// Read by the frontend so a degraded app says so instead of looking healthy. Also folded into
-/// the fault report, so a user who *can* reach the app files something that already contains
-/// the answer.
+/// Read by the frontend so a degraded app says so instead of looking healthy, and so the
+/// window opened for a restored icon says why it opened. Also folded into the fault report, so
+/// a user who *can* reach the app files something that already contains the answer.
 #[tauri::command]
 fn lumen_startup_health(app: tauri::AppHandle) -> serde_json::Value {
-    let Some(health) = app.try_state::<StartupHealth>() else {
-        return serde_json::json!({ "degraded": false, "tray": "unknown", "degradations": [] });
+    startup_health_payload(app.try_state::<StartupHealth>().as_deref())
+}
+
+fn startup_health_payload(health: Option<&StartupHealth>) -> serde_json::Value {
+    let Some(health) = health else {
+        return serde_json::json!({
+            "degraded": false,
+            "tray": "unknown",
+            "degradations": [],
+            "restored": [],
+        });
     };
     serde_json::json!({
         "degraded": health.is_degraded(),
         "tray": health.tray().describe(),
         "degradations": health.degradations(),
+        "restored": health.restored(),
     })
 }
 
@@ -1248,6 +1261,34 @@ mod tests {
                 assert_eq!(img.rgba().len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
             }
         }
+    }
+
+    // ── startup health ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_startup_health_payload_carries_the_restored_keys() {
+        // Home opens its explanation from `restored`; a payload without it leaves the window
+        // that opened for a restored icon saying nothing about why.
+        let h = StartupHealth::default();
+        h.set_tray(health::TrayState::Present);
+        h.set_restored(vec!["NSStatusItem Visible Item-0".into()]);
+        let v = startup_health_payload(Some(&h));
+        assert_eq!(
+            v["restored"],
+            serde_json::json!(["NSStatusItem Visible Item-0"])
+        );
+        assert_eq!(v["degraded"], serde_json::json!(false));
+
+        let healthy = StartupHealth::default();
+        healthy.set_tray(health::TrayState::Present);
+        assert_eq!(
+            startup_health_payload(Some(&healthy))["restored"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            startup_health_payload(None)["restored"],
+            serde_json::json!([])
+        );
     }
 
     // ── db_url ───────────────────────────────────────────────────────────────

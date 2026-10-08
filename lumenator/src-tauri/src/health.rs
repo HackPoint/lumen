@@ -206,6 +206,9 @@ pub struct StartupHealth {
     /// Set once the restored-icon explanation has been shown, so it appears on the launch that
     /// repaired the preference and not on every launch after it.
     explained_restore: AtomicBool,
+    /// The hidden-icon preferences this launch cleared, for the window that explains why the
+    /// icon is back. Empty on every launch that repaired nothing.
+    restored: Mutex<Vec<String>>,
 }
 
 // The locks are taken through a poisoning: a panic elsewhere while one was held leaves a
@@ -246,6 +249,17 @@ impl StartupHealth {
 
     pub fn claim_restore_explanation(&self) -> bool {
         !self.explained_restore.swap(true, Ordering::Relaxed)
+    }
+
+    pub fn set_restored(&self, keys: Vec<String>) {
+        *self.restored.lock().unwrap_or_else(PoisonError::into_inner) = keys;
+    }
+
+    pub fn restored(&self) -> Vec<String> {
+        self.restored
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Is anything wrong? Drives whether the frontend shows a banner at all — it must stay
@@ -585,6 +599,20 @@ mod tests {
         assert!(!h.claim_missing_tray_warning());
         assert!(h.claim_restore_explanation());
         assert!(!h.claim_restore_explanation());
+    }
+
+    #[test]
+    fn a_restored_icon_is_reported_without_reading_as_degraded() {
+        // The repair worked, so nothing is wrong: the window explains the icon, not a fault.
+        let h = StartupHealth::default();
+        assert!(h.restored().is_empty());
+        h.set_tray(TrayState::Present);
+        h.set_restored(vec!["NSStatusItem Visible Item-0".into()]);
+        assert_eq!(
+            h.restored(),
+            vec!["NSStatusItem Visible Item-0".to_string()]
+        );
+        assert!(!h.is_degraded());
     }
 
     #[test]
