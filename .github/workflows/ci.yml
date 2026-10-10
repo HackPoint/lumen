@@ -257,6 +257,9 @@ jobs:
   # Windows the tests run unelevated; the step says why.
   app-e2e:
     name: App e2e (${{ matrix.os }})
+    # A passing run takes about ten minutes. The job once sat in the test step for over two hours,
+    # and without a limit it would have sat there for six.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -304,9 +307,12 @@ jobs:
         run: cargo install tauri-driver --version 2.1.0 --locked
 
       # msedgedriver has to match the WebView2 runtime the app runs in, which need not be the
-      # Edge browser the runner image ships a driver for. That one is the fallback.
-      - name: Fetch the msedgedriver of the WebView2 runtime
+      # Edge browser the runner image ships a driver for. That one is the fallback. The download
+      # is cached by runtime version and retried; if it still fails, the step says what it was
+      # fetching and falls back, rather than ending the job.
+      - name: Find the WebView2 runtime
         if: runner.os == 'Windows'
+        id: webview2
         shell: pwsh
         run: |
           $client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
@@ -315,12 +321,29 @@ jobs:
             $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
             if ($pv) { $v = $pv; Write-Output "WebView2 runtime $v ($key)"; break }
           }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore msedgedriver
+        if: runner.os == 'Windows' && steps.webview2.outputs.version != ''
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/msedgedriver
+          key: msedgedriver-win64-${{ steps.webview2.outputs.version }}
+
+      - name: Fetch the msedgedriver of the WebView2 runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/ci-download.ps1
+          $v = '${{ steps.webview2.outputs.version }}'
           $dir = Join-Path $env:RUNNER_TEMP 'msedgedriver'
           $driver = Join-Path $dir 'msedgedriver.exe'
           try {
             if (-not $v) { throw 'no WebView2 runtime version in the registry' }
-            Invoke-WebRequest "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" -OutFile "$dir.zip"
-            Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+            if (-not (Test-Path $driver)) {
+              Get-WithRetry "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" "$dir.zip" "msedgedriver $v"
+              Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+            }
           } catch {
             Write-Output "no msedgedriver $v to download ($_); using the runner image's"
             $driver = Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe'
@@ -345,22 +368,44 @@ jobs:
         working-directory: lumenator
         run: xvfb-run -a node --test 'e2e/*.e2e.mjs'
 
+      - name: Restore gsudo
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/gsudo.portable.zip
+          key: gsudo-2.6.1-21130BF1
+
+      - name: Fetch gsudo
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/ci-download.ps1
+          $zip = Join-Path $env:RUNNER_TEMP 'gsudo.portable.zip'
+          if (-not (Test-Path $zip)) {
+            Get-WithRetry https://github.com/gerardog/gsudo/releases/download/v2.6.1/gsudo.portable.zip $zip 'gsudo v2.6.1'
+          }
+          $sum = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($sum -ne '21130BF178D7B9891207F00BFF56F05B6B363CE9CEC7B2D084E45FB12EE51F44') {
+            Remove-Item $zip
+            throw "gsudo.portable.zip: SHA-256 $sum, not the pinned one"
+          }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'gsudo') -Force
+
       # The runner's shell is elevated, and from WebView2 150 the web view of an elevated app
       # ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, the variable msedgedriver opens its
       # debugging port through: no session attaches, and every test fails with "DevToolsActivePort
       # file doesn't exist" (tauri-apps/wry#1782). Lumen runs unelevated for its users, so the
       # tests run it that way, through gsudo at medium integrity, with what the lowered token
       # has to reach opened to it.
+      # A passing run of this step takes under a minute. The limits name what hung: --test-timeout
+      # ends a single test, which is then reported by name, and the step's own limit ends the rest.
+      # Neither retries anything; a test that fails or hangs stays failed.
       - name: App e2e (unelevated)
         if: runner.os == 'Windows'
+        timeout-minutes: 15
         working-directory: lumenator
         shell: pwsh
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'gsudo.portable.zip'
-          Invoke-WebRequest https://github.com/gerardog/gsudo/releases/download/v2.6.1/gsudo.portable.zip -OutFile $zip
-          $sum = (Get-FileHash $zip -Algorithm SHA256).Hash
-          if ($sum -ne '21130BF178D7B9891207F00BFF56F05B6B363CE9CEC7B2D084E45FB12EE51F44') { throw "gsudo.portable.zip: SHA-256 $sum" }
-          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'gsudo') -Force
           $gsudo = Join-Path $env:RUNNER_TEMP 'gsudo\x64\gsudo.exe'
           icacls $env:GITHUB_WORKSPACE /grant 'Everyone:(OI)(CI)F' /Q
           icacls (Split-Path $env:LUMEN_E2E_NATIVE_DRIVER) /grant 'Everyone:(OI)(CI)RX' /Q
@@ -369,12 +414,20 @@ jobs:
             "Set-Location '$PWD'"
             "whoami /groups | Select-String 'Mandatory Label'"
             "if (-not `$env:LUMEN_E2E_NATIVE_DRIVER) { throw 'gsudo did not pass the environment on' }"
-            "node --test 'e2e/*.e2e.mjs'"
+            "node --test --test-timeout=180000 'e2e/*.e2e.mjs'"
             'exit $LASTEXITCODE'
           ) | Set-Content $run
           whoami /groups | Select-String 'Mandatory Label'
           & $gsudo --integrity Medium pwsh -NoProfile -File $run
           exit $LASTEXITCODE
+
+      # What was still running when a step failed or timed out: the app, its daemon, the drivers.
+      - name: What was running
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Process | Where-Object { $_.Name -match 'Lumen|lumen|tauri-driver|msedge|gsudo|node|pwsh' } |
+            Sort-Object Name | Format-Table Id, Name, CPU, StartTime -AutoSize | Out-String -Width 200
 
   # ── Issue #5, made on purpose ─────────────────────────────────────────────────
   # The bug that hid Lumen's icon was a preference only the reporter's machine held: macOS's
