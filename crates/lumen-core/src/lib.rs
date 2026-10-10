@@ -7,6 +7,7 @@ pub mod project;
 pub mod ranked;
 pub mod rates;
 pub mod record;
+pub mod repeat;
 pub mod report;
 pub mod schema;
 pub mod structure;

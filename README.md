@@ -713,6 +713,44 @@ the `env` block when it runs again or upgrades Lumen. Removing the `Bash` entry 
 `PostToolUse` also stops it, but only until the next time Setup runs, because Setup puts
 that entry back.
 
+### Experimental: repeat reads (1.7.0, off by default)
+
+When the model asks `smart_read` for a file it already holds an outline of, the second
+outline is a repeat of tokens it has. With `LUMEN_REPEAT_READS` set in the environment
+Claude Code passes to the MCP server, Lumen remembers what it last delivered for each
+`(session, file)` and answers a repeat with less:
+
+| value | behaviour |
+|---|---|
+| unset, or anything unrecognised | **off** — every read is answered as it always was, and nothing is remembered |
+| `on` | repeats are answered as below |
+| `ab` | half of files, split by a stable hash of the path, take the new path; the other half are answered as before, and the row records what the new path would have done |
+
+| the file since the last `smart_read` | the answer |
+|---|---|
+| unchanged | a stub: the line count, the item count and a fingerprint. Route `smart_read_unchanged` |
+| edited | a delta: the outlined items that were edited, added, removed or moved, with their line ranges. A run of items that only shifted down is one line. Route `smart_read_delta` |
+| first read, `refresh=true`, another session, or anything below | the full outline |
+
+A stub or delta is only used when it costs fewer tokens than the outline it replaces. The
+stub and delta both say how to get the full outline: `smart_read(path, refresh=true)`.
+
+**Compaction.** After Claude Code compacts a conversation, the outline the stub points to
+is gone. Lumen reads the session's transcript (`~/.claude/projects/*/<session>.jsonl`,
+or `LUMEN_PROJECTS_DIR`) for a `compact_boundary` record written after the last delivery,
+and answers with the full outline if it finds one. If the transcript cannot be found or
+is shorter than it was, Lumen cannot tell, so it also answers with the full outline: a
+stub that turns out to be wrong costs more than the outline it saved.
+
+State lives in the `read_state` table of the ledger, so it survives the MCP server
+restarting, and rows older than 14 days are dropped. Each `read_events` row records
+`repeat_arm` and `repeat_plan` (`first`, `unchanged`, `delta`, `compacted`, `refresh`,
+`unverifiable`, `not_diffable`, `unchanged_not_smaller`, `delta_too_big`).
+
+Savings columns on stub and delta rows are measured against the whole file, as for every
+other route; what a repeat saves over the outline it replaces is in `repeat_plan` and the
+returned-token column.
+
 ### Experimental: ranked outline (1.3.0, off by default)
 
 `smart_read`'s outline can be sized by the economics of the call rather than by a fixed

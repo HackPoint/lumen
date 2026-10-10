@@ -1793,7 +1793,7 @@ pub fn mode_from_env() -> Mode {
 /// input bytes, so on structured paths it barely varies: over 4,000 generated paths of
 /// the form `src/module_N/file_N.rs`, `hash % 2` put **every single one** in the same
 /// arm — a 100/0 split presented as 50/50. Mixing before taking the bit gives 0.509.
-fn path_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn path_hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= *b as u64;

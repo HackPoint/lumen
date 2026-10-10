@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 pub mod hook;
+mod repeat_read;
 
 pub const SERVER_NAME: &str = "lumen";
 // Taken from the crate, not written out. Hardcoded, it said 0.2.0 while the crate was
@@ -95,6 +96,17 @@ pub struct MeterRow {
     /// Ranked-outline decision inputs. Empty for the legacy arm, which has no decision
     /// to record — a zero there would claim one was made.
     pub ranked: lumen_core::meter::RankedMeta,
+    /// What a smart_read delivered, to be remembered once the reply is out. `None` for
+    /// every row that delivered nothing a later call could refer back to.
+    pub state: Option<RepeatState>,
+}
+
+/// One `read_state` write, deferred like the `read_events` row beside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepeatState {
+    pub session_id: String,
+    pub path: String,
+    pub delivered: lumen_core::repeat::Delivered,
 }
 
 impl MeterRow {
@@ -115,6 +127,13 @@ impl MeterRow {
             self.req_key.as_deref(),
             &self.ranked,
         );
+        if let Some(st) = &self.state
+            && let Some(db) = lumen_core::meter::db_path()
+            && let Err(e) = lumen_core::repeat::save(&db, &st.session_id, &st.path, &st.delivered)
+        {
+            // Not a fault row: losing it costs a repeat its saving, never a wrong answer.
+            eprintln!("lumen-meter: read_state write failed: {e}");
+        }
     }
 }
 
@@ -324,6 +343,7 @@ fn inflated_fallback(
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
             ranked: lumen_core::meter::RankedMeta::default(),
+            state: None,
         }),
     }
 }
@@ -358,6 +378,7 @@ fn undescribable_fallback(
             file_mtime: file_mtime(path),
             req_key: Some(path.to_string()),
             ranked: lumen_core::meter::RankedMeta::default(),
+            state: None,
         }),
     }
 }
@@ -427,6 +448,7 @@ fn metered_with(
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
             ranked,
+            state: None,
         }),
     }
 }
@@ -619,24 +641,45 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
         );
     }
 
+    // Repeat reads: answer a second read of the same file with less than a second outline,
+    // when the flag is on and the first answer is provably still in the model's context.
+    let rep = repeat_read::begin(path, &src, args);
+    let mut label = None;
+    if let Some(r) = &rep {
+        match r.serve(path, full_tokens, line_count) {
+            repeat_read::Served::Reply(o) => return *o,
+            repeat_read::Served::Fall(l) => label = Some(l),
+            repeat_read::Served::No => {}
+        }
+    }
+    let mut o = outline_read(path, &src, full_tokens, line_count);
+    if let Some(r) = &rep {
+        r.stamp(&mut o, label.unwrap_or_else(|| r.plan.label()));
+    }
+    o
+}
+
+/// The outline for a first read, a changed read the delta could not serve, and everything
+/// when the repeat flag is off.
+fn outline_read(path: &str, src: &str, full_tokens: usize, line_count: usize) -> Outcome {
     // outline mode. Which implementation depends on the rollout flag; `Off` is the
     // default and reaches nothing below.
     let arm = ranked::arm_for(ranked::mode_from_env(), path);
     if arm == ranked::Arm::Ranked
-        && let Some(o) = ranked_arm(path, &src, full_tokens, line_count)
+        && let Some(o) = ranked_arm(path, src, full_tokens, line_count)
     {
         return o;
     }
 
     let lang = detect_lang(path);
-    let items = outline(&src, lang);
+    let items = outline(src, lang);
 
     // An "outline" that is one synthetic whole-file item describes nothing. `outline` does not
     // fail on a language it cannot parse — it returns `whole_file_item` — so without this the
     // tool would report a ~95% saving on a file it never looked inside. Hand back the file and
     // let the ledger say so.
     if items.iter().all(|i| i.kind == "file") {
-        return undescribable_fallback(&src, full_tokens, path, Some(line_count as i64));
+        return undescribable_fallback(src, full_tokens, path, Some(line_count as i64));
     }
 
     let text = format_outline(path, line_count, full_tokens, &items);
@@ -650,7 +693,7 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
         None,
         // Guarded: a tiny file, or one that is almost entirely short declarations, can have an
         // outline larger than itself. That is not a saving and must not be recorded as one.
-        Inflate::Guard { fallback: &src },
+        Inflate::Guard { fallback: src },
     )
 }
 
@@ -685,6 +728,7 @@ fn ranked_meta(d: &ranked::Decision, k: i64, n: i64) -> lumen_core::meter::Ranke
         n_total: Some(n),
         coeff_version: Some(d.coeff_version as i64),
         target_outline: Some(lumen_core::econ::target_outline()),
+        ..Default::default()
     }
 }
 

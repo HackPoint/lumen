@@ -109,6 +109,23 @@ pub const MIGRATIONS: &[&str] = &[
     // never had the column (fresh, or pre-E7) it fails with "no such column" and is
     // swallowed like every other already-applied migration.
     "ALTER TABLE read_events DROP COLUMN is_subagent",
+    // ── 1.7.0: repeat reads ──────────────────────────────────────────────────
+    // repeat_arm  — 'treatment' when the repeat-read path was live for this read,
+    //               'control' when the path was withheld by the A/B split. NULL on every
+    //               row written while LUMEN_REPEAT_READS is off, and on every hook row.
+    // repeat_plan — what the repeat decision was: first, unchanged, delta, compacted,
+    //               unverifiable, refresh, delta_too_big, unchanged_not_smaller. A control
+    //               row records what the treatment arm WOULD have done, which is what
+    //               makes the two arms comparable on the same population of repeat reads.
+    "ALTER TABLE read_events ADD COLUMN repeat_arm TEXT",
+    "ALTER TABLE read_events ADD COLUMN repeat_plan TEXT",
+    // What smart_read last delivered for (session, path), so a later call can tell an
+    // unchanged file from an edited one. Also in DDL; repeated here for the reason
+    // `faults` is.
+    "CREATE TABLE IF NOT EXISTS read_state (\
+        session_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, \
+        lines INTEGER NOT NULL, items TEXT NOT NULL, tx_len INTEGER, \
+        ts TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (session_id, path))",
     "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
      ON read_events(session_id, path, file_mtime)",
     // `faults` is also in DDL, which is enough for a fresh database. It is repeated
@@ -127,7 +144,7 @@ pub const MIGRATIONS: &[&str] = &[
 /// [`MIGRATIONS`]. `lumen report` compares the live table against this to detect a
 /// database that missed a migration, so adding an ALTER means bumping this number;
 /// `read_events_column_count_matches_the_constant` fails if you forget.
-pub const READ_EVENTS_COLUMNS: usize = 24;
+pub const READ_EVENTS_COLUMNS: usize = 26;
 
 pub const DDL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -203,9 +220,25 @@ CREATE TABLE IF NOT EXISTS read_events (
     k_selected      INTEGER,
     n_total         INTEGER,
     coeff_version   INTEGER,
-    target_outline  INTEGER
+    target_outline  INTEGER,
+    -- 1.7.0 repeat reads. NULL while LUMEN_REPEAT_READS is off.
+    repeat_arm      TEXT,             -- treatment | control
+    repeat_plan     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
+
+-- What smart_read last delivered for a path in a session. One row per (session, path),
+-- replaced on each delivery; rows older than a fortnight are pruned on write.
+CREATE TABLE IF NOT EXISTS read_state (
+    session_id TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    hash       TEXT NOT NULL,       -- content fingerprint at delivery
+    lines      INTEGER NOT NULL,
+    items      TEXT NOT NULL,       -- JSON: the item signatures delivered
+    tx_len     INTEGER,             -- transcript length at delivery; NULL = unverifiable
+    ts         TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (session_id, path)
+);
 
 -- One row per fault occurrence; `lumen report` aggregates count/first/last at read
 -- time, the way it already does for read_events. Writers never come here directly:
@@ -676,6 +709,13 @@ mod tests {
         "target_outline",
     ];
 
+    /// What a migrated 1.5.1 database has: the surviving 1.5.1 columns, then 1.7.0's two.
+    fn migrated_columns() -> Vec<String> {
+        let mut c = SURVIVING.map(String::from).to_vec();
+        c.extend(["repeat_arm".into(), "repeat_plan".into()]);
+        c
+    }
+
     /// Each row rendered by SQLite's own `quote()`, so both drivers compare the stored
     /// values byte for byte rather than through their type mappings.
     fn rendered_rows_sql() -> String {
@@ -726,7 +766,7 @@ mod tests {
         init_schema(&pool).await.unwrap();
 
         let cols = columns(&pool, "read_events").await;
-        assert_eq!(cols, SURVIVING.map(String::from).to_vec());
+        assert_eq!(cols, migrated_columns());
         assert_eq!(cols.len(), READ_EVENTS_COLUMNS);
         let after: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
             .fetch_all(&pool)
@@ -770,10 +810,7 @@ mod tests {
 
         let conn = crate::meter::connect_db(&path).unwrap();
 
-        assert_eq!(
-            rusqlite_columns(&conn),
-            SURVIVING.map(String::from).to_vec()
-        );
+        assert_eq!(rusqlite_columns(&conn), migrated_columns());
         assert_eq!(rendered_rows(&conn), before);
 
         drop(conn);

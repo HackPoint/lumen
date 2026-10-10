@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.7.0] — unreleased
+
+### Repeat reads: a second `smart_read` of the same file no longer costs a second outline
+
+Off by default. `LUMEN_REPEAT_READS=on` (or `ab`, split by a hash of the path) makes Lumen
+remember what it last delivered for each `(session, file)`. An unchanged file is answered with a
+stub, an edited one with a delta of the changed items, and anything else with the outline. The
+way back to the full outline, `smart_read(path, refresh=true)`, is in every stub and delta.
+
+- **Unchanged first.** Measured on 60 real edits from this repository's history, the stub is 4987
+  tokens against 44306 for the outlines it replaces (median 13.3% of the outline).
+- **Delta for edited files:** median 41.7%, p90 59.0% of the full outline over the same 60 edits;
+  none fell back to the outline. An edit that would cost as much as the outline gets the outline
+  (`delta_too_big`).
+- **Compaction** is detected from the session transcript (`compact_boundary`); if it cannot be
+  read, the answer is the full outline. State is persisted in a new `read_state` table, so it
+  survives an MCP server restart.
+- `read_events` gains `repeat_arm` and `repeat_plan` (additive migration).
+- With the flag off, `optimizer_bench` is unchanged to the token and the baseline is not
+  re-blessed.
+
 ## [1.6.0] — 2026-10-08
 
 Three things this release is really about: the hooks, which on a machine with no `python3` did
