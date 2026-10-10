@@ -63,17 +63,18 @@
                     <strong>{{ effectPct() }}% fewer tokens</strong>.
                     {{ provenanceNote() }}
                 </p>
-                <!-- Shown only while some rows lack recorded provenance. Before 1.1.5
-                     a dead tokenizer path made the metering hook substitute bytes/4
-                     in silence, so an unqualified "measured to the token" would be a
-                     claim this data cannot support. -->
+                <!-- Shown only while some counts are not known to be measured. Before
+                     1.1.5 a dead tokenizer path made the metering hook substitute bytes/4
+                     in silence, and until 1.6.0 it still could, saying so; an unqualified
+                     "measured to the token" would be a claim this data cannot support.
+                     Reads of images carry no count and are in neither figure. -->
                 @if (s.unverifiedProvenanceRows() > 0) {
                     <p class="hero__warn">
                         {{ fmtTokens(s.unverifiedProvenanceRows()) }} of
                         {{ fmtTokens(s.provenanceTotalRows()) }} metered events have
-                        unverified token provenance — recorded before Lumen tracked
-                        whether a count was measured or estimated. See the 1.1.5
-                        release notes.
+                        unverified token provenance — estimated by a hook before 1.6.0,
+                        or recorded before Lumen tracked whether a count was measured
+                        or estimated. See the 1.1.5 release notes.
                     </p>
                 }
             </section>

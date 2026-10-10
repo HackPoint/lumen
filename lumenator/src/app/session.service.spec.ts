@@ -718,6 +718,49 @@ describe('SessionService', () => {
     expect(s.notification()).toBeNull();
   });
 
+  it('warns when a session passes its per-session limit, and toasts it once', async () => {
+    const s = build();
+    s.setWindow(1_000_000); // keep context out of the way
+    s.setSessionLimit(1);
+    // A million output tokens is well over $1 at any published output rate.
+    bridge.emit('daemon', turnFrame({ output_tokens: 1_000_000 }));
+    await settle();
+    const n = s.notification();
+    expect(n?.level).toBe('warn');
+    expect(n?.text).toMatch(/^Session cost \$\d+\.\d\d exceeded your \$1 per-session limit\.$/);
+
+    bridge.emit('daemon', turnFrame({ output_tokens: 10 }));
+    await settle();
+    const toasts = bridge.notifications.filter((x) => x.title === 'Lumen — Session Alert');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].body).toBe(n!.text);
+  });
+
+  it('warns about a session that has run for more than two hours, and not before', () => {
+    // Only Date is faked: the service's refresh interval stays real and is cleared on reset.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T10:00:00Z'));
+      const s = build();
+      s.setWindow(1_000_000);
+      bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 10 }));
+
+      vi.setSystemTime(new Date('2026-01-01T11:59:00Z'));
+      bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 10 }));
+      expect(s.notification()).toBeNull();
+
+      // A later turn keeps the session's start, so it is now 121 minutes old.
+      vi.setSystemTime(new Date('2026-01-01T12:01:00Z'));
+      bridge.emit('daemon', turnFrame({ cache_read_input_tokens: 10 }));
+      expect(s.notification()).toEqual({
+        level: 'warn',
+        text: 'Long session (121 min). Context may be drifting.',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── native notifications ──────────────────────────────────────────────────
 
   it('sends a native toast once per compaction crossing, not once per change', async () => {
@@ -783,6 +826,33 @@ describe('SessionService', () => {
     build();
     expect(bridge.countOf('get_usage')).toBe(1);
     expect(bridge.countOf('get_optimizer_stats')).toBe(1);
+  });
+
+  it('refreshes both aggregate reports every minute, and stops once destroyed', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      build();
+      expect(bridge.countOf('get_usage')).toBe(1);
+      vi.advanceTimersByTime(60_000);
+      expect(bridge.countOf('get_usage')).toBe(2);
+      expect(bridge.countOf('get_optimizer_stats')).toBe(2);
+
+      // An interval that outlived its service would keep polling, and leak across tests.
+      TestBed.resetTestingModule();
+      vi.advanceTimersByTime(180_000);
+      expect(bridge.countOf('get_usage')).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports a rejection that is not an Error by its text', async () => {
+    const s = build();
+    bridge.invoke = (() => Promise.reject('database is locked')) as FakeTauriBridge['invoke'];
+    s.refreshFaultReport();
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    expect(s.faultError()).toBe('database is locked');
+    expect(s.faultReportLoading()).toBe(false);
   });
 
   it('re-fetches on demand', async () => {

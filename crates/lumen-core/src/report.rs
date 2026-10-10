@@ -289,6 +289,7 @@ struct Group {
 pub const FAULT_KINDS: &[&str] = &[
     "hook_fail_open",
     "schema_drift",
+    "meter_write_failed",
     "ingest_failed",
     "reporter_degraded",
     "ws_restart",
@@ -298,21 +299,27 @@ pub const FAULT_KINDS: &[&str] = &[
 /// The impact line used for a kind the renderer does not recognise.
 const UNCLASSIFIED: &str = "Unclassified fault. See the table below.";
 
+/// Where a kind this build does not know sorts: after every known one.
+const CATCH_ALL_PRIORITY: u8 = 7;
+
 /// Sort order for the table and for picking the headline. A fired fail-open guard
 /// outranks everything: it means the routing contract broke in the field.
 fn kind_priority(kind: &str) -> u8 {
     match kind {
         "hook_fail_open" => 0,
         "schema_drift" => 1,
+        // A read that never reached the ledger. Below schema drift only because drift is
+        // the commonest cause of it, so the cause should head the report.
+        "meter_write_failed" => 2,
         // Silent data loss: the daemon logged and continued, so the gauge is wrong and
         // nothing said so. Ranks above the two that merely retry.
-        "ingest_failed" => 2,
+        "ingest_failed" => 3,
         // The report itself is incomplete. Not the fault being reported, but it changes
         // how much the rest of the report can be trusted.
-        "reporter_degraded" => 3,
-        "ws_restart" => 4,
-        "ranked_decline" => 5,
-        _ => 6,
+        "reporter_degraded" => 4,
+        "ws_restart" => 5,
+        "ranked_decline" => 6,
+        _ => CATCH_ALL_PRIORITY,
     }
 }
 
@@ -326,6 +333,11 @@ fn impact(kind: &str) -> &'static str {
         "schema_drift" => {
             "The database's `read_events` columns do not match the set this build expects. \
              Metering rows may be dropped or written to the wrong column."
+        }
+        "meter_write_failed" => {
+            "A Read or Bash call was not written to the ledger. Every figure Lumen shows is \
+             computed from that table, so savings and spend are low by whatever these calls \
+             carried — and this fault is the only trace they left."
         }
         "ingest_failed" => {
             "The daemon could not ingest a transcript and carried on. Those turns are \
@@ -528,6 +540,10 @@ fn headline(top: &Group, version: &str) -> String {
             if files == 1 { "" } else { "s" }
         ),
         "schema_drift" => "read_events schema drift".to_string(),
+        "meter_write_failed" => format!(
+            "metering write failed {}× ({}) — reads missing from the ledger",
+            top.count, top.variant
+        ),
         "ingest_failed" => format!(
             "ingest failed {}× ({}) — turns missing from the ledger",
             top.count, top.variant
@@ -816,18 +832,41 @@ fn decline_routes() -> Vec<&'static str> {
 ///
 /// The drain runs first so a fault recorded seconds ago by a hook is in this report.
 pub fn load_faults_from_db(conn: &rusqlite::Connection) -> Result<Vec<Fault>, String> {
+    load_faults_with_spool(conn, crate::faults::spool_path().as_deref())
+}
+
+/// [`load_faults_from_db`] with the spool named, not resolved from the environment: a
+/// test that resolved it drained the spool of whatever home it ran under, the
+/// developer's own included. `None` drains nothing.
+pub fn load_faults_with_spool(
+    conn: &rusqlite::Connection,
+    spool: Option<&Path>,
+) -> Result<Vec<Fault>, String> {
     let mut out = Vec::new();
     let mut degraded: Vec<String> = Vec::new();
 
     // Every read below degrades instead of aborting. A stale or damaged database is
     // precisely what this report exists to describe, so a reporter that dies on one
     // cannot do its job — it would fail exactly when it is most needed.
-    if let Err(e) = crate::faults::drain_spool(conn) {
+    if let Some(spool) = spool
+        && let Err(e) = crate::faults::drain_spool_at(conn, spool)
+    {
         degraded.push(format!("spool drain: {e}"));
     }
     match spooled_faults(conn) {
         Ok(mut f) => out.append(&mut f),
         Err(e) => degraded.push(format!("faults table: {e}")),
+    }
+    // Whatever the drain left: everything, when the ledger would not take it. Before
+    // 1.6.0 a read-only ledger reduced a lost row to "spool drain: attempt to write a
+    // readonly database", and the next report to nothing at all.
+    if let Some(spool) = spool {
+        match crate::faults::peek_spool_at(spool) {
+            Ok(recs) => out.append(&mut pending_faults(&recs)),
+            // Not the path: it is under the home directory, and a report renders no
+            // absolute path.
+            Err(e) => degraded.push(format!("spool: {e}")),
+        }
     }
     match declines(conn) {
         Ok(mut f) => out.append(&mut f),
@@ -881,6 +920,48 @@ fn spooled_faults(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Fault>> {
     rows.collect()
 }
 
+/// Spool records the ledger has not taken, grouped as [`spooled_faults`] groups the
+/// table, so a fault reads the same before and after it reaches the ledger.
+fn pending_faults(recs: &[crate::faults::FaultRecord]) -> Vec<Fault> {
+    type Key<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>);
+    let mut groups: BTreeMap<Key, Fault> = BTreeMap::new();
+    for r in recs {
+        let key = (
+            r.kind.as_str(),
+            r.variant.as_str(),
+            r.path.as_deref(),
+            r.detail.as_deref(),
+        );
+        match groups.get_mut(&key) {
+            Some(f) => {
+                f.count += 1;
+                f.lines = r.lines.or(f.lines);
+                if f.first_seen.as_deref().is_none_or(|t| r.ts.as_str() < t) {
+                    f.first_seen = Some(r.ts.clone());
+                }
+                if f.last_seen.as_deref().is_none_or(|t| r.ts.as_str() > t) {
+                    f.last_seen = Some(r.ts.clone());
+                }
+            }
+            None => {
+                let f = Fault {
+                    kind: r.kind.clone(),
+                    path: r.path.clone(),
+                    lines: r.lines,
+                    detail: r.detail.clone(),
+                    count: 1,
+                    first_seen: Some(r.ts.clone()),
+                    last_seen: Some(r.ts.clone()),
+                    ..Default::default()
+                }
+                .with_variant(r.variant.clone());
+                groups.insert(key, f);
+            }
+        }
+    }
+    groups.into_values().collect()
+}
+
 /// Ranked declines were already metered by the MCP server; they need a reader, not a
 /// writer. `lines` is selected only when present, so a database predating it still
 /// yields its declines instead of erroring the whole report.
@@ -930,17 +1011,34 @@ fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
 /// counting them would keep a badge permanently lit for something nobody needs to act on
 /// — which trains people to ignore the badge.
 ///
-/// Read-only: it does not drain, so refreshing a badge on navigation writes nothing.
-pub fn actionable_fault_count(conn: &rusqlite::Connection) -> u64 {
-    let recorded: i64 = conn
-        .query_row("SELECT count(*) FROM faults", [], |r| r.get(0))
-        .unwrap_or(0);
-    recorded.max(0) as u64 + lumen_core_spool_len()
+/// Read-only: it does not drain, create or migrate, so refreshing a badge on navigation
+/// writes nothing. The spool is counted whether or not the ledger opens: a fault the
+/// ledger would not take is the one most worth showing, and until 1.6.0 a ledger that
+/// would not open put the badge out instead. A ledger that exists and cannot be read
+/// counts as one fault, so the badge leads to the report that names it; no ledger yet
+/// is none.
+pub fn actionable_fault_count(db: Option<&Path>, spool: Option<&Path>) -> u64 {
+    let recorded = match db.filter(|p| p.exists()) {
+        None => 0,
+        Some(p) => crate::meter::open_read_only(p)
+            .and_then(|c| recorded_faults(&c))
+            .unwrap_or(1),
+    };
+    recorded + spool.map_or(0, |p| crate::faults::spool_len_at(p) as u64)
 }
 
-/// Indirection so the count can be unit-tested without a spool on disk.
-fn lumen_core_spool_len() -> u64 {
-    crate::faults::spool_len() as u64
+/// Rows in `faults`, and none in a ledger that predates the table.
+fn recorded_faults(conn: &rusqlite::Connection) -> rusqlite::Result<u64> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'faults')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_table {
+        return Ok(0);
+    }
+    conn.query_row("SELECT count(*) FROM faults", [], |r| r.get::<_, i64>(0))
+        .map(|n| n.max(0) as u64)
 }
 
 /// A live comparison of `read_events` against the column set this build expects.
@@ -1145,8 +1243,13 @@ fn curl(
     token: Option<&str>,
     body: Option<&str>,
 ) -> Result<(u16, String), String> {
-    let cfg_path = scratch_path("lumen-curl", "cfg");
-    let body_path = scratch_path("lumen-curl", "json");
+    let body_path = match body {
+        Some(b) => Some(
+            stage_private("lumen-curl", "json", b)
+                .map_err(|e| format!("cannot stage request body: {e}"))?,
+        ),
+        None => None,
+    };
 
     let mut cfg = String::new();
     cfg.push_str("silent\nshow-error\n");
@@ -1157,22 +1260,27 @@ fn curl(
     if let Some(t) = token {
         cfg.push_str(&format!("header = \"Authorization: Bearer {t}\"\n"));
     }
-    if let Some(b) = body {
-        std::fs::write(&body_path, b).map_err(|e| format!("cannot stage request body: {e}"))?;
-        cfg.push_str(&format!("data-binary = @{}\n", body_path.display()));
+    if let Some(p) = &body_path {
+        cfg.push_str(&format!("data-binary = @{}\n", p.display()));
     }
     cfg.push_str(&format!("url = {url}\n"));
     cfg.push_str("write-out = \"\\n%{http_code}\"\n");
 
-    write_private(&cfg_path, &cfg)?;
-    let out = std::process::Command::new("curl")
-        .arg("--config")
-        .arg(&cfg_path)
-        .output();
-    let _ = std::fs::remove_file(&cfg_path);
-    let _ = std::fs::remove_file(&body_path);
+    let cfg_path = stage_private("lumen-curl", "cfg", &cfg);
+    let out = match &cfg_path {
+        Ok(p) => std::process::Command::new("curl")
+            .arg("--config")
+            .arg(p)
+            .output()
+            .map_err(|e| format!("cannot run curl: {e}")),
+        Err(e) => Err(format!("cannot stage curl config: {e}")),
+    };
+    // Whatever happened: the config holds the token.
+    for path in cfg_path.iter().chain(&body_path) {
+        let _ = std::fs::remove_file(path);
+    }
 
-    let out = out.map_err(|e| format!("cannot run curl: {e}"))?;
+    let out = out?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() && text.is_empty() {
         return Err(format!(
@@ -1186,13 +1294,46 @@ fn curl(
     Ok((code, body.to_string()))
 }
 
-/// Write a file only the owner can read. The curl config carries a bearer token.
-fn write_private(path: &Path, contents: &str) -> Result<(), String> {
-    std::fs::write(path, contents).map_err(|e| format!("cannot stage curl config: {e}"))?;
+/// Stage `contents` in a new scratch file only its owner can read, and return its path.
+///
+/// The curl config carries a bearer token. It used to be written with `fs::write` and
+/// chmodded afterwards: the token sat at the umask's mode until the chmod, a failed chmod
+/// was dropped, and the write went through whatever already sat at the predictable name —
+/// on Linux, in a /tmp every user can write to. A name that exists is skipped rather than
+/// written through: a crash between staging and cleanup leaves one behind, and a later
+/// process given the same pid would otherwise fail on it.
+fn stage_private(stem: &str, ext: &str, contents: &str) -> std::io::Result<PathBuf> {
+    const ATTEMPTS: usize = 8;
+    for _ in 0..ATTEMPTS {
+        let path = scratch_path(stem, ext);
+        match create_private(&path, contents) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("{ATTEMPTS} scratch names in a row already existed"),
+    ))
+}
+
+/// Create `path` holding `contents`, readable by its owner alone; refuse if it exists.
+///
+/// `create_new` refuses an existing path, a symlink included, so nothing is written
+/// through one. On unix the mode is set by the call that creates the file, so there is
+/// no moment at which the contents are readable by anyone else.
+fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut file = opts.open(path)?;
+    if let Err(e) = file.write_all(contents.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
     }
     Ok(())
 }
@@ -1525,8 +1666,8 @@ fn open_in_browser(ep: &Endpoints, url: &str) -> Result<(), String> {
 /// `gh` reads `--body-file -` from stdin, which `Command::output` cannot supply without
 /// a writer thread. A temp file is simpler and leaves the body inspectable if gh fails.
 fn write_via_tempfile(ep: &Endpoints, args: &[&str], body: &str) -> Result<String, String> {
-    let path = scratch_path("lumen-issue", "md");
-    std::fs::write(&path, body).map_err(|e| format!("cannot stage issue body: {e}"))?;
+    let path = stage_private("lumen-issue", "md", body)
+        .map_err(|e| format!("cannot stage issue body: {e}"))?;
 
     let mut full: Vec<&str> = args.to_vec();
     let p = path.to_string_lossy().into_owned();
@@ -1933,7 +2074,7 @@ mod tests {
             .unwrap();
         }
 
-        let faults = load_faults_from_db(&conn).expect("reader runs");
+        let faults = load_faults_with_spool(&conn, None).expect("reader runs");
 
         let valve = faults
             .iter()
@@ -1956,6 +2097,103 @@ mod tests {
         );
     }
 
+    /// A spool of `n` lost rows, in a temp dir of its own.
+    fn spool_of(n: usize) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let spool = dir.path().join("faults.jsonl");
+        for _ in 0..n {
+            crate::faults::record_at(
+                &spool,
+                &crate::faults::FaultRecord::now(crate::meter::METER_WRITE_FAILED, "insert")
+                    .with_path("src/a.rs")
+                    .with_detail("attempt to write a readonly database"),
+            );
+        }
+        (dir, spool)
+    }
+
+    /// B1. The badge counts what is waiting whatever state the ledger is in, and counting
+    /// creates nothing.
+    #[test]
+    fn the_fault_count_includes_the_spool_whatever_the_ledger() {
+        let (dir, spool) = spool_of(2);
+
+        let absent = dir.path().join("lumen.db");
+        assert_eq!(actionable_fault_count(Some(&absent), Some(&spool)), 2);
+        assert!(!absent.exists(), "counting created {}", absent.display());
+
+        let garbage = dir.path().join("garbage.db");
+        std::fs::write(&garbage, vec![b'x'; 4096]).unwrap();
+        assert_eq!(
+            actionable_fault_count(Some(&garbage), Some(&spool)),
+            3,
+            "an unreadable ledger is one more"
+        );
+
+        let old = dir.path().join("old.db");
+        rusqlite::Connection::open(&old)
+            .unwrap()
+            .execute_batch("CREATE TABLE read_events (ts TEXT)")
+            .unwrap();
+        assert_eq!(
+            actionable_fault_count(Some(&old), None),
+            0,
+            "no faults table is no faults"
+        );
+
+        let ledger = dir.path().join("ledger.db");
+        crate::meter::connect_db(&ledger)
+            .unwrap()
+            .execute(
+                "INSERT INTO faults(ts,kind,variant,channel) \
+                 VALUES('2026-10-08T00:00:00Z','ws_restart','-','cli')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(actionable_fault_count(Some(&ledger), Some(&spool)), 3);
+        assert_eq!(actionable_fault_count(Some(&ledger), None), 1);
+        assert_eq!(actionable_fault_count(None, None), 0);
+    }
+
+    /// B1. A ledger that will not take writes: the report names the row it lost on every
+    /// visit, and once the ledger takes writes the fault is drained and listed once.
+    #[test]
+    fn a_report_on_a_read_only_ledger_names_the_lost_row() {
+        let (_dir, spool) = spool_of(1);
+        let conn = db_with_schema();
+        conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        let lost = |faults: &[Fault]| -> Vec<(String, u64, Option<String>)> {
+            faults
+                .iter()
+                .filter(|f| f.kind == crate::meter::METER_WRITE_FAILED)
+                .map(|f| (f.variant().to_string(), f.count, f.path.clone()))
+                .collect()
+        };
+        let want = [("insert".to_string(), 1, Some("src/a.rs".to_string()))];
+
+        for visit in 1..=2 {
+            let faults = load_faults_with_spool(&conn, Some(&spool)).expect("reader runs");
+            assert_eq!(lost(&faults), want, "visit {visit}: {faults:?}");
+            assert!(
+                faults.iter().any(|f| f.kind == "reporter_degraded"
+                    && f.detail
+                        .as_deref()
+                        .is_some_and(|d| d.starts_with("spool drain:"))),
+                "visit {visit}: {faults:?}"
+            );
+            assert_eq!(crate::faults::spool_len_at(&spool), 1, "visit {visit}");
+        }
+
+        conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+        let faults = load_faults_with_spool(&conn, Some(&spool)).expect("reader runs");
+        assert_eq!(lost(&faults), want, "drained, and listed once: {faults:?}");
+        assert!(
+            faults.iter().all(|f| f.kind != "reporter_degraded"),
+            "{faults:?}"
+        );
+        assert_eq!(crate::faults::spool_len_at(&spool), 0);
+    }
+
     #[test]
     fn db_reader_reports_drift_on_a_stale_read_events() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1971,7 +2209,7 @@ mod tests {
         )
         .unwrap();
 
-        let faults = load_faults_from_db(&conn).expect("reader runs");
+        let faults = load_faults_with_spool(&conn, None).expect("reader runs");
         let drift = faults
             .iter()
             .find(|f| f.kind == "schema_drift")
@@ -2215,7 +2453,7 @@ mod tests {
                 "{kind} has no impact line — it would render as an unclassified fault"
             );
             assert!(
-                kind_priority(kind) < 6,
+                kind_priority(kind) < CATCH_ALL_PRIORITY,
                 "{kind} falls into the catch-all priority and would sort below everything"
             );
             let f = Fault {
@@ -2283,6 +2521,53 @@ mod tests {
                 "{raw} leaked a private directory name as {label}"
             );
             assert!(label.starts_with("<redacted:external>"), "got {label}");
+        }
+    }
+
+    #[test]
+    fn a_staged_file_is_owner_only_and_holds_what_was_staged() {
+        let staged = "header = \"Authorization: Bearer t0ken\"\n";
+        let path = stage_private("lumen-test-private", "cfg", staged).unwrap();
+        let read = std::fs::read_to_string(&path);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&path).map(|m| m.permissions().mode() & 0o777)
+        };
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(read.unwrap(), staged);
+        #[cfg(unix)]
+        assert_eq!(mode.unwrap(), 0o600, "the token file must be owner-only");
+    }
+
+    #[test]
+    fn staging_never_writes_through_a_name_that_exists() {
+        // What a planted file in a shared /tmp would be. The old writer opened it with
+        // `fs::write`, which truncates an existing file and follows a symlink.
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.cfg");
+        std::fs::write(&existing, "someone else's").unwrap();
+
+        let err = create_private(&existing, "token").unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "someone else's"
+        );
+
+        #[cfg(unix)]
+        {
+            let victim = dir.path().join("victim");
+            std::fs::write(&victim, "untouched").unwrap();
+            let planted = dir.path().join("planted.cfg");
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+            let err = create_private(&planted, "token").unwrap_err();
+
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
         }
     }
 }

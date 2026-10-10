@@ -13,7 +13,9 @@
 #   ./scripts/verify-install.sh --bin-dir DIR   # check binaries in DIR
 #   ./scripts/verify-install.sh --expect 1.5.0  # require this version
 #
-# Exit codes: 0 all checks passed, 1 one or more failed.
+# The hooks are checked by scripts/verify-hooks.sh, which runs them.
+#
+# Exit codes: 0 all checks passed, 1 one or more failed, 2 bad usage.
 
 set -uo pipefail
 
@@ -23,8 +25,11 @@ EXPECT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cli-only) CLI_ONLY=1; shift ;;
-        --bin-dir)  BIN_DIR="${2:-}"; shift 2 ;;
-        --expect)   EXPECT="${2:-}"; shift 2 ;;
+        # `shift 2` with one word left shifts nothing, and the loop never ended.
+        --bin-dir|--expect)
+            [[ $# -ge 2 ]] || { echo "$1 needs a value" >&2; exit 2; }
+            if [[ "$1" == --bin-dir ]]; then BIN_DIR="$2"; else EXPECT="$2"; fi
+            shift 2 ;;
         -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -63,11 +68,14 @@ section "Lumen install verification — ${PLATFORM}, $(uname -m)"
 
 # ── Locate the binaries ───────────────────────────────────────────────────────
 #
-# Search order mirrors how each platform actually installs: an explicit --bin-dir, then
-# the macOS app bundle, then PATH.
+# An explicit --bin-dir is the only place looked. It used to be only the first, so the
+# app bundle's lumen-cli was found ahead of a build's lumen, and a check of the build
+# checked whatever Lumen was installed. Without it, the search order mirrors how each
+# platform actually installs: the macOS app bundle, then PATH.
 find_bin() {
     local name="$1"
-    if [[ -n "$BIN_DIR" && -x "$BIN_DIR/$name" ]]; then
+    if [[ -n "$BIN_DIR" ]]; then
+        [[ -x "$BIN_DIR/$name" ]] || return 1
         printf '%s\n' "$BIN_DIR/$name"; return 0
     fi
     if [[ -x "/Applications/Lumen.app/Contents/MacOS/$name" ]]; then
@@ -168,16 +176,19 @@ else
 fi
 
 # ── The tokenizer sidecar ─────────────────────────────────────────────────────
+# The hooks no longer use it: `lumen-mcp hook meter` counts tokens itself, and
+# verify-hooks.sh checks the rows it writes say so. It still ships with the app, so a
+# broken one is still a broken install.
 section "Tokenizer"
 if [[ -n "$TOK" ]]; then
     N="$(printf 'fn main() {}\n' | "$TOK" 2>/dev/null | tr -dc '0-9')"
     if [[ -n "$N" && "$N" -gt 0 ]]; then
         ok "lumen-tok counted $N tokens"
     else
-        bad "lumen-tok produced no count — metering would fall back to bytes/4"
+        bad "lumen-tok produced no count"
     fi
 elif [[ "$CLI_ONLY" == "1" ]]; then
-    skip "no lumen-tok in a CLI-only install — hook metering would fall back to bytes/4"
+    skip "no lumen-tok in a CLI-only install"
 else
     bad "no lumen-tok"
 fi
@@ -201,27 +212,21 @@ if [[ -n "$CLI" ]]; then
 fi
 
 # ── Hooks, if Setup has run ───────────────────────────────────────────────────
+#
+# Run, not grepped. This used to grep the intercept for its fail-open guards, which
+# passed the 1.5.1 hooks, failed every hook since (the guards moved into lumen-mcp),
+# and passed hooks whose lumen-mcp was gone, which block and meter nothing.
 section "Hook scripts"
 HOOK_DIR="${HOME}/.claude/lumen"
+VERIFY_HOOKS="$(dirname "${BASH_SOURCE[0]}")/verify-hooks.sh"
 if [[ ! -d "$HOOK_DIR" ]]; then
     skip "no ~/.claude/lumen — Setup has not run on this machine"
+elif [[ ! -f "$VERIFY_HOOKS" ]]; then
+    bad "no verify-hooks.sh beside this script to check the hooks with"
+elif bash "$VERIFY_HOOKS" ${EXPECT:+--expect "$EXPECT"} "$HOOK_DIR"; then
+    ok "the hooks meter, intercept and fail open as they should"
 else
-    for f in lumen_read_intercept.sh lumen_meter.sh; do
-        if [[ -x "$HOOK_DIR/$f" ]]; then ok "$f present and executable"; else bad "$f missing or not executable"; fi
-    done
-    # The fail-open guards. Their absence is what deadlocked a session, and the fix
-    # reached the developer copy for a full release before it reached this one.
-    if grep -q 'lumen_mcp_missing' "$HOOK_DIR/lumen_read_intercept.sh" 2>/dev/null \
-       && grep -q 'retry_escape_valve' "$HOOK_DIR/lumen_read_intercept.sh" 2>/dev/null; then
-        ok "intercept has both fail-open guards"
-    else
-        bad "intercept is missing a fail-open guard — a session can deadlock"
-    fi
-    if grep -q 'will be allowed through' "$HOOK_DIR/lumen_read_intercept.sh" 2>/dev/null; then
-        ok "block message tells the model an escape exists"
-    else
-        bad "block message does not mention the retry escape"
-    fi
+    bad "the hooks failed the checks above"
 fi
 
 # ── GUI / widget ──────────────────────────────────────────────────────────────
@@ -239,7 +244,7 @@ elif [[ "$PLATFORM" == "macos" ]]; then
         ok "app bundle installed"
         BV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
               /Applications/Lumen.app/Contents/Info.plist 2>/dev/null)"
-        [[ -n "$BV" ]] && ok "bundle version $BV" || bad "bundle has no version"
+        if [[ -n "$BV" ]]; then ok "bundle version $BV"; else bad "bundle has no version"; fi
         if wait_for_process 'Lumen.app/Contents/MacOS/Lumen$'; then
             ok "tray process is running"
         else

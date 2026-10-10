@@ -45,6 +45,13 @@ fn emit(id: Value, outcome: Outcome) {
 }
 
 fn main() {
+    // `lumen-mcp hook …` runs as a Claude Code hook, not a server. It must branch before
+    // the banner below: on a block, Claude Code hands everything on stderr to the model.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("hook") {
+        std::process::exit(lumen_mcp::hook::run(&args[2..]));
+    }
+
     eprintln!(
         "lumen-mcp v{} starting (stdio transport)",
         lumen_mcp::SERVER_VERSION

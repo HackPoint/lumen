@@ -49,8 +49,9 @@ pub struct Facts {
 /// What doctor concluded, most actionable first.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Finding {
-    /// A `NSStatusItem Visible …` key is false: the icon was ⌘-dragged off the menu bar and
-    /// macOS remembers it. The cause of the reported symptom, and it has a one-line fix.
+    /// A `NSStatusItem Visible …` or `NSStatusItem VisibleCC …` key is false: the icon was
+    /// ⌘-dragged off the menu bar and macOS remembers it. The cause of the reported symptom, and
+    /// it has a one-line fix.
     IconHiddenByPreference { domain: String, key: String },
     /// A **running** menu-bar manager, which can hide the icon into an overflow area.
     MenuBarManager { name: String },
@@ -94,7 +95,7 @@ pub fn findings(f: &Facts) -> Vec<Finding> {
     let mut out = Vec::new();
 
     for p in &f.status_item_prefs {
-        if p.key.starts_with("NSStatusItem Visible ") && p.visible == Some(false) {
+        if is_visibility_key(&p.key) && p.visible == Some(false) {
             out.push(Finding::IconHiddenByPreference {
                 domain: p.domain.clone(),
                 key: p.key.clone(),
@@ -276,8 +277,10 @@ fn describe(x: &Finding) -> String {
 
 /// The preference domains Lumen has written status-item state under. Both are real — this
 /// machine has `NSStatusItem Preferred Position Item-0` in each, with different values.
+#[cfg(target_os = "macos")]
 pub const PREF_DOMAINS: [&str; 2] = ["io.speedata.lumen", "Lumen"];
 
+#[cfg(target_os = "macos")]
 const MENU_BAR_MANAGERS: [&str; 7] = [
     "Bartender",
     "Ice",
@@ -295,6 +298,42 @@ fn sh(cmd: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Whether a preference key is a status item's visibility flag. macOS writes it in two forms,
+/// `NSStatusItem Visible <autosave>` and, under Control Center on current macOS,
+/// `NSStatusItem VisibleCC <autosave>`; a match on "Visible " with the space missed the second.
+/// Without the space it catches both, and still not `NSStatusItem Preferred Position …`, which
+/// is where the item sat rather than whether it shows. The app's `health::is_visibility_key`
+/// matches the same way.
+fn is_visibility_key(key: &str) -> bool {
+    key.starts_with("NSStatusItem Visible")
+}
+
+/// One line of `defaults read <domain>`, if it holds a status-item key: `"<key>" = <value>;`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_pref_line(domain: &str, line: &str) -> Option<StatusItemPref> {
+    let line = line.trim();
+    if !line.contains("NSStatusItem") {
+        return None;
+    }
+    let (raw_key, raw_val) = line.split_once('=')?;
+    let key = raw_key.trim().trim_matches('"').to_string();
+    let val = raw_val.trim().trim_end_matches(';').trim();
+    let visible = if is_visibility_key(&key) {
+        match val {
+            "0" | "false" | "NO" => Some(false),
+            "1" | "true" | "YES" => Some(true),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Some(StatusItemPref {
+        domain: domain.to_string(),
+        key,
+        visible,
+    })
 }
 
 /// Collect what we can. Every field is optional because doctor's whole purpose is to run on a
@@ -321,31 +360,8 @@ pub fn collect() -> Facts {
             let Some(text) = sh("defaults", &["read", domain]) else {
                 continue;
             };
-            for line in text.lines() {
-                let line = line.trim();
-                if !line.contains("NSStatusItem") {
-                    continue;
-                }
-                let Some((raw_key, raw_val)) = line.split_once('=') else {
-                    continue;
-                };
-                let key = raw_key.trim().trim_matches('"').to_string();
-                let val = raw_val.trim().trim_end_matches(';').trim();
-                let visible = if key.starts_with("NSStatusItem Visible ") {
-                    match val {
-                        "0" | "false" | "NO" => Some(false),
-                        "1" | "true" | "YES" => Some(true),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                f.status_item_prefs.push(StatusItemPref {
-                    domain: domain.to_string(),
-                    key,
-                    visible,
-                });
-            }
+            f.status_item_prefs
+                .extend(text.lines().filter_map(|l| parse_pref_line(domain, l)));
         }
 
         if let Some(ps) = sh("/bin/ps", &["-ax", "-o", "comm"]) {
@@ -506,6 +522,59 @@ mod tests {
         );
         assert!(found[0].remedy().contains("defaults delete"));
         assert!(found[0].remedy().contains("NSStatusItem Visible Item-0"));
+    }
+
+    #[test]
+    fn the_control_center_form_of_the_key_is_found_too() {
+        // `NSStatusItem VisibleCC <autosave>` is the form macOS writes under Control Center.
+        // Lumen's own domain once held it false, and a match on "Visible " with a trailing
+        // space never saw it, so doctor reported nothing wrong on a machine hiding the icon.
+        let pref = |visible| StatusItemPref {
+            domain: "io.speedata.lumen".into(),
+            key: "NSStatusItem VisibleCC Item-0".into(),
+            visible,
+        };
+        let mut f = healthy();
+        f.status_item_prefs = vec![pref(Some(false))];
+        let found = findings(&f);
+        assert_eq!(
+            found,
+            [Finding::IconHiddenByPreference {
+                domain: "io.speedata.lumen".into(),
+                key: "NSStatusItem VisibleCC Item-0".into(),
+            }]
+        );
+        assert!(
+            found[0]
+                .remedy()
+                .contains(r#"defaults delete io.speedata.lumen "NSStatusItem VisibleCC Item-0""#)
+        );
+        // The control: the same key set true is what every other app on a Mac has.
+        f.status_item_prefs = vec![pref(Some(true))];
+        assert!(findings(&f).is_empty(), "{:?}", findings(&f));
+    }
+
+    #[test]
+    fn a_defaults_read_line_is_parsed_in_both_key_forms() {
+        // The lines as `defaults read <domain>` prints them. `collect()` shells out, so the
+        // parsing is checked here, on every host.
+        let parse = |line| parse_pref_line("Lumen", line).map(|p| (p.key, p.visible));
+        let key = |k: &str| k.to_string();
+        assert_eq!(
+            parse(r#"    "NSStatusItem VisibleCC Item-0" = 0;"#),
+            Some((key("NSStatusItem VisibleCC Item-0"), Some(false)))
+        );
+        assert_eq!(
+            parse(r#"    "NSStatusItem Visible Item-0" = 1;"#),
+            Some((key("NSStatusItem Visible Item-0"), Some(true)))
+        );
+        // Where the item sat, not whether it shows.
+        assert_eq!(
+            parse(r#"    "NSStatusItem Preferred Position Item-0" = 612;"#),
+            Some((key("NSStatusItem Preferred Position Item-0"), None))
+        );
+        assert_eq!(parse(r#"    NSWindowFrame = "0 0 800 600";"#), None);
+        assert_eq!(parse("{"), None);
     }
 
     #[test]

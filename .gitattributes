@@ -6,3 +6,7 @@ crates/lumen-core/tests/fixtures/*.json text eol=lf
 
 # Hook scripts run under bash; a CRLF checkout breaks the shebang.
 *.sh text eol=lf
+
+# Captured hook payloads stay as Claude Code sent them on every checkout. The tests parse
+# them, so CRLF would fail none today; it would make each one a payload nobody sent.
+crates/lumen-mcp/tests/fixtures/hooks/*.json -text

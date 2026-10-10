@@ -375,7 +375,7 @@ pub struct OptimizerReport {
     /// from `missed_calls` because no optimization was available to miss, and
     /// reported separately so the exclusion is visible rather than implied.
     pub unmeasurable_calls: i64,
-    /// How many rows in the lifetime window have no recorded token provenance.
+    /// How many rows in the lifetime window carry a token count not known to be measured.
     ///
     /// Rows written before 1.1.5 carry no `token_source`, and on installs whose
     /// baked tokenizer path was dead the hook silently substituted `bytes / 4`.
@@ -383,7 +383,8 @@ pub struct OptimizerReport {
     /// count instead of the claim. Deliberately "unverified", not "estimated":
     /// asserting they are all estimates would be its own unmeasured claim.
     pub unverified_provenance_rows: i64,
-    /// Total rows considered, so the frontend can render "N of M".
+    /// Rows that carry a count, so the frontend can render "N of M". Reads marked
+    /// `unsupported` have none and are in neither figure.
     pub provenance_total_rows: i64,
 
     /// Net dollar value of interception: what the avoided tokens are worth, less what the
@@ -491,11 +492,17 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     // ── Token provenance ─────────────────────────────────────────────────────
     // Counted over every metered row, not just lumen routes: a user's confidence in
     // the effectiveness figure depends on the whole ledger being measured.
+    //
+    // A row marked 'unsupported' — an image, a binary — carries no count, and says so,
+    // so it is on neither side. Counted as unverified, every screenshot read made the
+    // Optimizer say the ledger was partly unverified, on an install that has never
+    // estimated a count.
     let (unverified_provenance_rows, provenance_total_rows): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(CASE WHEN token_source IS NULL OR token_source <> 'measured'
                                   THEN 1 ELSE 0 END),0),
                 COUNT(*)
-         FROM read_events",
+         FROM read_events
+         WHERE COALESCE(token_source, '') <> 'unsupported'",
     )
     .fetch_one(pool)
     .await
@@ -628,7 +635,7 @@ const VALUE_ROUNDS: f64 = 194.0;
 /// `recall_file` on the same file, so an intercept averages more than a single round.
 const PAIR_MULTIPLIER: f64 = 1.604;
 
-// ── Context diagnostics: where is this project's context actually going? ──────
+// ── Context diagnostics: where is the context actually going? ────────────────
 //
 // Diagnosis, not savings. This answers "where does your context go" and makes no claim
 // to have saved anything — it costs zero tokens, intercepts nothing and forces no rounds,
@@ -637,7 +644,7 @@ const PAIR_MULTIPLIER: f64 = 1.604;
 // that survives contact with the data.
 
 /// How many files the report names. Enough to act on, short enough to read.
-const HOTSPOT_LIMIT: i64 = 15;
+const HOTSPOT_LIMIT: usize = 15;
 
 /// A file that a meaningful share of the project's context has gone into.
 #[derive(Serialize, Debug, PartialEq)]
@@ -648,7 +655,7 @@ pub struct FileHotspot {
     pub name: String,
     pub reads: i64,
     pub total_tokens: i64,
-    /// Share of every token this project has read.
+    /// Share of every token read, in every project the ledger holds.
     pub share_pct: f64,
     /// Line count at the most recent read, when it was recorded.
     pub lines: Option<i64>,
@@ -703,7 +710,7 @@ fn recommend(lines: Option<i64>, reads: i64, unchanged: i64, share: f64) -> Opti
     // A single file dominating the project's context.
     if share >= 10.0 {
         return Some(format!(
-            "{share:.0}% of everything this project has read is this one file"
+            "{share:.0}% of everything read, across every project, is this one file"
         ));
     }
     None
@@ -711,12 +718,17 @@ fn recommend(lines: Option<i64>, reads: i64, unchanged: i64, share: f64) -> Opti
 
 /// Where the project's context has gone.
 pub async fn get_context_report(pool: &SqlitePool) -> Result<ContextReport, String> {
-    let (total, distinct): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(full_tokens),0), COUNT(DISTINCT path) FROM read_events",
+    // Every file's reads and tokens, heaviest first. The total, the file count, the ten
+    // largest files' share and the files reported all come from this one pass.
+    let mut files: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT path, COUNT(*), SUM(full_tokens) FROM read_events
+         GROUP BY path
+         ORDER BY SUM(full_tokens) DESC",
     )
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
+    let total: i64 = files.iter().map(|f| f.2).sum();
 
     if total == 0 {
         return Ok(ContextReport {
@@ -727,6 +739,8 @@ pub async fn get_context_report(pool: &SqlitePool) -> Result<ContextReport, Stri
             total_unchanged_rereads: 0,
         });
     }
+    let distinct = files.len() as i64;
+    let top10: i64 = files.iter().take(10).map(|f| f.2).sum();
 
     // Re-reads that found the file unchanged, per path.
     //
@@ -745,23 +759,33 @@ pub async fn get_context_report(pool: &SqlitePool) -> Result<ContextReport, Stri
     .map_err(|e| e.to_string())?;
     let unchanged: std::collections::HashMap<String, i64> = unchanged.into_iter().collect();
 
-    let rows: Vec<(String, i64, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT path, COUNT(*), SUM(full_tokens), MAX(lines)
-         FROM read_events
-         GROUP BY path
-         ORDER BY SUM(full_tokens) DESC
-         LIMIT ?1",
+    files.truncate(HOTSPOT_LIMIT);
+
+    // The line count is the latest read's, not the largest: through 1.5.1 it was MAX(lines),
+    // so a file that had shrunk, split on this report's own advice say, kept its old size here
+    // and the advice with it. Looked up for the reported files only, once they are chosen.
+    let paths: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT path, lines FROM read_events
+         WHERE lines IS NOT NULL AND path IN (SELECT value FROM json_each(?1))
+         ORDER BY ts, rowid",
     )
-    .bind(HOTSPOT_LIMIT)
+    .bind(serde_json::to_string(&paths).map_err(|e| e.to_string())?)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
+    let mut latest = std::collections::HashMap::new();
+    for (path, lines) in counts {
+        // In the order they were read, so each file is left with its latest read's count.
+        latest.insert(path, lines);
+    }
 
-    let top_files: Vec<FileHotspot> = rows
+    let top_files: Vec<FileHotspot> = files
         .into_iter()
-        .map(|(path, reads, tokens, lines)| {
+        .map(|(path, reads, tokens)| {
             let share = 100.0 * tokens as f64 / total as f64;
             let u = unchanged.get(&path).copied().unwrap_or(0);
+            let lines = latest.get(&path).copied();
             FileHotspot {
                 name: path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string(),
                 recommendation: recommend(lines, reads, u, share),
@@ -774,15 +798,6 @@ pub async fn get_context_report(pool: &SqlitePool) -> Result<ContextReport, Stri
             }
         })
         .collect();
-
-    let (top10,): (i64,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(t),0) FROM (
-             SELECT SUM(full_tokens) AS t FROM read_events GROUP BY path
-             ORDER BY t DESC LIMIT 10)",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
 
     Ok(ContextReport {
         total_tokens_read: total,

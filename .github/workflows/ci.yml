@@ -69,20 +69,23 @@ jobs:
         run: pnpm build
 
       # The frontend suite enforces its own coverage thresholds via the
-      # `test` target in angular.json, so a drop in coverage fails here.
+      # `test` target in angular.json, per file: a file under any of them fails
+      # here by name, however high the total stays. Every file under src/app is
+      # measured whether a spec loads it or not, except what coverageExclude lists:
+      #   src/main.ts                  the bootstrap call, which runs only in a window
+      #   src/**/*.spec.ts             the specs
+      #   src/app/tauri-bridge.fake.ts the test double the specs drive the app through
+      #   src/app/tauri-bridge.ts      one-line calls into @tauri-apps/api, which
+      #                                throws outside a Tauri window; the App e2e job
+      #                                runs it, in the built app
       - name: pnpm test
         working-directory: lumenator
         run: pnpm test
 
-  # ── Cross-platform CLI/core job: Linux + Windows ───────────────────────────
-  # The `lumen` CLI and the core/daemon/mcp/stats crates are pure cross-platform
-  # Rust. SQLite is compiled from source (rusqlite `bundled`), so no system
-  # libsqlite3 is needed on any OS. The GUI is covered by its own jobs: macOS in
-  # `check`, Linux in `gui-linux` below.
   # ── End-to-end gate ─────────────────────────────────────────────────────────
   #
   # A separate job so it is a named status check that branch protection can require.
-  # These tests also run inside `cargo test --all-targets` in the jobs above, but a
+  # These tests also run inside `cargo test --all-targets` in `check` and `test`, but a
   # protection rule can require a job, not a subset of one — and the point of this gate
   # is that "the chain from a file on disk to the figure on screen still works" cannot be
   # merged past.
@@ -94,7 +97,7 @@ jobs:
   #                 SQLite + a live WebSocket frame -> the same aggregates
   #
   # Ubuntu rather than macOS: it is the cheapest runner, and nothing in either chain is
-  # platform-specific. The per-OS jobs above already prove the code compiles and passes
+  # platform-specific. The per-OS `test` job below proves the code compiles and passes
   # everywhere.
   e2e:
     name: E2E (read path + ingest path)
@@ -127,16 +130,42 @@ jobs:
       - name: E2E — decision metering
         run: cargo test -p lumen-mcp --test ranked_metering -- --nocapture
 
+  # ── Every crate, every target, on all three: macOS, Linux, Windows ───────────
+  # The same tests everywhere, the Tauri crate included: its build needs the sidecars,
+  # so they are built first, and on Linux the GTK/WebKit headers. Before anything is
+  # built, the probe prints what a hook's shell finds on the runner, unedited.
+  #
+  # The hook end-to-end tests run on their own first, with their output shown: each
+  # installs with Setup into a temp home, hands a payload Claude Code really sent to the
+  # registered command in the shell Claude Code uses there (/bin/sh on macOS and Linux,
+  # Git Bash on Windows), and prints the row that landed. They run again in the full
+  # suite; this step is where to read them.
   test:
     name: Test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
+    # A warning fails the build here as clippy fails it in `check`, which runs on macOS only:
+    # code compiled out on macOS warned on Linux and Windows, unread, until 1.6.0.
+    env:
+      RUSTFLAGS: -D warnings
+    defaults:
+      run:
+        # Git Bash on Windows: the shell Claude Code runs hooks with there.
+        shell: bash
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Probe the hook environment
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            bash scripts/probe-hook-env.sh
+          else
+            /bin/sh scripts/probe-hook-env.sh
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -145,13 +174,30 @@ jobs:
           workspaces: ". -> target"
           cache-on-failure: true
 
-      - name: Build CLI (proves cross-platform compile)
-        run: cargo build -p lumen-cli --release
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
 
-      # lumen-cli and lumen-stats were missing here, so the TUI rendering code
-      # and every rollup query went untested on Linux and Windows entirely.
-      - name: cargo test (all non-Tauri crates)
-        run: cargo test -p lumen-core -p lumen-cli -p lumen-daemon -p lumen-mcp -p lumen-stats --all-targets
+      # Release builds of lumen-mcp, lumen-daemon and the CLI, staged where the Tauri
+      # build and the hook tests look for them.
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: Hook e2e (install -> captured payload -> hook -> ledger row)
+        run: cargo test -p Lumen --lib setup::hook_e2e -- --nocapture --test-threads=1
+
+      - name: cargo test (every crate, every target)
+        run: cargo test --workspace --all-targets
 
   # ── Linux GUI job ──────────────────────────────────────────────────────────
   # Now that Lumen ships a Linux AppImage and .deb, the Tauri crate has to build
@@ -198,3 +244,233 @@ jobs:
 
       - name: cargo clippy (Tauri crate on Linux)
         run: cargo clippy -p Lumen --all-targets -- -D warnings
+
+  # ── The built app, driven through WebDriver ──────────────────────────────────
+  # The debug build of the app itself, launched by tauri-driver: whether it opens its window
+  # when it should and only then, says why when it does, and whether the Optimizer and Hotspots
+  # screens show what a ledger the real lumen-mcp wrote holds. lumenator/e2e/app.e2e.mjs says
+  # what each test covers.
+  #
+  # Linux and Windows only. tauri-driver needs the platform's own WebDriver behind it,
+  # WebKitWebDriver on Linux and msedgedriver on Windows; macOS has none for its web view, so
+  # the app cannot be driven there. The job after this one launches it on macOS instead. On
+  # Windows the tests run unelevated; the step says why.
+  app-e2e:
+    name: App e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Linux build dependencies, WebKitWebDriver and Xvfb
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential \
+            webkit2gtk-driver \
+            xvfb \
+            xauth
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --version 2.1.0 --locked
+
+      # msedgedriver has to match the WebView2 runtime the app runs in, which need not be the
+      # Edge browser the runner image ships a driver for. That one is the fallback.
+      - name: Fetch the msedgedriver of the WebView2 runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $v = $null
+          foreach ($key in "HKLM:\SOFTWARE\WOW6432Node\$client", "HKLM:\SOFTWARE\$client", "HKCU:\Software\$client") {
+            $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
+            if ($pv) { $v = $pv; Write-Output "WebView2 runtime $v ($key)"; break }
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'msedgedriver'
+          $driver = Join-Path $dir 'msedgedriver.exe'
+          try {
+            if (-not $v) { throw 'no WebView2 runtime version in the registry' }
+            Invoke-WebRequest "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" -OutFile "$dir.zip"
+            Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+          } catch {
+            Write-Output "no msedgedriver $v to download ($_); using the runner image's"
+            $driver = Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe'
+          }
+          & $driver --version
+          "LUMEN_E2E_NATIVE_DRIVER=$driver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the app (debug, not bundled)
+        working-directory: lumenator
+        run: pnpm tauri build --debug --no-bundle
+
+      - name: App e2e
+        if: runner.os == 'Linux'
+        working-directory: lumenator
+        run: xvfb-run -a node --test 'e2e/*.e2e.mjs'
+
+      # The runner's shell is elevated, and from WebView2 150 the web view of an elevated app
+      # ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, the variable msedgedriver opens its
+      # debugging port through: no session attaches, and every test fails with "DevToolsActivePort
+      # file doesn't exist" (tauri-apps/wry#1782). Lumen runs unelevated for its users, so the
+      # tests run it that way, through gsudo at medium integrity, with what the lowered token
+      # has to reach opened to it.
+      - name: App e2e (unelevated)
+        if: runner.os == 'Windows'
+        working-directory: lumenator
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'gsudo.portable.zip'
+          Invoke-WebRequest https://github.com/gerardog/gsudo/releases/download/v2.6.1/gsudo.portable.zip -OutFile $zip
+          $sum = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($sum -ne '21130BF178D7B9891207F00BFF56F05B6B363CE9CEC7B2D084E45FB12EE51F44') { throw "gsudo.portable.zip: SHA-256 $sum" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'gsudo') -Force
+          $gsudo = Join-Path $env:RUNNER_TEMP 'gsudo\x64\gsudo.exe'
+          icacls $env:GITHUB_WORKSPACE /grant 'Everyone:(OI)(CI)F' /Q
+          icacls (Split-Path $env:LUMEN_E2E_NATIVE_DRIVER) /grant 'Everyone:(OI)(CI)RX' /Q
+          $run = Join-Path $env:RUNNER_TEMP 'app-e2e.ps1'
+          @(
+            "Set-Location '$PWD'"
+            "whoami /groups | Select-String 'Mandatory Label'"
+            "if (-not `$env:LUMEN_E2E_NATIVE_DRIVER) { throw 'gsudo did not pass the environment on' }"
+            "node --test 'e2e/*.e2e.mjs'"
+            'exit $LASTEXITCODE'
+          ) | Set-Content $run
+          whoami /groups | Select-String 'Mandatory Label'
+          & $gsudo --integrity Medium pwsh -NoProfile -File $run
+          exit $LASTEXITCODE
+
+  # ── Issue #5, made on purpose ─────────────────────────────────────────────────
+  # The bug that hid Lumen's icon was a preference only the reporter's machine held: macOS's
+  # "NSStatusItem Visible <autosave>" set false by a ⌘-drag. This sets it, in both forms,
+  # launches the built app, and checks the preference is cleared, the icon is on screen and the
+  # window opens saying why; then that a launch with nothing set does none of it. It writes the
+  # app's preferences as the logged-in user, which is why it runs here and refuses to elsewhere.
+  issue5:
+    name: Issue 5 launch check (macOS)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: pnpm install
+        working-directory: lumenator
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the app bundle (debug)
+        working-directory: lumenator
+        run: pnpm tauri build --debug --bundles app
+
+      - name: Plant the hidden-icon preference and launch
+        run: bash scripts/issue5-launch-check.sh target/debug/bundle/macos/Lumen.app "$RUNNER_TEMP/issue5"
+
+      - name: Keep what the launch showed
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue5-launch-check
+          path: ${{ runner.temp }}/issue5
+          if-no-files-found: warn
+
+  # ── Minimum supported Rust ─────────────────────────────────────────────────
+  # `rust-version` is declared once, in the workspace Cargo.toml, at what the
+  # dependency set requires: sqlx 0.9 needs 1.94.0. Every other job builds on
+  # stable, so without this one the declared floor is a claim no compiler has
+  # checked. The toolchain is read from Cargo.toml rather than written here, so
+  # the two cannot drift. Linux, so the Tauri crate is in the build too.
+  msrv:
+    name: Build on the declared rust-version
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the declared rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: The compiler is the declared one, and every crate declares it
+        run: bash scripts/check-msrv.sh
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
+
+      - name: Build sidecars
+        working-directory: lumenator
+        run: bash ./build-sidecar.sh
+
+      - name: cargo build (every crate, every target)
+        run: cargo build --workspace --all-targets --locked

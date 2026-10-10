@@ -76,10 +76,22 @@ describe('Hotspots', () => {
   });
 
   it('shows an empty state rather than zeros before anything is read', async () => {
-    await mount(report({ totalTokensRead: 0, topFiles: [], distinctFiles: 0 }));
+    await mount(report({
+      totalTokensRead: 0, topFiles: [], distinctFiles: 0, top10SharePct: 0, totalUnchangedRereads: 0,
+    }));
     expect(text()).toContain('No reads recorded yet');
-    // A "0%" concentration would read as a measurement of nothing.
-    expect(text()).not.toContain('Concentration');
+    // The ledger holds the reads of every project, and the screen shows all of them. Through
+    // 1.5.1 this said it would show the reads "in this project".
+    expect(text()).toContain('Once Claude Code reads files, in any project,');
+    // A "0%" concentration would read as a measurement of nothing, and so would "0 tokens
+    // read across 0 files" or "0 reads learned nothing new": no figure renders at all.
+    for (const figure of [
+      'Concentration', 'Tokens read', 'across', 'Re-read unchanged', 'learned nothing', '%', 'NaN',
+    ]) {
+      expect(text()).not.toContain(figure);
+    }
+    expect(fixture.nativeElement.querySelector('.hs__summary')).toBeNull();
+    expect(fixture.nativeElement.querySelectorAll('.hs__row').length).toBe(0);
   });
 
   it('survives a backend that is not there', async () => {
@@ -304,6 +316,20 @@ describe('Hotspots', () => {
 
     expect(text()).toContain('No faults recorded');
     expect(button('File issue')).toBeUndefined();
+  });
+
+  it('says why a report could not be rendered, and offers nothing to file', async () => {
+    await mount(report());
+    bridge.failures.add('get_fault_report');
+
+    button('Check for faults')!.click();
+    await tick();
+
+    const err = (fixture.nativeElement as HTMLElement).querySelector('.fr__error');
+    expect(err?.getAttribute('role')).toBe('alert');
+    expect(err?.textContent).toContain('fake: get_fault_report failed');
+    expect(button('File issue')).toBeUndefined();
+    expect(text()).not.toContain('No faults recorded');
   });
 
   it('surfaces a filing failure instead of claiming success', async () => {

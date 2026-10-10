@@ -5,8 +5,7 @@
       "command": "./target/release/lumen-mcp",
       "args": [],
       "env": {
-        "LUMEN_DB": "./lumen.db",
-        "LUMEN_TOK": "./target/release/lumen-tok"
+        "LUMEN_DB": "./lumen.db"
       }
     }
   }

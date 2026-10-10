@@ -845,6 +845,66 @@ async fn optimizer_still_counts_measured_and_unlabelled_missed_reads() {
     assert_eq!(o.unmeasurable_calls, 0);
 }
 
+/// Insert a built-in Read of a text file whose count carries `token_source`.
+async fn sourced_event(pool: &SqlitePool, path: &str, token_source: &str, tokens: i64) {
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,token_source)
+         VALUES(datetime('now'),'Read',?1,10,?2,?2,0,'builtin_read','cli',?3)"
+            .to_string(),
+    ))
+    .bind(path)
+    .bind(tokens)
+    .bind(token_source)
+    .execute(pool)
+    .await
+    .expect("insert sourced read_event");
+}
+
+/// A read of an image records `unsupported`: no count at all, and it says so. It is not
+/// a count of unknown provenance, so it is in neither side of "N of M unverified". Counted
+/// as unverified, the first screenshot read on a fresh install turned "never estimated"
+/// into "partly unverified", with a note that the events predate provenance tracking.
+#[tokio::test]
+async fn provenance_leaves_out_reads_that_carry_no_count() {
+    let (_d, pool) = fixture().await;
+    sourced_event(&pool, "/p/main.rs", "measured", 3000).await;
+    unmeasurable_event(&pool, "/p/shot.png").await;
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(
+        (o.unverified_provenance_rows, o.provenance_total_rows),
+        (0, 1),
+        "the one count there is was measured; the image has none to verify"
+    );
+}
+
+/// Negative control for the exclusion above: a count that was estimated, or written before
+/// provenance was recorded, is still unverified, and only the uncounted read leaves.
+#[tokio::test]
+async fn provenance_still_counts_estimated_and_unlabelled_rows_as_unverified() {
+    let (_d, pool) = fixture().await;
+    // token_source NULL: written before 1.1.5.
+    event(
+        &pool,
+        "datetime('now')",
+        "builtin_read",
+        "cli",
+        (100, 100, 0),
+    )
+    .await;
+    sourced_event(&pool, "/p/b.rs", "estimated", 300).await;
+    sourced_event(&pool, "/p/a.rs", "measured", 200).await;
+    unmeasurable_event(&pool, "/p/shot.png").await;
+
+    let o = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(
+        (o.unverified_provenance_rows, o.provenance_total_rows),
+        (2, 3),
+        "NULL and estimated are unverified, of the three rows that carry a count"
+    );
+}
+
 #[tokio::test]
 async fn optimizer_breaks_down_by_channel_descending_by_saving() {
     let (_d, pool) = fixture().await;
@@ -1081,6 +1141,37 @@ async fn context_report_ranks_files_by_cumulative_tokens_and_computes_share() {
     assert_eq!(r.top_files[0].lines, Some(3_833));
 }
 
+/// A file that shrank is reported at the size its latest read found, not the largest it ever
+/// was. The reads are those of this repository's setup.rs in its developer's ledger: 4,748
+/// lines, then 4,348 and 4,392 once a change on a branch had shortened it. Through 1.5.1 the
+/// report said 4,748, and would have gone on saying it, with the advice to split the file,
+/// after the file was split.
+#[tokio::test]
+async fn a_file_that_shrank_is_reported_at_its_latest_size() {
+    let (_d, pool) = fixture().await;
+    let read = |ts: &'static str, lines: Option<i64>| {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                     saved_tokens,routed_via,channel,file_mtime)
+             VALUES(?1,'Read','/p/setup.rs',?2,100,100,0,'builtin_read','cli',1)"
+                .to_string(),
+        ))
+        .bind(ts)
+        .bind(lines)
+        .execute(&pool)
+    };
+    read("2026-10-07T13:18:38Z", Some(4_748)).await.unwrap();
+    read("2026-10-08T10:11:38Z", Some(4_392)).await.unwrap();
+    // Written last but read earlier: the order is the reads', not the rows'.
+    read("2026-10-08T10:10:30Z", Some(4_348)).await.unwrap();
+    // The latest read recorded no line count, which is not a size of nothing.
+    read("2026-10-08T11:00:00Z", None).await.unwrap();
+
+    let r = get_context_report(&pool).await.unwrap();
+    assert_eq!(r.top_files[0].reads, 4);
+    assert_eq!(r.top_files[0].lines, Some(4_392));
+}
+
 /// The re-read signal must distinguish "the file changed" from "we lost it".
 #[tokio::test]
 async fn unchanged_rereads_count_only_reads_that_learned_nothing_new() {
@@ -1168,6 +1259,21 @@ async fn an_ordinary_file_gets_no_recommendation() {
             );
         }
     }
+}
+
+/// The ledger has no notion of a project, so the report covers every one it holds, and the
+/// advice says so. Through 1.5.1 it put a file's share of the whole ledger as its share of
+/// "everything this project has read".
+#[tokio::test]
+async fn the_share_advice_says_it_covers_every_project() {
+    let (_d, pool) = fixture().await;
+    read_of(&pool, "/one/project/big.rs", 900, 40, 1).await;
+    read_of(&pool, "/another/project/small.rs", 100, 40, 1).await;
+    let r = get_context_report(&pool).await.unwrap();
+    assert_eq!(
+        r.top_files[0].recommendation.as_deref(),
+        Some("90% of everything read, across every project, is this one file")
+    );
 }
 
 #[tokio::test]

@@ -1,10 +1,84 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] — 2026-10-08
 
-Two things this release is really about: the menu-bar icon that never appeared for one user, and
-the discovery that two of the three "honesty" figures published in 1.5.1's efficiency report were
-themselves wrong.
+Three things this release is really about: the hooks, which on a machine with no `python3` did
+nothing and said nothing, and now run in `lumen-mcp`; the menu-bar icon that never appeared for
+one user; and the discovery that two of the three "honesty" figures published in 1.5.1's
+efficiency report were themselves wrong.
+
+### The hooks did nothing without `python3`, and said nothing
+
+**On a machine with no `python3`, 1.5.1's hooks were inert.** Both were bash scripts that ran
+`python3` to write a row or decide a block, and the recorder that would have reported a failure ran
+on `python3` too. Where PATH has no `python3`, which is the case with Python from python.org's
+classic Windows installer (it adds `python` and `py`) or with no Python at all, the meter exited 0
+having written nothing. Its one word, `python3: command not found`, went to a stderr that Claude
+Code does not show on exit 0. The intercept let a 400-line read through, and neither left a fault.
+It was the same on CI's Windows runner with `python3` as the App Execution Alias Windows puts there
+when Python is not installed: `command -v` finds it, and nothing is written or blocked. With a real
+Python 3 as `python3`, the same scripts write the row and block the read, so the silence was
+`python3`'s absence and nothing else.
+
+**The hooks are now shims over `lumen-mcp hook`.** Metering, the intercept's decision and the fault
+records moved into `lumen-mcp`, the binary the MCP server already runs as, so the hooks need no
+Python and count tokens in-process. What is left in shell needs bash, cat and date, and does one
+thing. When `lumen-mcp` cannot be found or run, it says so on stderr and in the fault spool, as
+`lumen_mcp_missing` or `lumen_mcp_unrunnable`, and lets the tool call through: without that binary
+the MCP server is not running either, so a block would send the model to tools it cannot call.
+
+Tests now run the commands Setup registers the way Claude Code runs them, with payloads Claude
+Code really sent and the real `lumen-mcp`, in CI on macOS, Ubuntu and Windows. The shell is
+`/bin/sh -c` on macOS and Linux and Git Bash on Windows. A Read lands as a row, a Bash command as a
+`bash_output` row, and a large read is blocked once. With `lumen-mcp` deleted, the same read is let
+through and reported. With no Python, with `python` and `py` only, and with a `python3` that
+behaves as the Store alias does, the hooks meter and block. Before anything is built, a probe
+prints what a hook's shell finds on each runner, unedited.
+
+**Faults say where they came from.** The intercept's recorder wrote `"channel": "cli"` and
+`"version": null` as literals. A fault raised under VS Code said `cli`, and an issue `lumen report`
+filed from a hook fault carried no build version. The Rust recorder read its channel from
+`LUMEN_CHANNEL`, which nothing sets, so its faults said `unknown`. Faults now take their channel
+from `CLAUDE_CODE_ENTRYPOINT`, as the meter's rows do, and carry the version of the build that
+raised them. The shims write their own fault when there is no binary to do it; it follows the same
+channel rules and reads the version from the stamp in the script.
+
+**Registered commands are quoted.** Setup registered each hook as a bare path. In a home with a
+space in it, the shell split the path at the space. On Windows an unquoted backslash is an escape,
+both to bash and to Claude Code's scan of the command, so
+`C:\Users\Jane\.claude\lumen\lumen_meter.sh` arrived as `C:UsersJane.claudelumenlumen_meter.sh`.
+Those hooks never ran. Each command is now the script's path as one single-quoted word, with forward
+slashes on Windows. Setup's validator reports a bare path that holds anything the shell does not
+take literally, and asks for Setup to be run.
+
+**An upgrade keeps what the user set.** The upgrade test installs 1.5.1's own scripts and
+registration in a home named `Jane Doe`. The first launch of this build rewrites the two scripts.
+It leaves `settings.json` and `~/.claude.json` byte for byte as they were, and a login item the user
+switched off stays off. Setup then quotes the commands and keeps everything else: the user's other
+hooks and MCP servers, and `LUMEN_HOOK_ENABLED=0` and `LUMEN_CAPTURE=0`, which go on working.
+
+**The plugin's hooks are Setup's.** The scripts in the Claude Code plugin's `.claude/hooks/` were
+`python3` scripts of their own, and still inserted `is_subagent`. They are now generated from
+Setup's templates with nothing baked in, and a test fails if the committed copies differ by a byte
+(`LUMEN_BLESS_HOOKS=1` regenerates them). The plugin's `hooks.json` now quotes the plugin root and
+registers the meter on `Bash`, as Setup does. It drops the three `mcp__lumen__*` matchers that
+Setup retired in 1.2.1.
+
+**`verify-install` runs the hooks instead of grepping them.** It checked the intercept for the
+names of its fail-open guards. That passed 1.5.1's hooks and failed this release's, whose guards
+are in `lumen-mcp`. It also passed hooks whose `lumen-mcp` was gone, which meter and block nothing.
+`scripts/verify-hooks.sh` runs the installed hooks as Claude Code does, against a scratch ledger,
+and judges them by the rows, blocks and faults they leave. Both verify-install scripts call it, the
+PowerShell one under Git Bash. Hooks from before `lumen-mcp hook` are reported and not run: nothing
+in them promises to write to the scratch ledger rather than the real one.
+
+Three faults in verify-install itself are fixed:
+
+- `--bin-dir` was the first place it looked rather than the only one, so the app bundle's binaries
+  answered for the build being checked.
+- A flag given without its value hung it. It now exits 2.
+- On Windows, `-BinDir` passed the GUI check falsely: the build's `lumen.exe` answered for
+  `Lumen.exe` on a case-insensitive filesystem.
 
 ### The menu-bar icon, and why nothing was logged
 
@@ -27,8 +101,9 @@ inside. It is per-user preference state, which is why it does not reproduce on a
 
 Lumen now clears that preference before building the tray, and says so rather than silently
 overriding a choice someone may have made deliberately: on the launch that repairs it, the window
-opens once with an explanation. `TrayIcon::set_visible(true)` is *not* the fix — it only re-creates
-a missing item and never calls `NSStatusItem::setVisible`.
+opens once and says what hid the icon, that hiding it never stopped Lumen, and that **Quit Lumen**
+in the icon's menu does. `TrayIcon::set_visible(true)` is *not* the fix — it only re-creates a
+missing item and never calls `NSStatusItem::setVisible`.
 
 **"Built" is not "visible", and is no longer treated as such.** After the event loop starts, the
 status item's rect is checked at +500ms, +1.5s and +4s, and classified `Present` / `Absent` /
@@ -36,20 +111,35 @@ status item's rect is checked at +500ms, +1.5s and +4s, and classified `Present`
 pretending). On `Absent` it asks AppKit directly to show the item. The build itself is not retried:
 its only macOS error paths are deterministic, so a second attempt cannot succeed.
 
-**Nothing in startup uses `?` or `expect` any more.** Three `?` on tray-menu construction and two
-`expect`s on the daemon sidecar could abort startup outright, and 1.5.1's fallback covered none of
-them. Every step now either succeeds or records a degradation, startup ends with one decision about
-reachability, and the app says so in a banner instead of presenting itself as healthy. A latent
+**The check runs only where it can answer.** Only macOS gives a status item a place to judge
+against the menu bar; elsewhere the check can only say "unknown". As first written for this
+release, three unknowns counted as an absent tray, so on Linux every launch logged the tray as not
+visible and opened its window six seconds in. Off macOS the tray is now left "unknown (not yet
+verified)" and the window stays closed. That has a cost: a Linux desktop with no tray host, such as
+GNOME without an AppIndicator extension, is not detected, and since `lumen show` and re-opening the
+app work only on macOS, Lumen is as unreachable there as it was in 1.5.1. Where the checks do give
+up, the window they open now says why. Home had read the startup health once, at load, so that
+window opened with an empty banner.
+
+**Nothing in the tray or sidecar startup uses `?` or `expect` any more.** Three `?` on tray-menu
+construction and two `expect`s on the daemon sidecar could abort startup outright, and 1.5.1's
+fallback covered none of them. Every step of `setup` now either succeeds or records a degradation,
+startup ends with one decision about reachability, and the app says so in a banner instead of
+presenting itself as healthy. One `expect` is left, on `Builder::build` itself: if Tauri cannot
+build the app at all there is no window, no tray and no event loop to degrade to, and that failure
+still ends the process with a panic, as it did in 1.5.1. A latent
 trap came with it: `DaemonChild` was only managed on the success path while the exit handler called
 `state::<DaemonChild>()`, which panics if unmanaged — so degrading past a failed spawn would have
 traded a startup panic for a shutdown panic.
 
-**And there are now ways in that do not involve the tray.** `open -a Lumen` or double-clicking the
-app reveals the window (previously it did nothing at all). `lumen show` asks a running instance to
-surface. `lumen doctor` prints what a bug report needs in one paste — status-item preferences across
+**And on macOS there are now ways in that do not involve the tray.** `open -a Lumen` or
+double-clicking the app reveals the window (previously it did nothing at all). `lumen show` asks a
+running instance to surface. `lumen doctor` prints what a bug report needs in one paste — status-item preferences across
 both domains, processes, menu-bar managers, log and database paths — with the likely cause named
-and its one-line fix. The fallback also switches to `Regular` activation while degraded, because an
-Accessory process has no Dock icon and a window it "shows" has nothing to bring it forward.
+and its one-line fix. It reads the visibility flag in both forms macOS writes,
+`NSStatusItem Visible …` and `NSStatusItem VisibleCC …`, as the app's own repair does. The
+fallback also switches to `Regular` activation while degraded, because an Accessory process has
+no Dock icon and a window it "shows" has nothing to bring it forward.
 
 ### Two of the three published honesty figures were wrong
 
@@ -73,6 +163,34 @@ is now one module, and the disagreement it hid included a real bug: `mts`/`cts` 
 the ranked language detector and not by the structural one, so `smart_read` on a `.mts` file
 produced a one-item whole-file "outline" and metered it as a ~95% saving of a file it never looked
 inside.
+
+### The model was told figures nobody measured
+
+The model routes on what it is told. Every block told it that an outline costs "~5-10%" of the
+file and "typically saves 80-93% of context", or for a log "typically 40-80%". This repository's
+`CLAUDE.md` said each `smart_read` of a large file saves "3000–4500 tokens". `compress_logs`
+described itself as "fully reversible, no information loss". None of it came from the ledger, and
+the last was false: the middle of a long stack trace is dropped and only its frame count is kept.
+
+The tool descriptions, the intercept's message, `CLAUDE.md`, `MESSAGING_CONTRACT.md` and the
+README now carry no figure, since every tool reply already reports what that call saved.
+`compress_logs` says what it drops. `model_copy.rs` fails on any percentage, approximate number,
+token count or "typically" in the tool list or `CLAUDE.md`, and the intercept's message is
+checked the same way. The dollar figures that rested on the assumed rounds-remaining constant `R`,
+in the README and `docs/efficiency.md`, are withdrawn until `R` is derived per call.
+
+### The Optimizer called screenshots unverified, and priced what it could not
+
+Provenance counted every row not marked `measured` as unverified, image reads included. Those rows
+carry no count and say so, as `unsupported`. So the first screenshot read turned "never estimated"
+into "partly unverified", with a note that the events predated provenance tracking. Image reads are
+now on neither side of "N of M". On the ledger where this was found, 3,192 of 7,800 became 2,584
+of 7,192; the 608 removed were all PNG and JPEG reads. The note no longer says that every
+unverified row predates tracking, since `estimated` rows were tracked.
+
+An unpriced net value rendered "+$0.00, roughly break-even" beside "no net figure is claimed". It
+now renders a dash. The tests read the rendered page, and each one failed with its condition
+removed.
 
 ### No tool can return more than the file it was asked about
 
@@ -102,15 +220,211 @@ recorded as `full_tokens=0, token_source='measured'`: an unsupported file launde
 measurement, in the one column that exists to tell those apart. The installed copy was correct. The
 drift test compared column *names*, which is why it passed.
 
-That test now runs both copies against a stub tokenizer and compares what they record, across exit
-0, exit 3, exit 1 and a missing binary. Reintroducing the bug fails it by name.
+The hook is now a shim over `lumen-mcp hook meter`, as the installed one is, so there is one meter
+and no copy to drift. A file that is not UTF-8 is recorded as 0 `unsupported`, and
+`a_file_that_is_not_utf8_is_recorded_as_unsupported_with_no_count` fails if it is recorded as
+`measured`. That test and two others were missing until just before release. The shell meter's
+tests went with the shell meter, and three rules they held were tested nowhere else: this one, no
+row for a command that printed nothing, and no second count for Lumen's own tools. Each was checked
+by breaking it with the whole `lumen-mcp` suite running, and each time exactly one test failed, on a
+line this change added.
+
+### A Read the ledger refused is a fault the app shows
+
+**1.5.1 dropped it without a trace.** The installed meter ran its INSERT as
+`python3 -c '…' 2>/dev/null || true`, so a ledger that would not take the row — read-only,
+locked past the timeout, no `python3` — lost the Read with no row, no fault and no message.
+Metering now runs in `lumen-mcp hook meter`, and a refused INSERT is a `meter_write_failed`
+record in the fault spool, carrying the file, its line count and SQLite's error, plus a line on
+stderr.
+
+**The app did not show it.** Three defects stood between that record and the screen:
+
+- The badge opened the ledger with `connect_db`, which creates and migrates it, on every
+  navigation, and a ledger that would not open put the badge out while faults sat in the spool.
+  It now opens the ledger read-only and counts the spool whatever the ledger does; a ledger that
+  exists and cannot be read counts as one fault, so the badge leads to the report that names it.
+- The report drained the spool into the ledger that had just refused the row. The batch stayed in
+  `faults.jsonl.draining`, which nothing counted or listed: the first visit to the report put the
+  badge out, and the report showed "spool drain: attempt to write a readonly database" and never
+  the Read that was lost. A refused drain now puts the batch back, and the report lists what the
+  spool holds beside what the ledger does, on every visit.
+- A batch left aside was read as UTF-8 or not at all: one torn multi-byte character and the whole
+  batch was never read, and the next drain deleted it after a merge whose failure it ignored. It
+  is now read lossily, line by line, and a merge that fails leaves the batch where it is.
+
+**Restoring the ledger was not enough to take writes again.** SQLite creates `lumen.db-wal` and
+`lumen.db-shm` with the ledger's own mode. A Read metered while the ledger was read-only, with no
+`-shm` there already, left a 0444 `-shm` behind; once the ledger's permissions were restored,
+every insert was still refused with "attempt to write a readonly database", against a writable
+ledger. Every writer now gives the two sidecars the write bits the ledger has before opening it
+(Unix; Windows keeps no mode to copy). The library test of this case had switched the ledger to a
+rollback journal, so it never ran the journal mode the ledger uses.
+
+**The report tests drained the spool of whatever home they ran under.** `cargo test` on a
+developer machine emptied that machine's fault spool into a throwaway ledger: a canary fault in a
+scratch home's spool was gone after `cargo test -p lumen-core --lib db_reader`. The tests now name
+their spool, and the same probe leaves the canary in place through the whole `lumen-core` suite.
+
+### `read_events.is_subagent` is gone
+
+Every writer inserted a literal 0 into it, so every row said "main agent", and a
+`GROUP BY is_subagent` looked exactly like a measurement. The 1.1.5 notes called it a placeholder
+awaiting a source of truth. None exists for every writer: Claude Code hands hooks an `agent_id`
+only inside a subagent, and an MCP tool call carries no agent identity at all. Nothing read the
+column, so a migration drops it, and the inserts and queries no longer name it. Nothing is lost,
+since every stored value was the literal. `a_populated_1_5_1_database_loses_is_subagent_and_keeps_every_value`
+runs the migration on a 1.5.1 table holding rows. Where the drop cannot run, an insert still lands,
+because the column has a default and the insert never names it. `turns.is_subagent`, which the
+daemon derives from the transcript's path, stays.
+
+**A test run changed an installed ledger's schema.** `crates/lumen-mcp/tests/efficiency.rs`
+measures the ledger of the machine it runs on. It opened that ledger with `connect_db`, which
+creates and migrates. While this release was being made, it ran on a machine with 1.5.1 installed
+and applied this migration to the live ledger. 1.5.1's own migration then added the column back, at
+the end of the table. No value was lost, because the column held only the literal. Tests that read
+a ledger they do not own now open it with `meter::open_read_only`, which creates, migrates and
+writes nothing.
+
+### A fallback that hides a failure now fails a test
+
+**The guard asked for in 1.2.1 was never written.** A failure replaced by a value that looks real
+has shipped four times: the DMG tokenizer, 1.1.3's ingest, the meter's `|| echo 0`, and the INSERT
+above. A test now scans the production Rust and every shell script, Setup's hook templates
+included, for `|| echo <number>`, `|| true`, `unwrap_or(<number>)`, `unwrap_or_default()` and
+writes whose result is thrown away, and fails on any that its allowlist does not name with a
+reason. It finds 57 today, under 56 entries, each saying why that one is not a measurement; an
+entry that matches nothing fails the test as stale. Added in a scratch commit,
+`lines=$(wc -l < "$1" 2>/dev/null || echo 0)` in the meter template failed it by name:
+`setup.rs:1071 [|| echo <number>] in const METER_TEMPLATE`.
+
+Where the honest reason would have described something wrong that the user can see, the code was
+fixed instead:
+
+- **The issue reporter's token file.** The curl config carrying the GitHub token was written at
+  the umask's mode and chmodded afterwards, the chmod's failure dropped, and written through
+  whatever already sat at its predictable name — on Linux, in a `/tmp` every user can write to.
+  It and the issue body are now created owner-only by the call that creates them, and an
+  existing name, a symlink included, is never written through.
+- **Setup and Uninstall rewrote a config whose backup had failed.** The copy to `.lumen_bak` was
+  `let _`, so the one undo might not exist and nothing said so. The step now fails and leaves the
+  file as it was.
+- **App startup dropped three errors.** Creating the data directory, the copy that moves the
+  ledger over from `com.tauri.dev` — which logged "Migrated" whatever the copy did — and writing
+  `~/.lumen_db_path` are now logged as errors, so they reach `Lumen.log` in a release build.
+- **A poisoned lock emptied the degraded banner.** After a panic while the startup health was
+  locked, its reads returned no degradations and an unchecked tray, which is a healthy launch, so
+  no banner. The locks are now read through the poisoning.
+- **Calibration rows were dropped with `let _`.** A refused row is now logged, once per process.
+  It is not filed as a fault: the rows feed only `correction_factor`, which nothing in the app or
+  the CLI shows.
+- **A login-item marker that could not be written is logged.** Without it the next launch takes
+  the item for never registered, and turns it back on if the user had turned it off.
+
+The scan reads text, and what it does not read is listed at the top of the test: PowerShell,
+workflow YAML, `${VAR:-N}` defaults, the frontend, and any fallback spelled another way.
+
+### Opting out of Bash metering did not survive Setup
+
+Through 1.5.1 the README said to stop recording Bash output by deleting the `Bash` entry under
+`PostToolUse` in `~/.claude/settings.json`. Setup's validator then reported the hooks unhealthy,
+"PostToolUse not registered: Bash", and the Setup run it asked for put the entry back, so
+command output was recorded again. Upgrading to this release asks for that Setup run in any home
+with a space in its path, and in every home on Windows, because the commands 1.5.1 registered
+never ran there.
+
+`LUMEN_METER_BASH=0` in the `env` block of `~/.claude/settings.json` now stops it, and Setup
+keeps that block. Reads are still metered. Setup also recognises a deleted entry, a Lumen meter
+on `Read` with none on `Bash` and no matcher retired in 1.2.1, which no release's Setup ever
+wrote, and carries it over as `LUMEN_METER_BASH=0` instead of recording again.
+
+### The app, launched and driven, before release
+
+Until now the tests ran functions, binaries, and pages against a stand-in for the backend; none
+launched the app. Two CI jobs now do.
+
+**App e2e, on Linux and Windows.** `tauri-driver` launches the debug build over WebDriver and the
+tests read what it shows: a tray that cannot be built leaves the window open, saying so legibly;
+the Optimizer and Hotspots screens show what a ledger written by the real `lumen-mcp` holds,
+checked against SQLite directly; an empty ledger shows the empty states; a healthy launch keeps
+its window closed past the tray checks; a tray reported absent opens the window once they give
+up, saying why. macOS has no WebDriver for its web view, so the app is not driven there.
+
+**Issue #5, made on purpose, on macOS.** The preference behind issue #5 existed on nobody's
+machine but the reporter's, so a job now creates it: both forms set false, the built app
+launched, then the preferences, the icon, the window and what the window says are checked; a
+second launch with nothing set must do none of it. It writes the app's preferences as the
+logged-in user, so the script refuses to run outside CI.
+
+Their first runs found three faults, all in this release's own unreleased changes, and confirmed
+a fourth that had been fixed shortly before:
+
+- Off macOS every launch opened its window six seconds in (above).
+- A tray that failed to build was reported again at the first redraw as having "disappeared
+  after startup", replacing the real reason in the banner and opening the window a second time.
+- The window the tray checks open had an empty banner (above).
+- The degraded banner named CSS variables that nothing defines, so in the light theme its bold
+  text measured 1.03:1 against its background and the rest 2.21:1 and 2.69:1. They are now
+  14.17:1, 4.26:1 and 3.98:1. The last is the app's secondary-text colour everywhere, still
+  short of the 4.5:1 WCAG AA asks of body text, and not changed here.
+
+Each test was shown failing with its fix reverted and passing with it restored.
+
+### Frontend coverage is enforced per file
+
+The coverage thresholds applied to the total. It passed while eight files sat under them, so
+`pnpm test` exited 0: `home.html` at 79.82% of statements and 0% of functions, `setup.html` at 0%
+of functions, and `panel.ts` at 83.33%. The thresholds now hold for each file. Files that no spec
+loads are measured too; before, they were left out of the report altogether (`app.component.ts`,
+`app.config.ts`, `app.routes.ts`).
+
+Tests were written for what that exposed:
+
+- the rendered controls on Home, Setup and the panel;
+- the Optimizer's per-channel rows and missed reads;
+- the tooltip's placement;
+- the session warnings and refresh timer;
+- the app shell's routes.
+
+The Optimizer's `provenanceTip`, unused since 1.4.0, is gone. What is still excluded is listed in
+`ci.yml` with the reason.
+
+### Hotspots gave files their largest size, and called every project "this project"
+
+The line count on the Hotspots screen is documented as the file's size at its most recent read.
+Since the screen arrived in 1.4.0 it was the largest size any read had recorded, so a file that
+shrank kept its old size there, and with it any advice to split it, after it was split. Running
+the report over this repository's own reads found it: `setup.rs`, in the worktree this release
+was made in, was read at 4,748 lines, then at 4,348 and 4,392 once a change here had shortened
+it, and the screen still said 4,748. It now gives the latest read's count; a read that recorded
+no count is passed over rather than taken for an empty file.
+
+The ledger has no notion of a project, so the report covers every project it holds, but its
+advice called a file's share of all of them its share of "everything this project has read",
+and its empty state spoke of "this project" too. Both now say what is measured. `Run.tsx`, which
+1.4.0's entry gave as this repository's heaviest file, has never been in this repository; those
+figures were the whole ledger's.
+
+The report also reads the ledger three times rather than four. Release builds of 1.5.1's report
+and this one ran on the same copy of a real ledger, 7,833 reads of 2,307 files: the median of 21
+calls went from 8.81 and 8.67 ms to 7.76 and 8.47 ms over two rounds, and with the same reads 25
+times over, from 218 and 204 ms to 138 and 137 ms. Every figure but the line counts, and the
+advice that quotes them, came out the same.
 
 ### Maintenance
 
+- build: `release.sh` read the commit subjects as `git log … 2>/dev/null | grep … || true`, so a
+  `git log` that failed — a bad range, say — wrote a release entry with no notes in it. `git log`
+  now runs once and unguarded and stops the release; `|| true` covers only grep finding nothing.
 - chore(deps): Tauri 2.11.5 → 2.12.1, moved as one group: `tauri-build` 2.7.1, the autostart
   2.7.0, log 2.10.0, notification 2.5.1, positioner 2.4.0 and shell 2.4.0 plugins, and
   `@tauri-apps/api`/`cli` 2.12.1. The pinned `tray-icon` goes 0.24.2 → 0.25.1, the version Tauri
-  2.12 uses, not the newer 0.26. The GUI crate's `rust-version` is now 1.90, Tauri 2.12's floor.
+  2.12 uses, not the newer 0.26.
+- build: every crate declares `rust-version` 1.94.0, inherited from the workspace. That is
+  sqlx 0.9's floor, and every crate reaches sqlx through lumen-core; the GUI crate alone
+  declared one before, 1.90, Tauri 2.12's floor, which the build could not honour. A new CI
+  job, `msrv`, reads the version from `Cargo.toml`, checks every crate declares it, and builds
+  the whole workspace, the Tauri crate included, on exactly that compiler.
 - chore(deps): tree-sitter 0.26 → 0.27, sha2 0.10 → 0.11, dirs 6 → 7, plus every
   semver-compatible bump in `Cargo.lock`. A known-answer test now pins the SHA-256 output: the
   fingerprint that deduplicates filed issues is built on it, so a digest change would re-file
@@ -121,6 +435,40 @@ That test now runs both copies against a stub tokenizer and compares what they r
   Rust.
 - ci: `actions/checkout` and `actions/setup-node` v4 → v7 and `pnpm/action-setup` v4 → v6, off the
   deprecated Node 20 action runtime; the frontend now builds on Node 24 LTS.
+- ci: two new jobs, `App e2e` on `ubuntu-22.04` and `windows-latest`, and `Issue 5 launch check
+  (macOS)` on `macos-14`, described above. `tauri-driver` is pinned to 2.1.0 and installed with
+  `--locked`. On Windows the job fetches the msedgedriver that matches the runner's WebView2
+  runtime, and falls back to the one the runner image ships. There the tests run unelevated,
+  through gsudo 2.6.1 (pinned, its checksum checked) at medium integrity. The first Windows run was
+  elevated, as the runner's shell is, and failed all five tests with "DevToolsActivePort file
+  doesn't exist": from WebView2 150 an elevated app's web view ignores
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, which msedgedriver opens its debugging port through
+  (tauri-apps/wry#1782). The runtime and the driver were the same version, 153.0.4234.48.
+- ci: the `test` job runs on macOS as well as Ubuntu and Windows, and runs every crate and target.
+  It used to leave out the Tauri crate, where Setup and the hooks live. The hook end-to-end tests
+  run first, with their output shown. Captured hook payloads are checked out byte for byte as Claude
+  Code sent them (`.gitattributes`).
+- ci: a compiler warning fails the `test` job on all three platforms, as clippy fails one in `check`,
+  which runs on macOS only. Every Linux and Windows build had warned that two constants of
+  `lumen doctor`, used only on macOS, were never used, and no job failed on it. They are compiled
+  on macOS only now. In a Linux container, the job's flags fail the build with the constants as
+  they were, and pass it with them gated.
+- test: the first Windows run failed three tests that wrote `~/.claude.json` by splicing a path into
+  a JSON string with `format!`. A Windows temp path made `\U`, an invalid escape. They now write the
+  file through serde.
+- test: a `lumen-daemon` test failed once on macOS, in the run meant to gate this release. Its
+  daemons start in parallel, and on macOS std creates a child's pipes and marks them close-on-exec
+  in two steps, so a daemon another test started in between inherited the supervised daemon's
+  stdin. Holding it open, it kept back the EOF the test waits for, and the supervised daemon
+  outlived its 10 s grace. The tests in `supervisor_exit.rs` now spawn one daemon at a time. A
+  scratch test that gave a copy of that stdin to a second process failed the same way, and its
+  daemon exited 57 ms after the second process did.
+- ci: the `Verify install` workflow runs `verify-hooks.sh` on each OS, against the plugin's hooks in
+  a scratch home, with the build's `lumen-mcp`.
+- fix(daemon): an assistant record with `usage: null` is skipped. The daemon unwrapped the usage and
+  relied on `is_billable`, in `lumen-core`, to have checked it, so an edit there would have
+  panicked the daemon at ingest. The test was shown failing with `is_billable` edited to stop
+  checking, and passing with the unwrap replaced.
 - chore: removed `lumenator/src-tauri/Cargo.lock`. `src-tauri` is a workspace member, so cargo
   and the Tauri CLI both read the root lockfile; this one was unused and had been stale since
   0.1.0.
@@ -136,6 +484,13 @@ That test now runs both copies against a stub tokenizer and compares what they r
 - Test fixtures shaped like toys were hiding behind the guard: `"fn alpha() {}\nfn beta() {}"` is
   eight tokens, so any reply about it legitimately costs more than reading it. Fifteen tests were
   asserting the inflation guard rather than the behaviour they were written for.
+- The hook tests run the hooks as Claude Code 2.1.270 spawns them: the shell, the `bash ` prefix on
+  Windows, the environment it builds. That is read from Claude Code, not run: no test starts Claude
+  Code itself.
+- A 1.5.1 process still running after the upgrade, such as an MCP server that Claude Code started
+  before it, re-adds `is_subagent` each time it opens the ledger, and 1.6.0 drops it again. 1.6.0's
+  inserts land either way, which is tested. 1.5.1's add the column back before inserting, so they
+  land too, unless a drop falls between the two. That was read from 1.5.1's code, not tested.
 
 ## [1.5.1] — 2026-07-31
 

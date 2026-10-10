@@ -105,9 +105,10 @@ interface UsageReport {
 //
 // HONEST LABELING:
 //   OptimizerReport = tokens CAUSED by Lumen. Exact for Lumen tool calls, which
-//   tokenize in-process with no fallback. Built-in Read events are counted by a
-//   shell hook that can fall back to bytes/4; token_source records which, and
-//   unverifiedProvenanceRows counts the rows that predate that tracking.
+//   tokenize in-process with no fallback. Built-in Read events were counted until
+//   1.6.0 by a shell hook that could fall back to bytes/4; token_source records
+//   which, and unverifiedProvenanceRows counts the rows estimated that way or
+//   written before that tracking.
 //   This is distinct from "Saved by caching" (turns.cache_read * RATE diff),
 //   which is REPORTED by Claude Code, not caused by Lumen.
 //   Never merge the two numbers in the UI.
@@ -156,9 +157,15 @@ interface OptimizerReport {
      * does not send it.
      */
     unmeasurableCalls?: number;
-    /** Metered events with no recorded token provenance (rows predating 1.1.5). */
+    /**
+     * Metered events whose count is not known to be measured: estimated by a hook
+     * before 1.6.0, or written before 1.1.5, when provenance began to be recorded.
+     */
     unverifiedProvenanceRows: number;
-    /** Total metered events, so the UI can say "N of M". */
+    /**
+     * Metered events that carry a count, so the UI can say "N of M". Reads of images
+     * and binaries carry none and are in neither figure.
+     */
     provenanceTotalRows: number;
     /**
      * Net dollar value of interception: the avoided tokens priced, less the extra rounds
@@ -205,7 +212,7 @@ export interface FileHotspot {
     name: string;
     reads: number;
     totalTokens: number;
-    /** Share of every token this project has read. */
+    /** Share of every token read, in every project the ledger holds. */
     sharePct: number;
     lines: number | null;
     /**

@@ -1,141 +1,73 @@
 #!/usr/bin/env bash
-# lumen_meter.sh — PostToolUse hook: records ONLY built-in Read events.
+# lumen-generator: 1.6.0
+# lumen_meter.sh — the Claude Code plugin's copy of the hook
+# Lumen Setup installs, generated from the same template in setup.rs. Do not
+# hand-edit; regenerate with `LUMEN_BLESS_HOOKS=1 cargo test -p Lumen`.
 #
-# mcp__lumen__* tools self-meter directly (works in both CLI and VS Code).
-# This hook handles only the built-in Read tool, which fires in CLI only,
-# providing the "missed optimization" baseline: reads that bypassed lumen.
+# PostToolUse hook for Read and Bash. `lumen-mcp hook meter` does the metering;
+# this finds that binary, and when it cannot, leaves a fault and a line on stderr
+# instead of losing the event in silence. It needs bash, cat and date.
 #
-# Writes to read_events with routed_via=builtin_read, saved_tokens=0.
-#
-# This is the developer copy. Setup installs its own from a template in setup.rs, and the
-# two drifted badly: this one wrote nine columns where the installed one writes fifteen,
-# and it resolved the database as <workspace>/lumen.db — a path with no schema, so every
-# INSERT failed with "no such table: read_events" and `|| true` threw the error away. It
-# recorded nothing at all, for weeks, while looking like it worked. The column set is now
-# the same (asserted by lumen-core's meter_hooks_agree test) and a failed write leaves a
-# line in lumen_hook_errors.log beside the database instead of vanishing.
+# Nothing is baked in: a plugin cannot know where Lumen is installed. The binary is
+# the one built in this checkout, else lumen-mcp on PATH, and lumen-mcp finds the
+# ledger itself. LUMEN_MCP_BIN overrides the first.
+here="${BASH_SOURCE[0]%[/\\]*}"
+[ "$here" = "${BASH_SOURCE[0]}" ] && here=.
+LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-$here/../../target/release/lumen-mcp}"
 
-# `-uo pipefail` without `-e`, matching METER_TEMPLATE. Under `-e`, `VAR=$(cmd)` with a
-# non-zero `cmd` aborts the script before `$?` can be read — which is exactly what the
-# tokenizer branch below has to inspect.
-set -uo pipefail
+# A failed exec falls through to the report below instead of ending the script.
+shopt -s execfail
+bin="$LUMEN_MCP_BIN"
+[ -x "$bin" ] || bin="$(command -v lumen-mcp 2>/dev/null)"
+[ -n "$bin" ] && exec "$bin" hook meter --writer repo:.claude/hooks/lumen_meter.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-
-# Resolve the database the way lumen_core::meter does, rather than assuming the workspace.
-# Assuming it is what made this hook write to a file that never had a schema.
-resolve_db() {
-    if [ -n "${LUMEN_DB:-}" ]; then printf '%s\n' "$LUMEN_DB"; return; fi
-    if [ -f "${HOME}/.lumen_db_path" ]; then
-        local p; p="$(cat "${HOME}/.lumen_db_path" 2>/dev/null || true)"
-        if [ -n "$p" ]; then printf '%s\n' "$p"; return; fi
+# Lumen was moved or removed. Exit 0 all the same: a meter must never fail the
+# tool call it observes.
+cat >/dev/null
+kind=meter_write_failed
+consequence="this event was not metered"
+# Where lumen-mcp would have put the fault: LUMEN_FAULT_SPOOL, else faults.jsonl
+# beside the ledger, which is LUMEN_DB, else ~/.lumen_db_path, else the per-OS one.
+if [ -z "${LUMEN_FAULT_SPOOL:-}" ]; then
+    db="${LUMEN_DB:-}"
+    home="${HOME:-${USERPROFILE:-}}"
+    if [ -z "$db" ] && [ -n "$home" ]; then
+        db="$(cat "$home/.lumen_db_path" 2>/dev/null)"
+        db="${db#"${db%%[![:space:]]*}"}"
+        db="${db%"${db##*[![:space:]]}"}"
     fi
-    case "$(uname -s)" in
-        Darwin) printf '%s\n' "${HOME}/Library/Application Support/io.speedata.lumen/lumen.db" ;;
-        *)      printf '%s\n' "${HOME}/.local/share/io.speedata.lumen/lumen.db" ;;
+    if [ -z "$db" ] && [ -n "$home" ]; then
+        case "${OSTYPE:-}" in
+            darwin*) db="$home/Library/Application Support/io.speedata.lumen/lumen.db" ;;
+            msys* | cygwin*) db="$home/AppData/Roaming/io.speedata.lumen/lumen.db" ;;
+            *) db="$home/.local/share/io.speedata.lumen/lumen.db" ;;
+        esac
+    fi
+    case "$db" in
+        */* | *\\*) LUMEN_FAULT_SPOOL="${db%[/\\]*}/faults.jsonl" ;;
+        ?*) LUMEN_FAULT_SPOOL=faults.jsonl ;;
     esac
-}
-
-LUMEN_DB="$(resolve_db)"
-LUMEN_TOK="${LUMEN_TOK:-${WORKSPACE_ROOT}/target/release/lumen-tok}"
-
-INPUT=$(cat)
-
-if [ "${LUMEN_DEBUG:-}" = "1" ]; then
-    echo "$INPUT" > /tmp/lumen_hook_dump.json
 fi
+if [ -n "$bin" ]; then variant=lumen_mcp_unrunnable; else variant=lumen_mcp_missing; fi
+echo "lumen: cannot run lumen-mcp (looked for '$LUMEN_MCP_BIN', then on PATH); $consequence" >&2
+[ "${LUMEN_CAPTURE:-1}" = "0" ] && exit 0
 
-PARSED=$(python3 -c '
-import sys, json
-d = json.loads(sys.argv[1])
-print("\t".join([
-    d.get("tool_name", ""),
-    d.get("tool_input", {}).get("file_path", ""),
-    str(d.get("session_id", "")),
-]))
-' "$INPUT" 2>/dev/null || echo "")
-
-TOOL_NAME=""; FILE_PATH=""; SESSION_ID=""
-IFS=$'\t' read -r TOOL_NAME FILE_PATH SESSION_ID <<<"$PARSED" || true
-
-# Only handle built-in Read; all mcp__lumen__* tools self-meter.
-if [ "$TOOL_NAME" != "Read" ]; then
-    exit 0
-fi
-
-if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
-    exit 0
-fi
-
-LINE_COUNT=$(wc -l < "$FILE_PATH" 2>/dev/null | tr -d '[:space:]' || echo 0)
-LINE_COUNT="${LINE_COUNT:-0}"
-
-# token_source records WHICH of these produced the count. Without it a bytes/4 estimate is
-# indistinguishable from a real measurement, which is the whole point of the column.
-#
-# Identical to METER_TEMPLATE's count_tokens, and it has to be. This copy used to do
-#
-#     FULL_TOKENS=$("$LUMEN_TOK" < "$FILE_PATH" 2>/dev/null || echo 0)
-#     TOKEN_SOURCE="measured"
-#
-# which threw the exit code away. lumen-tok exits 3 for a file that is not valid UTF-8, so a
-# PNG was recorded as `full_tokens=0, token_source='measured'` — an unsupported file laundered
-# as a measurement, in the one column that exists to tell those apart. The drift test only
-# compared column *names*, so it passed.
-count_tokens() {
-    _f="$1"
-    if [ -x "$LUMEN_TOK" ]; then
-        _c=$("$LUMEN_TOK" < "$_f" 2>/dev/null)
-        _rc=$?
-        [ "$_rc" -eq 0 ] && { printf '%s measured\n' "$_c"; return 0; }
-        # 3 is EXIT_NOT_TEXT: the tokenizer ran and said this is not text. That is a fact about
-        # the file, not a failure, and it must not become a bytes/4 guess — bytes/4 overstates a
-        # screenshot by roughly 40x.
-        [ "$_rc" -eq 3 ] && { printf '0 unsupported\n'; return 0; }
-    fi
-    printf '%s estimated\n' "$(wc -c < "$_f" | awk '{print int($1/4)}')"
-}
-
-read -r FULL_TOKENS TOKEN_SOURCE <<EOF
-$(count_tokens "$FILE_PATH")
-EOF
-
-# Parameterised, not interpolated: the previous version spliced the path into SQL and
-# hand-escaped quotes, which is one apostrophe away from a broken statement.
-python3 - "$LUMEN_DB" "$FILE_PATH" "$LINE_COUNT" "$FULL_TOKENS" "$SESSION_ID" "$TOKEN_SOURCE" <<'PY' 2>/dev/null || true
-import os, sqlite3, sys, time
-
-db, path, lines, full, sid, tsrc = sys.argv[1:7]
-ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-try:
-    mtime = int(os.path.getmtime(path))
-except OSError:
-    mtime = None
-# Same dedup key the installed hook uses, so a repeated read of an unchanged file can be
-# recognised rather than counted twice.
-req = f"{sid}:{path}:{mtime}" if sid else None
-
-try:
-    con = sqlite3.connect(db)
-    con.execute(
-        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,"
-        "saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,"
-        "writer_hook,token_source) VALUES(?,?,?,?,?,?,0,?,?,?,?,?,0,?,?)",
-        (ts, "Read", path, int(lines), int(full), int(full), "builtin_read", "cli",
-         sid or None, mtime, req, "repo:.claude/hooks/lumen_meter.sh", tsrc),
-    )
-    con.commit()
-    con.close()
-except Exception as e:
-    # Never fail the hook — a metering miss must not break the session. But do not vanish
-    # either: swallowing this silently is exactly why nothing was recorded for weeks.
-    try:
-        log = os.path.join(os.path.dirname(db) or ".", "lumen_hook_errors.log")
-        with open(log, "a") as fh:
-            fh.write(f"{ts} lumen_meter.sh: {type(e).__name__}: {e}\n")
-    except Exception:
-        pass
-PY
-
+# A value enters the JSON line only if it cannot break it.
+json() { case "$1" in "" | *[!A-Za-z0-9._-]*) printf 'null' ;; *) printf '"%s"' "$1" ;; esac; }
+version=""
+while IFS= read -r line; do
+    case "$line" in "# lumen-generator: "*) version="${line#"# lumen-generator: "}"; break ;; esac
+done 2>/dev/null <"$0"
+# lumen_core::meter::channel_from, in shell.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    *vscode*) channel=vscode ;;
+    ?*) channel=cli ;;
+    *) if [ -n "${VSCODE_PID+x}${VSCODE_CWD+x}" ]; then channel=vscode; else channel=unknown; fi ;;
+esac
+case "${LUMEN_CHANNEL:-}" in "" | *[!A-Za-z0-9._-]*) ;; *) channel="$LUMEN_CHANNEL" ;; esac
+printf '{"ts":"%s","kind":"%s","variant":"%s","path":null,"lines":null,"detail":null,"session_id":%s,"version":%s,"channel":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$kind" "$variant" \
+    "$(json "${LUMEN_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}")" "$(json "$version")" "$channel" \
+    2>/dev/null >>"$LUMEN_FAULT_SPOOL" \
+    || echo "lumen: nor could the fault be written to '$LUMEN_FAULT_SPOOL'" >&2
 exit 0

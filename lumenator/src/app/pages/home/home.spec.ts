@@ -202,10 +202,205 @@ describe('Home', () => {
     expect(items[1].textContent).toContain('could not build the menu');
   });
 
-  it('asks the backend for startup health exactly once', async () => {
+  // ── restored-icon notice ───────────────────────────────────────────────────
+  //
+  // The launch that clears a hidden-icon preference opens this window. Without a word here the
+  // icon coming back reads as the app overriding the user, and whoever ⌘-dragged it away on
+  // purpose is never told how to stop Lumen.
+
+  it('explains a restored icon on the launch that restored it', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [],
+      restored: ['NSStatusItem Visible Item-0'],
+    }));
+    const el = fixture.nativeElement.querySelector('.restored');
+    expect(el).not.toBeNull();
+    expect(el.textContent).toContain('hidden by macOS');
+    expect(el.querySelector('strong')?.textContent).toBe('Quit Lumen');
+    // The repair worked, so it is not presented as a fault.
+    expect(fixture.nativeElement.querySelector('.degraded')).toBeNull();
+  });
+
+  it('says nothing about the icon when nothing was restored', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [], restored: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.restored')).toBeNull();
+  });
+
+  it('says nothing about the icon when the backend predates the field', async () => {
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'present', degradations: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.restored')).toBeNull();
+  });
+
+  it('shows both when a restored icon is still not visible', async () => {
+    // Clearing the preference cannot make room in a full menu bar; the banner says that part.
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: true, tray: 'built but not visible: off-screen', degradations: [],
+      restored: ['NSStatusItem Visible Item-0'],
+    }));
+    expect(fixture.nativeElement.querySelector('.degraded')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.restored')).not.toBeNull();
+  });
+
+  it('asks the backend for startup health once when nothing changes', async () => {
     await build(b => b.responses.set('lumen_startup_health', {
       degraded: false, tray: 'present', degradations: [],
     }));
     expect(bridge.countOf('lumen_startup_health')).toBe(1);
+  });
+
+  it('says why when the window is opened after it loaded', async () => {
+    // The tray checks give up six seconds after launch, long after this page read a healthy
+    // startup; the window they open must not be blank about why.
+    await build(b => b.responses.set('lumen_startup_health', {
+      degraded: false, tray: 'unknown (not yet verified)', degradations: [],
+    }));
+    expect(fixture.nativeElement.querySelector('.degraded')).toBeNull();
+
+    bridge.responses.set('lumen_startup_health', {
+      degraded: true, tray: 'built but not visible: it was created but is not visible', degradations: [],
+    });
+    bridge.emit('startup-health', 'the menu-bar icon is not visible: it was created but is not visible');
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(bridge.countOf('lumen_startup_health')).toBe(2);
+    expect(fixture.nativeElement.querySelector('.degraded__tray')?.textContent).toContain('built but not visible');
+  });
+
+  // ── first run ──────────────────────────────────────────────────────────────
+
+  it('sends a first run to setup', async () => {
+    // Spied on the prototype: the redirect is decided in ngOnInit, before a test could
+    // reach the injected router, and an unmatched route would otherwise reject.
+    const navigate = vi.spyOn(Router.prototype, 'navigate').mockResolvedValue(true);
+    try {
+      await build((b) => b.responses.set('lumen_setup_needed', true));
+      expect(navigate).toHaveBeenCalledWith(['/setup']);
+    } finally {
+      navigate.mockRestore();
+    }
+  });
+
+  it('ignores a negative session limit rather than storing it', async () => {
+    const h = await build();
+    const before = h.s.sessionSpendLimit();
+    h.onSessionLimit(inputEvent('-1'));
+    expect(h.s.sessionSpendLimit()).toBe(before);
+  });
+
+  // ── what the controls do when used ─────────────────────────────────────────
+  //
+  // The handlers above are tested by calling them; these drive the rendered controls,
+  // which is the only way to know the template wires each one to the right handler.
+
+  function el<T extends Element>(selector: string): T {
+    const found = (fixture.nativeElement as HTMLElement).querySelector<T>(selector);
+    expect(found, selector).not.toBeNull();
+    return found!;
+  }
+
+  function change(selector: string, value: string): void {
+    const input = el<HTMLInputElement>(selector);
+    input.value = value;
+    input.dispatchEvent(new Event('change'));
+  }
+
+  it('sets the window tier from the segmented control', async () => {
+    const h = await build();
+    const tabs = (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.segmented__opt');
+    tabs[2].click();
+    fixture.detectChanges();
+    expect(h.s.contextOverride()).toBe(500_000);
+    expect(tabs[2].getAttribute('aria-selected')).toBe('true');
+    expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('applies the spend limits typed into the inputs', async () => {
+    const h = await build();
+    change('input[aria-label="Daily spend limit in dollars"]', '7');
+    change('input[aria-label="Per-session spend limit in dollars"]', '4');
+    expect(h.s.dailySpendLimit()).toBe(7);
+    expect(h.s.sessionSpendLimit()).toBe(4);
+  });
+
+  it('turns native notifications off from the rendered toggle', async () => {
+    const h = await build();
+    el<HTMLInputElement>('input[aria-label="Enable native OS notifications"]').click();
+    expect(h.s.nativeNotify()).toBe(false);
+  });
+
+  // ── what the dashboard shows ───────────────────────────────────────────────
+
+  function turn(over: Record<string, unknown>): string {
+    return JSON.stringify({
+      type: 'event',
+      turn: {
+        session_id: 's1',
+        model: 'claude-sonnet-4',
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        ...over,
+      },
+    });
+  }
+
+  it('badges the Hotspots tab with the recorded fault count', async () => {
+    await build((b) => b.responses.set('get_fault_count', 3));
+    const badge = el<HTMLElement>('.tab-nav__badge');
+    expect(badge.textContent?.trim()).toBe('3');
+    expect(badge.getAttribute('aria-label')).toBe('3 faults recorded');
+  });
+
+  it('leaves the Hotspots tab unbadged when nothing was recorded', async () => {
+    await build((b) => b.responses.set('get_fault_count', 0));
+    expect(fixture.nativeElement.querySelector('.tab-nav__badge')).toBeNull();
+  });
+
+  it('shows the active alert as a banner at its level', async () => {
+    await build();
+    bridge.emit('daemon', turn({ cache_read_input_tokens: 195_000 }));
+    fixture.detectChanges();
+    const banner = el<HTMLElement>('.banner');
+    expect(banner.getAttribute('data-level')).toBe('alert');
+    expect(banner.textContent).toContain('compaction imminent');
+  });
+
+  it('names the project the gauge follows, without a count for one session', async () => {
+    const h = await build();
+    bridge.emit('daemon', turn({ project: 'lumen' }));
+    fixture.detectChanges();
+    expect(el<HTMLElement>('.gauge-stage__project').textContent).toContain('lumen');
+    expect(fixture.nativeElement.querySelector('.gauge-stage__count')).toBeNull();
+    expect(h.projectHint()).toBe('Project: lumen');
+  });
+
+  it('says how many other sessions exist when it follows one of several', async () => {
+    const h = await build();
+    bridge.emit('daemon', turn({ project: 'lumen' }));
+    bridge.emit('daemon', turn({ session_id: 's2', project: 'speedash' }));
+    fixture.detectChanges();
+    expect(el<HTMLElement>('.gauge-stage__count').textContent?.trim()).toBe('+1 more');
+    expect(h.projectHint()).toContain('most recently active of 2 sessions: speedash');
+  });
+
+  it('renders the usage report once it has loaded', async () => {
+    const zero = { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+    await build((b) => b.responses.set('get_usage', {
+      rolling5h: zero, windowStart: null, resetApprox: null,
+      rolling7dOpus: zero, rolling7dOther: zero, today: zero, thisWeek: zero, allTime: zero,
+    }));
+    expect(el<HTMLElement>('.usage').textContent).toContain('Usage & Cost');
+  });
+
+  it('renders no usage block before the report loads', async () => {
+    await build();
+    expect(fixture.nativeElement.querySelector('.usage')).toBeNull();
   });
 });

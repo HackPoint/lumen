@@ -266,4 +266,113 @@ describe('Panel', () => {
     const asked = bridge.lastArgsOf('resize_panel')!['height'] as number;
     expect(asked).toBe(Math.ceil(card.getBoundingClientRect().height) + 16);
   });
+
+  // ── What the precision row says ─────────────────────────────────────────────
+
+  function frame(over: Record<string, unknown>): string {
+    return JSON.stringify({
+      type: 'event',
+      turn: {
+        session_id: 's1',
+        model: 'claude-sonnet-4',
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        ...over,
+      },
+    });
+  }
+
+  function flag(): HTMLElement | null {
+    return (fixture.nativeElement as HTMLElement).querySelector('.panel__flag');
+  }
+
+  it('names the project it follows', () => {
+    const p = build();
+    bridge.emit('daemon', frame({ project: 'lumen' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.panel__project').textContent).toContain('lumen');
+    expect(p.projectHint()).toBe('Project: lumen');
+  });
+
+  it('says it follows the newest of several sessions', () => {
+    const p = build();
+    bridge.emit('daemon', frame({ project: 'lumen' }));
+    bridge.emit('daemon', frame({ session_id: 's2', project: 'speedash' }));
+    fixture.detectChanges();
+    expect(p.projectHint()).toContain('most recently active of 2 sessions: speedash');
+  });
+
+  it('flags compaction as imminent from 95% of the window', () => {
+    const p = build();
+    p.s.setWindow(200_000);
+    bridge.emit('daemon', frame({ cache_read_input_tokens: 190_000 }));
+    fixture.detectChanges();
+    expect(flag()?.getAttribute('data-level')).toBe('alert');
+    expect(flag()?.textContent).toContain('compaction imminent');
+  });
+
+  it('warns of approaching compaction from 80%', () => {
+    const p = build();
+    p.s.setWindow(200_000);
+    bridge.emit('daemon', frame({ cache_read_input_tokens: 160_000 }));
+    fixture.detectChanges();
+    expect(flag()?.getAttribute('data-level')).toBe('warn');
+    expect(flag()?.textContent).toContain('approaching compaction');
+  });
+
+  it('raises no flag below 80%', () => {
+    const p = build();
+    p.s.setWindow(200_000);
+    bridge.emit('daemon', frame({ cache_read_input_tokens: 159_000 }));
+    fixture.detectChanges();
+    expect(flag()).toBeNull();
+  });
+
+  // ── Following the card as it changes size ───────────────────────────────────
+  //
+  // jsdom has no ResizeObserver, so without one the path that keeps the window fitted
+  // after the first measurement never runs here. A stand-in records what is observed
+  // and lets the test report a resize.
+
+  class FakeResizeObserver {
+    static last: FakeResizeObserver | null = null;
+    readonly observed: Element[] = [];
+    disconnected = false;
+    constructor(private readonly callback: ResizeObserverCallback) {
+      FakeResizeObserver.last = this;
+    }
+    observe(target: Element): void { this.observed.push(target); }
+    unobserve(): void {}
+    disconnect(): void { this.disconnected = true; }
+    resized(): void { this.callback([], this as unknown as ResizeObserver); }
+  }
+
+  it('refits the window when the card resizes, skips a no-op, and stops on destroy', () => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    try {
+      build();
+      const observer = FakeResizeObserver.last!;
+      const card = fixture.nativeElement.querySelector('.panel') as HTMLElement;
+      expect(observer.observed).toEqual([card]);
+      const first = bridge.countOf('resize_panel');
+
+      // Same height: nothing to ask for.
+      observer.resized();
+      expect(bridge.countOf('resize_panel')).toBe(first);
+
+      // The card grew, so the window must be asked for the new height plus the inset.
+      card.getBoundingClientRect = () => ({ height: 300 }) as DOMRect;
+      observer.resized();
+      expect(bridge.countOf('resize_panel')).toBe(first + 1);
+      expect(bridge.lastArgsOf('resize_panel')).toEqual({ height: 316 });
+
+      fixture.destroy();
+      expect(observer.disconnected).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      FakeResizeObserver.last = null;
+    }
+  });
 });

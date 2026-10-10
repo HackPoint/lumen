@@ -200,7 +200,8 @@ pub fn run() {
         })
         .manage(StartupHealth::default())
         .setup(|app| {
-            // Nothing below this line uses `?` or `expect`.
+            // Nothing in this closure uses `?` or `expect`. `Builder::build`, outside it, still
+            // does: a failure there leaves no window, tray or event loop to degrade to.
             //
             // Every step either succeeds or records a degradation, and setup ends with one
             // decision about whether the app is reachable. Before this rule, three `?` on
@@ -271,11 +272,20 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map(|d| {
-                    std::fs::create_dir_all(&d).ok();
+                    // The daemon's open of the ledger fails next and says so; this says why.
+                    if let Err(e) = std::fs::create_dir_all(&d) {
+                        log::error!("STARTUP: cannot create {}: {e}", d.display());
+                    }
                     d.join("lumen.db")
                 })
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "lumen.db".to_string());
+                .unwrap_or_else(|e| {
+                    log::error!(
+                        "STARTUP: no app-data directory ({e}); the ledger is lumen.db in the \
+                         working directory, where lumen-mcp will not find it"
+                    );
+                    "lumen.db".to_string()
+                });
 
             unsafe {
                 std::env::set_var("LUMEN_DB", &db_path);
@@ -290,8 +300,20 @@ pub fn run() {
                 if let Some(home) = dirs::home_dir() {
                     let old_db = home.join("Library/Application Support/com.tauri.dev/lumen.db");
                     if old_db.exists() {
-                        let _ = std::fs::copy(&old_db, &db_path);
-                        log::info!("Migrated DB from com.tauri.dev to io.speedata.lumen");
+                        // This logged success whatever the copy did. A failure is not retried:
+                        // the daemon creates a ledger at db_path next, and this runs only while
+                        // there is none. The old file is left as it was.
+                        match std::fs::copy(&old_db, &db_path) {
+                            Ok(_) => {
+                                log::info!("Migrated DB from com.tauri.dev to io.speedata.lumen")
+                            }
+                            Err(e) => log::error!(
+                                "STARTUP: could not copy {} to {db_path}: {e}. History from \
+                                 before the rename stays in the old file; this starts an empty \
+                                 ledger.",
+                                old_db.display()
+                            ),
+                        }
                     }
                 }
             }
@@ -299,8 +321,15 @@ pub fn run() {
             // Write pointer file so lumen-mcp can auto-discover the same DB path.
             // dirs::home_dir() rather than $HOME: Windows sets USERPROFILE, not
             // HOME, so reading the env var directly skipped this entirely there.
+            //
+            // Without it lumen-mcp, the CLI and the plugin's hooks fall back to the per-OS
+            // path. That is this one everywhere except Linux with XDG_DATA_HOME set, where
+            // they would use a ledger this app never reads.
             if let Some(home) = dirs::home_dir() {
-                let _ = std::fs::write(home.join(".lumen_db_path"), &db_path);
+                let pointer = home.join(".lumen_db_path");
+                if let Err(e) = std::fs::write(&pointer, &db_path) {
+                    log::error!("STARTUP: cannot write {}: {e}", pointer.display());
+                }
             }
 
             // spawn the bundled daemon as a sidecar, passing the DB path via env
@@ -433,11 +462,13 @@ pub fn run() {
             // If a hidden-icon preference was cleared, say so once. The icon reappearing with
             // no explanation reads as the app fighting the user — and someone who ⌘-dragged it
             // away deliberately needs to be told that is not how to remove it, and what is.
+            // The window shows that explanation from `lumen_startup_health`'s `restored`.
             if !restored.is_empty() && health.claim_restore_explanation() {
                 log::warn!(
                     "TRAY: restored a hidden menu-bar icon ({} pref(s))",
                     restored.len()
                 );
+                health.set_restored(restored);
                 reveal_main_window(app.handle(), "the menu-bar icon was restored");
             }
 
@@ -573,6 +604,11 @@ fn reveal_main_window(app: &tauri::AppHandle, why: &str) {
         "FALLBACK: revealed the main window ({why}); visible={:?}",
         w.is_visible()
     );
+    // The page read startup health when it loaded, which for a reveal by the presence checks is
+    // six seconds before the reason existed. Without this the window they open says nothing.
+    if let Err(e) = app.emit("startup-health", why) {
+        log::warn!("FALLBACK: could not tell the window why it opened: {e}");
+    }
 }
 
 /// Check whether the status item is on screen, and repair it if it is not.
@@ -600,6 +636,10 @@ async fn verify_tray_presence(app: tauri::AppHandle) {
     const DELAYS_MS: [u64; 3] = [500, 1_500, 4_000];
     let simulate =
         health::simulated_tray_from(std::env::var("LUMEN_SIMULATE_TRAY").ok().as_deref());
+    if !health::presence_is_checkable(cfg!(target_os = "macos"), simulate) {
+        log::warn!("TRAY: built; this platform cannot report whether it is visible");
+        return;
+    }
 
     let mut last = health::TrayPresence::Unknown;
     for (attempt, delay) in DELAYS_MS.iter().enumerate() {
@@ -655,8 +695,9 @@ fn tray_presence(app: &tauri::AppHandle) -> health::TrayPresence {
     let Some(tray) = app.tray_by_id(&TrayIconId::new("lumen-tray")) else {
         return health::TrayPresence::Absent;
     };
-    // Linux always returns None here, which is why the whole check is macOS-gated: treating
-    // that as Absent would report every Linux launch as broken.
+    // Off macOS there is nothing to judge a rect against: Linux gives none at all, and what
+    // follows reads the macOS menu bar. `verify_tray_presence` does not ask there
+    // (`presence_is_checkable`); treating Unknown as Absent reported every launch as broken.
     if !cfg!(target_os = "macos") {
         return health::TrayPresence::Unknown;
     }
@@ -744,20 +785,31 @@ fn update_tray(app: tauri::AppHandle, percent: u8, status: String) {
     }
 }
 
-/// What degraded during startup, and whether the tray is actually visible.
+/// What degraded during startup, whether the tray is actually visible, and which hidden-icon
+/// preferences this launch cleared.
 ///
-/// Read by the frontend so a degraded app says so instead of looking healthy. Also folded into
-/// the fault report, so a user who *can* reach the app files something that already contains
-/// the answer.
+/// Read by the frontend so a degraded app says so instead of looking healthy, and so the
+/// window opened for a restored icon says why it opened. Also folded into the fault report, so
+/// a user who *can* reach the app files something that already contains the answer.
 #[tauri::command]
 fn lumen_startup_health(app: tauri::AppHandle) -> serde_json::Value {
-    let Some(health) = app.try_state::<StartupHealth>() else {
-        return serde_json::json!({ "degraded": false, "tray": "unknown", "degradations": [] });
+    startup_health_payload(app.try_state::<StartupHealth>().as_deref())
+}
+
+fn startup_health_payload(health: Option<&StartupHealth>) -> serde_json::Value {
+    let Some(health) = health else {
+        return serde_json::json!({
+            "degraded": false,
+            "tray": "unknown",
+            "degradations": [],
+            "restored": [],
+        });
     };
     serde_json::json!({
         "degraded": health.is_degraded(),
         "tray": health.tray().describe(),
         "degradations": health.degradations(),
+        "restored": health.restored(),
     })
 }
 
@@ -834,32 +886,41 @@ async fn get_fault_report(app: tauri::AppHandle) -> Result<Option<FaultReport>, 
     tauri::async_runtime::spawn_blocking(move || {
         let path = lumen_core::meter::db_path()
             .ok_or_else(|| "cannot resolve a database path".to_string())?;
-        let conn = lumen_core::meter::connect_db(&path)
-            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-
-        let faults = lumen_core::report::load_faults_from_db(&conn)?;
         // "gui", not the default "cli": this report is being filed from the app's own button,
         // and a report that misnames its own channel misleads the one reader who trusts it.
         let mut env = lumen_core::report::Environment::collect_for("gui");
         env.tray = tray;
         env.startup_degradations = degradations;
-
-        // Metadata-only by default, exactly as the CLI renders it. Embedding source is a
-        // deliberate opt-in with a manifest, which is not something a button can offer.
-        let opts = lumen_core::report::RenderOpts::default();
-        Ok(
-            lumen_core::report::render(&faults, &env, &opts).map(|body| FaultReport {
-                title: lumen_core::report::title_from(&body),
-                fingerprint: lumen_core::report::fingerprint(&faults, &env),
-                kinds: faults.len(),
-                occurrences: faults.iter().map(|f| f.count).sum(),
-                repo: lumen_core::report::DEFAULT_REPO.to_string(),
-                body,
-            }),
-        )
+        fault_report_at(&path, lumen_core::faults::spool_path().as_deref(), &env)
     })
     .await
     .map_err(|e| format!("fault report task failed: {e}"))?
+}
+
+/// [`get_fault_report`] against a ledger and spool it is given, so a test drives what
+/// the screen shows without resolving either from the environment.
+fn fault_report_at(
+    db: &std::path::Path,
+    spool: Option<&std::path::Path>,
+    env: &lumen_core::report::Environment,
+) -> Result<Option<FaultReport>, String> {
+    let conn = lumen_core::meter::connect_db(db)
+        .map_err(|e| format!("cannot open {}: {e}", db.display()))?;
+    let faults = lumen_core::report::load_faults_with_spool(&conn, spool)?;
+
+    // Metadata-only by default, exactly as the CLI renders it. Embedding source is a
+    // deliberate opt-in with a manifest, which is not something a button can offer.
+    let opts = lumen_core::report::RenderOpts::default();
+    Ok(
+        lumen_core::report::render(&faults, env, &opts).map(|body| FaultReport {
+            title: lumen_core::report::title_from(&body),
+            fingerprint: lumen_core::report::fingerprint(&faults, env),
+            kinds: faults.len(),
+            occurrences: faults.iter().map(|f| f.count).sum(),
+            repo: lumen_core::report::DEFAULT_REPO.to_string(),
+            body,
+        }),
+    )
 }
 
 /// Check whether a newer Lumen has been released, for minor and major bumps only.
@@ -952,22 +1013,19 @@ fn fetch_latest_release(repo: &str) -> Option<String> {
 ///
 /// Separate from [`get_fault_report`] because a badge refreshes on every navigation and
 /// rendering a whole issue body for a number would be absurd. Read-only: it does not
-/// drain the spool, so opening a screen is never a write.
+/// drain the spool, create the ledger or migrate it, so opening a screen is never a
+/// write. Until 1.6.0 it opened the ledger with `connect_db`, which creates and migrates
+/// it, and a ledger that would not open put the badge out while faults were waiting.
 #[tauri::command]
 async fn get_fault_count() -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let Some(path) = lumen_core::meter::db_path() else {
-            return Ok(0);
-        };
-        // A database that will not open is not a reason to fail a navigation; the badge
-        // simply stays dark and the report screen reports the real error.
-        match lumen_core::meter::connect_db(&path) {
-            Ok(conn) => Ok(lumen_core::report::actionable_fault_count(&conn)),
-            Err(_) => Ok(0),
-        }
+        lumen_core::report::actionable_fault_count(
+            lumen_core::meter::db_path().as_deref(),
+            lumen_core::faults::spool_path().as_deref(),
+        )
     })
     .await
-    .map_err(|e| format!("fault count task failed: {e}"))?
+    .map_err(|e| format!("fault count task failed: {e}"))
 }
 
 /// Width of the tray popover. Fixed: it is positioned under the tray icon and a varying
@@ -1213,6 +1271,34 @@ mod tests {
                 assert_eq!(img.rgba().len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
             }
         }
+    }
+
+    // ── startup health ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_startup_health_payload_carries_the_restored_keys() {
+        // Home opens its explanation from `restored`; a payload without it leaves the window
+        // that opened for a restored icon saying nothing about why.
+        let h = StartupHealth::default();
+        h.set_tray(health::TrayState::Present);
+        h.set_restored(vec!["NSStatusItem Visible Item-0".into()]);
+        let v = startup_health_payload(Some(&h));
+        assert_eq!(
+            v["restored"],
+            serde_json::json!(["NSStatusItem Visible Item-0"])
+        );
+        assert_eq!(v["degraded"], serde_json::json!(false));
+
+        let healthy = StartupHealth::default();
+        healthy.set_tray(health::TrayState::Present);
+        assert_eq!(
+            startup_health_payload(Some(&healthy))["restored"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            startup_health_payload(None)["restored"],
+            serde_json::json!([])
+        );
     }
 
     // ── db_url ───────────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 [package]
 name = "lumen-mcp"
-version = "1.5.1"
+version = "1.6.0"
 edition = "2024"
+rust-version.workspace = true
 
 # Request handling lives in the lib so it can be unit-tested; the binaries are
 # thin shells that own the stdout/DB side effects.

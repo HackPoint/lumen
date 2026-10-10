@@ -30,9 +30,12 @@ function Section($m){ Write-Host ""; Write-Host $m -ForegroundColor White }
 
 Section "Lumen install verification — windows, $env:PROCESSOR_ARCHITECTURE"
 
+# An explicit -BinDir is the only place looked: a binary found anywhere else is an
+# installed Lumen's, not the build's that was asked about.
 function Find-Bin([string]$Name) {
-    if ($BinDir -and (Test-Path (Join-Path $BinDir "$Name.exe"))) {
-        return (Resolve-Path (Join-Path $BinDir "$Name.exe")).Path
+    if ($BinDir) {
+        $p = Join-Path $BinDir "$Name.exe"
+        if (Test-Path $p) { return (Resolve-Path $p).Path } else { return $null }
     }
     # The installer puts the app under Program Files; the name mirrors the bundle.
     foreach ($root in @("$env:ProgramFiles\Lumen", "$env:LOCALAPPDATA\Programs\Lumen")) {
@@ -98,13 +101,15 @@ if (-not $mcp) {
     else { Bad "stdout was polluted with non-protocol output" }
 }
 
+# The hooks no longer use it: `lumen-mcp hook meter` counts tokens itself. It still
+# ships with the app, so a broken one is still a broken install.
 Section "Tokenizer"
 if ($tok) {
     $n = ("fn main() {}" | & $tok 2>$null | Out-String).Trim()
     if ($n -match '^\d+$' -and [int]$n -gt 0) { Ok "lumen-tok counted $n tokens" }
-    else { Bad "lumen-tok produced no count — metering would fall back to bytes/4" }
+    else { Bad "lumen-tok produced no count" }
 } elseif ($CliOnly) {
-    Skipped "no lumen-tok in a CLI-only install — hook metering would fall back to bytes/4"
+    Skipped "no lumen-tok in a CLI-only install"
 } else { Bad "no lumen-tok" }
 
 Section "CLI report path"
@@ -117,28 +122,50 @@ if ($cli) {
     else { Bad "report exited 0 without being asked to file or dry-run" }
 }
 
+# Run, not grepped: verify-hooks.sh runs the hooks against a scratch ledger, in Git Bash
+# as Claude Code does. This used to grep the intercept for its fail-open guards, which
+# passed the 1.5.1 hooks, failed every hook since (the guards moved into lumen-mcp), and
+# passed hooks whose lumen-mcp was gone, which block and meter nothing.
 Section "Hook scripts"
 $hookDir = Join-Path $env:USERPROFILE ".claude\lumen"
+$verifyHooks = Join-Path $PSScriptRoot "verify-hooks.sh"
 if (-not (Test-Path $hookDir)) {
     Skipped "no ~/.claude/lumen — Setup has not run on this machine"
+} elseif (-not (Test-Path $verifyHooks)) {
+    Bad "no verify-hooks.sh beside this script to check the hooks with"
 } else {
-    foreach ($f in @("lumen_read_intercept.sh","lumen_meter.sh")) {
-        if (Test-Path (Join-Path $hookDir $f)) { Ok "$f present" } else { Bad "$f missing" }
+    # Git Bash where Claude Code looks for it, in its order. Not `bash` on PATH, which is
+    # usually WSL's.
+    $candidates = @()
+    $named = $env:CLAUDE_CODE_GIT_BASH_PATH
+    if ($named -and @("bash.exe", "sh.exe", "bash", "sh") -contains (Split-Path $named -Leaf).ToLower()) {
+        $candidates += $named
     }
-    $intercept = Join-Path $hookDir "lumen_read_intercept.sh"
-    if (Test-Path $intercept) {
-        $body = Get-Content $intercept -Raw
-        # Their absence is what deadlocked a session, and the fix reached the developer
-        # copy a full release before it reached the installed one.
-        if ($body -match 'lumen_mcp_missing' -and $body -match 'retry_escape_valve') {
-            Ok "intercept has both fail-open guards"
-        } else { Bad "intercept is missing a fail-open guard — a session can deadlock" }
+    $candidates += @("C:\Program Files\Git\bin\bash.exe", "C:\Program Files (x86)\Git\bin\bash.exe")
+    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($git) { $candidates += Join-Path (Split-Path (Split-Path $git.Source)) "bin\bash.exe" }
+    $bash = $candidates | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $bash) {
+        Bad "no Git Bash — Claude Code runs the hooks in it, so here they cannot run at all"
+    } else {
+        # Forward slashes: the script takes them apart as paths.
+        $hookArgs = @($verifyHooks -replace '\\', '/')
+        if ($Expect) { $hookArgs += @("--expect", $Expect) }
+        $hookArgs += $hookDir -replace '\\', '/'
+        & $bash @hookArgs
+        if ($LASTEXITCODE -eq 0) { Ok "the hooks meter, intercept and fail open as they should" }
+        else { Bad "the hooks failed the checks above" }
     }
 }
 
 Section "Tray widget"
 if ($CliOnly) {
     Skipped "-CliOnly: GUI checks not applicable"
+} elseif ($BinDir) {
+    # As in verify-install.sh: -BinDir is build output, not an installed package. Here
+    # it also passed falsely, the build's lumen.exe answering for Lumen.exe on a
+    # case-insensitive filesystem.
+    Skipped "-BinDir given: verifying built binaries, not an installed package"
 } else {
     $exe = Find-Bin "Lumen"
     if ($exe) { Ok "app executable installed: $exe" } else { Bad "no Lumen.exe found" }
