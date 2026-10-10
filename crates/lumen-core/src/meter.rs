@@ -9,13 +9,20 @@ use rusqlite::{Connection, params};
 ///   anything else non-empty  → treat as cli (future entrypoint names)
 ///   unset                    → fall back to VSCODE_PID / VSCODE_CWD presence
 pub fn detect_channel() -> &'static str {
-    let ep = std::env::var("CLAUDE_CODE_ENTRYPOINT").unwrap_or_default();
+    channel_from(|k| std::env::var(k).ok())
+}
+
+/// [`detect_channel`] with the environment passed in, so every writer — the meter, the
+/// hooks, the fault recorder — shares one mapping that tests can drive without mutating
+/// process-global state.
+pub fn channel_from(var: impl Fn(&str) -> Option<String>) -> &'static str {
+    let ep = var("CLAUDE_CODE_ENTRYPOINT").unwrap_or_default();
     match ep.as_str() {
         "claude-vscode" => "vscode",
         s if s.contains("vscode") => "vscode",
         s if !s.is_empty() => "cli",
         _ => {
-            if std::env::var("VSCODE_PID").is_ok() || std::env::var("VSCODE_CWD").is_ok() {
+            if var("VSCODE_PID").is_some() || var("VSCODE_CWD").is_some() {
                 "vscode"
             } else {
                 "unknown"
@@ -113,6 +120,7 @@ pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std
 
 /// Open (or create) the lumen SQLite DB, apply DDL + additive migrations.
 fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    restore_sidecar_write_bits(path);
     let conn = Connection::open(path)?;
     conn.execute_batch(DDL)?;
     for migration in MIGRATIONS {
@@ -127,7 +135,55 @@ pub fn connect_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     open_db(path)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Open an existing ledger to read it: nothing is created, migrated or written.
+///
+/// For whatever reads a ledger it does not own, the tests that read this machine's above
+/// all. [`connect_db`] migrates, and a build whose migrations differ from the installed
+/// app's rewrites the installed app's schema: a 1.6.0 test run dropped
+/// `read_events.is_subagent` from a live 1.5.1 ledger, and 1.5.1 added it back.
+pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
+/// Give the ledger's `-wal` and `-shm` back the write bits the ledger itself has.
+///
+/// SQLite creates both with the ledger's mode. Opened while the ledger is read-only, it
+/// leaves a read-only `-shm` behind, and that outlives the ledger's own permissions being
+/// restored: SQLite then opens it read-only and refuses every write with "attempt to
+/// write a readonly database", against a ledger that is writable again. One Read metered
+/// during the read-only spell is enough. SQLite repairs an empty `-wal` on open; a `-shm`
+/// is never empty once used, and nothing else repairs it.
+///
+/// Metadata and chmod only. Opening the ledger here would drop any lock this process
+/// already holds on it: POSIX locks belong to the process, and any close releases them.
+#[cfg(unix)]
+pub fn restore_sidecar_write_bits(db: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(ledger) = std::fs::metadata(db) else {
+        return;
+    };
+    let want = ledger.permissions().mode() & 0o222;
+    for suffix in ["-wal", "-shm"] {
+        let mut side = db.as_os_str().to_owned();
+        side.push(suffix);
+        let Ok(meta) = std::fs::metadata(&side) else {
+            continue;
+        };
+        let mode = meta.permissions().mode() & 0o7777;
+        if mode & want != want {
+            // Owned by someone else, it stays as it is: the write it refuses is a fault.
+            let _ = std::fs::set_permissions(&side, std::fs::Permissions::from_mode(mode | want));
+        }
+    }
+}
+
+/// Windows keeps no mode to copy: there is nothing to restore.
+#[cfg(not(unix))]
+pub fn restore_sidecar_write_bits(_db: &std::path::Path) {}
+
 /// Provenance of a ranked-outline decision, recorded alongside the row.
 ///
 /// All-NULL by default, which is what every other writer produces: the hook and the
@@ -181,10 +237,15 @@ pub fn insert_read_event(
             eprintln!(
                 "lumen-meter: LUMEN_DB not set and binary path resolution failed — skipping DB write"
             );
+            record_write_fault(
+                "no_db_path",
+                path,
+                "no LUMEN_DB, pointer file or home directory",
+            );
             return;
         }
     };
-    insert_read_event_at(
+    if let Err(e) = insert_read_event_at(
         &db,
         path,
         lines,
@@ -198,13 +259,58 @@ pub fn insert_read_event(
         file_mtime,
         req_key,
         meta,
+    ) {
+        eprintln!("lumen-meter: {e} ({})", db.display());
+        record_write_fault(e.stage, path, &format!("{}: {}", db.display(), e.detail));
+    }
+}
+
+/// The fault kind every lost `read_events` row is filed under.
+pub const METER_WRITE_FAILED: &str = "meter_write_failed";
+
+/// File a lost row with the spool, so the badge and `lumen report` count it.
+///
+/// Until 1.6.0 a failed write was an `eprintln!` here and `2>/dev/null || true` in the
+/// hook: the row vanished, and because every figure is computed from this table, an
+/// uncounted row was invisible by construction.
+fn record_write_fault(stage: &str, path: &str, detail: &str) {
+    crate::faults::record(
+        &crate::faults::FaultRecord::now(METER_WRITE_FAILED, stage)
+            .with_path(path)
+            .with_detail(detail),
     );
 }
 
+/// Why a `read_events` row did not land. `stage` is the fault variant it is filed
+/// under: `open` (the database could not be opened or its schema applied) or `insert`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteError {
+    pub stage: &'static str,
+    pub detail: String,
+}
+
+impl WriteError {
+    fn at(stage: &'static str) -> impl FnOnce(rusqlite::Error) -> Self {
+        move |e| Self {
+            stage,
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "read_events {} failed: {}", self.stage, self.detail)
+    }
+}
+
+impl std::error::Error for WriteError {}
+
 /// Write one `read_events` row to the DB at `db`. Split out from
 /// [`insert_read_event`] so tests can target a tempdir instead of the ambient
-/// LUMEN_DB. Failures are logged and swallowed: metering must never break a tool
-/// call that has already answered the client.
+/// LUMEN_DB. Returns why the row did not land rather than deciding what to do about
+/// it: the caller owns the fault, and metering must never break a tool call that has
+/// already answered the client.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_read_event_at(
     db: &std::path::Path,
@@ -220,50 +326,26 @@ pub fn insert_read_event_at(
     file_mtime: Option<i64>,
     req_key: Option<&str>,
     meta: &RankedMeta,
-) {
-    let conn = match open_db(db) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("lumen-meter: failed to open DB {db:?}: {e}");
-            return;
-        }
-    };
-
-    let ts = {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // Format as ISO-8601 UTC without chrono dependency.
-        let s = secs;
-        let sec = s % 60;
-        let min = (s / 60) % 60;
-        let hr = (s / 3600) % 24;
-        let days = s / 86400;
-        // Days since 1970-01-01 → Gregorian date (accurate for ~200 years)
-        let (y, mo, d) = days_to_ymd(days);
-        format!("{y:04}-{mo:02}-{d:02}T{hr:02}:{min:02}:{sec:02}Z")
-    };
-
-    let lines_val: Option<i64> = lines;
+) -> Result<(), WriteError> {
+    let conn = open_db(db).map_err(WriteError::at("open"))?;
 
     // token_source is always 'measured' here: this crate tokenizes in-process with
-    // no fallback path, unlike the shell hook which can substitute bytes/4. Recording
-    // it explicitly is what lets the UI stop qualifying its accuracy claim — a NULL
-    // would count as unverified forever and the warning would never clear.
-    let result = conn.execute(
+    // no fallback path, unlike a hook, which can only estimate a file the tokenizer
+    // cannot read. Recording it explicitly is what lets the UI stop qualifying its
+    // accuracy claim — a NULL would count as unverified forever and the warning would
+    // never clear.
+    conn.execute(
         "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
-         saved_tokens,routed_via,channel,session_id,file_mtime,req_key,is_subagent,\
+         saved_tokens,routed_via,channel,session_id,file_mtime,req_key,\
          writer_hook,token_source,budget,s_min,econ_context,econ_rounds,econ_output,\
          econ_source,k_selected,n_total,coeff_version,target_outline) \
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'lumen-mcp','measured',\
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'lumen-mcp','measured',\
                 ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
         params![
-            ts,
+            now_iso(),
             tool_name,
             path,
-            lines_val,
+            lines,
             tokens_returned,
             full_tokens,
             saved_tokens,
@@ -283,11 +365,80 @@ pub fn insert_read_event_at(
             meta.coeff_version,
             meta.target_outline,
         ],
-    );
+    )
+    .map_err(WriteError::at("insert"))?;
+    Ok(())
+}
 
-    if let Err(e) = result {
-        eprintln!("lumen-meter: INSERT failed: {e}");
-    }
+/// One row as a hook writes it: a built-in Read or Bash call that Lumen observed but did
+/// not serve, so nothing was saved and there is no ranked decision to record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookReadEvent<'a> {
+    /// The tool Claude Code ran: `Read` or `Bash`.
+    pub tool: &'a str,
+    /// The file read, or the command's label for Bash.
+    pub path: &'a str,
+    pub lines: Option<i64>,
+    pub tokens_returned: i64,
+    pub full_tokens: i64,
+    /// `builtin_read` | `bash_output`.
+    pub routed_via: &'a str,
+    pub channel: &'a str,
+    pub session_id: Option<&'a str>,
+    pub file_mtime: Option<i64>,
+    pub req_key: Option<&'a str>,
+    /// Which hook wrote the row. Two installs live at once were indistinguishable
+    /// before this existed.
+    pub writer_hook: &'a str,
+    /// `measured` | `estimated` | `unsupported`.
+    pub token_source: &'a str,
+}
+
+/// Write one hook-observed row to the DB at `db`.
+///
+/// Opens through the same DDL-plus-migrations path as every other writer, so a database
+/// one release behind is brought up to date before the insert instead of rejecting it.
+/// The shell hooks inserted against whatever schema they found, which is how a
+/// pre-migration database swallowed every row without a word.
+pub fn insert_hook_event_at(db: &std::path::Path, ev: &HookReadEvent) -> Result<(), WriteError> {
+    let conn = open_db(db).map_err(WriteError::at("open"))?;
+    conn.execute(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
+         saved_tokens,routed_via,channel,session_id,file_mtime,req_key,writer_hook,\
+         token_source) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            now_iso(),
+            ev.tool,
+            ev.path,
+            ev.lines,
+            ev.tokens_returned,
+            ev.full_tokens,
+            ev.routed_via,
+            ev.channel,
+            ev.session_id,
+            ev.file_mtime,
+            ev.req_key,
+            ev.writer_hook,
+            ev.token_source,
+        ],
+    )
+    .map_err(WriteError::at("insert"))?;
+    Ok(())
+}
+
+/// The current instant as ISO-8601 UTC to the second, without a date library.
+fn now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // A clock before 1970 is not a measurement problem this function can solve; the
+    // epoch is at least a value every reader parses.
+    let s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (sec, min, hr) = (s % 60, (s / 60) % 60, (s / 3600) % 24);
+    // Days since 1970-01-01 → Gregorian date (accurate for ~200 years)
+    let (y, mo, d) = days_to_ymd(s / 86400);
+    format!("{y:04}-{mo:02}-{d:02}T{hr:02}:{min:02}:{sec:02}Z")
 }
 
 /// Convert days since Unix epoch to (year, month, day) in the proleptic Gregorian calendar.
@@ -310,6 +461,50 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn read_events_columns(path: &std::path::Path) -> Vec<String> {
+        let conn = open_read_only(path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('read_events')")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_read_only_open_leaves_an_older_schema_as_it_found_it() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lumen.db");
+        // A ledger as 1.5.1 left it, with the column this build's migrations drop.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(DDL).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE read_events ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+        )
+        .unwrap();
+        drop(conn);
+
+        let ro = open_read_only(&path).unwrap();
+        let write = ro.execute_batch("ALTER TABLE read_events DROP COLUMN is_subagent");
+        assert!(write.is_err(), "a read-only connection changed the schema");
+        drop(ro);
+        assert!(read_events_columns(&path).contains(&"is_subagent".to_string()));
+
+        // What connect_db does to the same file, and why nothing that reads another
+        // install's ledger may use it.
+        drop(connect_db(&path).unwrap());
+        assert!(!read_events_columns(&path).contains(&"is_subagent".to_string()));
+    }
+
+    #[test]
+    fn a_read_only_open_creates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("absent.db");
+        assert!(open_read_only(&path).is_err());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn epoch_day_zero_is_1970_01_01() {
@@ -569,7 +764,8 @@ mod tests {
             None,
             None,
             &RankedMeta::default(),
-        );
+        )
+        .unwrap();
 
         let conn = connect_db(&path).unwrap();
         assert_eq!(count_events(&conn), 1);
@@ -631,7 +827,8 @@ mod tests {
             None,
             None,
             &RankedMeta::default(),
-        );
+        )
+        .unwrap();
         let conn = connect_db(&path).unwrap();
         let lines: Option<i64> = conn
             .query_row("SELECT lines FROM read_events", [], |r| r.get(0))
@@ -658,7 +855,8 @@ mod tests {
             None,
             None,
             &RankedMeta::default(),
-        );
+        )
+        .unwrap();
 
         let conn = connect_db(&path).unwrap();
         let ts: String = conn
@@ -696,16 +894,18 @@ mod tests {
                 None,
                 None,
                 &RankedMeta::default(),
-            );
+            )
+            .unwrap();
         }
         let conn = connect_db(&path).unwrap();
         assert_eq!(count_events(&conn), 5);
     }
 
     #[test]
-    fn a_failed_write_is_swallowed_rather_than_panicking() {
-        // Metering must never break a tool call that already answered the client.
-        insert_read_event_at(
+    fn a_failed_write_is_returned_with_its_stage_rather_than_panicking() {
+        // Metering must never break a tool call that already answered the client — but
+        // the caller has to learn the row is gone, or it cannot file the fault.
+        let err = insert_read_event_at(
             std::path::Path::new("/nonexistent-dir-xyz/sub/lumen.db"),
             "/p",
             None,
@@ -719,6 +919,255 @@ mod tests {
             None,
             None,
             &RankedMeta::default(),
+        )
+        .expect_err("a database under a missing directory cannot be written");
+        assert_eq!(err.stage, "open");
+        assert!(!err.detail.is_empty());
+    }
+
+    // ── insert_hook_event_at ─────────────────────────────────────────────────
+
+    fn hook_row<'a>() -> HookReadEvent<'a> {
+        HookReadEvent {
+            tool: "Read",
+            path: "/src/lib.rs",
+            lines: Some(512),
+            tokens_returned: 6_100,
+            full_tokens: 6_100,
+            routed_via: "builtin_read",
+            channel: "vscode",
+            session_id: Some("sess-9"),
+            file_mtime: Some(1_767_000_000),
+            req_key: Some("/src/lib.rs"),
+            writer_hook: "lumen_meter.sh",
+            token_source: "measured",
+        }
+    }
+
+    #[test]
+    fn a_hook_row_lands_with_its_provenance_and_no_saving() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("m.db");
+        insert_hook_event_at(&path, &hook_row()).unwrap();
+
+        let conn = connect_db(&path).unwrap();
+        let got: (
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT tool,path,lines,tokens_returned,saved_tokens,routed_via,channel,\
+                 session_id,file_mtime,writer_hook,token_source FROM read_events",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            got,
+            (
+                "Read".into(),
+                "/src/lib.rs".into(),
+                512,
+                6_100,
+                0,
+                "builtin_read".into(),
+                "vscode".into(),
+                "sess-9".into(),
+                1_767_000_000,
+                "lumen_meter.sh".into(),
+                "measured".into(),
+            )
         );
+    }
+
+    /// R3: a database one migration behind took the shell hook's insert as an error it
+    /// then discarded. Opening through the migrations first is what makes it land.
+    #[test]
+    fn a_hook_row_lands_on_a_pre_migration_database() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE read_events (ts TEXT NOT NULL, tool TEXT NOT NULL, \
+                 path TEXT NOT NULL, lines INTEGER, tokens_returned INTEGER NOT NULL, \
+                 full_tokens INTEGER NOT NULL, saved_tokens INTEGER NOT NULL, \
+                 routed_via TEXT NOT NULL)",
+            )
+            .unwrap();
+        }
+        insert_hook_event_at(&path, &hook_row()).expect("the migrations must run first");
+        assert_eq!(count_events(&connect_db(&path).unwrap()), 1);
+    }
+
+    /// A 1.5.1 table whose `is_subagent` could not be dropped — here because a view
+    /// names it, in the field because another process held the lock — must still take
+    /// the insert. It does because the column has a default and the insert never names it.
+    #[test]
+    fn a_hook_row_lands_even_when_the_drop_could_not_run() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("pinned.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(DDL).unwrap();
+            c.execute_batch(
+                "ALTER TABLE read_events ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0; \
+                 CREATE VIEW pin AS SELECT is_subagent FROM read_events;",
+            )
+            .unwrap();
+        }
+        insert_hook_event_at(&path, &hook_row()).unwrap();
+        let conn = connect_db(&path).unwrap();
+        assert_eq!(count_events(&conn), 1);
+        let still_there: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('read_events') WHERE name='is_subagent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still_there, 1,
+            "precondition: the view really did pin the column"
+        );
+    }
+
+    /// The falsification for B1, at the library level: a database the process may read
+    /// but not write. The row cannot land, and the error says which stage refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_database_is_an_error_not_a_silent_skip() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ro.db");
+        drop(connect_db(&path).unwrap());
+        // Rollback journal, so the read-only file is the whole database. The ledger runs
+        // in WAL, where the read-only spell also leaves read-only sidecars: next test.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode=DELETE")
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let err = insert_hook_event_at(&path, &hook_row()).expect_err("read-only must fail");
+        assert!(
+            err.detail.contains("readonly") || err.detail.contains("read-only"),
+            "{err}"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        insert_hook_event_at(&path, &hook_row()).expect("restored permissions must write");
+        assert_eq!(count_events(&connect_db(&path).unwrap()), 1);
+    }
+
+    /// The same falsification on the ledger as it runs, in WAL. A read during the
+    /// read-only spell leaves a `-shm` with the ledger's 0444; restoring the ledger alone
+    /// left every later insert refused, against a writable ledger.
+    #[cfg(unix)]
+    #[test]
+    fn a_wal_ledger_restored_from_read_only_takes_writes_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lumen.db");
+        let shm = dir.path().join("lumen.db-shm");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let chmod =
+            |m: u32| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m)).unwrap();
+        insert_hook_event_at(&path, &hook_row()).unwrap();
+        assert!(
+            !shm.exists(),
+            "premise: the last connection out removed the -shm"
+        );
+
+        chmod(0o444);
+        // As root the mode is ignored and there is nothing to test.
+        assert!(
+            std::fs::File::options().append(true).open(&path).is_err(),
+            "premise: the ledger must be read-only to this user"
+        );
+        let err = insert_hook_event_at(&path, &hook_row()).expect_err("read-only must fail");
+        assert!(err.detail.contains("readonly"), "{err}");
+        assert_eq!(
+            mode(&shm),
+            0o444,
+            "premise: SQLite gave the -shm the ledger's mode"
+        );
+
+        chmod(0o644);
+        insert_hook_event_at(&path, &hook_row()).expect("the restored ledger must take the row");
+        assert_eq!(count_events(&open_read_only(&path).unwrap()), 2);
+        assert_eq!(
+            mode(&path),
+            0o644,
+            "the ledger itself is left as the user set it"
+        );
+    }
+
+    #[test]
+    fn a_hook_row_under_a_missing_directory_fails_at_open() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("gone/sub/lumen.db");
+        let err = insert_hook_event_at(&path, &hook_row()).unwrap_err();
+        assert_eq!(err.stage, "open");
+        assert!(
+            !path.exists(),
+            "a missing directory must not be created behind the user's back"
+        );
+    }
+
+    // ── channel_from ─────────────────────────────────────────────────────────
+
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    #[test]
+    fn the_channel_mapping_covers_every_entrypoint_shape() {
+        assert_eq!(
+            channel_from(env_of(&[("CLAUDE_CODE_ENTRYPOINT", "claude-vscode")])),
+            "vscode"
+        );
+        assert_eq!(
+            channel_from(env_of(&[("CLAUDE_CODE_ENTRYPOINT", "vscode-next")])),
+            "vscode"
+        );
+        assert_eq!(
+            channel_from(env_of(&[("CLAUDE_CODE_ENTRYPOINT", "cli")])),
+            "cli"
+        );
+        assert_eq!(
+            channel_from(env_of(&[("CLAUDE_CODE_ENTRYPOINT", "sdk-cli")])),
+            "cli"
+        );
+        assert_eq!(channel_from(env_of(&[("VSCODE_PID", "123")])), "vscode");
+        assert_eq!(channel_from(env_of(&[])), "unknown");
     }
 }

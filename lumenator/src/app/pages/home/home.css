@@ -287,21 +287,23 @@
 }
 
 /* Degraded-startup banner. Amber rather than red: the app still works, it is just not whole,
-   and red is reserved for the alert threshold on the gauge. */
+   and red is reserved for the alert threshold on the gauge. Its text takes the theme's colours:
+   the --fg, --fg-muted and --warn-* it first read were defined nowhere, so every theme got
+   their dark fallbacks, and in the light one the bold text was near-white on white. */
 .degraded {
     margin: 0 0 14px;
     padding: 10px 12px;
-    border: 1px solid var(--warn-border, #6b5320);
+    border: 1px solid #6b5320;
     border-left-width: 3px;
     border-radius: 6px;
-    background: var(--warn-bg, rgba(210, 153, 34, 0.08));
+    background: rgba(210, 153, 34, 0.08);
 }
 
 .degraded__head {
     margin: 0 0 6px;
     font-size: 12px;
     font-weight: 600;
-    color: var(--warn-fg, #d29922);
+    color: var(--lumen-warn);
 }
 
 .degraded__tray,
@@ -309,7 +311,7 @@
     margin: 0 0 4px;
     font-size: 11px;
     line-height: 1.45;
-    color: var(--fg-muted, #8b949e);
+    color: var(--lumen-text-dim);
     /* Error text can be long and arbitrary; it must wrap rather than widen the popover. */
     overflow-wrap: anywhere;
 }
@@ -317,10 +319,39 @@
 .degraded__hint {
     margin: 6px 0 0;
     font-size: 11px;
-    color: var(--fg-muted, #8b949e);
+    color: var(--lumen-text-dim);
 }
 
 .degraded__hint strong {
-    color: var(--fg, #e6edf3);
+    color: var(--lumen-text);
+    font-weight: 600;
+}
+
+/* Restored-icon notice. Neutral rather than amber: nothing is wrong any more, the repair worked,
+   and this only says what it did. */
+.restored {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--lumen-border);
+    border-left-width: 3px;
+    border-radius: 6px;
+}
+
+.restored__head {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lumen-text);
+}
+
+.restored__body {
+    margin: 0 0 4px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+}
+
+.restored__body strong {
+    color: var(--lumen-text);
     font-weight: 600;
 }

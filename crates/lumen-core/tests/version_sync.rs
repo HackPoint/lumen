@@ -17,6 +17,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// Generated hook scripts that carry a version on their stamp line.
+const PLUGIN_HOOKS: [&str; 2] = [
+    ".claude/hooks/lumen_meter.sh",
+    ".claude/hooks/lumen_read_intercept.sh",
+];
+
 /// Walk up from this crate to the workspace root.
 fn workspace_root() -> Option<PathBuf> {
     let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -46,6 +52,14 @@ fn version_in(path: &Path) -> Option<String> {
         return rest.split('"').next().map(str::to_string);
     }
     None
+}
+
+/// The version on a generated script's `# lumen-generator:` stamp.
+fn stamp_version(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("# lumen-generator: "))
+        .map(|v| v.trim().to_string())
 }
 
 fn json_version(path: &Path) -> Option<String> {
@@ -111,9 +125,17 @@ fn every_version_file_agrees_with_the_crate_version() {
         }
     }
 
+    // The plugin's hook scripts. A fault one writes when lumen-mcp is missing reports
+    // the version on its stamp.
+    for rel in PLUGIN_HOOKS {
+        if let Some(v) = stamp_version(&root.join(rel)) {
+            checked.push((rel.to_string(), v));
+        }
+    }
+
     assert!(
-        checked.len() >= 9,
-        "expected to find at least 9 version files, found {}: {checked:?}",
+        checked.len() >= 11,
+        "expected to find at least 11 version files, found {}: {checked:?}",
         checked.len()
     );
 
@@ -147,6 +169,7 @@ fn the_release_script_knows_every_version_file() {
         "Formula/lumen-cli.rb".into(),
         "Casks/lumen-app.rb".into(),
     ];
+    required.extend(PLUGIN_HOOKS.map(String::from));
     for entry in std::fs::read_dir(root.join("crates")).expect("crates/ exists") {
         let p = entry.expect("readable entry").path();
         if p.join("Cargo.toml").is_file() {

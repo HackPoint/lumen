@@ -1,7 +1,8 @@
 [package]
 name = "lumen-daemon"
-version = "1.5.1"
+version = "1.6.0"
 edition = "2024"
+rust-version.workspace = true
 
 [dependencies]
 lumen-core = { path = "../lumen-core" }

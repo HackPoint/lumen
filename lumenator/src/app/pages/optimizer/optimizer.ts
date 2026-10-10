@@ -29,16 +29,20 @@ export class Optimizer implements OnInit {
      * this, as the input it is.
      */
     readonly netUsd = computed(() => this.s.netValueUsd());
+    /** A dash until a round can be priced: an unpriced $0.00 would read as a result. */
     readonly netLabel = computed(() => {
+        if (!this.s.netValuePriced()) return '—';
         const v = this.netUsd();
         const abs = Math.abs(v);
         const s = abs >= 100 ? abs.toFixed(0) : abs.toFixed(2);
         return `${v < 0 ? '−' : '+'}$${s}`;
     });
-    /** Break-even is reported as break-even, not rounded into a win. */
-    readonly netIsBreakEven = computed(() => Math.abs(this.netUsd()) < 1);
+    /** Break-even is reported as break-even, not rounded into a win — once there is a figure. */
+    readonly netIsBreakEven = computed(() => this.s.netValuePriced() && Math.abs(this.netUsd()) < 1);
     readonly netColor = computed(() =>
-        this.netIsBreakEven() ? '#8b949e' : this.netUsd() > 0 ? '#3fb950' : '#f85149',
+        !this.s.netValuePriced() || this.netIsBreakEven()
+            ? '#8b949e'
+            : this.netUsd() > 0 ? '#3fb950' : '#f85149',
     );
     readonly netSub = computed(() => {
         if (!this.s.netValuePriced()) {
@@ -63,13 +67,6 @@ export class Optimizer implements OnInit {
         this.s.unverifiedProvenanceRows() === 0
             ? 'Counted to the token by a local tokenizer, never estimated.'
             : 'Counts are exact for Lumen tool calls; some older events have unverified provenance.',
-    );
-
-    readonly provenanceTip = computed(() =>
-        this.s.unverifiedProvenanceRows() === 0
-            ? 'When Lumen intercepts a read, this is how many fewer tokens it returned — counted to the token.'
-            : 'When Lumen intercepts a read, this is how many fewer tokens it returned. '
-              + 'Events recorded before Lumen tracked token provenance may include estimates.',
     );
 
     readonly savingsNote = computed(() =>

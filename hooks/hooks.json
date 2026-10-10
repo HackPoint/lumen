@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
           }
         ]
       }
@@ -17,34 +17,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_meter.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_meter.sh\""
           }
         ]
       },
       {
-        "matcher": "mcp__lumen__smart_read",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_meter.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__lumen__recall_file",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_meter.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__lumen__compress_logs",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_meter.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_meter.sh\""
           }
         ]
       }

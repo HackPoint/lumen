@@ -356,30 +356,31 @@ value of saving S tokens = S × (cache_write + cache_read × R) / 1e6
 cost of the extra round  = (context × cache_read + output × output_rate) / 1e6 × pairs
 ```
 
-`R` is how many rounds the saving keeps paying for, bounded by the next compaction. Both
-figures come from the same call, so neither is an average standing in for the other.
+`R` is how many rounds the saving keeps paying for, bounded by the next compaction. Every
+other input comes from the call itself.
 
-Measured on the author's machine over 291 attributable calls: **net +$276, about +$0.95
-per call**, with 52–62% of calls paying for their own round. The token ratio still appears,
-below the dollar figure, because it is the input to it and not a conclusion.
+**No dollar figure is published here.** This section used to quote one for the author's
+machine, and it rested on `R`: not derived per call, but one assumed constant, 65 rounds
+(`DEFAULT_ROUNDS_REMAINING` in `crates/lumen-core/src/econ.rs`), and the value side of the
+formula is linear in it. Until `R` is derived per call, a dollar total
+is that assumption multiplied out. The Optimizer screen still computes the figure from your
+own ledger; read it with that in mind. The token ratio beneath it is measured.
 
-Two honest caveats, kept next to the number rather than in a footnote. The sign is robust
-— positive across every plausible `R` — but the **magnitude spans an order of magnitude**
-on that one input, from +$31 to +$368. And `smart_read` taken alone is roughly break-even;
-the surplus comes from `recall_file`.
-
-**Tool calls are measured to the token. Built-in `Read` events may not be.**
+**Tool calls and built-in `Read` events are measured to the token.**
 
 `smart_read`, `recall_file` and `compress_logs` count tokens in-process with a BPE
-tokenizer and have no estimation path, so their figures are exact.
+tokenizer (`cl100k_base`, not Claude's own) and have no estimation path, so their figures
+are exact in its units.
 
-Built-in `Read` events are counted by a shell hook that shells out to `lumen-tok`.
-If that binary is unreachable the hook falls back to `bytes ÷ 4`. Before 1.1.5 it did
-so **silently**, and on installs set up from a mounted `.dmg` before 1.0.1 the baked
-path pointed inside the disk image — so once it was ejected, every built-in `Read`
-figure became an estimate while this document claimed otherwise. Each row now records
-`token_source` (`measured` / `estimated`), the fallback logs a warning, and rows
-predating 1.1.5 are marked as unverified provenance rather than reclassified, because
+Since 1.6.0 built-in `Read` events are counted by `lumen-mcp hook meter`, with the same
+tokenizer, and it has no estimation path either: a file that is not text is recorded as 0
+tokens with provenance `unsupported`, and a meter that cannot write its row records a fault
+instead of a guess. Before 1.6.0 a shell hook shelled out to `lumen-tok` and fell back to
+`bytes ÷ 4` when it could not; before 1.1.5 it did so **silently**, and on installs set up
+from a mounted `.dmg` before 1.0.1 the baked path pointed inside the disk image — so once
+it was ejected, every built-in `Read` figure became an estimate while this document claimed
+otherwise. Each row records `token_source` (`measured` / `estimated` / `unsupported`), and
+rows predating 1.1.5 are marked as unverified provenance rather than reclassified, because
 there is no honest way to recover it after the fact.
 
 #### Lumen optimized (caused)
@@ -467,18 +468,19 @@ caching savings display.
 ## How much you save
 
 The hero metric on the Optimizer screen is the **net dollar value** of interception: what
-the tokens Lumen avoided are worth, less what the extra round cost. On the author's machine
-that is **+$99.21 over 1,573 intercepted reads** — 11.03M tokens avoided, worth $427.35,
-against $328.14 of forced round-trips.
+the tokens Lumen avoided are worth, less what the extra round cost. It is computed from your
+own ledger with one assumed input, how many rounds a saving keeps paying for, so no figure
+is quoted here; [Effectiveness %](#effectiveness-) says why.
 
-The token ratio — **84% fewer tokens per intercepted read** — is shown underneath it. It is
-real and measured to the token, but on its own it is not a result: a smaller reply that
-forces a second round is a loss however good the ratio looks.
+The token ratio — **84% fewer tokens per intercepted read** on the author's machine — is
+shown underneath it. It is real and measured to the token, but on its own it is not a
+result: a smaller reply that forces a second round is a loss however good the ratio looks.
 
-Every intercepted read reports `full_tokens` vs `returned_tokens`, measured by the same
-BPE tokenizer Claude uses. No estimation, no extrapolation, and no scaling up — 96.6% of
-that saving rests on a real tokenizer count rather than a bytes/4 guess, which is asserted
-by a test rather than asserted here.
+Every intercepted read reports `full_tokens` vs `returned_tokens`, counted with the
+`cl100k_base` BPE tokenizer. That is a real tokenizer but not the one Claude bills with, so
+the counts are exact in its units and an approximation of Claude's. No estimation, no
+extrapolation, and no scaling up — 96.6% of that saving rests on a real tokenizer count
+rather than a bytes/4 guess, which is asserted by a test rather than asserted here.
 
 **→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
 measurement, including the things that would make the figure above dishonest: **8 of 1,608
@@ -509,9 +511,9 @@ active (Full mode), or on-demand in Soft mode:
 
 | Tool | What it does |
 | --- | --- |
-| `smart_read` | Returns a structural outline of a source file — functions, classes, imports with exact line ranges — without reading bodies. Typically 5–10% of the token cost of reading the full file. |
+| `smart_read` | Returns a structural outline of a source file — functions, classes, imports with exact line ranges — without reading bodies. Each reply reports its own token count against the full file's, so what it saved is measured per call, not quoted. |
 | `recall_file` | Fetches one or more named items (function, class, struct) or an explicit line range, resolved via tree-sitter AST. Use after `smart_read` once you know what you need. |
-| `compress_logs` | Collapses repeated lines, stack-trace runs, and blank-line noise in log files and build output into annotated compact form. Deterministic — not LLM summarization, no information loss. |
+| `compress_logs` | Collapses repeated lines, stack-trace runs, and blank-line runs in log files and build output into annotated compact form. Deterministic — not LLM summarization. Repeated lines are kept with their count; the middle of a long stack trace is dropped, leaving the count of frames omitted. |
 
 Languages supported by `smart_read` / `recall_file`: Rust, Python, TypeScript, TSX.
 `compress_logs` works on any text.
@@ -542,16 +544,23 @@ ratio and token counts appear on the Optimizer tab.
 
 ### Trigger an interception (Full mode / CLI)
 
-Ask Claude to read a large source file. Lumen's hook intercepts it and prints:
+Ask Claude to read a large source file. Lumen's hook blocks the read and tells Claude:
 
 ```text
 Lumen intercept: path/to/file.rs is 420 lines.
 Instead of reading the full file, call:
-  1. lumen:smart_read(path="path/to/file.rs")  → structural outline, ~5-10% token cost
-  2. lumen:recall_file(path="path/to/file.rs", names=["<item>"])
+  1. lumen:smart_read(path="path/to/file.rs") → structural outline with line ranges
+  2. lumen:recall_file(path="path/to/file.rs", names=["<item>"]) → fetch only what you need
+Each call reports the tokens it saved in _meta.saved_tokens.
+Use smart_read(mode="full") only if you truly need every line.
+
+If the lumen tools are unavailable to you (server down, permission denied), retry
+this exact Read — it will be allowed through. Do not abandon the task.
 ```
 
-Claude then uses `smart_read` and the Optimizer screen records the event.
+Claude then uses `smart_read` and the Optimizer screen records the event. The message
+quotes no savings figure: Claude routes on it, and a typical-case number would bias that
+routing on files where it does not hold.
 
 ### Troubleshoot: hook not firing
 
@@ -559,15 +568,20 @@ If interception is not happening in the CLI:
 
 ```bash
 # confirm hooks are registered
-python3 -c "import json; d=json.load(open('/Users/$USER/.claude/settings.json')); \
-  [print(p, e.get('matcher')) for p,arr in d.get('hooks',{}).items() for e in arr]"
-# expected: PreToolUse Read, PostToolUse Read, PostToolUse Bash
+grep -n '"command": .*/lumen_' ~/.claude/settings.json
+# expected: lumen_read_intercept.sh once (PreToolUse on Read)
+#           and lumen_meter.sh twice (PostToolUse on Read and on Bash)
+# more meter lines than that: an older Setup also hooked the lumen tools; re-run Setup
 
 # confirm hook scripts exist and are executable
 ls -la ~/.claude/lumen/
 ```
 
-If either check fails, re-run Setup from the Lumen menu (right-click tray → Setup)
+From a checkout of this repository, `./scripts/verify-hooks.sh` goes further: it runs the
+installed hooks the way Claude Code does, against a scratch ledger it deletes afterwards,
+and says what each one did.
+
+If any check fails, re-run Setup from the Lumen menu (right-click tray → Setup)
 and restart Claude Code.
 
 ---
@@ -576,29 +590,35 @@ and restart Claude Code.
 
 **Nothing leaves your machine.**
 
-Here is exactly what Lumen's hooks do:
+Here is exactly what Lumen's hooks do. Both are short shell scripts in `~/.claude/lumen/`
+that hand each event to `lumen-mcp hook`, the binary that also serves the tools. Neither
+makes a network call.
 
-`lumen_read_intercept.sh` (PreToolUse, CLI only) — a shell script that receives the
-`Read` tool call as JSON on stdin, checks the file extension and line count, and if the
-file is large, writes a redirect message to stderr for Claude to act on. **It reads no
-file contents and makes no network calls.**
+`lumen_read_intercept.sh` (PreToolUse, CLI only) — receives the `Read` tool call as JSON
+on stdin. If the file is a source or log file at or above the line threshold, it blocks
+the read and writes a redirect message to stderr for Claude to act on. **It opens the
+file only to count its lines, and keeps nothing of it.**
 
 It writes two things, both local, and both there so that a redirect can never leave
 Claude with no way to read the file at all:
 
-- **A session marker** — `$TMPDIR/lumen_intercept_<session-id>`, one line per file
-  already redirected in this session. A file is redirected at most once: if Claude comes
-  back to the built-in `Read` for the same file, the Lumen route did not work for it and
-  the read is allowed through. Without this the hook can deadlock a session — it blocks
-  the built-in `Read` while the replacement is unreachable.
+- **A session marker** — `lumen_intercept_<session-id>` in the temp directory, one line
+  per file already redirected in this session. A file is redirected at most once: if
+  Claude comes back to the built-in `Read` for the same file, the Lumen route did not work
+  for it and the read is allowed through. Without this the hook can deadlock a session —
+  it blocks the built-in `Read` while the replacement is unreachable.
 - **A fault record** — one JSON line appended to `faults.jsonl` beside the database when
-  a fail-open guard fires. It contains the file path, its line count, which guard fired,
-  and the session id — **never file contents**. `lumen report` reads these; nothing is
-  sent anywhere unless you explicitly file a report. Set `LUMEN_CAPTURE=0` to keep the
-  guards and record nothing.
+  a hook lets through a read it would have redirected, or loses an event it should have
+  metered. It contains the file path, its line count, what went wrong, and the session id
+  — **never file contents**. `lumen report` reads these; nothing is sent anywhere unless
+  you explicitly file a report. Set `LUMEN_CAPTURE=0` to keep the hooks and record nothing.
 
-It also stats the `lumen-mcp` binary to check the server it would redirect to actually
-exists. Set `LUMEN_HOOK_ENABLED=0` to disable interception entirely.
+If `lumen-mcp` is gone — Lumen moved or removed — both scripts let the event through, say
+so on stderr and record a fault, rather than blocking a read nothing is left to serve.
+Set `LUMEN_HOOK_ENABLED=0` to disable interception entirely. `LUMEN_DEBUG=1`, which is off
+unless you set it, also writes the payload of each run verbatim to `lumen_hook_dump.json` in
+the temp directory, each run overwriting the last, file contents and full command lines
+included; it exists to capture test fixtures.
 
 ### Checking for a new release
 
@@ -661,11 +681,11 @@ issue instead of opening a duplicate. The lookup reads the tracker over HTTPS an
 without any credentials on a public repository; a token is only ever needed to *write*.
 
 `lumen_meter.sh` (PostToolUse) — a shell script that fires after a `Read` or a `Bash`
-call completes. It inserts one row into a local SQLite database and makes no network
-calls. What it records differs by tool:
+call completes and hands the event to `lumen-mcp hook meter`. It inserts one row into a
+local SQLite database and makes no network calls. What it records differs by tool:
 
-- **After a `Read`** it counts the tokens in the file that was just read, using
-  `lumen-tok` (a local BPE tokenizer, no network), and stores the file's path, line
+- **After a `Read`** it counts the tokens in the file that was just read, with the BPE
+  tokenizer built into `lumen-mcp` (local, no network), and stores the file's path, line
   count and modification time. Files that are not text — images, binaries — get a row
   with no token count and a provenance of `unsupported`; Lumen does not guess a number
   for them.
@@ -678,12 +698,20 @@ calls. What it records differs by tool:
   test`, `git status` — never the full text. Command lines routinely carry credentials
   in flags and URLs, and a leading `VAR=value` assignment is dropped before the label
   is taken, so `TOKEN=secret curl …` is recorded as `curl`. Command **output** is
-  tokenized in a temporary file that is deleted when the hook exits, and its contents
-  are never stored — only the resulting count.
+  tokenized in memory, from the payload Claude Code hands the hook, and unless
+  `LUMEN_DEBUG=1` is set it is never written anywhere — only the resulting count is stored.
 
-If you would rather not record `Bash` output at all, remove the `Bash` entry under
-`PostToolUse` in `~/.claude/settings.json`. Everything else keeps working; re-running
-Setup will add it back.
+If you would rather not record `Bash` output at all, set `LUMEN_METER_BASH` to `0` in the
+`env` block of `~/.claude/settings.json`:
+
+```json
+"env": { "LUMEN_METER_BASH": "0" }
+```
+
+It applies from the next Claude Code session. Reads are still metered, and Setup keeps
+the `env` block when it runs again or upgrades Lumen. Removing the `Bash` entry under
+`PostToolUse` also stops it, but only until the next time Setup runs, because Setup puts
+that entry back.
 
 ### Experimental: ranked outline (1.3.0, off by default)
 

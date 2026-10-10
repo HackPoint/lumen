@@ -51,6 +51,16 @@ jobs:
       - name: Verify (full)
         run: ./scripts/verify-install.sh --bin-dir target/release
 
+      # Setup has not run on a runner, so the hook check above skipped. A scratch home
+      # holding the plugin's copies of the hooks gives it hooks to run, which find this
+      # build's lumen-mcp on PATH.
+      - name: Verify (hooks, in a scratch home)
+        run: |
+          h="$RUNNER_TEMP/home"
+          mkdir -p "$h/.claude/lumen"
+          cp .claude/hooks/lumen_meter.sh .claude/hooks/lumen_read_intercept.sh "$h/.claude/lumen/"
+          HOME="$h" PATH="$PWD/target/release:$PATH" ./scripts/verify-install.sh --bin-dir target/release
+
       # The CLI distribution ships only `lumen`, so it has to pass on its own terms —
       # without an MCP server or a tokenizer present.
       - name: Verify (CLI-only, mirroring the Homebrew formula)
@@ -74,6 +84,13 @@ jobs:
 
       - name: Verify (full)
         run: ./scripts/verify-install.sh --bin-dir target/release
+
+      - name: Verify (hooks, in a scratch home)
+        run: |
+          h="$RUNNER_TEMP/home"
+          mkdir -p "$h/.claude/lumen"
+          cp .claude/hooks/lumen_meter.sh .claude/hooks/lumen_read_intercept.sh "$h/.claude/lumen/"
+          HOME="$h" PATH="$PWD/target/release:$PATH" ./scripts/verify-install.sh --bin-dir target/release
 
       - name: Verify (CLI-only, mirroring the release tarball)
         run: |
@@ -135,6 +152,17 @@ jobs:
       - name: Verify (full)
         shell: pwsh
         run: .\scripts\verify-install.ps1 -BinDir target\release
+
+      # As on the others, with the hooks run in Git Bash as Claude Code runs them.
+      - name: Verify (hooks, in a scratch profile)
+        shell: pwsh
+        run: |
+          $p = Join-Path $env:RUNNER_TEMP "profile"
+          New-Item -ItemType Directory -Force -Path (Join-Path $p ".claude\lumen") | Out-Null
+          Copy-Item .claude\hooks\lumen_meter.sh, .claude\hooks\lumen_read_intercept.sh (Join-Path $p ".claude\lumen")
+          $env:USERPROFILE = $p
+          $env:PATH = "$((Resolve-Path target\release).Path);$env:PATH"
+          .\scripts\verify-install.ps1 -BinDir target\release
 
       - name: Verify (CLI-only, mirroring the release zip)
         shell: pwsh

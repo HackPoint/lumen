@@ -21,6 +21,23 @@
             </section>
         }
 
+        <!-- Shown on the one launch that cleared a hidden-icon preference, which is the launch
+             that opened this window. Not a fault: the repair worked, and this says what it did. -->
+        @if (restored().length) {
+            <section class="restored" role="status" aria-live="polite">
+                <p class="restored__head">Lumen's menu-bar icon had been hidden by macOS</p>
+                <p class="restored__body">
+                    An icon dragged off the menu bar with ⌘ held stays hidden on every launch
+                    after, and with no icon there was no way into Lumen. Lumen has cleared that
+                    setting.
+                </p>
+                <p class="restored__body">
+                    Hiding the icon never stopped Lumen. To stop it, right-click the icon and
+                    choose <strong>Quit Lumen</strong>.
+                </p>
+            </section>
+        }
+
         <!-- Tab nav: switch between Context and Optimizer screens -->
         <nav class="tab-nav" role="tablist" aria-label="Main navigation">
             <a class="tab-nav__tab"

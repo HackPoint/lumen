@@ -8,9 +8,11 @@ pub struct CompressResult {
     pub compressed_tokens: usize,
 }
 
-/// Deterministic, reversibly-described log compression.
-/// Collapses: consecutive identical lines, stack frame runs, blank line noise.
-/// No LLM, no information loss — every omission is annotated with its count.
+/// Deterministic log compression.
+/// Collapses: consecutive identical lines, stack frame runs, blank line runs.
+/// No LLM, but not lossless. A run of identical lines keeps one copy and the count of
+/// the rest, which loses nothing. The middle of a stack trace is dropped and only its
+/// frame count kept, and a run of blank lines becomes one blank line with no count.
 pub fn compress_logs(text: &str) -> CompressResult {
     let original_tokens = count_tokens(text);
     let original_lines = text.lines().count();

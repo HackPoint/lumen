@@ -12,7 +12,7 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
 import type { FileHotspot } from '../../components/index';
 
 /**
- * Where this project's context actually goes.
+ * Where the context actually goes, in every project the ledger holds.
  *
  * Diagnosis, not savings — and the distinction is the point. Every other figure in the
  * product claims a benefit and therefore has to defend a counterfactual; this one only

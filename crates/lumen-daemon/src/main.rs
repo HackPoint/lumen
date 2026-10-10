@@ -253,6 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = Path::new(&db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    lumen_core::meter::restore_sidecar_write_bits(Path::new(&db_path));
     let conn = format!("sqlite:{db_path}?mode=rwc");
     let pool = SqlitePoolOptions::new().connect(&conn).await?;
     logline!("lumen-daemon using db: {db_path}");
@@ -559,7 +560,11 @@ async fn ingest_from(
         if !rec.is_billable() {
             continue;
         }
-        let u = rec.message.usage.as_ref().unwrap();
+        // Not unwrapped. `is_billable` is what guarantees the usage, and it lives in
+        // lumen-core: an edit there would otherwise panic the daemon here.
+        let Some(u) = rec.message.usage.as_ref() else {
+            continue;
+        };
 
         let res = sqlx::query(
             "INSERT OR IGNORE INTO turns
@@ -618,10 +623,14 @@ async fn ingest_from(
                     project: project.clone(),
                 });
             }
-            // Calibration: real vs estimated output tokens (unchanged).
+            // Calibration: real vs estimated output tokens.
+            //
+            // Not `?`. The turn above is already in the ledger, and failing the file here
+            // would leave its offset where it was, so every poll would re-read it and fail on
+            // the same row: one bad calibration insert would stop ingest for that transcript.
             let est = lumen_core::tokenizer::count_tokens(&rec.message.text_output()) as i64;
-            if est > 0 {
-                let _ = sqlx::query(
+            if est > 0
+                && let Err(e) = sqlx::query(
                     "INSERT OR IGNORE INTO calibration (message_id, real_output, est_output)
                      VALUES (?,?,?)",
                 )
@@ -629,7 +638,9 @@ async fn ingest_from(
                 .bind(u.output_tokens)
                 .bind(est)
                 .execute(pool)
-                .await;
+                .await
+            {
+                calibration_lost(&e);
             }
         }
     }
@@ -638,6 +649,23 @@ async fn ingest_from(
     }
 
     Ok(start + (last_nl as u64) + 1)
+}
+
+/// Set once a calibration row has been refused and logged.
+static CALIBRATION_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Log a calibration row the ledger refused, the first time only.
+///
+/// These rows were dropped with `let _ =` until 1.6.0, so a broken `calibration` table
+/// cost every row with no trace. Logged rather than filed as a fault: the rows feed only
+/// `correction_factor`, which nothing in the app or the CLI displays, so no figure the user
+/// sees is wrong because of them. Once per process because this runs per turn, and the
+/// startup backfill replays every transcript on the machine — the per-turn line that
+/// rotated the log away (see `broadcast_live` above).
+fn calibration_lost(e: &sqlx::Error) {
+    if !CALIBRATION_LOST.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        logline!("calibration row not written: {e} (logged once; later failures are not)");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1015,6 +1043,35 @@ mod tests {
         assert_eq!(count, 1, "the one good line must still be inserted");
     }
 
+    // ── An assistant record with no usage is skipped, not fatal ────────────────
+
+    #[tokio::test]
+    async fn an_assistant_record_with_null_usage_is_skipped_not_fatal() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+
+        let jsonl = dir.path().join("session.jsonl");
+        let no_usage = BILLABLE_LINE
+            .replace("__ID__", "msg-no-usage")
+            .replace(
+                r#""usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}"#,
+                r#""usage":null"#,
+            );
+        assert!(no_usage.contains(r#""usage":null"#), "{no_usage}");
+        let good = BILLABLE_LINE.replace("__ID__", "msg-after");
+        write_jsonl(&jsonl, &[&no_usage, &good]);
+
+        let (tx, _rx) = broadcast::channel(4);
+        let result = ingest_from(&pool, &jsonl, 0, &tx, false).await;
+        assert!(result.is_ok(), "ingest_from failed: {result:?}");
+
+        let ids: Vec<String> = sqlx::query_scalar("SELECT message_id FROM turns")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["msg-after".to_string()]);
+    }
+
     // ── Regression: duplicate message_id → single DB row ─────────────────────
 
     #[tokio::test]
@@ -1383,5 +1440,36 @@ mod ws_tests {
                 .await
                 .unwrap();
         assert_eq!(stored, 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_calibration_row_is_reported_and_costs_neither_the_turn_nor_the_file() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        sqlx::query(
+            "CREATE TRIGGER refuse BEFORE INSERT ON calibration
+             BEGIN SELECT RAISE(ABORT, 'calibration refused by the test'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (tx, _rx) = broadcast::channel::<TurnMsg>(4);
+        // Text output, so the estimate is non-zero and the calibration insert is attempted.
+        let line = r#"{"sessionId":"s-cal","timestamp":"2026-01-01T12:00:00Z","message":{"id":"msg-cal","model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"a reply long enough to count"}],"usage":{"input_tokens":7,"output_tokens":9,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let jsonl = dir.path().join("session.jsonl");
+        std::fs::write(&jsonl, format!("{line}\n")).unwrap();
+
+        let end = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+
+        assert_eq!(end, line.len() as u64 + 1, "the file must be consumed");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(turns, 1, "the turn must land");
+        assert!(
+            CALIBRATION_LOST.load(std::sync::atomic::Ordering::Relaxed),
+            "the refused calibration row must be reported"
+        );
     }
 }

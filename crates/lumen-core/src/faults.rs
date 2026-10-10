@@ -58,8 +58,21 @@ fn unknown_channel() -> String {
 }
 
 impl FaultRecord {
-    /// A record stamped with this build's version and the current UTC second.
+    /// A record stamped with this build's version, the current UTC second, and the
+    /// session and channel of the process that hit it.
     pub fn now(kind: &str, variant: &str) -> Self {
+        Self::now_with_env(kind, variant, |k| std::env::var(k).ok())
+    }
+
+    /// [`now`](Self::now) with the environment passed in, so tests need not mutate
+    /// process-global state.
+    ///
+    /// Channel goes through the meter's own mapping of `CLAUDE_CODE_ENTRYPOINT`. Until
+    /// 1.6.0 it was read from `LUMEN_CHANNEL`, which nothing sets, so every fault recorded
+    /// here said `unknown` — while the shell recorder wrote `cli` as a literal, under VS
+    /// Code too. `LUMEN_CHANNEL` and `LUMEN_SESSION_ID` still win when set.
+    pub fn now_with_env(kind: &str, variant: &str, var: impl Fn(&str) -> Option<String>) -> Self {
+        let set = |k: &str| var(k).filter(|v| !v.is_empty());
         Self {
             ts: utc_now(),
             kind: kind.to_string(),
@@ -71,9 +84,10 @@ impl FaultRecord {
             path: None,
             lines: None,
             detail: None,
-            session_id: std::env::var("LUMEN_SESSION_ID").ok(),
+            session_id: set("LUMEN_SESSION_ID").or_else(|| set("CLAUDE_CODE_SESSION_ID")),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            channel: std::env::var("LUMEN_CHANNEL").unwrap_or_else(|_| "unknown".into()),
+            channel: set("LUMEN_CHANNEL")
+                .unwrap_or_else(|| crate::meter::channel_from(&var).to_string()),
         }
     }
 
@@ -144,6 +158,13 @@ pub fn record_at(path: &Path, rec: &FaultRecord) {
     let _ = append_line(path, rec);
 }
 
+/// [`record_at`], reporting whether the line landed — for a caller with somewhere else
+/// to say so. A hook's stderr reaches the user; when the spool is unwritable too, that
+/// line is the only trace a lost row leaves.
+pub fn try_record_at(path: &Path, rec: &FaultRecord) -> std::io::Result<()> {
+    append_line(path, rec)
+}
+
 /// Last recorded instant per `(kind, variant)`, for [`record_throttled`].
 static LAST_RECORDED: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
@@ -211,10 +232,60 @@ pub fn spool_len() -> usize {
 }
 
 /// [`spool_len`] against an explicit spool path.
+///
+/// A batch a drain has moved aside counts too: until it is in the ledger it is still
+/// waiting. Counting only the live spool put the badge out the moment a drain began,
+/// and for good when the drain failed.
 pub fn spool_len_at(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
-        .unwrap_or(0)
+    waiting_in(path) + waiting_in(&draining_path(path))
+}
+
+/// Non-empty lines in one spool file. No file is nothing waiting; a file that is there
+/// and cannot be read is counted as one, because zero would say nothing is waiting.
+fn waiting_in(path: &Path) -> usize {
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(_) => 1,
+    }
+}
+
+/// The records waiting in the spool, read where they lie: the live spool and a batch a
+/// drain moved aside, which is still there when its insert failed. Nothing is moved,
+/// so a report can list what the ledger would not take.
+pub fn peek_spool_at(path: &Path) -> std::io::Result<Vec<FaultRecord>> {
+    let mut out = Vec::new();
+    for p in [draining_path(path), path.to_path_buf()] {
+        match std::fs::read(&p) {
+            Ok(bytes) => out.extend(parse_spool(&bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// Where a drain moves the spool while it inserts it.
+fn draining_path(spool: &Path) -> PathBuf {
+    spool.with_extension("jsonl.draining")
+}
+
+/// The records in spool bytes, up to [`DRAIN_LINE_CAP`] lines.
+///
+/// A truncated tail line is skipped, not fatal: one bad line must not discard every
+/// good fault in the spool. Decoded lossily for the same reason: a tail cut inside a
+/// multi-byte character is one bad line, not a spool that cannot be read.
+fn parse_spool(bytes: &[u8]) -> Vec<FaultRecord> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .take(DRAIN_LINE_CAP)
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| serde_json::from_str::<FaultRecord>(l).ok())
+        .collect()
 }
 
 /// [`take_spool`] against an explicit spool path.
@@ -222,36 +293,32 @@ pub fn take_spool_at(path: &Path) -> Option<(Vec<FaultRecord>, PathBuf)> {
     if !path.is_file() {
         return None;
     }
-    let taken = path.with_extension("jsonl.draining");
+    let taken = draining_path(path);
     // A leftover .draining from an interrupted run is folded into the live spool and
     // then removed — not merged the other way. The rename below replaces `taken`, so
-    // anything merged *into* it would be clobbered by the very next line.
-    if taken.exists() {
-        let _ = merge_into(path, &taken);
-        let _ = std::fs::remove_file(&taken);
+    // anything merged *into* it would be clobbered by the very next line. Until 1.6.0 a
+    // fold that failed was ignored and the leftover deleted anyway; now nothing moves,
+    // and both files wait for the next drain.
+    if taken.exists() && merge_into(path, &taken).is_err() {
+        return None;
     }
     std::fs::rename(path, &taken).ok()?;
 
-    let text = std::fs::read_to_string(&taken).ok()?;
-    let mut out = Vec::new();
-    for line in text.lines().take(DRAIN_LINE_CAP) {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // A truncated tail line is skipped, not fatal: one bad line must not discard
-        // every good fault in the spool.
-        if let Ok(rec) = serde_json::from_str::<FaultRecord>(line) {
-            out.push(rec);
-        }
-    }
-    Some((out, taken))
+    let bytes = std::fs::read(&taken).ok()?;
+    Some((parse_spool(&bytes), taken))
 }
 
+/// Append `src` to `dst`, creating `dst` if need be, then delete `src`. Bytes, not
+/// text: a spool that is not valid UTF-8 is still a spool, and refusing to move it is
+/// what used to get it deleted.
 fn merge_into(dst: &Path, src: &Path) -> std::io::Result<()> {
-    let extra = std::fs::read_to_string(src)?;
-    let mut f = std::fs::OpenOptions::new().append(true).open(dst)?;
-    f.write_all(extra.as_bytes())
+    let extra = std::fs::read(src)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dst)?
+        .write_all(&extra)?;
+    std::fs::remove_file(src)
 }
 
 /// Insert drained records into `faults`. Returns how many rows landed.
@@ -298,11 +365,24 @@ pub fn drain_spool(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
 }
 
 /// [`drain_spool`] against an explicit spool path.
+///
+/// A batch the ledger would not take goes back into the live spool, so a failed drain
+/// leaves the spool as it found it. Left where the drain had moved it, the batch was
+/// invisible: counted by nothing, and read again only once some later fault recreated
+/// the live spool.
 pub fn drain_spool_at(conn: &rusqlite::Connection, path: &Path) -> rusqlite::Result<usize> {
     let Some((recs, taken)) = take_spool_at(path) else {
         return Ok(0);
     };
-    let n = insert(conn, &recs)?;
+    let n = match insert(conn, &recs) {
+        Ok(n) => n,
+        Err(e) => {
+            // If even this fails the batch stays aside, which is still counted and
+            // listed, and the next drain folds it back in.
+            let _ = merge_into(path, &taken);
+            return Err(e);
+        }
+    };
     let _ = std::fs::remove_file(&taken);
     Ok(n)
 }
@@ -465,6 +545,84 @@ mod tests {
         assert_eq!(FaultRecord::now("k", "").variant, NO_VARIANT);
     }
 
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    /// R4: a fault raised inside VS Code said `cli` (the shell recorder's literal) or
+    /// `unknown` (this one's, since nothing set `LUMEN_CHANNEL`). The E7 fix had reached
+    /// the meter and nothing else.
+    #[test]
+    fn a_fault_raised_under_vscode_records_vscode() {
+        let rec = FaultRecord::now_with_env(
+            "hook_fail_open",
+            "bad_payload",
+            env_of(&[("CLAUDE_CODE_ENTRYPOINT", "claude-vscode")]),
+        );
+        assert_eq!(rec.channel, "vscode");
+        let cli = FaultRecord::now_with_env("k", "v", env_of(&[("CLAUDE_CODE_ENTRYPOINT", "cli")]));
+        assert_eq!(cli.channel, "cli");
+        assert_eq!(
+            FaultRecord::now_with_env("k", "v", env_of(&[])).channel,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn an_explicit_channel_and_session_still_win() {
+        let rec = FaultRecord::now_with_env(
+            "k",
+            "v",
+            env_of(&[
+                ("CLAUDE_CODE_ENTRYPOINT", "claude-vscode"),
+                ("LUMEN_CHANNEL", "desktop"),
+                ("CLAUDE_CODE_SESSION_ID", "from-claude"),
+                ("LUMEN_SESSION_ID", "from-lumen"),
+            ]),
+        );
+        assert_eq!(rec.channel, "desktop");
+        assert_eq!(rec.session_id.as_deref(), Some("from-lumen"));
+    }
+
+    /// The session a hook ran in is in its environment; a fault that drops it cannot be
+    /// joined back to the reads it lost. An empty value is absence, not a session.
+    #[test]
+    fn the_claude_code_session_is_recorded_and_an_empty_one_is_not() {
+        let rec =
+            FaultRecord::now_with_env("k", "v", env_of(&[("CLAUDE_CODE_SESSION_ID", "s-42")]));
+        assert_eq!(rec.session_id.as_deref(), Some("s-42"));
+        let empty = FaultRecord::now_with_env("k", "v", env_of(&[("CLAUDE_CODE_SESSION_ID", "")]));
+        assert_eq!(empty.session_id, None);
+    }
+
+    /// R5: every shell-recorded fault said `"version": None`, so a filed issue could not
+    /// say which build wrote it.
+    #[test]
+    fn every_fault_carries_the_version_that_wrote_it() {
+        let rec = FaultRecord::now_with_env("k", "v", env_of(&[]));
+        assert_eq!(rec.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn try_record_reports_a_spool_it_could_not_write() {
+        let dir = TempDir::new().unwrap();
+        let ok = spool_in(&dir);
+        try_record_at(&ok, &FaultRecord::now("k", "v")).unwrap();
+        assert_eq!(spool_len_at(&ok), 1);
+
+        let missing = dir.path().join("no/such/dir/faults.jsonl");
+        assert!(try_record_at(&missing, &FaultRecord::now("k", "v")).is_err());
+        assert!(
+            !missing.parent().unwrap().exists(),
+            "the spool must not create directories"
+        );
+    }
+
     /// The throttle is what keeps a 2s retry loop from flooding the spool.
     #[test]
     fn throttling_admits_the_first_and_suppresses_the_burst() {
@@ -496,6 +654,109 @@ mod tests {
             3,
             "expected first + other + unthrottled"
         );
+    }
+
+    /// A connection that refuses every write, as a read-only ledger does.
+    fn refusing_conn() -> rusqlite::Connection {
+        let c = conn_with_schema();
+        c.execute_batch("PRAGMA query_only = ON").unwrap();
+        c
+    }
+
+    /// B1. A drain the ledger refuses leaves the spool as it found it: still counted,
+    /// still listed, on every attempt, and drained whole once the ledger takes writes.
+    #[test]
+    fn a_drain_the_ledger_refuses_leaves_the_spool_as_it_was() {
+        let dir = TempDir::new().unwrap();
+        let spool = spool_in(&dir);
+        let lost = crate::meter::METER_WRITE_FAILED;
+        record_at(&spool, &FaultRecord::now(lost, "insert").with_path("a.rs"));
+        record_at(
+            &spool,
+            &FaultRecord::now("hook_fail_open", "retry_escape_valve"),
+        );
+        let conn = refusing_conn();
+
+        for attempt in 1..=2 {
+            let err = drain_spool_at(&conn, &spool).unwrap_err();
+            assert!(
+                err.to_string().contains("readonly"),
+                "attempt {attempt}: {err}"
+            );
+            assert_eq!(
+                spool_len_at(&spool),
+                2,
+                "attempt {attempt}: the badge's count"
+            );
+            let kinds: Vec<String> = peek_spool_at(&spool)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.kind)
+                .collect();
+            assert_eq!(kinds, [lost, "hook_fail_open"], "attempt {attempt}");
+        }
+
+        conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+        assert_eq!(drain_spool_at(&conn, &spool).unwrap(), 2);
+        assert_eq!(spool_len_at(&spool), 0);
+        assert_eq!(peek_spool_at(&spool).unwrap(), []);
+    }
+
+    /// A drain interrupted between its rename and its insert leaves the batch aside.
+    /// It is still waiting, so it is counted and listed until a drain folds it back in.
+    #[test]
+    fn a_batch_left_aside_is_still_counted_and_listed() {
+        let dir = TempDir::new().unwrap();
+        let spool = spool_in(&dir);
+        record_at(&spool, &FaultRecord::now("schema_drift", "-"));
+        let (_recs, taken) = take_spool_at(&spool).expect("taken");
+        assert!(taken.exists() && !spool.exists());
+
+        assert_eq!(spool_len_at(&spool), 1);
+        assert_eq!(peek_spool_at(&spool).unwrap().len(), 1);
+    }
+
+    /// A tail cut inside a multi-byte character is one bad line. Read as text, it made
+    /// the batch unreadable, and the next drain deleted it unread.
+    #[test]
+    fn a_spool_that_is_not_utf8_keeps_its_good_lines() {
+        let dir = TempDir::new().unwrap();
+        let spool = spool_in(&dir);
+        let conn = conn_with_schema();
+        record_at(
+            &spool,
+            &FaultRecord::now("ingest_failed", "init").with_path("é.rs"),
+        );
+        let line =
+            serde_json::to_string(&FaultRecord::now("ingest_failed", "poll").with_path("é.rs"))
+                .unwrap();
+        let cut = line.find('é').unwrap() + 1;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&spool)
+            .unwrap()
+            .write_all(&line.as_bytes()[..cut])
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(&spool).is_err(),
+            "premise: not UTF-8"
+        );
+
+        // Taken and not inserted, as by an interrupted drain; then a later fault, and
+        // the drain that folds the leftover back in.
+        let (recs, _taken) = take_spool_at(&spool).expect("taken");
+        assert_eq!(recs.len(), 1);
+        record_at(&spool, &FaultRecord::now("ws_restart", "-"));
+        assert_eq!(drain_spool_at(&conn, &spool).unwrap(), 2);
+        let paths: Vec<Option<String>> = conn
+            .prepare("SELECT path FROM faults ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        // The live spool first: the leftover is appended to it.
+        assert_eq!(paths, [None, Some("é.rs".to_string())]);
     }
 
     /// The faults table has to exist on a database created from DDL alone, and from

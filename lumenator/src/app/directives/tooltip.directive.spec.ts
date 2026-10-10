@@ -131,6 +131,31 @@ describe('LumenTooltip', () => {
 
   // ── cleanup ────────────────────────────────────────────────────────────────
 
+  it('places itself above the trigger when there is room', () => {
+    // jsdom lays nothing out, so every rect is at 0 and the tooltip always flips below.
+    // A trigger part-way down the window is the ordinary case and needs a real rect.
+    button.getBoundingClientRect = () =>
+      ({ top: 300, bottom: 320, left: 100, right: 120, width: 20, height: 20 }) as DOMRect;
+    button.dispatchEvent(new MouseEvent('mouseenter'));
+    // Above: the trigger's top, less the tooltip's height (0 here) and the 8px gap.
+    expect(tip()!.style.top).toBe('292px');
+  });
+
+  it('flips below the trigger when there is no room above', () => {
+    button.getBoundingClientRect = () =>
+      ({ top: 4, bottom: 24, left: 100, right: 120, width: 20, height: 20 }) as DOMRect;
+    button.dispatchEvent(new MouseEvent('mouseenter'));
+    expect(tip()!.style.top).toBe('32px');
+  });
+
+  it('does nothing on leave or Escape before it was ever shown', () => {
+    expect(() => {
+      button.dispatchEvent(new MouseEvent('mouseleave'));
+      button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    }).not.toThrow();
+    expect(tip()).toBeNull();
+  });
+
   it('removes its node from the body on destroy', () => {
     button.dispatchEvent(new MouseEvent('mouseenter'));
     expect(tip()).not.toBeNull();

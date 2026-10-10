@@ -22,7 +22,7 @@
 //! and the decisions are what carry tests.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 /// What the log level should be, given `LUMEN_LOG` and the build profile.
 ///
@@ -206,42 +206,68 @@ pub struct StartupHealth {
     /// Set once the restored-icon explanation has been shown, so it appears on the launch that
     /// repaired the preference and not on every launch after it.
     explained_restore: AtomicBool,
+    /// The hidden-icon preferences this launch cleared, for the window that explains why the
+    /// icon is back. Empty on every launch that repaired nothing.
+    restored: Mutex<Vec<String>>,
 }
 
+// The locks are taken through a poisoning: a panic elsewhere while one was held leaves a
+// list or a state that is still whole, and reading it as empty would show a healthy launch.
 impl StartupHealth {
     /// Record a step that failed without aborting startup.
     pub fn degrade(&self, step: &str, detail: impl std::fmt::Display) {
         let line = format!("{step}: {detail}");
         log::error!("DEGRADED {line}");
-        if let Ok(mut v) = self.degradations.lock() {
-            v.push(line);
-        }
+        self.degradations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(line);
     }
 
     pub fn set_tray(&self, state: TrayState) {
-        if let Ok(mut t) = self.tray.lock() {
-            *t = state;
-        }
+        *self.tray.lock().unwrap_or_else(PoisonError::into_inner) = state;
     }
 
     pub fn tray(&self) -> TrayState {
-        self.tray.lock().map(|t| t.clone()).unwrap_or_default()
+        self.tray
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn degradations(&self) -> Vec<String> {
         self.degradations
             .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// True the first time only. Used for the once-per-process log lines.
+    ///
+    /// Never true for a tray that failed to build: that one is missing from the start, and the
+    /// setup gate has already opened the window and said why. Claimed anyway, the first redraw
+    /// replaced "build failed" in the banner with "disappeared after startup" and opened the
+    /// window a second time.
     pub fn claim_missing_tray_warning(&self) -> bool {
+        if matches!(self.tray(), TrayState::Failed(_)) {
+            return false;
+        }
         !self.warned_missing_tray.swap(true, Ordering::Relaxed)
     }
 
     pub fn claim_restore_explanation(&self) -> bool {
         !self.explained_restore.swap(true, Ordering::Relaxed)
+    }
+
+    pub fn set_restored(&self, keys: Vec<String>) {
+        *self.restored.lock().unwrap_or_else(PoisonError::into_inner) = keys;
+    }
+
+    pub fn restored(&self) -> Vec<String> {
+        self.restored
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Is anything wrong? Drives whether the frontend shows a banner at all — it must stay
@@ -272,6 +298,17 @@ pub fn simulated_tray_from(env: Option<&str>) -> SimulatedTray {
         Some("offscreen") => SimulatedTray::OffScreen,
         _ => SimulatedTray::None,
     }
+}
+
+/// Can the presence check after `RunEvent::Ready` tell anything on this platform?
+///
+/// `tray_presence` asks only on macOS, where the icon's place is judged against the menu bar.
+/// Everywhere else it answers `Unknown`, and three `Unknown`s are not evidence of absence: read
+/// as one, they marked every Linux and Windows launch degraded and opened the main window six
+/// seconds in. A simulated absence is checked everywhere, since driving the fallback on any
+/// platform is its purpose.
+pub fn presence_is_checkable(macos: bool, simulate: SimulatedTray) -> bool {
+    macos || matches!(simulate, SimulatedTray::Absent | SimulatedTray::OffScreen)
 }
 
 /// Read the `NSStatusItem *` preferences, log every one found, and clear the keys that hide
@@ -347,6 +384,31 @@ pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Men
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_poisoned_lock_still_shows_what_went_wrong() {
+        let health = std::sync::Arc::new(StartupHealth::default());
+        health.degrade("daemon", "spawn failed");
+        health.set_tray(TrayState::Failed("no menu".into()));
+        let held = health.clone();
+        let _ = std::thread::spawn(move || {
+            let _d = held.degradations.lock().unwrap();
+            let _t = held.tray.lock().unwrap();
+            panic!("poisoning both locks on purpose");
+        })
+        .join();
+        assert!(health.degradations.is_poisoned() && health.tray.is_poisoned());
+
+        health.degrade("tray", "absent");
+        assert_eq!(
+            health.degradations(),
+            ["daemon: spawn failed", "tray: absent"]
+        );
+        assert_eq!(health.tray(), TrayState::Failed("no menu".into()));
+        assert!(health.is_degraded(), "the banner must still show");
+        health.set_tray(TrayState::Present);
+        assert_eq!(health.tray(), TrayState::Present);
+    }
 
     #[test]
     fn the_log_level_defaults_differ_by_profile_but_are_never_off() {
@@ -559,6 +621,33 @@ mod tests {
     }
 
     #[test]
+    fn a_tray_that_never_built_is_not_reported_missing_at_redraw() {
+        let h = StartupHealth::default();
+        h.set_tray(TrayState::Failed("simulated".into()));
+        assert!(!h.claim_missing_tray_warning());
+        assert_eq!(h.tray(), TrayState::Failed("simulated".into()));
+        // A tray that was built and then went missing is still reported, once.
+        let h = StartupHealth::default();
+        h.set_tray(TrayState::Present);
+        assert!(h.claim_missing_tray_warning());
+        assert!(!h.claim_missing_tray_warning());
+    }
+
+    #[test]
+    fn a_restored_icon_is_reported_without_reading_as_degraded() {
+        // The repair worked, so nothing is wrong: the window explains the icon, not a fault.
+        let h = StartupHealth::default();
+        assert!(h.restored().is_empty());
+        h.set_tray(TrayState::Present);
+        h.set_restored(vec!["NSStatusItem Visible Item-0".into()]);
+        assert_eq!(
+            h.restored(),
+            vec!["NSStatusItem Visible Item-0".to_string()]
+        );
+        assert!(!h.is_degraded());
+    }
+
+    #[test]
     fn tray_states_describe_themselves_for_the_report() {
         assert_eq!(TrayState::Present.describe(), "present");
         assert!(TrayState::Absent("hidden".into())
@@ -577,5 +666,15 @@ mod tests {
             SimulatedTray::OffScreen
         );
         assert_eq!(simulated_tray_from(Some("nonsense")), SimulatedTray::None);
+    }
+
+    #[test]
+    fn presence_is_checked_only_where_the_platform_can_answer() {
+        assert!(presence_is_checkable(true, SimulatedTray::None));
+        // Off macOS a real launch can only come back Unknown, so it is not checked at all.
+        assert!(!presence_is_checkable(false, SimulatedTray::None));
+        // A simulated absence still reaches the fallback there.
+        assert!(presence_is_checkable(false, SimulatedTray::Absent));
+        assert!(presence_is_checkable(false, SimulatedTray::OffScreen));
     }
 }

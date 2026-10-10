@@ -52,8 +52,9 @@ pub const MIGRATIONS: &[&str] = &[
     //               one file asking for different items are different requests, so
     //               keying dedup on path alone overstates the opportunity.
     "ALTER TABLE read_events ADD COLUMN req_key TEXT",
-    // is_subagent — mirrors the turns classification.
-    "ALTER TABLE read_events ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+    // (is_subagent was added here from 1.1.0 to 1.5.x. It is dropped at the end of the
+    // read_events block — never re-add it above the DROP, or every open re-creates it.)
+    //
     // writer_hook — which hook or binary wrote the row. Two hook installs were
     //               live simultaneously and their rows were indistinguishable.
     "ALTER TABLE read_events ADD COLUMN writer_hook TEXT",
@@ -95,6 +96,19 @@ pub const MIGRATIONS: &[&str] = &[
     //               values would be pooled and the follow-up-rate curve would be the
     //               average of several different experiments.
     "ALTER TABLE read_events ADD COLUMN target_outline INTEGER",
+    // ── 1.6.0: read_events.is_subagent is gone ───────────────────────────────
+    // Every writer inserted a literal 0 from the day it was added, so every row said
+    // "main agent" whether it was or not, and a GROUP BY on it looked exactly like a
+    // measurement. It cannot be populated honestly for every writer: Claude Code hands
+    // hooks an `agent_id` only inside a subagent, but an MCP tool call carries no agent
+    // identity at all. A column that is true for one writer and a constant for another
+    // is the same lie with better cover, and nothing ever read it. Dropping it loses no
+    // information — every stored value was the literal.
+    //
+    // DROP COLUMN needs SQLite 3.35; both drivers bundle a newer one. On a database that
+    // never had the column (fresh, or pre-E7) it fails with "no such column" and is
+    // swallowed like every other already-applied migration.
+    "ALTER TABLE read_events DROP COLUMN is_subagent",
     "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
      ON read_events(session_id, path, file_mtime)",
     // `faults` is also in DDL, which is enough for a fresh database. It is repeated
@@ -113,7 +127,7 @@ pub const MIGRATIONS: &[&str] = &[
 /// [`MIGRATIONS`]. `lumen report` compares the live table against this to detect a
 /// database that missed a migration, so adding an ALTER means bumping this number;
 /// `read_events_column_count_matches_the_constant` fails if you forget.
-pub const READ_EVENTS_COLUMNS: usize = 25;
+pub const READ_EVENTS_COLUMNS: usize = 24;
 
 pub const DDL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -176,7 +190,6 @@ CREATE TABLE IF NOT EXISTS read_events (
     session_id      TEXT,
     file_mtime      INTEGER,
     req_key         TEXT,
-    is_subagent     INTEGER NOT NULL DEFAULT 0,
     writer_hook     TEXT,
     token_source    TEXT,             -- measured | estimated | unsupported | NULL
     -- 1.3.0 ranked-outline decision. NULL on every row not produced by that path,
@@ -420,12 +433,12 @@ mod tests {
             channel TEXT NOT NULL DEFAULT 'unknown' \
         )";
 
-    /// The six columns E7 adds, and the index over them.
-    const E7_COLUMNS: [&str; 6] = [
+    /// The columns E7 adds that are still current, and the index over them. E7 also
+    /// added `is_subagent`, which 1.6.0 drops.
+    const E7_COLUMNS: [&str; 5] = [
         "session_id",
         "file_mtime",
         "req_key",
-        "is_subagent",
         "writer_hook",
         "token_source",
     ];
@@ -459,6 +472,10 @@ mod tests {
             );
         }
         assert!(
+            !cols.contains(&"is_subagent".to_string()),
+            "a pre-E7 database must not gain the dropped column on its way up: {cols:?}"
+        );
+        assert!(
             index_names(&pool, "read_events")
                 .await
                 .contains(&"idx_read_events_dedup".to_string()),
@@ -481,8 +498,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
              saved_tokens,routed_via,channel,session_id,file_mtime,req_key,\
-             is_subagent,writer_hook,token_source) \
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             writer_hook,token_source) \
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind("2026-01-01T00:00:00Z")
         .bind("Read")
@@ -496,7 +513,6 @@ mod tests {
         .bind("sess-1")
         .bind(1_700_000_000_i64)
         .bind("/x.rs")
-        .bind(0_i64)
         .bind("lumen_meter.sh")
         .bind("measured")
         .execute(&pool)
@@ -597,5 +613,172 @@ mod tests {
                 .await
                 .contains(&"channel".into())
         );
+    }
+
+    // ── 1.6.0: read_events.is_subagent dropped ───────────────────────────────
+
+    /// `read_events` exactly as 1.5.1 shipped it — 25 columns with `is_subagent` among
+    /// them, and both indexes. Hand-written for the same reason as the shapes above: the
+    /// current DDL no longer has the column, so generating this from it could not fail.
+    const READ_EVENTS_1_5_1: &str = "\
+        CREATE TABLE read_events ( \
+            ts TEXT NOT NULL, tool TEXT NOT NULL, path TEXT NOT NULL, lines INTEGER, \
+            tokens_returned INTEGER NOT NULL, full_tokens INTEGER NOT NULL, \
+            saved_tokens INTEGER NOT NULL, routed_via TEXT NOT NULL, \
+            channel TEXT NOT NULL DEFAULT 'unknown', session_id TEXT, file_mtime INTEGER, \
+            req_key TEXT, is_subagent INTEGER NOT NULL DEFAULT 0, writer_hook TEXT, \
+            token_source TEXT, budget INTEGER, s_min INTEGER, econ_context REAL, \
+            econ_rounds REAL, econ_output REAL, econ_source TEXT, k_selected INTEGER, \
+            n_total INTEGER, coeff_version INTEGER, target_outline INTEGER); \
+        CREATE INDEX idx_read_events_ts ON read_events(ts); \
+        CREATE INDEX idx_read_events_dedup ON read_events(session_id, path, file_mtime);";
+
+    /// The kinds of row a 1.5.1 ledger holds: a hook Read, an MCP read carrying the full
+    /// ranked provenance, an estimated Bash row. Values differ column to column, so a
+    /// shifted or truncated column cannot compare equal by accident.
+    const ROWS_1_5_1: &str = "\
+        INSERT INTO read_events VALUES ('2026-09-01T10:00:00Z','Read','/a.rs',412,5100, \
+            5100,0,'builtin_read','cli','s-1',1767000000,'/a.rs',0,'lumen_meter.sh', \
+            'measured',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL); \
+        INSERT INTO read_events VALUES ('2026-09-01T10:00:05Z','mcp__lumen__smart_read', \
+            '/b.rs',900,700,9000,8300,'smart_read','vscode','s-2',1767000100, \
+            's-2:/b.rs:1767000100',0,'lumen-mcp','measured',4100,4900,61000.5,65.0, \
+            1200.25,'observed',7,19,3,600); \
+        INSERT INTO read_events VALUES ('2026-09-01T10:00:09Z','Bash','cargo test',NULL,0, \
+            321,0,'bash_output','unknown',NULL,NULL,NULL,0,'lumen_meter.sh','estimated', \
+            NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);";
+
+    /// Every column that survives the drop, in order.
+    const SURVIVING: [&str; 24] = [
+        "ts",
+        "tool",
+        "path",
+        "lines",
+        "tokens_returned",
+        "full_tokens",
+        "saved_tokens",
+        "routed_via",
+        "channel",
+        "session_id",
+        "file_mtime",
+        "req_key",
+        "writer_hook",
+        "token_source",
+        "budget",
+        "s_min",
+        "econ_context",
+        "econ_rounds",
+        "econ_output",
+        "econ_source",
+        "k_selected",
+        "n_total",
+        "coeff_version",
+        "target_outline",
+    ];
+
+    /// Each row rendered by SQLite's own `quote()`, so both drivers compare the stored
+    /// values byte for byte rather than through their type mappings.
+    fn rendered_rows_sql() -> String {
+        let cols: Vec<String> = SURVIVING.iter().map(|c| format!("quote({c})")).collect();
+        format!(
+            "SELECT {} FROM read_events ORDER BY ts",
+            cols.join(" || '|' || ")
+        )
+    }
+
+    fn rendered_rows(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare(&rendered_rows_sql()).unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn rusqlite_columns(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(read_events)").unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_populated_1_5_1_database_loses_is_subagent_and_keeps_every_value() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(READ_EVENTS_1_5_1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ROWS_1_5_1).execute(&pool).await.unwrap();
+        assert!(
+            columns(&pool, "read_events")
+                .await
+                .contains(&"is_subagent".into()),
+            "precondition: the 1.5.1 shape has the column"
+        );
+        let before: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 3);
+
+        init_schema(&pool).await.unwrap();
+
+        let cols = columns(&pool, "read_events").await;
+        assert_eq!(cols, SURVIVING.map(String::from).to_vec());
+        assert_eq!(cols.len(), READ_EVENTS_COLUMNS);
+        let after: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "every row and every value must survive the drop"
+        );
+
+        let fresh_dir = TempDir::new().unwrap();
+        let fresh = pool_in(&fresh_dir).await;
+        init_schema(&fresh).await.unwrap();
+        assert_eq!(
+            columns(&fresh, "read_events").await,
+            cols,
+            "a migrated 1.5.1 database and a fresh one must agree on columns and order"
+        );
+        let mut a = index_names(&fresh, "read_events").await;
+        let mut b = index_names(&pool, "read_events").await;
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "index sets must agree");
+    }
+
+    /// The same upgrade through the other driver. lumen-mcp and the hook open the
+    /// database with rusqlite, the daemon with sqlx, and whichever runs first after an
+    /// upgrade is the one that migrates — so both arms have to do it.
+    #[test]
+    fn the_rusqlite_open_drops_it_too() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("1_5_1.db");
+        let before = {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(READ_EVENTS_1_5_1).unwrap();
+            c.execute_batch(ROWS_1_5_1).unwrap();
+            assert!(rusqlite_columns(&c).contains(&"is_subagent".to_string()));
+            rendered_rows(&c)
+        };
+        assert_eq!(before.len(), 3);
+
+        let conn = crate::meter::connect_db(&path).unwrap();
+
+        assert_eq!(
+            rusqlite_columns(&conn),
+            SURVIVING.map(String::from).to_vec()
+        );
+        assert_eq!(rendered_rows(&conn), before);
+
+        drop(conn);
+        let again = crate::meter::connect_db(&path).expect("a second open must be a no-op");
+        assert_eq!(rendered_rows(&again), before);
+        assert_eq!(rusqlite_columns(&again).len(), READ_EVENTS_COLUMNS);
     }
 }

@@ -12,11 +12,28 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// How long to allow for shutdown. The watchdog reacts as soon as the read returns,
 /// so this is generous by two orders of magnitude.
 const GRACE: Duration = Duration::from_secs(10);
+
+/// Held across every spawn in this file, so no daemon starts while another test's are made.
+///
+/// The tests run in parallel, and on macOS std makes a child's pipes with `pipe()` and marks
+/// them close-on-exec only afterwards: a daemon another thread spawns in between inherits
+/// them. One holding the write end of a supervised daemon's stdin kept that pipe open, so
+/// the EOF this file is about never arrived. On macos-14 the supervised daemon outlived its
+/// 10 s grace, and the unsupervised daemon started beside it was alive until its own grace
+/// ran out at the same moment. Linux makes pipes with `pipe2(O_CLOEXEC)`, which has no such
+/// window.
+static SPAWN: Mutex<()> = Mutex::new(());
+
+fn spawning() -> MutexGuard<'static, ()> {
+    // A test that panicked while spawning has nothing left to protect.
+    SPAWN.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -58,7 +75,10 @@ fn spawn(supervised: bool) -> Fixture {
         cmd.env("LUMEN_SUPERVISED", "1");
     }
 
-    let mut child = cmd.spawn().expect("spawn lumen-daemon");
+    let mut child = {
+        let _spawning = spawning();
+        cmd.spawn().expect("spawn lumen-daemon")
+    };
 
     // Let it get past startup, so an exit below is attributable to the closed pipe
     // and not to the daemon never having run.
@@ -187,6 +207,7 @@ fn an_unsupervised_daemon_survives_its_pipes_closing_during_startup() {
     let projects = dir.path().join("projects");
     std::fs::create_dir_all(&projects).unwrap();
 
+    let spawning = spawning();
     let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-daemon"))
         .env("LUMEN_DB", dir.path().join("ledger.db"))
         .env("LUMEN_PROJECTS_DIR", &projects)
@@ -197,6 +218,7 @@ fn an_unsupervised_daemon_survives_its_pipes_closing_during_startup() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn lumen-daemon");
+    drop(spawning);
 
     // Immediately, while it is still logging its way through startup.
     drop(child.stdin.take());
