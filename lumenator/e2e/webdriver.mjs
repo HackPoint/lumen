@@ -8,15 +8,29 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const BASE = 'http://127.0.0.1:4444';
+// A call that gets no answer fails, naming itself, instead of holding the run until the CI job's
+// own limit. Starting a session launches the app, so it is given longer than the rest.
+const CALL_MS = 60_000;
+const LAUNCH_MS = 120_000;
 const ELEMENT = 'element-6066-11e4-a52e-4f735466cecf';
 
 async function call(method, path, body) {
-  const res = await fetch(BASE + path, {
-    method,
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
+  const ms = method === 'POST' && path === '/session' ? LAUNCH_MS : CALL_MS;
+  let text, res;
+  try {
+    res = await fetch(BASE + path, {
+      method,
+      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(ms),
+    });
+    text = await res.text();
+  } catch (e) {
+    if (e?.name === 'TimeoutError') {
+      throw new Error(`${method} ${path}: tauri-driver gave no answer in ${ms / 1000} s`);
+    }
+    throw e;
+  }
   let value;
   try {
     value = JSON.parse(text).value;
@@ -50,7 +64,7 @@ export class Driver {
         throw new Error(`tauri-driver exited with ${child.exitCode}:\n${d.output}`);
       }
       try {
-        await fetch(BASE + '/status');
+        await fetch(BASE + '/status', { signal: AbortSignal.timeout(2_000) });
         return d;
       } catch {
         if (Date.now() > deadline) throw new Error(`tauri-driver never listened:\n${d.output}`);
@@ -70,7 +84,7 @@ export class Driver {
     const { child } = this;
     if (child.exitCode === null) {
       if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F']);
+        spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeout: 30_000 });
       } else {
         try {
           process.kill(-child.pid, 'SIGTERM');
@@ -82,7 +96,7 @@ export class Driver {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       try {
-        await fetch(BASE + '/status');
+        await fetch(BASE + '/status', { signal: AbortSignal.timeout(2_000) });
       } catch {
         return;
       }

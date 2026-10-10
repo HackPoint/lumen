@@ -40,6 +40,9 @@ const PRESENCE_CHECKS_MS = 6_000;
 
 const WINDOWS = process.platform === 'win32';
 
+// The ranked outline's own time budget is 60 s (LUMEN_RANKED_TIME_BUDGET_MS in smartRead).
+const MCP_MS = 120_000;
+
 if (!(process.platform === 'linux' || (WINDOWS && process.env.CI))) {
   // Elsewhere the app's data and home directories come from the OS rather than from the
   // environment, so a run could not be kept off the real ledger.
@@ -78,7 +81,9 @@ function runnerProfile() {
   // Whatever the previous test launched and its driver's tree kill missed: a daemon whose app
   // was closed first is no longer under the driver, and while it runs it holds 127.0.0.1:9999,
   // which the next app's daemon then cannot bind.
-  for (const exe of ['Lumen.exe', 'lumen-daemon.exe']) spawnSync('taskkill', ['/IM', exe, '/T', '/F']);
+  for (const exe of ['Lumen.exe', 'lumen-daemon.exe']) {
+    spawnSync('taskkill', ['/IM', exe, '/T', '/F'], { timeout: 30_000 });
+  }
   const appData = path.join(process.env.APPDATA, 'io.hackpoint.lumen');
   const logs = path.join(process.env.LOCALAPPDATA, 'io.hackpoint.lumen', 'logs');
   const db = path.join(appData, 'lumen.db');
@@ -107,7 +112,10 @@ function smartRead(sb, file) {
   ].map(r => JSON.stringify(r) + '\n').join('');
   const env = { ...sb.env, LUMEN_DB: sb.db, LUMEN_RANKED_TIME_BUDGET_MS: '60000' };
   delete env.LUMEN_RANKED_OUTLINE;
-  const r = spawnSync(MCP, [], { input, env, encoding: 'utf8' });
+  // Bounded: lumen-mcp leaves when its stdin closes, and a run that never saw it do so would
+  // otherwise hold the job until CI's own limit.
+  const r = spawnSync(MCP, [], { input, env, encoding: 'utf8', timeout: MCP_MS, killSignal: 'SIGKILL' });
+  assert.ok(!r.error, `lumen-mcp did not finish smart_read ${file} within ${MCP_MS / 1000} s: ${r.error}\n${r.stderr}`);
   assert.equal(r.status, 0, `lumen-mcp exited ${r.status}: ${r.stderr}`);
   const reply = r.stdout.split('\n').filter(Boolean).map(l => JSON.parse(l)).find(m => m.id === 2);
   assert.ok(reply?.result && !reply.result.isError, `smart_read ${file}: ${r.stdout}`);
