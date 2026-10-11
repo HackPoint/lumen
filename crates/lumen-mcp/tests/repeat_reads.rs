@@ -649,7 +649,10 @@ fn percentile(v: &mut [f64], q: f64) -> f64 {
 /// Test-only use of `git`: the tool and hook paths never run it.
 #[test]
 fn real_edits_from_history_cost_less_than_the_outline() {
-    let Some(log) = git(&["log", "--no-merges", "-n", "900", "--format=%H"]) else {
+    // Pinned, so the sample does not move with every commit; absent in a shallow clone, where
+    // the test skips.
+    const CORPUS_TIP: &str = "a791f86";
+    let Some(log) = git(&["log", "--no-merges", "-n", "900", "--format=%H", CORPUS_TIP]) else {
         eprintln!("no git history available; corpus measurement skipped");
         return;
     };

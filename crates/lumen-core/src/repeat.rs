@@ -99,8 +99,9 @@ impl Sha1 {
 
     fn block(&mut self, b: &[u8; 64]) {
         let mut w = [0u32; 80];
-        for (i, c) in b.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+        let (words, _) = b.as_chunks::<4>();
+        for (wi, c) in w.iter_mut().zip(words) {
+            *wi = u32::from_be_bytes(*c);
         }
         for i in 16..80 {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -144,13 +145,10 @@ impl Sha1 {
             self.block(&b);
             self.len = 0;
         }
-        let mut chunks = data.chunks_exact(64);
-        for c in &mut chunks {
-            let mut b = [0u8; 64];
-            b.copy_from_slice(c);
-            self.block(&b);
+        let (blocks, rest) = data.as_chunks::<64>();
+        for b in blocks {
+            self.block(b);
         }
-        let rest = chunks.remainder();
         self.buf[..rest.len()].copy_from_slice(rest);
         self.len = rest.len();
     }
@@ -163,8 +161,9 @@ impl Sha1 {
         }
         self.update_pad(&bits.to_be_bytes());
         let mut out = [0u8; 20];
-        for (o, h) in out.chunks_exact_mut(4).zip(self.h) {
-            o.copy_from_slice(&h.to_be_bytes());
+        let (words, _) = out.as_chunks_mut::<4>();
+        for (o, h) in words.iter_mut().zip(self.h) {
+            *o = h.to_be_bytes();
         }
         out
     }

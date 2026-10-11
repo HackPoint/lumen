@@ -11,11 +11,11 @@ anything it cannot vouch for with the full result. The built-in Read is not touc
 
 - **Unchanged first.** Content-addressed (git blob hash computed in-process, CRLF read as LF; never
   mtime). The answer is about 30 tokens against 743 for the fixture's outline; on 60 real edits
-  the unchanged answers total 1,800 tokens against 42,395 for the outlines they replace.
+  the unchanged answers total 1,800 tokens against 44,306 for the outlines they replace.
 - **Deltas** name `changed [body]`, `changed [signature]`, `added`, `removed` and `moved`
   symbols with current line ranges. A symbol shifted by an insertion above it is `moved`, not
   changed. `recall_file` of a changed symbol returns a diff scoped to it. On 60 real edits a delta
-  is median 18.0% and p90 31.5% of the full outline (1.7.0's first cut: 41.7% / 59.0%); the p90
+  is median 16.6% and p90 31.5% of the full outline (1.7.0's first cut: 41.7% / 59.0%); the p90
   is above 25% because small outlines pay a fixed ~40 tokens for the sentence that tells the
   model how to ask again. That figure is per delta served, not an overall saving.
 - **Is the base still in context?** The daemon records one `session_events` row per compaction

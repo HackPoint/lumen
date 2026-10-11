@@ -40,9 +40,20 @@ async fn the_gui_path_upgrades_a_1_6_0_database_and_keeps_its_rows() {
     let pool = connect(&url).await.unwrap();
     let cols = names(&pool, "SELECT name FROM pragma_table_info('read_events')").await;
     assert!(cols.contains(&"repeat_arm".to_string()) && cols.contains(&"repeat_plan".to_string()));
-    let events = names(&pool, "SELECT name FROM pragma_table_info('session_events')").await;
-    assert_eq!(events, ["session_id", "kind", "uuid", "ts_ms", "source_file"]);
-    let idx = names(&pool, "SELECT name FROM pragma_index_list('session_events')").await;
+    let events = names(
+        &pool,
+        "SELECT name FROM pragma_table_info('session_events')",
+    )
+    .await;
+    assert_eq!(
+        events,
+        ["session_id", "kind", "uuid", "ts_ms", "source_file"]
+    );
+    let idx = names(
+        &pool,
+        "SELECT name FROM pragma_index_list('session_events')",
+    )
+    .await;
     assert!(idx.contains(&"idx_session_events_session".to_string()));
     let n: i64 = sqlx::query("SELECT count(*) FROM read_events")
         .fetch_one(&pool)
