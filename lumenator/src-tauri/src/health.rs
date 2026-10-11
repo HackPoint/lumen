@@ -375,10 +375,82 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
 /// and the fallback added in 1.5.1 wrapped only the *builder* result, so it covered none of
 /// them.
 pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItem};
-    let quit = MenuItem::with_id(app, "quit", "Quit Lumen", true, None::<&str>)?;
-    let show = MenuItem::with_id(app, "show", "Open Lumen", true, None::<&str>)?;
-    Menu::with_items(app, &[&show, &quit])
+    use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+    let mut built: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+    for entry in tray_menu_entries(&ui_version(app.package_info())) {
+        built.push(match entry {
+            TrayEntry::Item { id, text, enabled } => {
+                Box::new(MenuItem::with_id(app, id, text, enabled, None::<&str>)?)
+            }
+            TrayEntry::Separator => Box::new(PredefinedMenuItem::separator(app)?),
+        });
+    }
+    let items: Vec<&dyn IsMenuItem<tauri::Wry>> = built.iter().map(Box::as_ref).collect();
+    Menu::with_items(app, &items)
+}
+
+/// The tray menu item that opens the main window. Matched by the menu-event handler in `lib.rs`.
+pub const TRAY_SHOW_ID: &str = "show";
+/// The tray menu item that quits. Matched by the menu-event handler in `lib.rs`.
+pub const TRAY_QUIT_ID: &str = "quit";
+/// The tray menu's version line. Neither id above, so the menu-event handler ignores it, and it
+/// is built disabled, so no platform delivers a click on it in the first place.
+pub const TRAY_VERSION_ID: &str = "version";
+
+/// The version the app tells the user it is, wherever it says so.
+///
+/// This is `PackageInfo`, which Tauri fills from `tauri.conf.json` when the app is built (and
+/// from the crate's `Cargo.toml` when that file has no version). The tray menu reads it here.
+/// The windows read it through `getVersion()` from `@tauri-apps/api/app`, which Tauri answers
+/// with `app.package_info().version` too, so there is one source and no version string of
+/// Lumen's own to keep in step with it.
+pub fn ui_version(info: &tauri::PackageInfo) -> String {
+    info.version.to_string()
+}
+
+/// What the tray menu's version line says.
+pub fn tray_version_label(version: &str) -> String {
+    format!("Lumen {version}")
+}
+
+/// One line of the tray menu, as data.
+///
+/// The menu itself cannot be built in a test: muda creates menu items on the main thread only
+/// on macOS, and a test runs on its own. What the lines say, and which can be clicked, is the
+/// part worth checking, so it is decided here and `build_tray_menu_items` only turns it into
+/// items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrayEntry {
+    Item {
+        id: &'static str,
+        text: String,
+        enabled: bool,
+    },
+    Separator,
+}
+
+/// The tray menu, top to bottom. The version leads, disabled: it is information, and a
+/// disabled item is how every platform's tray (the macOS menu bar, the Windows notification
+/// area, the Linux indicator) shows a line that does nothing.
+pub fn tray_menu_entries(version: &str) -> Vec<TrayEntry> {
+    vec![
+        TrayEntry::Item {
+            id: TRAY_VERSION_ID,
+            text: tray_version_label(version),
+            enabled: false,
+        },
+        TrayEntry::Separator,
+        TrayEntry::Item {
+            id: TRAY_SHOW_ID,
+            text: "Open Lumen".to_string(),
+            enabled: true,
+        },
+        TrayEntry::Item {
+            id: TRAY_QUIT_ID,
+            text: "Quit Lumen".to_string(),
+            enabled: true,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -676,5 +748,145 @@ mod tests {
         // A simulated absence still reaches the fallback there.
         assert!(presence_is_checkable(false, SimulatedTray::Absent));
         assert!(presence_is_checkable(false, SimulatedTray::OffScreen));
+    }
+
+    // ── the version the user is shown ─────────────────────────────────────────────────
+
+    use std::path::Path;
+
+    /// The first `version = "…"` of a manifest, which is `[package]`'s: it precedes every
+    /// dependency table.
+    fn manifest_version(manifest: &Path) -> String {
+        let text = std::fs::read_to_string(manifest)
+            .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+        text.lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("version = \"")?
+                    .split('"')
+                    .next()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| panic!("{} declares no version", manifest.display()))
+    }
+
+    #[test]
+    fn the_tray_menu_leads_with_a_version_line_that_cannot_be_clicked() {
+        let entries = tray_menu_entries("9.8.7");
+        assert_eq!(
+            entries[0],
+            TrayEntry::Item {
+                id: TRAY_VERSION_ID,
+                text: "Lumen 9.8.7".to_string(),
+                enabled: false,
+            },
+            "the version line is first, built from the version it was given, and disabled"
+        );
+        assert_eq!(entries[1], TrayEntry::Separator);
+
+        // Only the version line is disabled: Open and Quit still work.
+        let items: Vec<(&str, &str, bool)> = entries
+            .iter()
+            .filter_map(|e| match e {
+                TrayEntry::Item { id, text, enabled } => Some((*id, text.as_str(), *enabled)),
+                TrayEntry::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (TRAY_VERSION_ID, "Lumen 9.8.7", false),
+                (TRAY_SHOW_ID, "Open Lumen", true),
+                (TRAY_QUIT_ID, "Quit Lumen", true),
+            ]
+        );
+        // The handler in lib.rs acts on the show and quit ids. A version line that shared one
+        // would do that thing when activated.
+        assert_ne!(TRAY_VERSION_ID, TRAY_SHOW_ID);
+        assert_ne!(TRAY_VERSION_ID, TRAY_QUIT_ID);
+    }
+
+    #[test]
+    fn the_tray_version_line_follows_the_version_it_is_given() {
+        // A label with a version written into it would pass the test above and not this one.
+        for v in ["0.0.1", "1.8.0", "12.34.56-rc.1"] {
+            let TrayEntry::Item { text, .. } = &tray_menu_entries(v)[0] else {
+                panic!("the first entry is the version line");
+            };
+            assert_eq!(text, &format!("Lumen {v}"));
+        }
+    }
+
+    /// The version the app was built as is the one `tauri.conf.json` declares, the one the Tauri
+    /// crate's `Cargo.toml` declares, and the one every other crate declares, which includes the
+    /// ones bundled beside the app as sidecars. The tray menu and the windows both show
+    /// `ui_version`, so a release that bumps some of those files and not the others shows the
+    /// user a version that is not the one they installed.
+    #[test]
+    fn the_version_the_ui_shows_is_the_one_tauri_conf_and_every_cargo_toml_declare() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // The context the app itself runs with: `PackageInfo` as the build made it.
+        let ctx = crate::app_context();
+        let ui = ui_version(ctx.package_info());
+
+        let conf: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("tauri.conf.json"))
+                .expect("tauri.conf.json is readable"),
+        )
+        .expect("tauri.conf.json is JSON");
+        let conf_version = conf["version"]
+            .as_str()
+            .expect("tauri.conf.json declares a version");
+
+        let mut declared = vec![
+            (
+                "lumenator/src-tauri/tauri.conf.json".to_string(),
+                conf_version.to_string(),
+            ),
+            (
+                "lumenator/src-tauri/Cargo.toml".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+        ];
+        let mut names = Vec::new();
+        for entry in
+            std::fs::read_dir(manifest_dir.join("../../crates")).expect("crates/ is readable")
+        {
+            let dir = entry.expect("a readable entry").path();
+            let manifest = dir.join("Cargo.toml");
+            if manifest.is_file() {
+                let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+                declared.push((
+                    format!("crates/{name}/Cargo.toml"),
+                    manifest_version(&manifest),
+                ));
+                names.push(name);
+            }
+        }
+        // Not vacuous: the crates whose binaries ship inside the app were found.
+        for sidecar in ["lumen-daemon", "lumen-mcp", "lumen-cli"] {
+            assert!(
+                names.iter().any(|n| n == sidecar),
+                "{sidecar} not found in {names:?}"
+            );
+        }
+
+        let wrong: Vec<String> = declared
+            .iter()
+            .filter(|(_, v)| *v != ui)
+            .map(|(f, v)| format!("  {f}: {v}"))
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "the app shows {ui} (PackageInfo), and these declare something else:\n{}",
+            wrong.join("\n")
+        );
+
+        // And the tray line is made from that same value.
+        let TrayEntry::Item { text, enabled, .. } = &tray_menu_entries(&ui)[0] else {
+            panic!("the first entry is the version line");
+        };
+        assert_eq!(text, &format!("Lumen {conf_version}"));
+        assert!(!enabled);
     }
 }

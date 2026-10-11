@@ -255,6 +255,63 @@
     opacity: 0.65;
 }
 
+/* The build's version, under the tagline. Dim and small, like the tagline: it answers a question
+   asked when filing a report, and must not compete with the gauge. No opacity on it, so its
+   contrast is the theme's --lumen-text-dim and no less. */
+.home__version {
+    margin: 0;
+    font-family: var(--lumen-font-mono);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-text-dim);
+}
+
+/* ── About ── */
+.about {
+    width: 100%;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    padding: 0.8rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+}
+
+.about__title {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.about__list {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.about__term {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text-dim);
+}
+
+.about__version {
+    margin: 0;
+    font-family: var(--lumen-font-mono);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-text);
+    /* A pre-release tag can be long; it wraps rather than widening the column. */
+    overflow-wrap: anywhere;
+}
+
 @keyframes fade-up {
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: none; }

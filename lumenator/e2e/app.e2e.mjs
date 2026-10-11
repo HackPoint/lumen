@@ -204,6 +204,39 @@ const digits = s => (s ?? '').replace(/\D/g, '');
 /** The text of the first element matching the selector, once it has some. */
 const TEXT = `return document.querySelector(arguments[0])?.textContent.trim() || null;`;
 
+/**
+ * The version the app was built as, from the two files that declare it: tauri.conf.json, which
+ * Tauri compiles into the app and answers `getVersion()` from, and the Tauri crate's Cargo.toml.
+ * Read when the test runs, so a release changes nothing here. Two files that disagree stop the
+ * test before it looks at the window, which would otherwise have to pick one to be right.
+ */
+function builtVersion() {
+  const dir = path.join(ROOT, 'lumenator', 'src-tauri');
+  const conf = JSON.parse(fs.readFileSync(path.join(dir, 'tauri.conf.json'), 'utf8')).version;
+  // The first version line is [package]'s; every dependency table comes after it.
+  const cargo = /^version = "([^"]+)"/m.exec(fs.readFileSync(path.join(dir, 'Cargo.toml'), 'utf8'))?.[1];
+  assert.ok(conf && cargo, `no version found: tauri.conf.json ${conf}, Cargo.toml ${cargo}`);
+  assert.equal(conf, cargo, 'tauri.conf.json and the Tauri crate\'s Cargo.toml declare different versions');
+  return conf;
+}
+
+// How the About section is built: a region named by its heading, the version as the value of a
+// "Version" term, and both places the version is shown actually laid out.
+const ABOUT = `
+  const section = document.querySelector('section.about');
+  const heading = document.getElementById(section?.getAttribute('aria-labelledby') ?? '');
+  const laidOut = sel => {
+    const r = document.querySelector(sel)?.getBoundingClientRect();
+    return !!r && r.width > 0 && r.height > 0;
+  };
+  return {
+    heading: heading?.textContent.trim() ?? null,
+    term: section?.querySelector('dl > dt')?.textContent.trim() ?? null,
+    valueFollowsTerm: section?.querySelector('dl > dt + dd')?.classList.contains('about__version') ?? false,
+    headerLaidOut: laidOut('.home__head .home__version'),
+    aboutLaidOut: laidOut('section.about .about__version'),
+  };`;
+
 // Each banner text against what is behind it, as WCAG computes contrast: the colours as the
 // page resolved them, with every translucent background between the text and the page
 // composited in. The theme is whatever the platform reports, and is returned with the ratios.
@@ -313,6 +346,29 @@ test('an empty ledger shows the empty states rather than zeros dressed as data',
     const none = await s.until('the Hotspots empty state', TEXT, 15_000, '.hs__empty');
     assert.match(none, /^No reads recorded yet\./);
     assert.equal(await s.run('return document.querySelectorAll(".hs__row").length'), 0);
+  });
+});
+
+test('the window shows the version the app was built as, in its header and in About', async t => {
+  const want = builtVersion();
+  const sb = sandbox();
+  // Simulated so the window is shown; the version is the subject. The page asks the Tauri runtime
+  // for it (`getVersion()`), so what is read here went through the built app, not a test double.
+  await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'err' }, async s => {
+    const head = await s.until('the version in the header', TEXT, 15_000, '.home__version');
+    const about = await s.until('the version in About', TEXT, 15_000, '.about__version');
+    t.diagnostic(`built as ${want}; header "${head}", About "${about}"`);
+    assert.equal(head, `Lumen ${want}`);
+    assert.equal(about, want);
+
+    const a = await s.run(ABOUT);
+    assert.deepEqual(a, {
+      heading: 'About',
+      term: 'Version',
+      valueFollowsTerm: true,
+      headerLaidOut: true,
+      aboutLaidOut: true,
+    });
   });
 });
 
