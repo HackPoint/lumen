@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### The retry escape valve no longer hands back a whole file after a working `smart_read` (#36)
+
+The intercept lets a second built-in Read of a large file through, for a model that cannot reach
+the Lumen tools. It also let through a model that could: `smart_read` worked, the model read the
+file anyway, and the whole file came back, with Claude Code's own unchanged-file dedup out of
+reach because the first Read was blocked and never entered its cache.
+
+- When `smart_read` or `recall_file` has answered for the path in this session (the ledger says
+  so), the retry is redirected once more, to `recall_file`. A model that needs the file whole,
+  to Edit it for example, retries again and gets it, so no model is ever stranded.
+- With no successful `smart_read` or `recall_file` recorded for the path, nothing changes: the
+  retry is released at once. Any trouble reading the ledger counts as "none recorded".
+- A release after a working route is recorded as `retry_escape_valve` with detail
+  `after_lumen_read`, so it can be counted apart from the valve's intended use.
+- On a 1,442-line fixture the scenario costs 444 tokens (a 211-token redirect and a 233-token
+  `recall_file`) against 13,807 for the released Read.
+
 ### A rewind the daemon could not see is now treated as one
 
 When the daemon tailed a transcript from a byte offset without that transcript's tracker (an ingest

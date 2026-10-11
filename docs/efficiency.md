@@ -84,7 +84,9 @@ within the hour of being written.
 
 The intercept has two deliberate fail-open guards: `retry_escape_valve` lets a second read of the
 same path through in one session, so a model that genuinely cannot reach the MCP tools is never
-deadlocked, and `lumen_mcp_missing` does the same when the server is absent. Both produce exactly
+deadlocked, and `lumen_mcp_missing` does the same when the server is absent. (Since #36 the
+first guard is narrower: once `smart_read` or `recall_file` has answered for the path in the
+session, the retry is sent to `recall_file` once more before it is released.) Both produce exactly
 the shape counted above — a built-in read of a file the hook covers — and both are working as
 designed. The count is now a bounded share with the offending paths printed, so a real routing
 regression (the hook not firing at all, which would put every eligible read in this bucket) is still
