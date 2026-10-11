@@ -23,6 +23,9 @@ use serde::Deserialize;
 pub enum Kind {
     Compaction,
     Rewind,
+    /// The tracker for a transcript was lost while it was being tailed, so whatever happened
+    /// since it last saw the file is unknown. Treated as an event: the safe direction.
+    Resync,
 }
 
 impl Kind {
@@ -30,6 +33,7 @@ impl Kind {
         match self {
             Kind::Compaction => "compaction",
             Kind::Rewind => "rewind",
+            Kind::Resync => "resync",
         }
     }
 }
@@ -43,6 +47,20 @@ pub struct Event {
     pub uuid: String,
     /// The record's own timestamp, unix ms. `None` when it is missing or unparseable.
     pub ts_ms: Option<i64>,
+}
+
+impl Event {
+    /// A tracker was lost at byte `offset` of a transcript and noticed at `at_ms`. There is no
+    /// record to name it by, so the moment and the place are its identity: a second loss, at any
+    /// other moment or offset, is a second event rather than an ignored duplicate.
+    pub fn resync(session_id: impl Into<String>, at_ms: i64, offset: u64) -> Self {
+        Event {
+            kind: Kind::Resync,
+            session_id: session_id.into(),
+            uuid: format!("resync-{at_ms}-{offset}"),
+            ts_ms: Some(at_ms),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -403,6 +421,24 @@ mod tests {
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].kind, Kind::Compaction);
         assert_eq!(ev[0].uuid, "c1");
+    }
+
+    #[test]
+    fn a_resync_names_its_session_and_is_stamped_with_the_moment_it_was_noticed() {
+        let ev = Event::resync("s", 1_780_330_445_157, 4096);
+        assert_eq!(ev.kind, Kind::Resync);
+        assert_eq!(ev.kind.as_str(), "resync");
+        assert_eq!(ev.session_id, "s");
+        assert_eq!(ev.ts_ms, Some(1_780_330_445_157));
+    }
+
+    #[test]
+    fn two_resyncs_of_one_transcript_are_two_events() {
+        let a = Event::resync("s", 1_000, 4096);
+        let b = Event::resync("s", 2_000, 4096);
+        let c = Event::resync("s", 1_000, 8192);
+        assert_ne!(a.uuid, b.uuid);
+        assert_ne!(a.uuid, c.uuid);
     }
 
     #[test]

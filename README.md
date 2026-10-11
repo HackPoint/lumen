@@ -741,15 +741,16 @@ answer. "Unchanged" is decided by content, never by modification time.
 **Is the base still in the model's context?** The daemon reads the Claude Code transcript and
 records one `session_events` row per compaction (`compact_boundary`) and per rewind (a message
 whose parent branches back past the session's latest real prompt; subagent sidechains are
-excluded). If either happened after the base was returned, or the ledger cannot be asked, the
-answer is the full one. Two cases cannot be seen: a subagent calling through the same session
+excluded), and one per `resync`: a transcript the daemon went on tailing after losing its
+tracker, which could hide a rewind. If any of them happened after the base was returned, or the
+ledger cannot be asked, the answer is the full one. Two cases cannot be seen: a subagent calling through the same session
 that never saw the parent's read, and an event the daemon has not ingested yet. That is why
 every repeat answer tells the model to call again with `fresh=true`. Both tools accept
 `fresh`; it always returns the full result and is recorded, and its rate is the error rate of
 this feature.
 
 Each `read_events` row records `repeat_arm` and `repeat_plan` (`first`, `fresh`, `unchanged`,
-`delta`, and for a full answer the reason: `compaction`, `rewind`, `unverifiable`, `no_base`,
+`delta`, and for a full answer the reason: `compaction`, `rewind`, `resync`, `unverifiable`, `no_base`,
 `outline`, `delta_too_big`, `unchanged_not_smaller`). Routes: `smart_read_unchanged`,
 `smart_read_delta`, `recall_file_unchanged`, `recall_file_delta`.
 

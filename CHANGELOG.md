@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### A rewind the daemon could not see is now treated as one
+
+When the daemon tailed a transcript from a byte offset without that transcript's tracker (an ingest
+that failed part-way, or the notify and poll paths racing on one file), it started from an empty
+state and recorded nothing, so a rewind in the lines that followed went unseen and a repeat read
+could be answered with a stub or delta whose base was no longer in the model's context. It now
+records a `resync` event stamped now, which the repeat-read gate answers with the full result, the
+same direction an event with no usable timestamp already took. A restart is unaffected: its initial
+pass reads every transcript from byte 0, so it neither loses a tracker nor writes a resync.
+
 ## [1.7.0] — 2026-10-11
 
 ### Repeat reads: a second `smart_read` or `recall_file` of the same thing no longer costs the same again
