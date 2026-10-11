@@ -288,14 +288,6 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-daemon/src/main.rs",
         OrDefault,
-        "g.remove(file)",
-        "No tracker for a transcript file means it has not been read before: an empty tracker \
-         is the true starting state, and a tail read that lost its tracker records nothing \
-         until the next boundary rather than inventing an event.",
-    ),
-    allow(
-        "crates/lumen-daemon/src/main.rs",
-        OrDefault,
         "LUMEN_LOG",
         "Unset means not verbose.",
     ),
