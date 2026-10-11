@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.7.0] — unreleased
+## [1.7.0] — 2026-10-11
 
 ### Repeat reads: a second `smart_read` or `recall_file` of the same thing no longer costs the same again
 
