@@ -42,7 +42,9 @@ use lumen_mcp::handle_tools_call;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 // ── Frozen fixtures ──────────────────────────────────────────────────────────
 //
@@ -381,8 +383,21 @@ fn fixture_rel(name: &str) -> String {
     format!("{FIXTURE_DIR}/{name}")
 }
 
+/// Taken by `measure` for its whole run, so one thread's fixture write never lands under another
+/// thread's read.
+///
+/// Cargo runs this file's tests on parallel threads, and `std::fs::write` truncates before it fills:
+/// a tool that read in between saw an empty file (`full = 0`) and fell back to `would_inflate`, which
+/// failed `every_mcp_tool_is_measured_against_the_committed_baseline` in CI at random. The path must
+/// stay the shared one (see `FIXTURE_DIR`), and swapping the file in with a rename fails on Windows
+/// while the other thread has it open, so the callers take turns instead.
+///
+/// A panic in one test must not fail the others for the wrong reason, hence the poison is ignored.
+static FIXTURES: Mutex<()> = Mutex::new(());
+
 /// Run one scenario. Returns the measurement and the median wall-clock over a few passes.
 fn measure(s: &Scenario) -> (Measured, u128) {
+    let _turn = FIXTURES.lock().unwrap_or_else(PoisonError::into_inner);
     let path = match &s.fixture {
         Some((name, body)) => {
             let p = fixture_rel(name);
@@ -683,6 +698,65 @@ fn no_scenario_costs_more_than_reading_the_file() {
         }
         None => println!("\n  no scenario exceeded the file"),
     }
+}
+
+/// Scenario hook for the overlap test below: runs inside `measure`, after the fixture is written and
+/// before the tool reads it. An `args` is a plain `fn`, so what it records has to be static.
+static PROBE_CLAIMED: AtomicBool = AtomicBool::new(false);
+static PROBE_INSIDE: AtomicUsize = AtomicUsize::new(0);
+static PROBE_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+fn linger_between_write_and_read(path: &str) -> Value {
+    let inside = PROBE_INSIDE.fetch_add(1, Ordering::SeqCst) + 1;
+    PROBE_PEAK.fetch_max(inside, Ordering::SeqCst);
+    // The first caller holds the window open and gives a second `measure` the chance to walk in.
+    if !PROBE_CLAIMED.swap(true, Ordering::SeqCst) {
+        let give_up = Instant::now() + Duration::from_millis(400);
+        while PROBE_PEAK.load(Ordering::SeqCst) < 2 && Instant::now() < give_up {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    PROBE_INSIDE.fetch_sub(1, Ordering::SeqCst);
+    json!({ "path": path, "names": ["operation_6"] })
+}
+
+/// Two `measure` calls must never be between "write the fixture" and "the tool has read it" at once.
+///
+/// Cargo runs this file's tests on parallel threads, and two of them call `measure`, which rewrites
+/// one shared path, `target/bench-fixtures/<name>`, with `std::fs::write` (truncate, then fill). A
+/// tool that reads in the gap sees an empty file, so it reports `full = 0` and falls back: in CI that
+/// was `recall_file/no_match` measured as `route changed recall_file -> would_inflate`, `full=0,
+/// returned=25`, against a baseline of 7495/230.
+///
+/// The gap is microseconds wide, so racing real writes hits it only now and then. This test does not
+/// race: the hook above keeps the first `measure` inside its window and waits (up to 400 ms) for a
+/// second one to walk in. Without the lock it does at once; with it, the second is still queued when
+/// the wait ends.
+///
+/// The path cannot be made unique per test instead: it is part of every reply header, so it is part
+/// of the token counts the baseline pins (see `FIXTURE_DIR`).
+#[test]
+fn measure_calls_never_share_the_fixture_window() {
+    let probe = || Scenario {
+        id: "probe/overlap",
+        tool: "recall_file",
+        intent: "two measures on one shared fixture",
+        fixture: Some(("big.rs", few_big_items(12, 40))),
+        args: linger_between_write_and_read,
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                measure(&probe());
+            });
+        }
+    });
+    assert_eq!(
+        PROBE_PEAK.load(Ordering::SeqCst),
+        1,
+        "two measure() calls were inside the fixture write-to-read window at once; the file one of \
+         them reads is being truncated by the other"
+    );
 }
 
 /// The fixtures must be byte-identical everywhere, or the baseline is meaningless.
