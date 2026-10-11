@@ -113,7 +113,14 @@ impl Tracker {
         let depth = base + prompt as i64;
         self.depth.insert(uuid.clone(), depth);
 
-        let rewound = prompt && parent_depth.is_some_and(|d| self.tip > d);
+        // A prompt whose parent is missing or unknown (a rewind to the root) cannot be placed on
+        // the branch we were on, so once a prompt has been seen it counts as a rewind: a false
+        // positive costs one full outline, a false negative serves a stub with no base in context.
+        let rewound = prompt
+            && match parent_depth {
+                Some(d) => self.tip > d,
+                None => self.tip > 0,
+            };
         self.tip = depth;
 
         let kind = if ty == "system" && h.subtype.as_deref() == Some("compact_boundary") {
@@ -296,6 +303,51 @@ mod tests {
                 ts_ms: Some(1_780_330_445_157)
             }]
         );
+    }
+
+    #[test]
+    fn a_rewind_to_the_conversation_root_is_a_rewind() {
+        // Esc-Esc on the first message: the new prompt has no parent at all.
+        let ev = run(&[
+            prompt("u1", None),
+            assistant("a1", "u1"),
+            prompt("u2", Some("a1")),
+            assistant("a2", "u2"),
+            prompt("u3", None),
+            assistant("a3", "u3"),
+            // The conversation carries on from the new root: not another rewind.
+            prompt("u4", Some("a3")),
+        ]);
+        assert_eq!(
+            ev,
+            [Event {
+                kind: Kind::Rewind,
+                session_id: "s".into(),
+                uuid: "u3".into(),
+                ts_ms: Some(1_780_330_445_157)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prompt_whose_parent_is_unknown_is_a_rewind_once_a_prompt_was_seen() {
+        let ev = run(&[
+            prompt("u1", None),
+            assistant("a1", "u1"),
+            prompt("u2", Some("never-seen")),
+        ]);
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert_eq!(ev[0].kind, Kind::Rewind);
+        assert_eq!(ev[0].uuid, "u2");
+    }
+
+    #[test]
+    fn the_first_prompt_of_a_transcript_is_never_a_rewind() {
+        // A resumed transcript can open with a parent that lives in another file.
+        let ev = run(&[prompt("u1", Some("elsewhere")), assistant("a1", "u1")]);
+        assert!(ev.is_empty(), "{ev:?}");
+        let ev = run(&[assistant("a0", "elsewhere"), prompt("u1", None)]);
+        assert!(ev.is_empty(), "{ev:?}");
     }
 
     #[test]
