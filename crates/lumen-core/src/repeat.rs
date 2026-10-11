@@ -855,6 +855,36 @@ mod tests {
         }
     }
 
+    // SHA-1 pads with 0x80 then a 64-bit length, so the message (the `blob <n>\0`
+    // header plus the content) changes shape at 55/56 and 63/64 bytes, and again at
+    // 119/120. Keyed by that total length, with the content length derived from it.
+    // Vectors are `git hash-object --stdin` of n 'a's.
+    #[test]
+    fn blob_hash_matches_git_at_padding_boundaries() {
+        for (total, want) in [
+            (55, "5e3bf7e629b4908cce461530c17a64365cb47303"),
+            (56, "12d42395b020f44bb7710113b31f688d0ebeda7c"),
+            (63, "d1985ddc2983785702b9a90effd5aff2f7cfdca4"),
+            (64, "1f973e890f52da1f22fa7e5620a628bc4ee74cb3"),
+            (119, "1fcb14c5910397220c4f8d0dd2203c70116bd4e0"),
+            (120, "d64a843f44190f041194ba87abf3cedc76eeb30e"),
+        ] {
+            let n = (0..total)
+                .find(|n| format!("blob {n}\0").len() + n == total)
+                .expect("a content length for this total");
+            assert_eq!(hex(&blob_hash(&"a".repeat(n))), want, "total {total}");
+        }
+    }
+
+    // `blob_hash` reads CRLF as LF, so both forms hash to git's hash of the LF bytes
+    // (`printf 'fn a() {\n    1\n}\n' | git hash-object --stdin`).
+    #[test]
+    fn crlf_and_lf_match_git_hash_of_the_lf_form() {
+        let want = "1b39008c1d5d99135aa9a38e91862276809edcc4";
+        assert_eq!(hex(&blob_hash("fn a() {\n    1\n}\n")), want);
+        assert_eq!(hex(&blob_hash("fn a() {\r\n    1\r\n}\r\n")), want);
+    }
+
     #[test]
     fn crlf_and_lf_copies_hash_equal() {
         let lf = "fn a() {\n    1\n}\n";
