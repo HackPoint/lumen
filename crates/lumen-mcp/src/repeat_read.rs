@@ -71,6 +71,7 @@ pub fn begin(tool: &'static str, path: &str, req_key: &str, args: &Value) -> Opt
             Some(db) => match repeat::event_since(&db, &session, b.when_ms()) {
                 Ok(None) => Gate::Repeat,
                 Ok(Some(kind)) if kind == "rewind" => Gate::Full("rewind"),
+                Ok(Some(kind)) if kind == "resync" => Gate::Full("resync"),
                 Ok(Some(_)) => Gate::Full("compaction"),
                 // No ledger to ask, or no events table in it: it cannot be said that nothing
                 // happened, so the answer is the full one, and the plan says why.
