@@ -2,22 +2,29 @@
 
 ## [1.7.0] — unreleased
 
-### Repeat reads: a second `smart_read` of the same file no longer costs a second outline
+### Repeat reads: a second `smart_read` or `recall_file` of the same thing no longer costs the same again
 
-Off by default. `LUMEN_REPEAT_READS=on` (or `ab`, split by a hash of the path) makes Lumen
-remember what it last delivered for each `(session, file)`. An unchanged file is answered with a
-stub, an edited one with a delta of the changed items, and anything else with the outline. The
-way back to the full outline, `smart_read(path, refresh=true)`, is in every stub and delta.
+Ships behind a flag, default off. `LUMEN_REPEAT_READS=on` (or `ab`, split by a hash of the path)
+makes Lumen remember, in memory, what it returned for each `(session, request)`. An unchanged
+file is answered with one sentence, an edited one with a delta of the changed symbols, and
+anything it cannot vouch for with the full result. The built-in Read is not touched.
 
-- **Unchanged first.** Measured on 60 real edits from this repository's history, the stub is 4987
-  tokens against 44306 for the outlines it replaces (median 13.3% of the outline).
-- **Delta for edited files:** median 41.7%, p90 59.0% of the full outline over the same 60 edits;
-  none fell back to the outline. An edit that would cost as much as the outline gets the outline
-  (`delta_too_big`).
-- **Compaction** is detected from the session transcript (`compact_boundary`); if it cannot be
-  read, the answer is the full outline. State is persisted in a new `read_state` table, so it
-  survives an MCP server restart.
-- `read_events` gains `repeat_arm` and `repeat_plan` (additive migration).
+- **Unchanged first.** Content-addressed (git blob hash computed in-process, CRLF read as LF; never
+  mtime). The answer is about 30 tokens against 743 for the fixture's outline; on 60 real edits
+  the unchanged answers total 1,800 tokens against 42,395 for the outlines they replace.
+- **Deltas** name `changed [body]`, `changed [signature]`, `added`, `removed` and `moved`
+  symbols with current line ranges. A symbol shifted by an insertion above it is `moved`, not
+  changed. `recall_file` of a changed symbol returns a diff scoped to it. On 60 real edits a delta
+  is median 18.0% and p90 31.5% of the full outline (1.7.0's first cut: 41.7% / 59.0%); the p90
+  is above 25% because small outlines pay a fixed ~40 tokens for the sentence that tells the
+  model how to ask again. That figure is per delta served, not an overall saving.
+- **Is the base still in context?** The daemon records one `session_events` row per compaction
+  and per rewind from the transcript; after either the answer is the full result. A subagent
+  sharing the session, or an event not yet ingested, cannot be seen, so every repeat answer says
+  it refers to an earlier read and to call again with `fresh=true`. `fresh=true` on both tools
+  always returns the full result and is recorded: its rate is the error rate of the feature.
+- `read_events` gains `repeat_arm` and `repeat_plan`, and a new `session_events` table with its
+  index, through the shared `init_schema` on all three code paths; tested from a 1.6.0 database.
 - With the flag off, `optimizer_bench` is unchanged to the token and the baseline is not
   re-blessed.
 

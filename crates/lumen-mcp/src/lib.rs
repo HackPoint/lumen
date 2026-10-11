@@ -96,17 +96,6 @@ pub struct MeterRow {
     /// Ranked-outline decision inputs. Empty for the legacy arm, which has no decision
     /// to record — a zero there would claim one was made.
     pub ranked: lumen_core::meter::RankedMeta,
-    /// What a smart_read delivered, to be remembered once the reply is out. `None` for
-    /// every row that delivered nothing a later call could refer back to.
-    pub state: Option<RepeatState>,
-}
-
-/// One `read_state` write, deferred like the `read_events` row beside it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RepeatState {
-    pub session_id: String,
-    pub path: String,
-    pub delivered: lumen_core::repeat::Delivered,
 }
 
 impl MeterRow {
@@ -127,13 +116,6 @@ impl MeterRow {
             self.req_key.as_deref(),
             &self.ranked,
         );
-        if let Some(st) = &self.state
-            && let Some(db) = lumen_core::meter::db_path()
-            && let Err(e) = lumen_core::repeat::save(&db, &st.session_id, &st.path, &st.delivered)
-        {
-            // Not a fault row: losing it costs a repeat its saving, never a wrong answer.
-            eprintln!("lumen-meter: read_state write failed: {e}");
-        }
     }
 }
 
@@ -343,7 +325,6 @@ fn inflated_fallback(
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
             ranked: lumen_core::meter::RankedMeta::default(),
-            state: None,
         }),
     }
 }
@@ -378,7 +359,6 @@ fn undescribable_fallback(
             file_mtime: file_mtime(path),
             req_key: Some(path.to_string()),
             ranked: lumen_core::meter::RankedMeta::default(),
-            state: None,
         }),
     }
 }
@@ -448,7 +428,6 @@ fn metered_with(
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
             ranked,
-            state: None,
         }),
     }
 }
@@ -476,6 +455,26 @@ pub fn handle_initialize() -> Value {
 }
 
 pub fn handle_tools_list() -> Value {
+    let mut list = base_tools_list();
+    // Advertised only when repeat reads are on, so the list the model sees is byte-identical
+    // with the flag off. `fresh` is still honoured either way.
+    if lumen_core::repeat::mode_from_env() != lumen_core::ranked::Mode::Off
+        && let Some(tools) = list["tools"].as_array_mut()
+    {
+        for t in tools {
+            if matches!(t["name"].as_str(), Some("smart_read" | "recall_file")) {
+                t["inputSchema"]["properties"]["fresh"] = json!({
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Set true to get the full result. Use it when an earlier answer said it refers to a previous read and that read is not in your context."
+                });
+            }
+        }
+    }
+    list
+}
+
+fn base_tools_list() -> Value {
     json!({ "tools": [
         {
             "name": "lumen_ping",
@@ -643,19 +642,26 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
 
     // Repeat reads: answer a second read of the same file with less than a second outline,
     // when the flag is on and the first answer is provably still in the model's context.
-    let rep = repeat_read::begin(path, &src, args);
+    let Some(r) = repeat_read::begin("smart_read", path, path, args) else {
+        return outline_read(path, &src, full_tokens, line_count);
+    };
+    let items = outline(&src, detect_lang(path));
+    let file = lumen_core::repeat::blob_hash(&src);
+    let syms = if items.iter().all(|i| i.kind == "file") {
+        vec![]
+    } else {
+        lumen_core::repeat::syms(&src, &items)
+    };
     let mut label = None;
-    if let Some(r) = &rep {
-        match r.serve(path, full_tokens, line_count) {
+    if !syms.is_empty() {
+        match r.serve_outline(path, file, &syms, &items, line_count, full_tokens) {
             repeat_read::Served::Reply(o) => return *o,
             repeat_read::Served::Fall(l) => label = Some(l),
             repeat_read::Served::No => {}
         }
     }
     let mut o = outline_read(path, &src, full_tokens, line_count);
-    if let Some(r) = &rep {
-        r.stamp(&mut o, label.unwrap_or_else(|| r.plan.label()));
-    }
+    r.stamp_outline(&mut o, label, file, &syms, line_count);
     o
 }
 
@@ -854,8 +860,9 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
     // different items are different requests, and keying dedup on the path alone
     // would count the second as redundant when it is not.
     let req_key = request_key(path, names.as_deref().unwrap_or(&[]), start_line, end_line);
+    let rep = repeat_read::begin("recall_file", path, &req_key, args);
 
-    let text = if let Some(queries) = names {
+    let (text, pieces) = if let Some(queries) = names {
         // Name-based recall
         let lang = detect_lang(path);
         let items = outline(&src, lang);
@@ -933,8 +940,8 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                     "{head}{}",
                     format_outline_compact(path, line_count, &filtered)
                 );
-                return metered_guarded(
-                    text,
+                let mut o = metered_guarded(
+                    text.clone(),
                     full_tokens,
                     "mcp__lumen__recall_file",
                     "recall_file",
@@ -943,6 +950,10 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                     Some(req_key.clone()),
                     Inflate::Guard { fallback: &src },
                 );
+                if let Some(r) = &rep {
+                    r.stamp_recall(&mut o, Some("outline"), None, &text);
+                }
+                return o;
             }
             fuzzy_note = format!(
                 "# matched by substring, not exact: {} → {}\n",
@@ -968,8 +979,8 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                 span * 100 / line_count,
                 format_outline_compact(path, line_count, &matched)
             );
-            return metered_guarded(
-                text,
+            let mut o = metered_guarded(
+                text.clone(),
                 full_tokens,
                 "mcp__lumen__recall_file",
                 "recall_file",
@@ -978,11 +989,28 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
                 Some(req_key.clone()),
                 Inflate::Guard { fallback: &src },
             );
+            if let Some(r) = &rep {
+                r.stamp_recall(&mut o, Some("outline"), None, &text);
+            }
+            return o;
         }
 
-        format!(
-            "{fuzzy_note}{}",
-            format_items_excerpt(path, &src_lines, &matched)
+        let pieces = rep.as_ref().map(|_| {
+            lumen_core::repeat::syms(&src, matched.iter().copied())
+                .into_iter()
+                .zip(&matched)
+                .map(|(s, i)| {
+                    let t = piece_text(&src_lines, i.start_line, i.end_line);
+                    (s, t)
+                })
+                .collect::<Vec<_>>()
+        });
+        (
+            format!(
+                "{fuzzy_note}{}",
+                format_items_excerpt(path, &src_lines, &matched)
+            ),
+            pieces,
         )
     } else if let (Some(start), Some(end)) = (start_line, end_line) {
         // Explicit line range
@@ -995,7 +1023,11 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         for (i, &line) in src_lines[ctx_start..ctx_end].iter().enumerate() {
             buf.push_str(&gutter_line(ctx_start + i + 1, line));
         }
-        buf
+        let pieces = rep.as_ref().map(|_| {
+            let t = piece_text(&src_lines, ctx_start + 1, ctx_end);
+            vec![(lumen_core::repeat::range_sym(ctx_start + 1, ctx_end, &t), t)]
+        });
+        (buf, pieces)
     } else {
         // No selector. Returning the file plus a header was guaranteed to cost more than the
         // file — the one branch that could never save anything. Return the outline instead,
@@ -1004,16 +1036,27 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         let lang = detect_lang(path);
         let items = outline(&src, lang);
         let refs: Vec<&CodeItem> = items.iter().collect();
-        format!(
+        let text = format!(
             "# recall_file: no selector given, so here is the outline.\n\
              # Call again with names=[...] or start_line/end_line, or use \
              smart_read(mode=\"full\") for the whole file.\n\n{}",
             format_outline_compact(path, line_count, &refs)
-        )
+        );
+        (text, None)
     };
 
-    metered_guarded(
-        text,
+    let mut fell = None;
+    if let (Some(r), Some(p)) = (&rep, &pieces) {
+        let gutter = |n: usize, l: &str| gutter_line(n, l);
+        match r.serve_recall(path, p, &text, full_tokens, line_count, &gutter) {
+            repeat_read::Served::Reply(o) => return *o,
+            repeat_read::Served::Fall(l) => fell = Some(l),
+            repeat_read::Served::No => {}
+        }
+    }
+
+    let mut o = metered_guarded(
+        text.clone(),
         full_tokens,
         "mcp__lumen__recall_file",
         "recall_file",
@@ -1023,7 +1066,25 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         // Guarded on every branch: a range spanning the file, or an outline of a file with
         // hundreds of tiny declarations, can both exceed the file itself.
         Inflate::Guard { fallback: &src },
-    )
+    );
+    if let Some(r) = &rep {
+        r.stamp_recall(
+            &mut o,
+            fell.or(pieces.is_none().then_some("outline")),
+            pieces.as_deref(),
+            &text,
+        );
+    }
+    o
+}
+
+/// The source lines `start..=end` (1-based) as the text of a piece.
+fn piece_text(lines: &[&str], start: usize, end: usize) -> String {
+    let from = start.saturating_sub(1).min(lines.len());
+    let to = end.min(lines.len()).max(from);
+    let mut t = lines[from..to].join("\n");
+    t.push('\n');
+    t
 }
 
 /// One emitted source line, with its number.
@@ -1963,6 +2024,7 @@ mod tests {
                 end_line: 40,
                 start_byte: 0,
                 end_byte: 0,
+                body_start_byte: None,
             },
             CodeItem {
                 kind: "fn".into(),
@@ -1971,6 +2033,7 @@ mod tests {
                 end_line: 20,
                 start_byte: 0,
                 end_byte: 0,
+                body_start_byte: None,
             },
         ];
         let refs: Vec<&CodeItem> = items.iter().collect();
@@ -1989,6 +2052,7 @@ mod tests {
                 end_line: 5,
                 start_byte: 0,
                 end_byte: 0,
+                body_start_byte: None,
             },
             CodeItem {
                 kind: "fn".into(),
@@ -1997,6 +2061,7 @@ mod tests {
                 end_line: 95,
                 start_byte: 0,
                 end_byte: 0,
+                body_start_byte: None,
             },
         ];
         let refs: Vec<&CodeItem> = items.iter().collect();

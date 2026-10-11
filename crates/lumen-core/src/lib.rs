@@ -1,6 +1,7 @@
 pub mod compress;
 pub mod coverage;
 pub mod econ;
+pub mod events;
 pub mod faults;
 pub mod meter;
 pub mod project;

@@ -113,19 +113,21 @@ pub const MIGRATIONS: &[&str] = &[
     // repeat_arm  — 'treatment' when the repeat-read path was live for this read,
     //               'control' when the path was withheld by the A/B split. NULL on every
     //               row written while LUMEN_REPEAT_READS is off, and on every hook row.
-    // repeat_plan — what the repeat decision was: first, unchanged, delta, compacted,
-    //               unverifiable, refresh, delta_too_big, unchanged_not_smaller. A control
+    // repeat_plan — what the repeat decision was: first, fresh, unchanged, delta, or a full
+    //               answer for a stated reason (compaction, rewind, unverifiable, no_base,
+    //               outline, delta_too_big, unchanged_not_smaller). A control
     //               row records what the treatment arm WOULD have done, which is what
     //               makes the two arms comparable on the same population of repeat reads.
     "ALTER TABLE read_events ADD COLUMN repeat_arm TEXT",
     "ALTER TABLE read_events ADD COLUMN repeat_plan TEXT",
-    // What smart_read last delivered for (session, path), so a later call can tell an
-    // unchanged file from an edited one. Also in DDL; repeated here for the reason
-    // `faults` is.
-    "CREATE TABLE IF NOT EXISTS read_state (\
-        session_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL, \
-        lines INTEGER NOT NULL, items TEXT NOT NULL, tx_len INTEGER, \
-        ts TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (session_id, path))",
+    // Compactions and rewinds the daemon saw in a session's transcript, one row per
+    // event, so lumen-mcp can tell that what it delivered earlier may no longer be in the
+    // model's context. Also in DDL; repeated here for the reason `faults` is.
+    "CREATE TABLE IF NOT EXISTS session_events (\
+        session_id TEXT NOT NULL, kind TEXT NOT NULL, uuid TEXT NOT NULL, \
+        ts_ms INTEGER NOT NULL, source_file TEXT, PRIMARY KEY (session_id, kind, uuid))",
+    // An index goes here, after the statement that creates its table, never in DDL.
+    "CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, ts_ms)",
     "CREATE INDEX IF NOT EXISTS idx_read_events_dedup \
      ON read_events(session_id, path, file_mtime)",
     // `faults` is also in DDL, which is enough for a fresh database. It is repeated
@@ -227,17 +229,17 @@ CREATE TABLE IF NOT EXISTS read_events (
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
 
--- What smart_read last delivered for a path in a session. One row per (session, path),
--- replaced on each delivery; rows older than a fortnight are pruned on write.
-CREATE TABLE IF NOT EXISTS read_state (
-    session_id TEXT NOT NULL,
-    path       TEXT NOT NULL,
-    hash       TEXT NOT NULL,       -- content fingerprint at delivery
-    lines      INTEGER NOT NULL,
-    items      TEXT NOT NULL,       -- JSON: the item signatures delivered
-    tx_len     INTEGER,             -- transcript length at delivery; NULL = unverifiable
-    ts         TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (session_id, path)
+-- Compactions and rewinds seen in a session's transcript (kind: compaction | rewind).
+-- The daemon re-reads transcripts from the start after a restart, so a row is keyed by the
+-- transcript record that caused it and written with INSERT OR IGNORE. Its index is in
+-- MIGRATIONS, not here.
+CREATE TABLE IF NOT EXISTS session_events (
+    session_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    uuid        TEXT NOT NULL,
+    ts_ms       INTEGER NOT NULL,    -- the record's own timestamp, unix ms
+    source_file TEXT,
+    PRIMARY KEY (session_id, kind, uuid)
 );
 
 -- One row per fault occurrence; `lumen report` aggregates count/first/last at read
@@ -817,5 +819,121 @@ mod tests {
         let again = crate::meter::connect_db(&path).expect("a second open must be a no-op");
         assert_eq!(rendered_rows(&again), before);
         assert_eq!(rusqlite_columns(&again).len(), READ_EVENTS_COLUMNS);
+    }
+
+    // ── 1.7.0: session_events, from a 1.6.0 database ─────────────────────────
+
+    /// `read_events` exactly as 1.6.0 shipped it: the 24 surviving columns, both indexes,
+    /// and none of 1.7.0's. Hand-written, like the shapes above, so it cannot drift with
+    /// the current DDL.
+    const READ_EVENTS_1_6_0: &str = "\
+        CREATE TABLE read_events ( \
+            ts TEXT NOT NULL, tool TEXT NOT NULL, path TEXT NOT NULL, lines INTEGER, \
+            tokens_returned INTEGER NOT NULL, full_tokens INTEGER NOT NULL, \
+            saved_tokens INTEGER NOT NULL, routed_via TEXT NOT NULL, \
+            channel TEXT NOT NULL DEFAULT 'unknown', session_id TEXT, file_mtime INTEGER, \
+            req_key TEXT, writer_hook TEXT, token_source TEXT, budget INTEGER, \
+            s_min INTEGER, econ_context REAL, econ_rounds REAL, econ_output REAL, \
+            econ_source TEXT, k_selected INTEGER, n_total INTEGER, coeff_version INTEGER, \
+            target_outline INTEGER); \
+        CREATE INDEX idx_read_events_ts ON read_events(ts); \
+        CREATE INDEX idx_read_events_dedup ON read_events(session_id, path, file_mtime);";
+
+    const ROWS_1_6_0: &str = "\
+        INSERT INTO read_events VALUES ('2026-09-01T10:00:00Z','Read','/a.rs',412,5100, \
+            5100,0,'builtin_read','cli','s-1',1767000000,'/a.rs','lumen_meter.sh', \
+            'measured',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL); \
+        INSERT INTO read_events VALUES ('2026-09-01T10:00:05Z','mcp__lumen__smart_read', \
+            '/b.rs',900,700,9000,8300,'smart_read','vscode','s-2',1767000100, \
+            's-2:/b.rs:1767000100','lumen-mcp','measured',4100,4900,61000.5,65.0, \
+            1200.25,'observed',7,19,3,600);";
+
+    const SESSION_EVENT_COLUMNS: [&str; 5] = ["session_id", "kind", "uuid", "ts_ms", "source_file"];
+
+    #[tokio::test]
+    async fn a_1_6_0_database_gains_session_events_and_its_index_and_keeps_every_row() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(READ_EVENTS_1_6_0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ROWS_1_6_0).execute(&pool).await.unwrap();
+        assert!(columns(&pool, "session_events").await.is_empty());
+        let before: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+
+        init_schema(&pool).await.unwrap();
+
+        assert_eq!(columns(&pool, "read_events").await, migrated_columns());
+        assert_eq!(
+            columns(&pool, "session_events").await,
+            SESSION_EVENT_COLUMNS
+        );
+        assert!(
+            index_names(&pool, "session_events")
+                .await
+                .contains(&"idx_session_events_session".to_string())
+        );
+        let after: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+
+        // The key makes a re-ingest harmless.
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT OR IGNORE INTO session_events VALUES ('s-1','rewind','u-1',1000,'f.jsonl')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let n: (i64,) = sqlx::query_as("SELECT count(*) FROM session_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n.0, 1);
+        init_schema(&pool).await.expect("a second run is a no-op");
+    }
+
+    #[test]
+    fn the_rusqlite_open_adds_session_events_to_a_1_6_0_database() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("1_6_0.db");
+        let before = {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(READ_EVENTS_1_6_0).unwrap();
+            c.execute_batch(ROWS_1_6_0).unwrap();
+            rendered_rows(&c)
+        };
+        assert_eq!(before.len(), 2);
+
+        let conn = crate::meter::connect_db(&path).unwrap();
+
+        assert_eq!(rusqlite_columns(&conn), migrated_columns());
+        assert_eq!(rendered_rows(&conn), before);
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(session_events)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cols, SESSION_EVENT_COLUMNS);
+        let idx: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'idx_session_events_session'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
+        drop(conn);
+        crate::meter::connect_db(&path).expect("a second open must be a no-op");
     }
 }

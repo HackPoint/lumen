@@ -1,33 +1,41 @@
-//! Repeat reads (1.7.0): answering a second `smart_read` of the same file with less than a
-//! second outline.
+//! Repeat reads (1.7.0): answering a second `smart_read` / `recall_file` of the same thing
+//! with less than the first answer, when the model provably still holds the first one.
 //!
-//! A repeat is only cheap to answer if the model still HAS the first answer. Two things take
-//! it away: the file changed (then say what changed), or the conversation was compacted (then
-//! say everything again). Everything here exists to tell those apart without guessing, and
-//! every doubt resolves to a full outline, never to a stub the model cannot use.
+//! The base is what Lumen returned in this session, held in memory per `(session_id,
+//! req_key)` — never git HEAD. A restart loses it, which falls back to the full answer.
 //!
-//! * `read_state` remembers, per `(session, path)`, what was delivered: a content hash, the
-//!   item signatures, and the transcript length at that moment.
-//! * Compaction is detected from the transcript: a `compact_boundary` record written after
-//!   that length. A transcript that cannot be found or read is "unverifiable", which is
-//!   treated like a compaction.
-//! * The flag is `LUMEN_REPEAT_READS` (off by default; `on`; `ab` splits by path hash).
+//! Content is addressed by hash at three levels, all after CRLF→LF normalisation so a Windows
+//! autocrlf checkout does not read as changed:
+//! 1. the file, in git blob format: equal means "unchanged";
+//! 2. each outline symbol, as a signature hash and a body hash: a changed file is answered with
+//!    the symbols that changed, were added, removed or moved;
+//! 3. inside one symbol, for `recall_file`: a line diff scoped to that symbol.
+//!
+//! Whether the base is still in the model's context is not knowable here. Compaction and
+//! rewind are detected from the transcript by the daemon (see `events`); anything else is
+//! handled by telling the model, in every reply, how to ask again with `fresh=true`.
 
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-
-use rusqlite::{OptionalExtension, params};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::ranked::{Mode, path_hash};
 use crate::structure::CodeItem;
 
 pub const ROUTE_UNCHANGED: &str = "smart_read_unchanged";
 pub const ROUTE_DELTA: &str = "smart_read_delta";
+pub const ROUTE_RECALL_UNCHANGED: &str = "recall_file_unchanged";
+pub const ROUTE_RECALL_DELTA: &str = "recall_file_delta";
 
 pub const ARM_TREATMENT: &str = "treatment";
 pub const ARM_CONTROL: &str = "control";
+
+/// `repeat_plan` values. `fresh` is the dedup error rate's numerator: the model asked again
+/// because the earlier read was not in its context.
+pub const PLAN_FIRST: &str = "first";
+pub const PLAN_FRESH: &str = "fresh";
+pub const PLAN_UNCHANGED: &str = "unchanged";
+pub const PLAN_DELTA: &str = "delta";
 
 /// Read the rollout mode from `LUMEN_REPEAT_READS`. Anything unrecognised is `Off`.
 pub fn mode_from_env() -> Mode {
@@ -53,615 +61,955 @@ pub fn treated(mode: Mode, path: &str) -> bool {
     }
 }
 
-/// One outline item as the model saw it, with a hash of its text so an edit inside it is
-/// visible even when its line range did not change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ItemSig {
-    pub k: String,
-    pub n: Option<String>,
-    pub s: usize,
-    pub e: usize,
-    pub h: u64,
+// ── hashing ──────────────────────────────────────────────────────────────────
+
+pub type Hash = [u8; 20];
+
+/// CRLF → LF. Everything is hashed through this.
+pub fn normalize(s: &str) -> Cow<'_, str> {
+    if s.contains("\r\n") {
+        Cow::Owned(s.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(s)
+    }
 }
 
-/// What was delivered for a path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Delivered {
-    pub hash: String,
-    pub lines: usize,
-    /// Empty when no outline was delivered (the whole file was): nothing to diff against.
-    pub items: Vec<ItemSig>,
-    /// Transcript length when it was delivered. `None`: no transcript, so no way to know
-    /// whether it was compacted away.
-    pub tx_len: Option<u64>,
+struct Sha1 {
+    h: [u32; 5],
+    buf: [u8; 64],
+    len: usize,
+    total: u64,
 }
 
-/// Content fingerprint: 16 hex chars of SHA-256.
-pub fn fingerprint(src: &str) -> String {
-    let d = Sha256::digest(src.as_bytes());
-    d[..8].iter().map(|b| format!("{b:02x}")).collect()
+impl Sha1 {
+    fn new() -> Self {
+        Sha1 {
+            h: [
+                0x6745_2301,
+                0xEFCD_AB89,
+                0x98BA_DCFE,
+                0x1032_5476,
+                0xC3D2_E1F0,
+            ],
+            buf: [0; 64],
+            len: 0,
+            total: 0,
+        }
+    }
+
+    fn block(&mut self, b: &[u8; 64]) {
+        let mut w = [0u32; 80];
+        for (i, c) in b.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut bb, mut c, mut d, mut e] = self.h;
+        for (i, wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((bb & c) | (!bb & d), 0x5A82_7999),
+                20..=39 => (bb ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((bb & c) | (bb & d) | (c & d), 0x8F1B_BCDC),
+                _ => (bb ^ c ^ d, 0xCA62_C1D6u32),
+            };
+            let t = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*wi);
+            e = d;
+            d = c;
+            c = bb.rotate_left(30);
+            bb = a;
+            a = t;
+        }
+        for (h, v) in self.h.iter_mut().zip([a, bb, c, d, e]) {
+            *h = h.wrapping_add(v);
+        }
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.total += data.len() as u64;
+        if self.len > 0 {
+            let take = (64 - self.len).min(data.len());
+            self.buf[self.len..self.len + take].copy_from_slice(&data[..take]);
+            self.len += take;
+            data = &data[take..];
+            if self.len < 64 {
+                return;
+            }
+            let b = self.buf;
+            self.block(&b);
+            self.len = 0;
+        }
+        let mut chunks = data.chunks_exact(64);
+        for c in &mut chunks {
+            let mut b = [0u8; 64];
+            b.copy_from_slice(c);
+            self.block(&b);
+        }
+        let rest = chunks.remainder();
+        self.buf[..rest.len()].copy_from_slice(rest);
+        self.len = rest.len();
+    }
+
+    fn finish(mut self) -> Hash {
+        let bits = self.total.wrapping_mul(8);
+        self.update_pad(&[0x80]);
+        while self.len != 56 {
+            self.update_pad(&[0]);
+        }
+        self.update_pad(&bits.to_be_bytes());
+        let mut out = [0u8; 20];
+        for (o, h) in out.chunks_exact_mut(4).zip(self.h) {
+            o.copy_from_slice(&h.to_be_bytes());
+        }
+        out
+    }
+
+    /// Padding does not count towards the message length.
+    fn update_pad(&mut self, data: &[u8]) {
+        let total = self.total;
+        self.update(data);
+        self.total = total;
+    }
 }
 
-pub fn item_sigs(src: &str, items: &[CodeItem]) -> Vec<ItemSig> {
+/// The hash `git hash-object` gives this content: SHA-1 of `blob <len>\0` + content, computed
+/// in-process (no git binary on the hook or tool path). CRLF is normalised first.
+pub fn blob_hash(content: &str) -> Hash {
+    let c = normalize(content);
+    let mut s = Sha1::new();
+    s.update(format!("blob {}\0", c.len()).as_bytes());
+    s.update(c.as_bytes());
+    s.finish()
+}
+
+pub fn hex(h: &Hash) -> String {
+    h.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ── symbols ──────────────────────────────────────────────────────────────────
+
+/// One outline symbol as delivered: where it was, and what its signature and body hashed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sym {
+    pub kind: String,
+    pub name: Option<String>,
+    pub start: usize,
+    pub end: usize,
+    pub sig: Hash,
+    pub body: Hash,
+    /// Whole-item hash: what identifies an anonymous item such as an import.
+    pub whole: Hash,
+}
+
+/// Signature and body split at the item's body. An item with no body (an import, a const) has
+/// its first line as the signature and the rest as the body, so a one-line item can only
+/// change its signature.
+pub fn syms<'a>(src: &str, items: impl IntoIterator<Item = &'a CodeItem>) -> Vec<Sym> {
     items
-        .iter()
-        .map(|i| ItemSig {
-            k: i.kind.clone(),
-            n: i.name.clone(),
-            s: i.start_line,
-            e: i.end_line,
-            h: path_hash(src.get(i.start_byte..i.end_byte).unwrap_or("").as_bytes()),
+        .into_iter()
+        .map(|i| {
+            let text = src.get(i.start_byte..i.end_byte).unwrap_or("");
+            let cut = i
+                .body_start_byte
+                .map(|b| b.saturating_sub(i.start_byte))
+                .filter(|b| *b <= text.len() && text.is_char_boundary(*b))
+                .unwrap_or_else(|| text.find('\n').unwrap_or(text.len()));
+            let (sig, body) = text.split_at(cut);
+            Sym {
+                kind: i.kind.clone(),
+                name: i.name.clone(),
+                start: i.start_line,
+                end: i.end_line,
+                sig: blob_hash(sig),
+                body: blob_hash(body),
+                whole: blob_hash(text),
+            }
         })
         .collect()
 }
 
-// ── the decision ─────────────────────────────────────────────────────────────
+type Key = (String, Option<String>, Option<Hash>, usize);
 
-/// What to do with a repeat.
+/// Named symbols match by `(kind, name, nth occurrence)`, anonymous ones by `(kind, text,
+/// nth)`: an inserted import must not turn every import below it into an edit.
+fn keys(items: &[Sym]) -> Vec<Key> {
+    let mut seen: HashMap<(String, Option<String>, Option<Hash>), usize> = HashMap::new();
+    items
+        .iter()
+        .map(|s| {
+            let base = (
+                s.kind.clone(),
+                s.name.clone(),
+                if s.name.is_none() {
+                    Some(s.whole)
+                } else {
+                    None
+                },
+            );
+            let nth = seen.entry(base.clone()).or_insert(0);
+            let key = (base.0, base.1, base.2, *nth);
+            *nth += 1;
+            key
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Plan {
-    /// Deliver a full outline. The reason is what the ledger records.
-    Fresh(&'static str),
-    Unchanged,
-    Delta(Delta),
+pub struct Changed {
+    pub sym: Sym,
+    pub sig: bool,
+    pub body: bool,
+    /// Its line range differs from the one the model holds.
+    pub range: bool,
 }
 
-impl Plan {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Plan::Fresh(r) => r,
-            Plan::Unchanged => "unchanged",
-            Plan::Delta(_) => "delta",
-        }
-    }
-}
-
-/// `compacted`: `Some(false)` only when the transcript was read and holds no boundary since
-/// the delivery. Anything else — a boundary, or not knowing — is a fresh outline.
-pub fn decide(
-    prev: Option<&Delivered>,
-    hash: &str,
-    items: &[ItemSig],
-    compacted: Option<bool>,
-) -> Plan {
-    let Some(p) = prev else {
-        return Plan::Fresh("first");
-    };
-    match compacted {
-        Some(true) => return Plan::Fresh("compacted"),
-        None => return Plan::Fresh("unverifiable"),
-        Some(false) => {}
-    }
-    if p.hash == hash {
-        return Plan::Unchanged;
-    }
-    // A whole-file "item" or an empty baseline has nothing to diff.
-    if p.items.is_empty() || items.is_empty() {
-        return Plan::Fresh("not_diffable");
-    }
-    Plan::Delta(diff(&p.items, items))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Moved {
+    One(Sym),
+    /// Consecutive symbols that all kept their text and moved by the same offset.
+    Run {
+        offset: i64,
+        first: Sym,
+        last: Sym,
+        count: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Delta {
-    pub edited: Vec<ItemSig>,
-    pub moved: Vec<(ItemSig, ItemSig)>,
-    pub added: Vec<ItemSig>,
-    pub removed: Vec<ItemSig>,
-    /// `(old_start_line, offset)`: every item from that old line on kept its text and moved
-    /// by `offset`. A single insertion moves everything below it, and listing each of those
-    /// would make the delta as long as the outline it replaces.
-    pub shifted_from: Option<(usize, i64)>,
+    pub changed: Vec<Changed>,
+    pub added: Vec<Sym>,
+    pub removed: Vec<Sym>,
+    pub moved: Vec<Moved>,
+    pub unchanged: usize,
+    /// `(kind, name)` pairs that occur more than once, so their entries carry a line.
+    pub dup: HashSet<(String, Option<String>)>,
 }
 
 impl Delta {
     pub fn is_empty(&self) -> bool {
-        self.edited.is_empty()
-            && self.moved.is_empty()
+        self.changed.is_empty()
             && self.added.is_empty()
             && self.removed.is_empty()
-            && self.shifted_from.is_none()
+            && self.moved.is_empty()
     }
 }
 
-/// Smallest run of identical shifts worth collapsing into one line.
-const MIN_SHIFT_RUN: usize = 3;
+/// Smallest run of identical shifts worth collapsing into one entry.
+const MIN_RUN: usize = 3;
 
-/// Match named items by `(kind, name, nth occurrence)` and anonymous ones (imports) by
-/// `(kind, text hash, nth occurrence)`: an inserted import must not turn every import below
-/// it into an edit.
-pub fn diff(old: &[ItemSig], new: &[ItemSig]) -> Delta {
-    use std::collections::HashMap;
-    type Key = (String, Option<String>, Option<u64>, usize);
-
-    fn keys(items: &[ItemSig]) -> Vec<Key> {
-        let mut seen: HashMap<(String, Option<String>, Option<u64>), usize> = HashMap::new();
-        items
-            .iter()
-            .map(|i| {
-                let base = (
-                    i.k.clone(),
-                    i.n.clone(),
-                    if i.n.is_none() { Some(i.h) } else { None },
-                );
-                let nth = seen.entry(base.clone()).or_insert(0);
-                let key = (base.0, base.1, base.2, *nth);
-                *nth += 1;
-                key
-            })
-            .collect()
-    }
-
-    let old_keys = keys(old);
-    let new_keys = keys(new);
-    let old_by_key: HashMap<&Key, usize> =
-        old_keys.iter().enumerate().map(|(i, k)| (k, i)).collect();
-    let mut matched_old = vec![false; old.len()];
-
+pub fn diff(old: &[Sym], new: &[Sym]) -> Delta {
+    let (ok, nk) = (keys(old), keys(new));
+    let by_key: HashMap<&Key, usize> = ok.iter().enumerate().map(|(i, k)| (k, i)).collect();
+    let mut matched = vec![false; old.len()];
     let mut d = Delta::default();
-    // Per new item: Some(offset) when matched, unedited and moved.
-    let mut shift: Vec<Option<i64>> = vec![None; new.len()];
-    for (ni, nk) in new_keys.iter().enumerate() {
-        match old_by_key.get(nk) {
-            None => d.added.push(new[ni].clone()),
+
+    // Per new symbol, in order: how it relates to the base.
+    enum Rel {
+        Added,
+        Same,
+        Shifted(i64),
+        Edited(i64),
+    }
+    let mut rel: Vec<Rel> = Vec::with_capacity(new.len());
+    for (ni, k) in nk.iter().enumerate() {
+        let n = &new[ni];
+        match by_key.get(k) {
+            None => {
+                d.added.push(n.clone());
+                rel.push(Rel::Added);
+            }
             Some(&oi) => {
-                matched_old[oi] = true;
-                let (o, n) = (&old[oi], &new[ni]);
-                if o.h != n.h {
-                    d.edited.push(n.clone());
-                } else if (o.s, o.e) != (n.s, n.e) {
-                    shift[ni] = Some(n.s as i64 - o.s as i64);
-                    d.moved.push((o.clone(), n.clone()));
+                matched[oi] = true;
+                let o = &old[oi];
+                let off = n.start as i64 - o.start as i64;
+                let (sig, body) = (o.sig != n.sig, o.body != n.body);
+                let range = (o.start, o.end) != (n.start, n.end);
+                if sig || body {
+                    d.changed.push(Changed {
+                        sym: n.clone(),
+                        sig,
+                        body,
+                        range,
+                    });
+                    rel.push(Rel::Edited(off));
+                } else if range {
+                    rel.push(Rel::Shifted(off));
+                } else {
+                    d.unchanged += 1;
+                    rel.push(Rel::Same);
                 }
             }
         }
     }
-    for (oi, m) in matched_old.iter().enumerate() {
+    for (oi, m) in matched.iter().enumerate() {
         if !m {
             d.removed.push(old[oi].clone());
         }
     }
 
-    // Collapse the trailing run of identical shifts into one statement.
-    if let Some(Some(off)) = shift.last().copied() {
-        let run = shift.iter().rev().take_while(|s| **s == Some(off)).count();
-        if run >= MIN_SHIFT_RUN {
-            let first_new = new.len() - run;
-            let first_moved = d.moved.iter().position(|(_, n)| {
-                n.s == new[first_new].s && n.k == new[first_new].k && n.n == new[first_new].n
+    // Moved symbols, collapsing a run of identical shifts. A symbol that was edited but
+    // shifted by the same offset sits inside a run without ending it.
+    let mut run: Vec<usize> = vec![];
+    let mut run_off = 0i64;
+    let flush = |run: &mut Vec<usize>, off: i64, d: &mut Delta| {
+        if run.len() >= MIN_RUN {
+            d.moved.push(Moved::Run {
+                offset: off,
+                first: new[run[0]].clone(),
+                last: new[*run.last().unwrap()].clone(),
+                count: run.len(),
             });
-            if let Some(pos) = first_moved {
-                d.shifted_from = Some((d.moved[pos].0.s, off));
-                d.moved.truncate(pos);
+        } else {
+            for &i in run.iter() {
+                d.moved.push(Moved::One(new[i].clone()));
             }
         }
+        d.unchanged += run.len();
+        run.clear();
+    };
+    for (i, r) in rel.iter().enumerate() {
+        match r {
+            Rel::Shifted(off) => {
+                if !run.is_empty() && *off != run_off {
+                    flush(&mut run, run_off, &mut d);
+                }
+                run_off = *off;
+                run.push(i);
+            }
+            Rel::Edited(off) if !run.is_empty() && *off == run_off => {}
+            _ => flush(&mut run, run_off, &mut d),
+        }
+    }
+    flush(&mut run, run_off, &mut d);
+
+    // A name used twice within one version of the file needs its line to be told apart.
+    for side in [old, new] {
+        let mut count: HashMap<(&str, &str), usize> = HashMap::new();
+        for s in side {
+            if let Some(n) = &s.name {
+                *count.entry((&s.kind, n)).or_insert(0) += 1;
+            }
+        }
+        d.dup.extend(
+            count
+                .into_iter()
+                .filter(|(_, c)| *c > 1)
+                .map(|((k, n), _)| (k.to_string(), Some(n.to_string()))),
+        );
     }
     d
 }
 
 // ── what the model is told ───────────────────────────────────────────────────
 
-fn short(hash: &str) -> &str {
-    &hash[..hash.len().min(8)]
+/// The sentence every unchanged answer carries. MCP carries no caller identity, so a
+/// subagent sharing the parent's session can be told "unchanged" about a read it never saw;
+/// this is how it gets out.
+pub fn unchanged_text(tool: &str) -> String {
+    if tool == "smart_read" {
+        "Unchanged since an earlier read of this file in this session. If that read is not in \
+         your context, call smart_read(path, fresh=true).\n"
+            .to_string()
+    } else {
+        format!(
+            "Unchanged since an earlier read of this file in this session. If that read is not \
+             in your context, call {tool}(path, fresh=true) with the same arguments.\n"
+        )
+    }
 }
 
-/// Deliberately tells the model how to recover: MCP carries no caller identity, so a
-/// subagent sharing the parent's session can be answered "unchanged" about an outline it
-/// never saw. One call with `refresh` gets it the full outline.
-pub fn format_unchanged(path: &str, lines: usize, items: usize, hash: &str) -> String {
+fn changed_header(tool: &str) -> String {
     format!(
-        "# {path} — unchanged since your last smart_read this session ({lines} lines, {items} items, {})\n\
-         # That outline is still exact; recall_file fetches bodies. Not in your context? smart_read(path, refresh=true).\n",
-        short(hash)
+        "Changed since an earlier read of this file in this session. If that read is not in \
+         your context, call {tool}(path, fresh=true).\n"
     )
 }
 
-pub fn format_delta(
-    path: &str,
-    old: &Delivered,
-    new_hash: &str,
-    new_lines: usize,
-    d: &Delta,
-) -> String {
-    let mut b = format!(
-        "# {path} — changed since your last smart_read ({} → {}, {} → {} lines)\n\
-         # Only differences are listed; every other item keeps the line range you have.\n",
-        short(&old.hash),
-        short(new_hash),
-        old.lines,
-        new_lines
-    );
-    let name = |i: &ItemSig| i.n.clone().unwrap_or_else(|| "(anonymous)".into());
-    for i in &d.edited {
-        b.push_str(&format!("~ {} {} L{}-{}\n", i.k, name(i), i.s, i.e));
+fn disp(s: &Sym, dup: &HashSet<(String, Option<String>)>) -> String {
+    match &s.name {
+        None => format!("{}@L{}", s.kind, s.start),
+        Some(n) if dup.contains(&(s.kind.clone(), s.name.clone())) => format!("{n}@L{}", s.start),
+        Some(n) => n.clone(),
     }
-    for (_, i) in &d.moved {
-        b.push_str(&format!("> {} {} L{}-{}\n", i.k, name(i), i.s, i.e));
+}
+
+/// Entries are grouped by marker, one line each, names comma-separated: an entry costs its
+/// name and a separator, not a line of an outline. A range appears only where it differs from
+/// the one the model already holds, and always for an added symbol.
+pub fn format_delta(new_lines: usize, d: &Delta) -> String {
+    let mut b = changed_header("smart_read");
+    b.push_str(&format!("{} unchanged; {new_lines} lines.\n", d.unchanged));
+    let range = |s: &Sym| format!(" L{}-{}", s.start, s.end);
+    // Where the range is printed it already tells two same-named symbols apart.
+    let named = |s: &Sym| match &s.name {
+        Some(n) => n.clone(),
+        None => s.kind.clone(),
+    };
+    for (label, pick) in [
+        ("changed [body]", (false, true)),
+        ("changed [signature]", (true, false)),
+        ("changed [signature, body]", (true, true)),
+    ] {
+        let items: Vec<String> = d
+            .changed
+            .iter()
+            .filter(|c| (c.sig, c.body) == pick)
+            .map(|c| {
+                if c.range {
+                    format!("{}{}", named(&c.sym), range(&c.sym))
+                } else {
+                    disp(&c.sym, &d.dup)
+                }
+            })
+            .collect();
+        if !items.is_empty() {
+            b.push_str(&format!("{label}: {}\n", items.join(", ")));
+        }
     }
-    for i in &d.added {
-        b.push_str(&format!("+ {} {} L{}-{}\n", i.k, name(i), i.s, i.e));
+    if !d.added.is_empty() {
+        let items: Vec<String> = d
+            .added
+            .iter()
+            .map(|s| format!("{}{}", named(s), range(s)))
+            .collect();
+        b.push_str(&format!("added: {}\n", items.join(", ")));
     }
-    for i in &d.removed {
-        b.push_str(&format!("- {} {} (was L{}-{})\n", i.k, name(i), i.s, i.e));
+    if !d.removed.is_empty() {
+        let items: Vec<String> = d.removed.iter().map(|s| disp(s, &d.dup)).collect();
+        b.push_str(&format!("removed: {}\n", items.join(", ")));
+    }
+    let singles: Vec<String> = d
+        .moved
+        .iter()
+        .filter_map(|m| match m {
+            Moved::One(s) => Some(format!("{}{}", named(s), range(s))),
+            Moved::Run { .. } => None,
+        })
+        .collect();
+    if !singles.is_empty() {
+        b.push_str(&format!("moved: {}\n", singles.join(", ")));
+    }
+    for m in &d.moved {
+        if let Moved::Run {
+            offset,
+            first,
+            last,
+            count,
+        } = m
+        {
+            b.push_str(&format!(
+                "moved {offset:+} lines: {}..{} ({count} symbols)\n",
+                disp(first, &d.dup),
+                disp(last, &d.dup)
+            ));
+        }
     }
     if d.is_empty() {
         b.push_str(
-            "# No outlined item changed: the edit is between items, in a comment, or whitespace.\n",
+            "No symbol changed: the edit is between symbols, in a comment, or whitespace.\n",
         );
     }
-    if let Some((from, off)) = d.shifted_from {
-        b.push_str(&format!(
-            "# every unedited item from old L{from} on moved {off:+} lines\n"
-        ));
-    }
-    b.push_str("# ~ edited  > moved  + added  - removed. smart_read(path, refresh=true) for the full outline.\n");
     b
 }
 
-// ── persistence ──────────────────────────────────────────────────────────────
+// ── inside a symbol ──────────────────────────────────────────────────────────
 
-/// What smart_read last delivered for `(session, path)`. Read-only and fail-open: a missing
-/// ledger, table or row is simply "nothing delivered", which yields a fresh outline.
-pub fn load(db: &Path, session: &str, path: &str) -> Option<Delivered> {
-    let conn = crate::meter::open_read_only(db).ok()?;
-    conn.query_row(
-        "SELECT hash, lines, items, tx_len FROM read_state WHERE session_id = ?1 AND path = ?2",
-        params![session, path],
-        |r| {
-            let items: String = r.get(2)?;
-            // A row whose items cannot be read is no baseline at all: the read that follows
-            // delivers a fresh outline and overwrites it.
-            let items = serde_json::from_str(&items).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-            Ok(Delivered {
-                hash: r.get(0)?,
-                lines: r.get::<_, i64>(1)? as usize,
-                items,
-                tx_len: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-            })
-        },
-    )
-    .optional()
-    .ok()
-    .flatten()
-}
+/// Longest cell count the line diff will fill. Past it the caller sends the whole body.
+const MAX_DIFF_CELLS: usize = 4_000_000;
 
-/// Record a delivery. Runs after the reply has gone out, so it may take its time.
-pub fn save(db: &Path, session: &str, path: &str, d: &Delivered) -> rusqlite::Result<()> {
-    let conn = crate::meter::connect_db(db)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO read_state(session_id,path,hash,lines,items,tx_len) \
-         VALUES(?1,?2,?3,?4,?5,?6)",
-        params![
-            session,
-            path,
-            d.hash,
-            d.lines as i64,
-            serde_json::to_string(&d.items).unwrap_or_else(|_| "[]".into()),
-            d.tx_len.map(|v| v as i64),
-        ],
-    )?;
-    conn.execute(
-        "DELETE FROM read_state WHERE ts < datetime('now','-14 days')",
-        [],
-    )?;
-    Ok(())
-}
-
-// ── compaction ───────────────────────────────────────────────────────────────
-
-/// `LUMEN_PROJECTS_DIR`, else `~/.claude/projects` — the daemon's resolution, so a test that
-/// points one at a tempdir points both.
-pub fn projects_dir() -> Option<PathBuf> {
-    match std::env::var("LUMEN_PROJECTS_DIR") {
-        Ok(d) if !d.trim().is_empty() => Some(PathBuf::from(d)),
-        _ => dirs::home_dir().map(|h| h.join(".claude/projects")),
-    }
-}
-
-/// `<projects>/<any project>/<session>.jsonl`. The id comes from the environment, so it is
-/// checked before it becomes part of a path.
-pub fn transcript_path(session: &str) -> Option<PathBuf> {
-    if session.is_empty()
-        || !session
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+/// Zero-context line diff, hunks headed `@@ L<new line>`. `None` when the two are too large
+/// to diff cheaply. `first_line` is the line number of `new[0]` in the file.
+pub fn line_diff(old: &[&str], new: &[&str], first_line: usize) -> Option<String> {
+    let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suf = old[pre..]
+        .iter()
+        .rev()
+        .zip(new[pre..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (o, n) = (&old[pre..old.len() - suf], &new[pre..new.len() - suf]);
+    if o.len().saturating_mul(n.len()) > MAX_DIFF_CELLS {
         return None;
     }
-    let name = format!("{session}.jsonl");
-    std::fs::read_dir(projects_dir()?)
-        .ok()?
-        .flatten()
-        .map(|e| e.path().join(&name))
-        .find(|p| p.is_file())
-}
-
-pub fn transcript_len(session: &str) -> Option<u64> {
-    std::fs::metadata(transcript_path(session)?)
-        .ok()
-        .map(|m| m.len())
-}
-
-/// Whether the transcript gained a `compact_boundary` record after byte `since`.
-///
-/// `None` when that cannot be said: no transcript, unreadable, or shorter than `since`
-/// (it was rewritten). Only lines that mention the marker are parsed, and only a
-/// `{"type":"system","subtype":"compact_boundary"}` record counts, so the phrase appearing
-/// in a file the model read does not.
-pub fn compacted_since(session: &str, since: u64) -> Option<bool> {
-    let mut f = std::fs::File::open(transcript_path(session)?).ok()?;
-    if f.metadata().ok()?.len() < since {
-        return None;
+    // LCS table over the differing middle.
+    let w = n.len() + 1;
+    let mut t = vec![0u32; (o.len() + 1) * w];
+    for i in (0..o.len()).rev() {
+        for j in (0..n.len()).rev() {
+            t[i * w + j] = if o[i] == n[j] {
+                t[(i + 1) * w + j + 1] + 1
+            } else {
+                t[(i + 1) * w + j].max(t[i * w + j + 1])
+            };
+        }
     }
-    f.seek(SeekFrom::Start(since)).ok()?;
-    for line in BufReader::new(f).split(b'\n') {
-        let line = line.ok()?;
-        if !line.windows(16).any(|w| w == b"compact_boundary") {
+    let mut out = String::new();
+    let (mut i, mut j) = (0, 0);
+    let mut open = false;
+    while i < o.len() || j < n.len() {
+        if i < o.len() && j < n.len() && o[i] == n[j] {
+            open = false;
+            i += 1;
+            j += 1;
             continue;
         }
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&line)
-            && v.get("type").and_then(|t| t.as_str()) == Some("system")
-            && v.get("subtype").and_then(|t| t.as_str()) == Some("compact_boundary")
-        {
-            return Some(true);
+        if !open {
+            out.push_str(&format!("@@ L{}\n", first_line + pre + j));
+            open = true;
+        }
+        if j >= n.len() || (i < o.len() && t[(i + 1) * w + j] >= t[i * w + j + 1]) {
+            out.push_str(&format!("-{}\n", o[i]));
+            i += 1;
+        } else {
+            out.push_str(&format!("+{}\n", n[j]));
+            j += 1;
         }
     }
-    Some(false)
+    Some(out)
+}
+
+/// The header sentence for a recall_file delta, for the caller to put in front of its blocks.
+pub fn recall_changed_header(tool: &str) -> String {
+    changed_header(tool)
+}
+
+/// A range request (`recall_file(start_line, end_line)`) as a piece: the requested range is
+/// its identity, the lines it returned are its content.
+pub fn range_sym(start: usize, end: usize, text: &str) -> Sym {
+    Sym {
+        kind: "range".into(),
+        name: Some(format!("L{start}-{end}")),
+        start,
+        end,
+        sig: blob_hash(""),
+        body: blob_hash(text),
+        whole: blob_hash(text),
+    }
+}
+
+/// The delta for a `recall_file` repeat: each requested piece that changed, as a diff scoped
+/// to that piece under its own first line, or whole when the diff is not smaller; pieces that
+/// were added, only moved or went missing; a count of the rest.
+///
+/// `gutter` renders one source line the way the first answer did, for a piece sent whole.
+pub fn recall_delta(
+    tool: &str,
+    old: &RecallBase,
+    new: &[(Sym, String)],
+    gutter: &dyn Fn(usize, &str) -> String,
+) -> String {
+    let old_syms: Vec<Sym> = old.pieces.iter().map(|(s, _)| s.clone()).collect();
+    let new_syms: Vec<Sym> = new.iter().map(|(s, _)| s.clone()).collect();
+    let (ok, nk) = (keys(&old_syms), keys(&new_syms));
+    let by_key: HashMap<&Key, usize> = ok.iter().enumerate().map(|(i, k)| (k, i)).collect();
+    let mut matched = vec![false; old.pieces.len()];
+    let label = |s: &Sym| match (s.kind.as_str(), &s.name) {
+        ("range", Some(n)) => n.clone(),
+        (_, Some(n)) => format!("{n} L{}-{}", s.start, s.end),
+        (k, None) => format!("{k} L{}-{}", s.start, s.end),
+    };
+    let whole = |s: &Sym, text: &str| {
+        text.lines()
+            .enumerate()
+            .map(|(i, l)| gutter(s.start + i, l))
+            .collect::<String>()
+    };
+
+    let mut unchanged = 0usize;
+    let mut moved: Vec<String> = vec![];
+    let mut entries = String::new();
+    for (i, (s, text)) in new.iter().enumerate() {
+        let Some(&oi) = by_key.get(&nk[i]) else {
+            entries.push_str(&format!("added {}:\n{}", label(s), whole(s, text)));
+            continue;
+        };
+        matched[oi] = true;
+        let (o, otext) = &old.pieces[oi];
+        let (sig, body) = (o.sig != s.sig, o.body != s.body);
+        if !sig && !body {
+            if (o.start, o.end) == (s.start, s.end) {
+                unchanged += 1;
+            } else {
+                moved.push(label(s));
+            }
+            continue;
+        }
+        let what = match (sig, body) {
+            (true, true) => "signature, body",
+            (true, false) => "signature",
+            _ => "body",
+        };
+        let hunks = otext.as_ref().and_then(|ot| {
+            let ol: Vec<&str> = ot.lines().collect();
+            let nl: Vec<&str> = text.lines().collect();
+            line_diff(&ol, &nl, s.start).filter(|h| h.len() < text.len())
+        });
+        match hunks {
+            Some(h) => {
+                let head = text.lines().next().unwrap_or("").trim_end();
+                entries.push_str(&format!("changed [{what}] {}: {head}\n{h}", label(s)));
+            }
+            None => entries.push_str(&format!(
+                "changed [{what}] {}:\n{}",
+                label(s),
+                whole(s, text)
+            )),
+        }
+    }
+    let removed: Vec<String> = old_syms
+        .iter()
+        .zip(&matched)
+        .filter(|(_, m)| !**m)
+        .map(|(s, _)| label(s))
+        .collect();
+
+    let mut b = changed_header(tool);
+    b.push_str(&format!("{unchanged} requested pieces unchanged.\n"));
+    if !moved.is_empty() {
+        b.push_str(&format!("moved: {}\n", moved.join(", ")));
+    }
+    if !removed.is_empty() {
+        b.push_str(&format!("removed: {}\n", removed.join(", ")));
+    }
+    b.push_str(&entries);
+    b
+}
+
+// ── the base ─────────────────────────────────────────────────────────────────
+
+/// What `smart_read` last delivered for a path.
+#[derive(Debug, Clone)]
+pub struct OutlineBase {
+    pub when_ms: i64,
+    pub file: Hash,
+    pub lines: usize,
+    /// Empty when the whole file was delivered: there is nothing to diff against.
+    pub syms: Vec<Sym>,
+}
+
+/// What `recall_file` last delivered for one request: the hash of the reply, and each piece
+/// served, with its text so a changed one can be diffed.
+#[derive(Debug, Clone)]
+pub struct RecallBase {
+    pub when_ms: i64,
+    pub text: Hash,
+    pub pieces: Vec<(Sym, Option<String>)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Base {
+    Outline(OutlineBase),
+    Recall(RecallBase),
+}
+
+impl Base {
+    pub fn when_ms(&self) -> i64 {
+        match self {
+            Base::Outline(b) => b.when_ms,
+            Base::Recall(b) => b.when_ms,
+        }
+    }
+}
+
+/// Entries kept. A session that reads more distinct things than this loses the oldest, which
+/// only costs those a repeat their saving.
+const CAP: usize = 512;
+/// Piece text kept per recall entry; past it the pieces are kept without text.
+const MAX_PIECE_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+pub struct Store {
+    map: HashMap<(String, String), (u64, Base)>,
+    seq: u64,
+}
+
+impl Store {
+    pub fn get(&self, session: &str, key: &str) -> Option<&Base> {
+        self.map
+            .get(&(session.to_string(), key.to_string()))
+            .map(|(_, b)| b)
+    }
+
+    pub fn put(&mut self, session: &str, key: &str, base: Base) {
+        self.seq += 1;
+        self.map
+            .insert((session.to_string(), key.to_string()), (self.seq, base));
+        if self.map.len() > CAP
+            && let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (s, _))| *s)
+                .map(|(k, _)| k.clone())
+        {
+            self.map.remove(&oldest);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// The process-wide base. Stdio MCP servers are per session, so one process holds one
+/// session's reads; the session id is still part of the key because a subagent shares it and
+/// a test may not.
+pub fn store() -> &'static Mutex<Store> {
+    static S: OnceLock<Mutex<Store>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Store::default()))
+}
+
+/// Truncate piece text to the per-entry budget.
+pub fn bound_pieces(pieces: Vec<(Sym, String)>) -> Vec<(Sym, Option<String>)> {
+    let mut used = 0usize;
+    pieces
+        .into_iter()
+        .map(|(s, t)| {
+            used += t.len();
+            (s, (used <= MAX_PIECE_BYTES).then_some(t))
+        })
+        .collect()
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(
+            |e| -(e.duration().as_millis() as i64),
+            |d| d.as_millis() as i64,
+        )
+}
+
+// ── invalidation ─────────────────────────────────────────────────────────────
+
+/// Whether the session has a compaction or a rewind recorded after `since_ms`.
+///
+/// `Err` when the ledger cannot say (no ledger, or no events table): the caller treats that
+/// as "possibly", the same as a yes.
+pub fn event_since(
+    db: &std::path::Path,
+    session: &str,
+    since_ms: i64,
+) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let conn = crate::meter::open_read_only(db)?;
+    conn.query_row(
+        "SELECT kind FROM session_events WHERE session_id = ?1 AND ts_ms >= ?2 \
+         ORDER BY ts_ms LIMIT 1",
+        rusqlite::params![session, since_ms],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure::{detect_lang, outline};
 
-    fn it(k: &str, n: Option<&str>, s: usize, e: usize, h: u64) -> ItemSig {
-        ItemSig {
-            k: k.into(),
-            n: n.map(String::from),
-            s,
-            e,
-            h,
-        }
+    // Vectors from `git hash-object`.
+    #[test]
+    fn blob_hash_matches_git() {
+        assert_eq!(
+            hex(&blob_hash("")),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+        assert_eq!(
+            hex(&blob_hash("hello\n")),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
+        assert_eq!(
+            hex(&blob_hash("what is up, doc?")),
+            "bd9dbf5aae1a3862dd1526723246b20206e5fc37"
+        );
     }
 
-    fn delivered(items: Vec<ItemSig>) -> Delivered {
-        Delivered {
-            hash: "aaaaaaaaaaaaaaaa".into(),
-            lines: 100,
-            items,
-            tx_len: Some(10),
+    #[test]
+    fn sha1_handles_block_boundaries() {
+        // `blob <n>\0` is 7-8 bytes, so these straddle the 56- and 64-byte padding edges.
+        // Vectors are `git hash-object` of n 'a's.
+        for (n, want) in [
+            (1, "2e65efe2a145dda7ee51d1741299f848e5bf752e"),
+            (43, "94c8020b1a20b3d8d05f83911e8904a2dca45114"),
+            (44, "e2a756bc77aa071621b4728b3e707a0a2de1dba1"),
+            (55, "d1985ddc2983785702b9a90effd5aff2f7cfdca4"),
+            (56, "1f973e890f52da1f22fa7e5620a628bc4ee74cb3"),
+            (57, "d28c6cde5a5ab0b138bd53a288c23e8c011c4171"),
+            (63, "487e57f9763ebddbed2027c4452510c0ae0f95ff"),
+            (64, "71b7a71962774fa5c721e1163f935cb61a0e09e6"),
+            (65, "44171c1993ae70a544a8e910b00347eed4b8e8f2"),
+            (119, "1325c3d76ea6a66e75dce490a0b8cb8b12233ee0"),
+            (120, "253af86ee859905852357aee8bd83b08601364ae"),
+            (128, "b9ec37e648dcec4d4f60dd267d05079a696d3267"),
+            (1000, "a50be72b20f0e3f078d252e8e56b11b4bec67509"),
+        ] {
+            assert_eq!(hex(&blob_hash(&"a".repeat(n))), want, "length {n}");
         }
     }
 
     #[test]
-    fn mode_parsing_defaults_off_and_typos_do_not_enable() {
-        assert_eq!(parse_mode(""), Mode::Off);
-        for typo in ["of", "yes", "enable", "abb", "off"] {
-            assert_eq!(parse_mode(typo), Mode::Off, "{typo:?}");
-        }
-        assert_eq!(parse_mode("on"), Mode::On);
-        assert_eq!(parse_mode(" ON "), Mode::On);
-        assert_eq!(parse_mode("ab"), Mode::Ab);
+    fn crlf_and_lf_copies_hash_equal() {
+        let lf = "fn a() {\n    1\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(blob_hash(lf), blob_hash(&crlf));
+        assert_ne!(blob_hash(lf), blob_hash("fn a() {\n    2\n}\n"));
     }
 
     #[test]
-    fn treatment_split_is_stable_balanced_and_independent_of_ranked() {
-        assert!(!treated(Mode::Off, "a.rs"));
-        assert!(treated(Mode::On, "a.rs"));
-        let paths: Vec<String> = (0..4000)
-            .map(|i| format!("src/module_{i}/file_{i}.rs"))
-            .collect();
-        let t = paths.iter().filter(|p| treated(Mode::Ab, p)).count();
-        assert!((1800..2200).contains(&t), "split {t}/4000");
-        for p in paths.iter().take(50) {
-            assert_eq!(treated(Mode::Ab, p), treated(Mode::Ab, p));
-        }
-        let same = paths
+    fn crlf_and_lf_copies_have_equal_symbols() {
+        let lf = "fn a() {\n    1\n}\n\nfn b(x: u8) {\n    x\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+        let (i1, i2) = (
+            outline(lf, detect_lang("a.rs")),
+            outline(&crlf, detect_lang("a.rs")),
+        );
+        assert_eq!(syms(lf, &i1), syms(&crlf, &i2));
+    }
+
+    fn rs(src: &str) -> Vec<Sym> {
+        syms(src, &outline(src, detect_lang("a.rs")))
+    }
+
+    #[test]
+    fn a_body_edit_a_signature_edit_add_remove_and_move_are_told_apart() {
+        let old = "fn keep() {\n    1\n}\n\nfn body() {\n    1\n}\n\nfn sig(a: u8) {\n    1\n}\n\nfn gone() {\n    1\n}\n\nfn tail() {\n    9\n}\n";
+        let new = "fn added() {\n    0\n}\n\nfn keep() {\n    1\n}\n\nfn body() {\n    2\n}\n\nfn sig(a: u16) {\n    1\n}\n\nfn tail() {\n    9\n}\n";
+        let d = diff(&rs(old), &rs(new));
+        let names = |v: &[Sym]| v.iter().filter_map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&d.added), ["added"]);
+        assert_eq!(names(&d.removed), ["gone"]);
+        let ch: Vec<_> = d
+            .changed
             .iter()
-            .filter(|p| {
-                treated(Mode::Ab, p)
-                    == (crate::ranked::arm_for(Mode::Ab, p) == crate::ranked::Arm::Ranked)
-            })
-            .count();
-        assert!(
-            (1800..2200).contains(&same),
-            "correlated with ranked split: {same}/4000"
-        );
-    }
-
-    #[test]
-    fn decide_never_stubs_without_proof_the_outline_survived() {
-        let items = vec![it("function", Some("a"), 1, 3, 1)];
-        let p = delivered(items.clone());
-        assert_eq!(decide(None, "x", &items, Some(false)), Plan::Fresh("first"));
+            .map(|c| (c.sym.name.clone().unwrap(), c.sig, c.body))
+            .collect();
         assert_eq!(
-            decide(Some(&p), &p.hash, &items, Some(true)),
-            Plan::Fresh("compacted")
+            ch,
+            [
+                ("body".to_string(), false, true),
+                ("sig".to_string(), true, false)
+            ]
         );
-        assert_eq!(
-            decide(Some(&p), &p.hash, &items, None),
-            Plan::Fresh("unverifiable")
-        );
-        assert_eq!(
-            decide(Some(&p), &p.hash, &items, Some(false)),
-            Plan::Unchanged
-        );
-    }
-
-    #[test]
-    fn decide_without_an_outline_to_diff_goes_fresh() {
-        let p = delivered(vec![]);
-        let items = vec![it("function", Some("a"), 1, 3, 1)];
-        assert_eq!(
-            decide(Some(&p), "other", &items, Some(false)),
-            Plan::Fresh("not_diffable")
-        );
-    }
-
-    #[test]
-    fn diff_classifies_edit_move_add_remove() {
-        let old = vec![
-            it("function", Some("a"), 1, 3, 10),
-            it("function", Some("b"), 5, 9, 20),
-            it("function", Some("gone"), 11, 12, 30),
-            it("function", Some("c"), 14, 20, 40),
-        ];
-        let new = vec![
-            it("function", Some("a"), 1, 3, 10),
-            it("function", Some("b"), 5, 10, 21),
-            it("function", Some("fresh"), 12, 14, 50),
-            it("function", Some("c"), 16, 22, 40),
-        ];
-        let d = diff(&old, &new);
-        assert_eq!(d.edited.len(), 1);
-        assert_eq!(d.edited[0].n.as_deref(), Some("b"));
-        assert_eq!(d.added.len(), 1);
-        assert_eq!(d.removed.len(), 1);
-        assert_eq!(d.moved.len(), 1, "short run is listed, not collapsed");
-        assert_eq!(d.moved[0].1.n.as_deref(), Some("c"));
-        assert_eq!(d.shifted_from, None);
-    }
-
-    #[test]
-    fn diff_collapses_a_trailing_shift_into_one_line() {
-        let old: Vec<ItemSig> = (0..8)
-            .map(|i| {
-                it(
-                    "function",
-                    Some(&format!("f{i}")),
-                    i * 10 + 1,
-                    i * 10 + 5,
-                    i as u64,
-                )
+        // keep was only shifted: moved, not changed. tail kept its lines: unchanged.
+        let moved: Vec<_> = d
+            .moved
+            .iter()
+            .flat_map(|m| match m {
+                Moved::One(s) => vec![s.name.clone().unwrap()],
+                Moved::Run { .. } => vec![],
             })
             .collect();
-        let mut new = old.clone();
-        for n in new.iter_mut().skip(3) {
-            n.s += 4;
-            n.e += 4;
-        }
-        new[2].e += 4;
-        new[2].h = 99;
-        let d = diff(&old, &new);
-        assert_eq!(d.edited.len(), 1);
-        assert!(d.moved.is_empty());
-        assert_eq!(d.shifted_from, Some((31, 4)));
+        assert_eq!(moved, ["keep"]);
+        let text = format_delta(20, &d);
+        assert!(text.contains("changed [body]: body"), "{text}");
+        assert!(text.contains("changed [signature]: sig"), "{text}");
+        assert!(text.contains("added: added L1-3"), "{text}");
+        assert!(text.contains("removed: gone"), "{text}");
+        assert!(text.contains("moved: keep"), "{text}");
+        assert!(text.contains("fresh=true"), "{text}");
+        assert!(!text.contains("changed [body]: keep"), "{text}");
     }
 
     #[test]
-    fn inserting_an_import_does_not_edit_the_imports_below_it() {
-        let old = vec![
-            it("import", None, 1, 1, 1),
-            it("import", None, 2, 2, 2),
-            it("function", Some("f"), 4, 9, 3),
-        ];
-        let new = vec![
-            it("import", None, 1, 1, 1),
-            it("import", None, 2, 2, 7),
-            it("import", None, 3, 3, 2),
-            it("function", Some("f"), 5, 10, 3),
-        ];
-        let d = diff(&old, &new);
-        assert!(d.edited.is_empty(), "{d:?}");
+    fn a_long_run_of_shifted_symbols_is_one_entry() {
+        let mut old = String::new();
+        for i in 0..20 {
+            old.push_str(&format!("fn f{i}() {{\n    {i}\n}}\n\n"));
+        }
+        let new = format!("fn inserted() {{}}\n\n{old}");
+        let d = diff(&rs(&old), &rs(&new));
         assert_eq!(d.added.len(), 1);
-        assert_eq!(d.added[0].h, 7);
+        assert_eq!(d.moved.len(), 1, "{:?}", d.moved);
+        assert!(matches!(
+            d.moved[0],
+            Moved::Run {
+                count: 20,
+                offset: 2,
+                ..
+            }
+        ));
+        assert_eq!(d.unchanged, 20);
+        let t = format_delta(82, &d);
+        assert!(t.contains("moved +2 lines: f0..f19 (20 symbols)"), "{t}");
     }
 
     #[test]
-    fn identical_items_give_an_empty_delta() {
-        let a = vec![it("function", Some("a"), 1, 3, 1)];
-        assert!(diff(&a, &a).is_empty());
+    fn line_diff_names_only_the_changed_lines() {
+        let o = ["a", "b", "c", "d", "e"];
+        let n = ["a", "b", "X", "d", "e", "f"];
+        let d = line_diff(&o, &n, 10).unwrap();
+        assert_eq!(d, "@@ L12\n-c\n+X\n@@ L15\n+f\n");
+        assert_eq!(line_diff(&o, &o, 1).unwrap(), "");
     }
 
     #[test]
-    fn fingerprint_changes_with_one_byte_and_is_stable() {
-        assert_eq!(fingerprint("abc"), fingerprint("abc"));
-        assert_ne!(fingerprint("abc"), fingerprint("abd"));
-        assert_eq!(fingerprint("").len(), 16);
+    fn a_recall_delta_is_a_diff_inside_the_changed_piece_only() {
+        let g = |n: usize, l: &str| format!("{n}|{l}\n");
+        let old_src = "fn a() {\n    1;\n    2;\n    3;\n}\n\nfn b() {\n    9;\n}\n";
+        let new_src = "fn a() {\n    1;\n    5;\n    3;\n}\n\nfn b() {\n    9;\n}\n";
+        let piece = |src: &str, name: &str| {
+            let items = outline(src, detect_lang("a.rs"));
+            let it: Vec<&CodeItem> = items
+                .iter()
+                .filter(|i| i.name.as_deref() == Some(name))
+                .collect();
+            let sym = syms(src, it.iter().copied()).remove(0);
+            let lines: Vec<&str> = src.lines().collect();
+            let text = lines[sym.start - 1..sym.end].join("\n");
+            (sym, text)
+        };
+        let base = RecallBase {
+            when_ms: 0,
+            text: [0; 20],
+            pieces: ["a", "b"]
+                .map(|n| {
+                    let (s, t) = piece(old_src, n);
+                    (s, Some(t))
+                })
+                .to_vec(),
+        };
+        let new: Vec<_> = ["a", "b"].map(|n| piece(new_src, n)).to_vec();
+        let d = recall_delta("recall_file", &base, &new, &g);
+        assert!(d.contains("1 requested pieces unchanged"), "{d}");
+        assert!(d.contains("changed [body] a L1-5: fn a() {"), "{d}");
+        assert!(d.contains("@@ L3\n-    2;\n+    5;\n"), "{d}");
+        assert!(!d.contains("fn b"), "{d}");
+        assert!(d.contains("fresh=true"), "{d}");
     }
 
     #[test]
-    fn state_round_trips_and_missing_state_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("l.db");
-        assert!(load(&db, "s", "/a.rs").is_none(), "no ledger yet");
-        let d = delivered(vec![it("function", Some("a"), 1, 3, 1)]);
-        save(&db, "s", "/a.rs", &d).unwrap();
-        assert_eq!(load(&db, "s", "/a.rs"), Some(d.clone()));
-        assert!(
-            load(&db, "other", "/a.rs").is_none(),
-            "another session has its own state"
-        );
-        let mut d2 = d;
-        d2.hash = "bbbbbbbbbbbbbbbb".into();
-        save(&db, "s", "/a.rs", &d2).unwrap();
-        assert_eq!(load(&db, "s", "/a.rs").unwrap().hash, "bbbbbbbbbbbbbbbb");
-    }
-
-    #[test]
-    fn stale_state_is_pruned_on_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("l.db");
-        let d = delivered(vec![]);
-        save(&db, "old", "/a.rs", &d).unwrap();
-        let conn = crate::meter::connect_db(&db).unwrap();
-        conn.execute("UPDATE read_state SET ts = datetime('now','-15 days')", [])
-            .unwrap();
-        drop(conn);
-        save(&db, "new", "/b.rs", &d).unwrap();
-        assert!(load(&db, "old", "/a.rs").is_none());
-        assert!(load(&db, "new", "/b.rs").is_some());
-    }
-
-    #[test]
-    fn transcript_path_rejects_traversal() {
-        for bad in ["", "../x", "a/b", "a\\b", "a b"] {
-            assert!(transcript_path(bad).is_none(), "{bad:?}");
+    fn the_store_is_bounded() {
+        let mut s = Store::default();
+        for i in 0..(CAP + 10) {
+            s.put(
+                "s",
+                &i.to_string(),
+                Base::Outline(OutlineBase {
+                    when_ms: 0,
+                    file: [0; 20],
+                    lines: 0,
+                    syms: vec![],
+                }),
+            );
         }
+        assert_eq!(s.len(), CAP);
+        assert!(s.get("s", "0").is_none() && s.get("s", &(CAP + 9).to_string()).is_some());
     }
 
-    /// The transcript-reading tests share the process environment, so they run in one test.
     #[test]
-    fn compaction_is_read_from_the_transcript() {
-        let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("-some-project");
-        std::fs::create_dir_all(&proj).unwrap();
-        let tx = proj.join("sess-1.jsonl");
-        // SAFETY: the only test in this crate that touches this variable.
-        unsafe { std::env::set_var("LUMEN_PROJECTS_DIR", dir.path()) };
-
-        assert_eq!(
-            compacted_since("sess-1", 0),
-            None,
-            "no transcript: unverifiable"
-        );
-        assert_eq!(transcript_len("sess-1"), None);
-
-        let user = r#"{"type":"user","message":{"content":"hi"}}"#;
-        std::fs::write(&tx, format!("{user}\n")).unwrap();
-        let at = transcript_len("sess-1").unwrap();
-        assert_eq!(compacted_since("sess-1", at), Some(false));
-
-        // The phrase inside a tool result (a file the model read) is not a boundary.
-        let quoted = r#"{"type":"user","message":{"content":"grep compact_boundary"}}"#;
-        std::fs::write(&tx, format!("{user}\n{quoted}\n")).unwrap();
-        assert_eq!(compacted_since("sess-1", at), Some(false));
-
-        let boundary =
-            r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}"#;
-        std::fs::write(&tx, format!("{user}\n{quoted}\n{boundary}\n")).unwrap();
-        assert_eq!(compacted_since("sess-1", at), Some(true));
-
-        // A boundary from before the delivery does not count against it.
-        let after = transcript_len("sess-1").unwrap();
-        assert_eq!(compacted_since("sess-1", after), Some(false));
-
-        // Shorter than the recorded offset: the file was rewritten.
-        assert_eq!(compacted_since("sess-1", after + 1000), None);
+    fn mode_parses() {
+        assert_eq!(parse_mode("on"), Mode::On);
+        assert_eq!(parse_mode("AB"), Mode::Ab);
+        assert_eq!(parse_mode(""), Mode::Off);
+        assert_eq!(parse_mode("nonsense"), Mode::Off);
     }
 }

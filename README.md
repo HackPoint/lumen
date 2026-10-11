@@ -715,10 +715,11 @@ that entry back.
 
 ### Experimental: repeat reads (1.7.0, off by default)
 
-When the model asks `smart_read` for a file it already holds an outline of, the second
-outline is a repeat of tokens it has. With `LUMEN_REPEAT_READS` set in the environment
-Claude Code passes to the MCP server, Lumen remembers what it last delivered for each
-`(session, file)` and answers a repeat with less:
+When the model asks `smart_read` or `recall_file` for something it already holds, the second
+answer repeats tokens it has. With `LUMEN_REPEAT_READS` set in the environment Claude Code
+passes to the MCP server, Lumen remembers what it last returned in this session for each
+`(session, request)` and answers a repeat with less. The built-in Read is not touched: Claude
+Code already dedups it.
 
 | value | behaviour |
 |---|---|
@@ -726,30 +727,35 @@ Claude Code passes to the MCP server, Lumen remembers what it last delivered for
 | `on` | repeats are answered as below |
 | `ab` | half of files, split by a stable hash of the path, take the new path; the other half are answered as before, and the row records what the new path would have done |
 
-| the file since the last `smart_read` | the answer |
+| the file since the last read in this session | the answer |
 |---|---|
-| unchanged | a stub: the line count, the item count and a fingerprint. Route `smart_read_unchanged` |
-| edited | a delta: the outlined items that were edited, added, removed or moved, with their line ranges. A run of items that only shifted down is one line. Route `smart_read_delta` |
-| first read, `refresh=true`, another session, or anything below | the full outline |
+| unchanged (git blob hash of the content, CRLF read as LF) | one sentence: "Unchanged since an earlier read of this file in this session. If that read is not in your context, call smart_read(path, fresh=true)." |
+| edited | a delta: only the symbols that changed — `changed [body]`, `changed [signature]`, `added`, `removed`, `moved` (same hashes, new line range) — with current line ranges and a count of the unchanged ones |
+| `recall_file` of a symbol that changed | a diff scoped to that symbol with its header as context; the whole body when the diff is not smaller |
+| first read, `fresh=true`, a compaction or rewind since, or no way to tell | the full answer |
 
-A stub or delta is only used when it costs fewer tokens than the outline it replaces. The
-stub and delta both say how to get the full outline: `smart_read(path, refresh=true)`.
+A repeat answer is used only when it costs fewer tokens than the full answer it replaces.
+The base is held in memory by `lumen-mcp`; a restart loses it and the next read is the full
+answer. "Unchanged" is decided by content, never by modification time.
 
-**Compaction.** After Claude Code compacts a conversation, the outline the stub points to
-is gone. Lumen reads the session's transcript (`~/.claude/projects/*/<session>.jsonl`,
-or `LUMEN_PROJECTS_DIR`) for a `compact_boundary` record written after the last delivery,
-and answers with the full outline if it finds one. If the transcript cannot be found or
-is shorter than it was, Lumen cannot tell, so it also answers with the full outline: a
-stub that turns out to be wrong costs more than the outline it saved.
+**Is the base still in the model's context?** The daemon reads the Claude Code transcript and
+records one `session_events` row per compaction (`compact_boundary`) and per rewind (a message
+whose parent branches back past the session's latest real prompt; subagent sidechains are
+excluded). If either happened after the base was returned, or the ledger cannot be asked, the
+answer is the full one. Two cases cannot be seen: a subagent calling through the same session
+that never saw the parent's read, and an event the daemon has not ingested yet. That is why
+every repeat answer tells the model to call again with `fresh=true`. Both tools accept
+`fresh`; it always returns the full result and is recorded, and its rate is the error rate of
+this feature.
 
-State lives in the `read_state` table of the ledger, so it survives the MCP server
-restarting, and rows older than 14 days are dropped. Each `read_events` row records
-`repeat_arm` and `repeat_plan` (`first`, `unchanged`, `delta`, `compacted`, `refresh`,
-`unverifiable`, `not_diffable`, `unchanged_not_smaller`, `delta_too_big`).
+Each `read_events` row records `repeat_arm` and `repeat_plan` (`first`, `fresh`, `unchanged`,
+`delta`, and for a full answer the reason: `compaction`, `rewind`, `unverifiable`, `no_base`,
+`outline`, `delta_too_big`, `unchanged_not_smaller`). Routes: `smart_read_unchanged`,
+`smart_read_delta`, `recall_file_unchanged`, `recall_file_delta`.
 
-Savings columns on stub and delta rows are measured against the whole file, as for every
-other route; what a repeat saves over the outline it replaces is in `repeat_plan` and the
-returned-token column.
+The size of a delta is measured per delta served against the outline it replaces, headers and
+the `fresh=true` sentence included; it is not an overall saving. Overall effect, follow-up
+rate and the `fresh=true` rate are measured live, in the `ab` split.
 
 ### Experimental: ranked outline (1.3.0, off by default)
 
