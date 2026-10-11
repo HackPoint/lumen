@@ -375,41 +375,44 @@ fn the_recorded_savings_are_priced_and_their_provenance_is_known() {
     );
 }
 
-/// The recorded ledger's own arithmetic. Skips cleanly where there is no database.
-#[test]
-fn the_recorded_ledger_agrees_with_itself() {
-    let Some(db) = lumen_core::meter::db_path() else {
-        return;
-    };
-    // Read-only: this is the installed app's ledger, and its schema is not this build's to
-    // migrate.
-    let Ok(conn) = lumen_core::meter::open_read_only(&db) else {
-        return;
-    };
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT routed_via, count(*), COALESCE(sum(full_tokens),0), \
-         COALESCE(sum(tokens_returned),0), COALESCE(sum(saved_tokens),0) \
-         FROM read_events GROUP BY routed_via ORDER BY 5 DESC",
-    ) else {
-        return;
-    };
-    let Ok(iter) = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-        ))
-    }) else {
-        return;
-    };
-    let rows: Vec<(String, i64, i64, i64, i64)> = iter.flatten().collect();
-    if rows.is_empty() {
-        return;
-    }
+/// The invariants a ledger must satisfy, asserted on whatever connection it is handed.
+///
+/// Separate from where the ledger comes from. The test used to open this machine's own
+/// ledger, so its verdict depended on how the maintainer had used Claude Code: 565 of 2,547
+/// eligible reads bypassed the optimizer there, through the fail-open guards, and a clean
+/// `main` failed. A test that is red on a clean checkout teaches everyone to ignore red. The
+/// invariants are properties of the rules, so they are checked on a ledger built in this file
+/// (`fixture`), and a real ledger is audited only on request.
+///
+/// Panics on the first violated invariant. An empty ledger is itself a failure: a test that
+/// passes on nothing is vacuous.
+fn assert_ledger_agrees(conn: &rusqlite::Connection) {
+    let mut stmt = conn
+        .prepare(
+            "SELECT routed_via, count(*), COALESCE(sum(full_tokens),0), \
+             COALESCE(sum(tokens_returned),0), COALESCE(sum(saved_tokens),0) \
+             FROM read_events GROUP BY routed_via ORDER BY 5 DESC",
+        )
+        .expect("the ledger has the read_events columns the invariants read");
+    let rows: Vec<(String, i64, i64, i64, i64)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })
+        .expect("query")
+        .flatten()
+        .collect();
+    assert!(
+        !rows.is_empty(),
+        "an empty ledger agrees with itself vacuously; refusing to pass on nothing"
+    );
 
-    println!("\n== This machine's recorded ledger ==============================");
+    println!("\n== The ledger under test ========================================");
     println!(
         "  {:<14} {:>7} {:>12} {:>12} {:>12} {:>7}",
         "routed_via", "calls", "full", "returned", "saved", "pct"
@@ -450,7 +453,7 @@ fn the_recorded_ledger_agrees_with_itself() {
             [SIGNED_SINCE],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .expect("the era query runs against the ledger schema");
     assert_eq!(
         violations, 0,
         "{violations} rows disagree with the saved_tokens rule for their era"
@@ -467,7 +470,7 @@ fn the_recorded_ledger_agrees_with_itself() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .unwrap_or((0, 0));
+        .expect("the loss query runs against the ledger schema");
     let headline: i64 = rows
         .iter()
         .filter(|r| r.0 != "builtin_read")
@@ -650,6 +653,289 @@ fn the_recorded_ledger_agrees_with_itself() {
         missed_tokens <= raw_missed,
         "excluding rows cannot increase the total"
     );
+}
+
+/// A ledger built here, on the real schema, so the invariants run on controlled data.
+///
+/// `lumen_core::meter::connect_db` creates the file in a temp dir with the production DDL and
+/// migrations, so a column added or dropped by a migration reaches this test instead of being
+/// hidden by a hand-written table. `LUMEN_DB` is never read or set: the ledger is passed by
+/// path, which also keeps these tests safe to run in parallel.
+mod fixture {
+    use rusqlite::{Connection, params};
+
+    /// Before and after the writer started recording a signed saving (see `SIGNED_SINCE`).
+    pub const OLD: &str = "2026-07-20T10:00:00Z";
+    pub const NEW: &str = "2026-08-15T10:00:00Z";
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn row(
+        conn: &Connection,
+        ts: &str,
+        route: &str,
+        path: &str,
+        lines: Option<i64>,
+        full: i64,
+        returned: i64,
+        saved: i64,
+        writer: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
+             saved_tokens,routed_via,channel,writer_hook,token_source) \
+             VALUES(?1,'Read',?2,?3,?4,?5,?6,?7,'cli',?8,'measured')",
+            params![ts, path, lines, returned, full, saved, route, writer],
+        )
+        .expect("insert fixture row");
+    }
+
+    /// A ledger that satisfies every invariant, then `tweak` applied to it. Returned
+    /// read-only, as the real ledger is opened, with the temp dir held alive alongside it.
+    pub fn ledger(
+        healthy: bool,
+        tweak: impl FnOnce(&Connection),
+    ) -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("lumen.db");
+        {
+            let conn = lumen_core::meter::connect_db(&db).expect("create ledger with real schema");
+            if healthy {
+                // Optimized reads, saving = full - returned.
+                for i in 0..30 {
+                    row(
+                        &conn,
+                        &format!("2026-08-15T10:00:{i:02}Z"),
+                        "smart_read",
+                        &format!("/w/src/f{i}.rs"),
+                        Some(400 + i),
+                        10_000,
+                        800,
+                        9_200,
+                        "lumen-mcp",
+                    );
+                }
+                // A call dearer than the file shows as a negative, in the signed era...
+                row(
+                    &conn,
+                    NEW,
+                    "recall_file",
+                    "/w/a.py",
+                    Some(350),
+                    200,
+                    260,
+                    -60,
+                    "lumen-mcp",
+                );
+                // ...and as a clamped zero before it. Both are correct for their era.
+                row(
+                    &conn,
+                    OLD,
+                    "smart_read",
+                    "/w/b.py",
+                    Some(320),
+                    100,
+                    150,
+                    0,
+                    "lumen-mcp",
+                );
+
+                // Built-in reads, which save nothing: returned == full.
+                // One eligible read that slipped past (a fail-open guard), recorded by BOTH
+                // registered meter hooks at the same (path, ts). Counted once it is 1 of 31
+                // eligible reads (3.2%); counted twice it would be 2 of 32 (6.3%) and fail,
+                // so this row also proves the de-duplication.
+                for hook in ["hook-user", "hook-repo"] {
+                    row(
+                        &conn,
+                        NEW,
+                        "builtin_read",
+                        "/w/src/leak.rs",
+                        Some(450),
+                        5_000,
+                        5_000,
+                        0,
+                        hook,
+                    );
+                }
+                // Out of scope, each for a different reason.
+                row(
+                    &conn,
+                    NEW,
+                    "builtin_read",
+                    "/w/small.rs",
+                    Some(40),
+                    300,
+                    300,
+                    0,
+                    "hook-user",
+                );
+                row(
+                    &conn,
+                    NEW,
+                    "builtin_read",
+                    "/w/shot.png",
+                    None,
+                    90_000,
+                    90_000,
+                    0,
+                    "hook-user",
+                );
+                row(
+                    &conn,
+                    NEW,
+                    "builtin_read",
+                    "/w/notes.md",
+                    Some(500),
+                    7_000,
+                    7_000,
+                    0,
+                    "hook-user",
+                );
+            }
+            tweak(&conn);
+        }
+        let conn = lumen_core::meter::open_read_only(&db).expect("reopen read-only");
+        (dir, conn)
+    }
+}
+
+/// The invariants hold on a ledger that honours the rules, with every kind of row in it.
+#[test]
+fn the_recorded_ledger_agrees_with_itself() {
+    let (_dir, conn) = fixture::ledger(true, |_| {});
+    assert_ledger_agrees(&conn);
+}
+
+// Each test below corrupts the healthy ledger in exactly one way and expects exactly the
+// assertion that guards against it. They exist so the test above cannot go green by asserting
+// nothing: if a guard were deleted or loosened, the matching test here would stop panicking.
+
+#[test]
+#[should_panic(expected = "impossible")]
+fn a_saving_larger_than_the_file_is_caught() {
+    let (_dir, conn) = fixture::ledger(true, |c| {
+        fixture::row(
+            c,
+            fixture::NEW,
+            "compress_logs",
+            "/w/x.log",
+            Some(900),
+            100,
+            0,
+            150,
+            "lumen-mcp",
+        );
+    });
+    assert_ledger_agrees(&conn);
+}
+
+#[test]
+#[should_panic(expected = "disagree with the saved_tokens rule")]
+fn a_clamped_saving_in_the_signed_era_is_caught() {
+    let (_dir, conn) = fixture::ledger(true, |c| {
+        // Returned more than the file but recorded as 0 after the writer went signed.
+        fixture::row(
+            c,
+            fixture::NEW,
+            "smart_read",
+            "/w/c.py",
+            Some(310),
+            100,
+            150,
+            0,
+            "lumen-mcp",
+        );
+    });
+    assert_ledger_agrees(&conn);
+}
+
+#[test]
+#[should_panic(expected = "disagree with the saved_tokens rule")]
+fn a_negative_saving_in_the_clamped_era_is_caught() {
+    let (_dir, conn) = fixture::ledger(true, |c| {
+        fixture::row(
+            c,
+            fixture::OLD,
+            "smart_read",
+            "/w/c.py",
+            Some(310),
+            100,
+            150,
+            -50,
+            "lumen-mcp",
+        );
+    });
+    assert_ledger_agrees(&conn);
+}
+
+#[test]
+#[should_panic(expected = "no longer describes what happened")]
+fn losses_that_swamp_the_headline_are_caught() {
+    let (_dir, conn) = fixture::ledger(true, |c| {
+        fixture::row(
+            c,
+            fixture::NEW,
+            "smart_read",
+            "/w/d.py",
+            Some(310),
+            100,
+            30_100,
+            -30_000,
+            "lumen-mcp",
+        );
+    });
+    assert_ledger_agrees(&conn);
+}
+
+#[test]
+#[should_panic(expected = "bypassed the optimizer")]
+fn a_hook_that_stopped_firing_is_caught() {
+    let (_dir, conn) = fixture::ledger(true, |c| {
+        for i in 0..12 {
+            fixture::row(
+                c,
+                &format!("2026-08-15T11:00:{i:02}Z"),
+                "builtin_read",
+                &format!("/w/src/missed{i}.rs"),
+                Some(600),
+                4_000,
+                4_000,
+                0,
+                "hook-user",
+            );
+        }
+    });
+    assert_ledger_agrees(&conn);
+}
+
+#[test]
+#[should_panic(expected = "vacuously")]
+fn an_empty_ledger_does_not_pass() {
+    let (_dir, conn) = fixture::ledger(false, |_| {});
+    assert_ledger_agrees(&conn);
+}
+
+/// This machine's own ledger, audited on request. Opt-in because its verdict is a fact about
+/// one person's usage — fail-open guards legitimately let eligible reads through — not about
+/// the code, so it cannot gate anyone else's `cargo test`.
+/// `LUMEN_TEST_REAL_LEDGER=1 cargo test -p lumen-mcp --test efficiency -- --nocapture`
+#[test]
+fn the_real_ledger_agrees_with_itself_when_asked() {
+    if std::env::var_os("LUMEN_TEST_REAL_LEDGER").is_none() {
+        println!(
+            "skipped: set LUMEN_TEST_REAL_LEDGER=1 to audit this machine's own ledger; \
+             the invariants are always checked on a fixture ledger by \
+             the_recorded_ledger_agrees_with_itself"
+        );
+        return;
+    }
+    let db = lumen_core::meter::db_path()
+        .expect("LUMEN_TEST_REAL_LEDGER is set but no ledger path resolves");
+    // Read-only: this is the installed app's ledger, and its schema is not this build's to
+    // migrate.
+    let conn = lumen_core::meter::open_read_only(&db)
+        .unwrap_or_else(|e| panic!("cannot open the ledger at {}: {e}", db.display()));
+    assert_ledger_agrees(&conn);
 }
 
 /// No Lumen tool may return more than the file it was asked about.
