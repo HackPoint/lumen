@@ -148,6 +148,30 @@ pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
     )
 }
 
+/// Whether `smart_read` or `recall_file` already answered for `path` in `session`.
+///
+/// For the intercept hook, which cannot see the server and has only the ledger to go on:
+/// a row is written when a call worked. Declined calls carry routes of their own
+/// (`would_inflate`, `ranked_*`) and do not count, nor does a built-in Read of the path.
+///
+/// Fails open in every direction, because the caller uses a yes to withhold a Read: no
+/// ledger, one that is locked, corrupt or lacks the table, a path spelled differently, all
+/// answer `false`. Read-only, so nothing is created, migrated or written; a writer holding
+/// the ledger delays this by at most 250 ms.
+pub fn lumen_answered(db: &std::path::Path, session: &str, path: &str) -> bool {
+    let Ok(conn) = open_read_only(db) else {
+        return false;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    conn.query_row(
+        "SELECT 1 FROM read_events WHERE session_id = ?1 AND path = ?2 \
+         AND routed_via IN ('smart_read', 'recall_file') LIMIT 1",
+        params![session, path],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// Give the ledger's `-wal` and `-shm` back the write bits the ledger itself has.
 ///
 /// SQLite creates both with the ledger's mode. Opened while the ledger is read-only, it
@@ -503,6 +527,44 @@ mod tests {
         // install's ledger may use it.
         drop(connect_db(&path).unwrap());
         assert!(!read_events_columns(&path).contains(&"is_subagent".to_string()));
+    }
+
+    #[test]
+    fn lumen_answered_counts_only_a_working_route_for_this_session_and_path() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        let put = |session: &str, path: &str, route: &str| {
+            insert_read_event_at(
+                &db,
+                path,
+                Some(400),
+                300,
+                4000,
+                3700,
+                route,
+                "cli",
+                "t",
+                Some(session),
+                None,
+                None,
+                &RankedMeta::default(),
+            )
+            .unwrap();
+        };
+        assert!(!lumen_answered(&db, "s", "/a.rs"), "no ledger yet");
+        assert!(!db.exists(), "asking created a ledger");
+
+        put("s", "/a.rs", "would_inflate");
+        put("s", "/a.rs", "builtin_read");
+        put("s", "/b.rs", "smart_read");
+        put("t", "/a.rs", "smart_read");
+        assert!(!lumen_answered(&db, "s", "/a.rs"));
+
+        put("s", "/a.rs", "recall_file");
+        assert!(lumen_answered(&db, "s", "/a.rs"));
+        assert!(lumen_answered(&db, "s", "/b.rs"));
+        assert!(lumen_answered(&db, "t", "/a.rs"));
+        assert!(!lumen_answered(&db, "u", "/a.rs"));
     }
 
     #[test]
