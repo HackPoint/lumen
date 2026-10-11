@@ -1,12 +1,14 @@
 pub mod compress;
 pub mod coverage;
 pub mod econ;
+pub mod events;
 pub mod faults;
 pub mod meter;
 pub mod project;
 pub mod ranked;
 pub mod rates;
 pub mod record;
+pub mod repeat;
 pub mod report;
 pub mod schema;
 pub mod structure;

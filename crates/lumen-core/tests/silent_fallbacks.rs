@@ -207,6 +207,12 @@ const ALLOWED: &[Allowed] = &[
         "Unset selects the default outline mode.",
     ),
     allow(
+        "crates/lumen-core/src/repeat.rs",
+        OrDefault,
+        "LUMEN_REPEAT_READS",
+        "Unset selects the default: off.",
+    ),
+    allow(
         "crates/lumen-core/src/report.rs",
         NumberForError,
         "INCLUDE_SOURCE_BYTE_CAP",
@@ -279,6 +285,14 @@ const ALLOWED: &[Allowed] = &[
          repeat a notice.",
     ),
     // ── lumen-daemon ──────────────────────────────────────────────────────────────
+    allow(
+        "crates/lumen-daemon/src/main.rs",
+        OrDefault,
+        "g.remove(file)",
+        "No tracker for a transcript file means it has not been read before: an empty tracker \
+         is the true starting state, and a tail read that lost its tracker records nothing \
+         until the next boundary rather than inventing an event.",
+    ),
     allow(
         "crates/lumen-daemon/src/main.rs",
         OrDefault,
