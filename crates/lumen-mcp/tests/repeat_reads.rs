@@ -430,6 +430,34 @@ fn a_rewind_between_two_reads_yields_the_full_outline() {
 }
 
 #[test]
+fn a_resync_between_two_reads_yields_the_full_outline() {
+    let rig = rig();
+    let f = rig.file("a.rs", &source(40, 6));
+    let mut s = rig.start(ON);
+    s.read(&f);
+    rig.event("resync", "resync-1-0");
+    let after = s.read(&f);
+    assert!(after.text.contains("— outline"), "{}", after.text);
+    assert!(s.read(&f).text.starts_with("Unchanged since"));
+    s.end();
+    assert_eq!(plans(&rig), ["first", "resync", "unchanged"]);
+}
+
+#[test]
+fn a_resync_between_two_reads_is_not_answered_with_a_delta_either() {
+    let rig = rig();
+    let (before, after) = edited_fixture();
+    let f = rig.file("a.rs", &before);
+    let mut s = rig.start(ON);
+    s.read(&f);
+    rig.event("resync", "resync-1-0");
+    rig.file("a.rs", &after);
+    let d = s.read(&f);
+    s.end();
+    assert!(d.text.contains("— outline"), "{}", d.text);
+}
+
+#[test]
 fn an_event_from_before_the_read_does_not_invalidate_it() {
     let rig = rig();
     rig.event("compaction", "old");

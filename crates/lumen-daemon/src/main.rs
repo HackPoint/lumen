@@ -551,7 +551,14 @@ async fn ingest_from(
     // One tracker per transcript, kept across polls: a rewind is a line that branches back past
     // lines read earlier. A restart rebuilds it from offset 0, and the rows it re-derives are
     // ignored by their primary key.
-    let mut tracker = take_tracker(&fname, start);
+    let (mut tracker, lost) = take_tracker(&fname, start);
+    if lost {
+        let session = transcript_session(complete, path);
+        let ev = lumen_core::events::Event::resync(session, lumen_core::repeat::now_ms(), start);
+        if let Err(e) = record_event(pool, &ev, &fname).await {
+            logline!("! could not record a resync in {fname}: {e}");
+        }
+    }
 
     for line in complete.lines() {
         if line.trim().is_empty() {
@@ -669,12 +676,38 @@ fn trackers()
     T.get_or_init(Default::default)
 }
 
-fn take_tracker(file: &str, start: u64) -> lumen_core::events::Tracker {
+/// The tracker for `file`, and whether it was lost. From byte 0 a fresh one is the true
+/// starting state, and it sees the whole file. A tail read that finds none has missed whatever
+/// came before `start`: a rewind in the lines it is about to read has no parent to branch from.
+fn take_tracker(file: &str, start: u64) -> (lumen_core::events::Tracker, bool) {
     if start == 0 {
-        return Default::default();
+        return (Default::default(), false);
     }
     let mut g = trackers().lock().unwrap_or_else(|p| p.into_inner());
-    g.remove(file).unwrap_or_default()
+    match g.remove(file) {
+        Some(t) => (t, false),
+        None => (Default::default(), true),
+    }
+}
+
+/// The session a transcript's lines belong to: the first `sessionId` among them, else the
+/// file's name, which is the session id for a Claude Code transcript.
+fn transcript_session(lines: &str, path: &Path) -> String {
+    lines
+        .lines()
+        .find_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()?
+                .get("sessionId")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned()
+        })
 }
 
 fn put_tracker(file: String, t: lumen_core::events::Tracker) {
@@ -682,7 +715,7 @@ fn put_tracker(file: String, t: lumen_core::events::Tracker) {
     g.insert(file, t);
 }
 
-/// One row per compaction or rewind. An event with no usable timestamp is stamped now, which
+/// One row per compaction, rewind or resync. An event with no usable timestamp is stamped now, which
 /// is the safe direction: it invalidates every earlier read rather than none.
 async fn record_event(
     pool: &SqlitePool,
@@ -1165,6 +1198,135 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    // ── A transcript tailed without its tracker is resynced, not trusted ───────
+
+    fn tree_line(ty: &str, u: &str, p: &str, extra: &str) -> String {
+        let p = if p.is_empty() {
+            "null".to_string()
+        } else {
+            format!("\"{p}\"")
+        };
+        format!(
+            r#"{{"type":"{ty}","uuid":"{u}","parentUuid":{p},"sessionId":"sess","timestamp":"2026-06-01T16:14:05.157Z"{extra}}}"#
+        )
+    }
+    fn tree_prompt(u: &str, p: &str) -> String {
+        tree_line("user", u, p, r#","message":{"content":"hi"}"#)
+    }
+    fn tree_asst(u: &str, p: &str) -> String {
+        tree_line("assistant", u, p, r#","message":{"content":[]}"#)
+    }
+    fn append_line(path: &Path, line: &str) {
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+    fn lose_tracker(path: &Path) {
+        trackers()
+            .lock()
+            .unwrap()
+            .remove(&path.to_string_lossy().to_string());
+    }
+    async fn event_kinds(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT kind FROM session_events ORDER BY kind")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_rewind_after_the_tracker_was_lost_still_reaches_the_gate() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        write_jsonl(
+            &jsonl,
+            &[
+                &tree_prompt("u1", ""),
+                &tree_asst("a1", "u1"),
+                &tree_prompt("u2", "a1"),
+                &tree_asst("a2", "u2"),
+            ],
+        );
+        let (tx, _rx) = broadcast::channel(4);
+        let off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        // The model read a file here; the gate asks about everything after this instant.
+        let read_at = lumen_core::repeat::now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        lose_tracker(&jsonl);
+        // Esc-Esc back past u2: the tracker that could have seen it is gone.
+        append_line(&jsonl, &tree_prompt("u3", "a1"));
+        ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+
+        let seen =
+            lumen_core::repeat::event_since(&dir.path().join("test.db"), "sess", read_at).unwrap();
+        assert_eq!(seen.as_deref(), Some("resync"));
+    }
+
+    #[tokio::test]
+    async fn a_tail_read_that_lost_its_tracker_records_one_resync_stamped_now() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        write_jsonl(&jsonl, &[&tree_prompt("u1", ""), &tree_asst("a1", "u1")]);
+        let (tx, _rx) = broadcast::channel(4);
+        let off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        lose_tracker(&jsonl);
+
+        let before = lumen_core::repeat::now_ms();
+        append_line(&jsonl, &tree_prompt("u2", "a1"));
+        let off = ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+        let after = lumen_core::repeat::now_ms();
+
+        let rows: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT session_id, kind, ts_ms FROM session_events")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0].0.as_str(), rows[0].1.as_str()), ("sess", "resync"));
+        assert!((before..=after).contains(&rows[0].2), "{rows:?}");
+
+        // The tracker is back: the next tail read is trusted and adds nothing.
+        append_line(&jsonl, &tree_asst("a2", "u2"));
+        ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+        assert_eq!(event_kinds(&pool).await, ["resync"]);
+    }
+
+    #[tokio::test]
+    async fn losing_the_tracker_twice_is_two_resyncs() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        write_jsonl(&jsonl, &[&tree_prompt("u1", ""), &tree_asst("a1", "u1")]);
+        let (tx, _rx) = broadcast::channel(4);
+        let mut off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        for (u, p) in [("u2", "a1"), ("u3", "u2")] {
+            lose_tracker(&jsonl);
+            append_line(&jsonl, &tree_prompt(u, p));
+            off = ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(event_kinds(&pool).await, ["resync", "resync"]);
+    }
+
+    #[tokio::test]
+    async fn a_new_transcript_and_a_replay_from_zero_record_no_resync() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        write_jsonl(&jsonl, &[&tree_prompt("u1", ""), &tree_asst("a1", "u1")]);
+        let (tx, _rx) = broadcast::channel(4);
+        let off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        append_line(&jsonl, &tree_prompt("u2", "a1"));
+        ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+        // A restart's initial pass starts every transcript at zero, with or without a tracker.
+        ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        lose_tracker(&jsonl);
+        ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        assert_eq!(event_kinds(&pool).await, Vec::<String>::new());
     }
 
     // ── An assistant record with no usage is skipped, not fatal ────────────────
