@@ -30,6 +30,9 @@ pub struct CodeItem {
     pub end_line: usize,
     pub start_byte: usize,
     pub end_byte: usize,
+    /// Where the item's `{}` / indented body begins, when it has one. Bytes before it are the
+    /// signature. `None` for items with no body (imports, consts, a bare `struct A;`).
+    pub body_start_byte: Option<usize>,
 }
 
 pub fn outline(src: &str, lang: Lang) -> Vec<CodeItem> {
@@ -76,6 +79,7 @@ fn whole_file_item(src: &str) -> Vec<CodeItem> {
         end_line: line_count,
         start_byte: 0,
         end_byte: src.len(),
+        body_start_byte: None,
     }]
 }
 
@@ -90,7 +94,19 @@ fn to_item(node: &Node, src: &str, lang: &Lang) -> Option<CodeItem> {
         end_line: end.row + 1,
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
+        body_start_byte: body_of(node).map(|b| b.start_byte()),
     })
+}
+
+/// The node holding an item's body, looking through a Python decorator or a TS `export`.
+fn body_of<'t>(node: &Node<'t>) -> Option<Node<'t>> {
+    if let Some(b) = node.child_by_field_name("body") {
+        return Some(b);
+    }
+    let inner = node
+        .child_by_field_name("definition")
+        .or_else(|| node.child_by_field_name("declaration"))?;
+    body_of(&inner)
 }
 
 fn classify(node: &Node, src: &str, lang: &Lang) -> Option<(&'static str, Option<String>)> {

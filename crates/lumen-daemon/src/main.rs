@@ -548,10 +548,19 @@ async fn ingest_from(
     let is_subagent = lumen_core::project::is_subagent_path(&fname);
     let project = lumen_core::project::label_for_transcript(&fname);
     let mut new = 0u64;
+    // One tracker per transcript, kept across polls: a rewind is a line that branches back past
+    // lines read earlier. A restart rebuilds it from offset 0, and the rows it re-derives are
+    // ignored by their primary key.
+    let mut tracker = take_tracker(&fname, start);
 
     for line in complete.lines() {
         if line.trim().is_empty() {
             continue;
+        }
+        if let Some(ev) = tracker.feed(line)
+            && let Err(e) = record_event(pool, &ev, &fname).await
+        {
+            logline!("! could not record a {} in {fname}: {e}", ev.kind.as_str());
         }
         let rec: Record = match serde_json::from_str(line) {
             Ok(r) => r,
@@ -644,11 +653,55 @@ async fn ingest_from(
             }
         }
     }
+    put_tracker(fname.clone(), tracker);
     if new > 0 {
         logline!("  ({new} new from {fname})");
     }
 
     Ok(start + (last_nl as u64) + 1)
+}
+
+fn trackers()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, lumen_core::events::Tracker>> {
+    static T: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, lumen_core::events::Tracker>>,
+    > = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+fn take_tracker(file: &str, start: u64) -> lumen_core::events::Tracker {
+    if start == 0 {
+        return Default::default();
+    }
+    let mut g = trackers().lock().unwrap_or_else(|p| p.into_inner());
+    g.remove(file).unwrap_or_default()
+}
+
+fn put_tracker(file: String, t: lumen_core::events::Tracker) {
+    let mut g = trackers().lock().unwrap_or_else(|p| p.into_inner());
+    g.insert(file, t);
+}
+
+/// One row per compaction or rewind. An event with no usable timestamp is stamped now, which
+/// is the safe direction: it invalidates every earlier read rather than none.
+async fn record_event(
+    pool: &SqlitePool,
+    ev: &lumen_core::events::Event,
+    file: &str,
+) -> Result<(), sqlx::Error> {
+    let ts = ev.ts_ms.unwrap_or_else(lumen_core::repeat::now_ms);
+    sqlx::query(
+        "INSERT OR IGNORE INTO session_events (session_id, kind, uuid, ts_ms, source_file)
+         VALUES (?,?,?,?,?)",
+    )
+    .bind(&ev.session_id)
+    .bind(ev.kind.as_str())
+    .bind(&ev.uuid)
+    .bind(ts)
+    .bind(file)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Set once a calibration row has been refused and logged.
@@ -1041,6 +1094,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1, "the one good line must still be inserted");
+    }
+
+    // ── Compaction and rewind are persisted, once each, across polls and restarts ──
+
+    #[tokio::test]
+    async fn a_compaction_and_a_rewind_are_each_recorded_once() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        let rec = |ty: &str, u: &str, p: &str, extra: &str| {
+            let p = if p.is_empty() {
+                "null".to_string()
+            } else {
+                format!("\"{p}\"")
+            };
+            format!(
+                r#"{{"type":"{ty}","uuid":"{u}","parentUuid":{p},"sessionId":"sess","timestamp":"2026-06-01T16:14:05.157Z"{extra}}}"#
+            )
+        };
+        let prompt = |u: &str, p: &str| rec("user", u, p, r#","message":{"content":"hi"}"#);
+        let asst = |u: &str, p: &str| rec("assistant", u, p, r#","message":{"content":[]}"#);
+        let first = [
+            prompt("u1", ""),
+            asst("a1", "u1"),
+            prompt("u2", "a1"),
+            asst("a2", "u2"),
+            rec("system", "c1", "a2", r#","subtype":"compact_boundary""#),
+        ];
+        let second = [prompt("u3", "a1")]; // branches back past u2: a rewind
+        write_jsonl(
+            &jsonl,
+            &first.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+
+        let (tx, _rx) = broadcast::channel(4);
+        let off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&jsonl)
+                .unwrap();
+            writeln!(f, "{}", second[0]).unwrap();
+        }
+        ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+        // A restart replays the file from zero: the same two rows, not four.
+        ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT session_id, kind, uuid, ts_ms FROM session_events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "sess".into(),
+                    "compaction".into(),
+                    "c1".into(),
+                    1_780_330_445_157
+                ),
+                (
+                    "sess".into(),
+                    "rewind".into(),
+                    "u3".into(),
+                    1_780_330_445_157
+                ),
+            ]
+        );
     }
 
     // ── An assistant record with no usage is skipped, not fatal ────────────────

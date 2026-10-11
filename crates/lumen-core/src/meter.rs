@@ -209,6 +209,10 @@ pub struct RankedMeta {
     /// What the outline was aiming to cost. Swept downward during the A/B, so a row
     /// without it cannot be placed on the follow-up-rate curve.
     pub target_outline: Option<i64>,
+    /// 1.7.0 repeat-read provenance, carried here because this is the struct every
+    /// writer already threads through. `None` while the flag is off.
+    pub repeat_arm: Option<String>,
+    pub repeat_plan: Option<String>,
 }
 
 /// Thirteen parameters, and the alternative is worse.
@@ -338,9 +342,10 @@ pub fn insert_read_event_at(
         "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
          saved_tokens,routed_via,channel,session_id,file_mtime,req_key,\
          writer_hook,token_source,budget,s_min,econ_context,econ_rounds,econ_output,\
-         econ_source,k_selected,n_total,coeff_version,target_outline) \
+         econ_source,k_selected,n_total,coeff_version,target_outline,\
+         repeat_arm,repeat_plan) \
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'lumen-mcp','measured',\
-                ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
         params![
             now_iso(),
             tool_name,
@@ -364,6 +369,8 @@ pub fn insert_read_event_at(
             meta.n_total,
             meta.coeff_version,
             meta.target_outline,
+            meta.repeat_arm.as_deref(),
+            meta.repeat_plan.as_deref(),
         ],
     )
     .map_err(WriteError::at("insert"))?;

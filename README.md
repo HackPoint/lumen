@@ -713,6 +713,50 @@ the `env` block when it runs again or upgrades Lumen. Removing the `Bash` entry 
 `PostToolUse` also stops it, but only until the next time Setup runs, because Setup puts
 that entry back.
 
+### Experimental: repeat reads (1.7.0, off by default)
+
+When the model asks `smart_read` or `recall_file` for something it already holds, the second
+answer repeats tokens it has. With `LUMEN_REPEAT_READS` set in the environment Claude Code
+passes to the MCP server, Lumen remembers what it last returned in this session for each
+`(session, request)` and answers a repeat with less. The built-in Read is not touched: Claude
+Code already dedups it.
+
+| value | behaviour |
+|---|---|
+| unset, or anything unrecognised | **off** — every read is answered as it always was, and nothing is remembered |
+| `on` | repeats are answered as below |
+| `ab` | half of files, split by a stable hash of the path, take the new path; the other half are answered as before, and the row records what the new path would have done |
+
+| the file since the last read in this session | the answer |
+|---|---|
+| unchanged (git blob hash of the content, CRLF read as LF) | one sentence: "Unchanged since an earlier read of this file in this session. If that read is not in your context, call smart_read(path, fresh=true)." |
+| edited | a delta: only the symbols that changed — `changed [body]`, `changed [signature]`, `added`, `removed`, `moved` (same hashes, new line range) — with current line ranges and a count of the unchanged ones |
+| `recall_file` of a symbol that changed | a diff scoped to that symbol with its header as context; the whole body when the diff is not smaller |
+| first read, `fresh=true`, a compaction or rewind since, or no way to tell | the full answer |
+
+A repeat answer is used only when it costs fewer tokens than the full answer it replaces.
+The base is held in memory by `lumen-mcp`; a restart loses it and the next read is the full
+answer. "Unchanged" is decided by content, never by modification time.
+
+**Is the base still in the model's context?** The daemon reads the Claude Code transcript and
+records one `session_events` row per compaction (`compact_boundary`) and per rewind (a message
+whose parent branches back past the session's latest real prompt; subagent sidechains are
+excluded). If either happened after the base was returned, or the ledger cannot be asked, the
+answer is the full one. Two cases cannot be seen: a subagent calling through the same session
+that never saw the parent's read, and an event the daemon has not ingested yet. That is why
+every repeat answer tells the model to call again with `fresh=true`. Both tools accept
+`fresh`; it always returns the full result and is recorded, and its rate is the error rate of
+this feature.
+
+Each `read_events` row records `repeat_arm` and `repeat_plan` (`first`, `fresh`, `unchanged`,
+`delta`, and for a full answer the reason: `compaction`, `rewind`, `unverifiable`, `no_base`,
+`outline`, `delta_too_big`, `unchanged_not_smaller`). Routes: `smart_read_unchanged`,
+`smart_read_delta`, `recall_file_unchanged`, `recall_file_delta`.
+
+The size of a delta is measured per delta served against the outline it replaces, headers and
+the `fresh=true` sentence included; it is not an overall saving. Overall effect, follow-up
+rate and the `fresh=true` rate are measured live, in the `ab` split.
+
 ### Experimental: ranked outline (1.3.0, off by default)
 
 `smart_read`'s outline can be sized by the economics of the call rather than by a fixed
