@@ -469,20 +469,45 @@ fn intercept(input: &[u8], env: &Env) -> Outcome {
     // One redirect per file per session. A second Read of the same file means the model
     // was told about Lumen and came back anyway, so that route failed; blocking again
     // would strand it.
+    //
+    // The exception is a model that came back because the route *worked*: smart_read or
+    // recall_file already answered for this path in this session, and it wants the code.
+    // Releasing then costs the whole file, and Claude Code's own unchanged-file dedup
+    // cannot help, because the blocked first Read never entered its cache (#36). That
+    // Read gets one more redirect, to recall_file, and only one: a model that really
+    // needs the file whole (to Edit it, say) retries and gets it, so nothing here can
+    // strand a model. The valve still exists for the case it was written for. With no
+    // successful smart_read or recall_file recorded for the path (tools down, denied, or
+    // never called) the retry is released exactly as before.
     let marker = env.state_dir.join(format!(
         "lumen_intercept_{}",
         session_key(run.session.as_deref())
     ));
-    let seen = match std::fs::read_to_string(&marker) {
-        Ok(text) => text.lines().any(|l| l == shown),
-        // No marker yet. An unreadable one fails the append below, which fails open.
-        Err(_) => false,
+    // No marker yet is no text. An unreadable one fails the append below, which fails open.
+    let text = std::fs::read_to_string(&marker).ok();
+    let has_line = |want: &str| {
+        text.as_deref()
+            .is_some_and(|t| t.lines().any(|l| l == want))
     };
-    if seen {
-        run.fault("retry_escape_valve", Some(&shown), Some(lines), None);
+    let seen = has_line(&shown);
+    let pointed_line = format!("{POINTED_PREFIX}{shown}");
+    let pointed = has_line(&pointed_line);
+    let served = !is_log && lumen_served(env, run.session.as_deref(), &shown);
+    if seen && (pointed || !served) {
+        let detail = served.then(|| AFTER_LUMEN_READ.to_string());
+        run.fault("retry_escape_valve", Some(&shown), Some(lines), detail);
         return run.out;
     }
-    if let Err(e) = append_marker(&marker, &shown) {
+    let mut record = String::new();
+    if !seen {
+        record.push_str(&shown);
+        record.push('\n');
+    }
+    if served {
+        record.push_str(&pointed_line);
+        record.push('\n');
+    }
+    if let Err(e) = append_marker(&marker, &record) {
         // Without the marker the retry the message promises would be blocked too, and
         // the model would loop. The shell hook swallowed this error and blocked anyway.
         run.say(format!(
@@ -499,8 +524,32 @@ fn intercept(input: &[u8], env: &Env) -> Outcome {
         return run.out;
     }
     run.out.exit = 2;
-    run.say(redirect_message(&shown, lines, is_log));
+    run.say(if served {
+        served_message(&shown, lines)
+    } else {
+        redirect_message(&shown, lines, is_log)
+    });
     run.out
+}
+
+/// Marker line prefix: this path was already sent to recall_file after a working smart_read.
+/// A prefix no path starts with, so it cannot be mistaken for the path lines.
+const POINTED_PREFIX: &str = "after-lumen-read\t";
+
+/// `detail` on the `retry_escape_valve` fault of a Read released after smart_read or
+/// recall_file had answered for the path, so those can be counted apart from the valve's
+/// intended use.
+const AFTER_LUMEN_READ: &str = "after_lumen_read";
+
+/// Whether smart_read or recall_file already answered for `path` in this session. The hook
+/// cannot see the server; the ledger the server writes is the only place that records that
+/// a call worked. Fails open: no session, no ledger, or an unreadable one answer "no", and
+/// the valve releases the retry as it always did. See [`meter::lumen_answered`].
+fn lumen_served(env: &Env, session: Option<&str>, path: &str) -> bool {
+    let (Some(session), Some(db)) = (session, env.db_path()) else {
+        return false;
+    };
+    meter::lumen_answered(&db, session, path)
 }
 
 /// The marker file's name component: the session id reduced to `[A-Za-z0-9_-]`.
@@ -517,12 +566,12 @@ fn session_key(session: Option<&str>) -> String {
     }
 }
 
-fn append_marker(marker: &Path, path: &str) -> std::io::Result<()> {
+fn append_marker(marker: &Path, lines: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(marker)?;
-    writeln!(f, "{path}")
+    f.write_all(lines.as_bytes())
 }
 
 /// Newline bytes in the file, read in chunks: this runs before every Read and must not
@@ -571,6 +620,20 @@ fn redirect_message(path: &str, lines: i64, is_log: bool) -> String {
              Use smart_read(mode=\"full\") only if you truly need every line.\n\n{RETRY}"
         )
     }
+}
+
+/// What the model is told when it reads, whole, a file that smart_read or recall_file has
+/// already answered for. No figures, for the reason given on [`redirect_message`].
+fn served_message(path: &str, lines: i64) -> String {
+    format!(
+        "Lumen intercept: {path} is {lines} lines, and smart_read or recall_file has already\n\
+         answered for it in this session. Reading it whole puts every line in context again.\n\
+         Fetch only what you need, using the item names from the outline you already have:\n  \
+         lumen:recall_file(path=\"{path}\", names=[\"<item>\"])\n  \
+         lumen:recall_file(path=\"{path}\", start_line=N, end_line=M)\n\n\
+         If you do need the whole file (to Edit it, for example), retry this exact Read once\n\
+         more — it will be allowed through."
+    )
 }
 
 #[cfg(test)]
@@ -656,6 +719,34 @@ mod tests {
     }
 
     #[test]
+    fn the_served_message_carries_no_figures() {
+        let m = served_message("/p/x.rs", 400);
+        assert!(!m.contains('%'), "{m}");
+        assert!(!m.contains("typically"), "{m}");
+        assert!(!m.contains("~"), "{m}");
+        assert!(m.contains("allowed through"), "{m}");
+    }
+
+    #[test]
+    fn smart_read_before_the_first_read_gets_one_redirect_to_recall_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let var = ledger_env(tmp.path());
+        seed_row(&tmp.path().join("lumen.db"), "s-1", &file, "smart_read");
+        let payload = read_payload(&file, "s-1");
+
+        let first = hook("intercept", &payload, &var, tmp.path());
+        assert_eq!(first.exit, 2, "{first:?}");
+        assert!(first.stderr[0].contains("already"), "{first:?}");
+        assert!(
+            first.stderr[0].contains("lumen:recall_file(path="),
+            "{first:?}"
+        );
+        let retry = hook("intercept", &payload, &var, tmp.path());
+        assert_eq!((retry.exit, retry.stderr.len()), (0, 0), "{retry:?}");
+    }
+
+    #[test]
     fn the_redirect_message_carries_no_figures() {
         for is_log in [false, true] {
             let m = redirect_message("/p/x.rs", 400, is_log);
@@ -711,6 +802,170 @@ mod tests {
         // Another session has its own marker, so it is blocked once too.
         let other = hook("intercept", &read_payload(&file, "s-2"), &var, tmp.path());
         assert_eq!(other.exit, 2, "{other:?}");
+    }
+
+    /// A ledger row as the MCP server writes one: `routed_via` is the route it took, and a
+    /// declined call carries a route of its own, so only the two served routes count.
+    fn seed_row(db: &Path, session: &str, path: &Path, routed_via: &str) {
+        lumen_core::meter::insert_read_event_at(
+            db,
+            &path.to_string_lossy(),
+            Some(400),
+            300,
+            4000,
+            3700,
+            routed_via,
+            "cli",
+            &format!("mcp__lumen__{routed_via}"),
+            Some(session),
+            None,
+            None,
+            &lumen_core::meter::RankedMeta::default(),
+        )
+        .unwrap();
+    }
+
+    /// An environment pointing the ledger and the fault spool into `dir`.
+    fn ledger_env(dir: &Path) -> impl Fn(&str) -> Option<String> + use<> {
+        vars(&[
+            ("LUMEN_DB", dir.join("lumen.db").to_str().unwrap()),
+            (
+                "LUMEN_FAULT_SPOOL",
+                dir.join("faults.jsonl").to_str().unwrap(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_retry_after_a_working_smart_read_is_sent_to_recall_file_not_released() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let var = ledger_env(tmp.path());
+        let payload = read_payload(&file, "s-1");
+
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        // The model did as told and smart_read worked.
+        seed_row(&tmp.path().join("lumen.db"), "s-1", &file, "smart_read");
+
+        let again = hook("intercept", &payload, &var, tmp.path());
+        assert_eq!(
+            again.exit, 2,
+            "released a full read after smart_read: {again:?}"
+        );
+        let msg = again.stderr.join("\n");
+        assert!(msg.contains("lumen:recall_file(path="), "{msg}");
+        assert!(msg.contains("names=["), "{msg}");
+        assert!(msg.contains("smart_read"), "{msg}");
+        assert!(msg.contains("retry"), "must say how to get past it: {msg}");
+        let spool = tmp.path().join("faults.jsonl");
+        assert!(spool_lines(&spool).is_empty(), "a block is not a fault");
+    }
+
+    #[test]
+    fn a_model_that_insists_is_never_blocked_a_third_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let var = ledger_env(tmp.path());
+        let payload = read_payload(&file, "s-1");
+        let spool = tmp.path().join("faults.jsonl");
+
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        seed_row(&tmp.path().join("lumen.db"), "s-1", &file, "smart_read");
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+
+        // It needs the whole file (to Edit it, say). The valve holds as before.
+        for _ in 0..3 {
+            let out = hook("intercept", &payload, &var, tmp.path());
+            assert_eq!((out.exit, out.stderr.len()), (0, 0), "{out:?}");
+        }
+        let recs = spool_lines(&spool);
+        assert_eq!(recs.len(), 3, "{recs:?}");
+        assert_eq!(recs[0]["variant"], "retry_escape_valve");
+        assert_eq!(recs[0]["detail"], "after_lumen_read");
+    }
+
+    #[test]
+    fn recall_file_alone_also_counts_as_a_working_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let var = ledger_env(tmp.path());
+        let payload = read_payload(&file, "s-1");
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        seed_row(&tmp.path().join("lumen.db"), "s-1", &file, "recall_file");
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+    }
+
+    #[test]
+    fn a_path_with_no_successful_smart_read_is_still_released_on_the_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let other = tmp.path().join("other.rs");
+        let var = ledger_env(tmp.path());
+        let db = tmp.path().join("lumen.db");
+        let payload = read_payload(&file, "s-1");
+        let spool = tmp.path().join("faults.jsonl");
+
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        // None of these show the tools working for this path in this session: another
+        // path, another session, a declined call, and a builtin read of the very path.
+        seed_row(&db, "s-1", &other, "smart_read");
+        seed_row(&db, "s-2", &file, "smart_read");
+        seed_row(&db, "s-1", &file, "would_inflate");
+        seed_row(&db, "s-1", &file, "builtin_read");
+
+        let retry = hook("intercept", &payload, &var, tmp.path());
+        assert_eq!((retry.exit, retry.stderr.len()), (0, 0), "{retry:?}");
+        let recs = spool_lines(&spool);
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0]["variant"], "retry_escape_valve");
+        assert!(recs[0]["detail"].is_null(), "{recs:?}");
+    }
+
+    #[test]
+    fn a_ledger_that_cannot_be_read_releases_the_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let payload = read_payload(&file, "s-1");
+
+        // No ledger at all, and the hook does not create one.
+        let var = ledger_env(tmp.path());
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 0);
+        assert!(!tmp.path().join("lumen.db").exists());
+
+        // A ledger that is not a database.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let payload = read_payload(&file, "s-1");
+        std::fs::write(tmp.path().join("lumen.db"), "this is not sqlite").unwrap();
+        let var = ledger_env(tmp.path());
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 0);
+
+        // A ledger with no read_events table.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let payload = read_payload(&file, "s-1");
+        rusqlite::Connection::open(tmp.path().join("lumen.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(x)")
+            .unwrap();
+        let var = ledger_env(tmp.path());
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 0);
+    }
+
+    #[test]
+    fn a_log_retry_is_unchanged_by_the_ledger() {
+        // compress_logs is not smart_read; the change is for source files.
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        std::fs::write(&log, "line\n".repeat(500)).unwrap();
+        let var = ledger_env(tmp.path());
+        let payload = read_payload(&log, "s-1");
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 2);
+        seed_row(&tmp.path().join("lumen.db"), "s-1", &log, "smart_read");
+        assert_eq!(hook("intercept", &payload, &var, tmp.path()).exit, 0);
     }
 
     #[test]
