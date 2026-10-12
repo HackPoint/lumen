@@ -153,7 +153,7 @@ async function withApp(t, sb, env, fn) {
   const driver = await Driver.start({ ...sb.env, ...env });
   let session;
   try {
-    session = await Session.launch(APP);
+    session = await Session.launch(driver, APP);
     await mainWindow(session);
     return await fn(session);
   } finally {
@@ -340,13 +340,36 @@ test('a healthy launch keeps its window closed past the tray checks', async t =>
 
 test('a tray reported absent opens the window once the checks give up', async t => {
   const sb = sandbox();
+  let skipped = false;
   await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'absent' }, async s => {
     const start = Date.now();
-    if (await noTrayHere(t, s)) return;
-    assert.equal((await s.run(VISIBILITY)).shown, false, 'shown before any check had run');
+    skipped = await noTrayHere(t, s);
+    if (skipped) return;
+    // How long after launch this attaches is not the test's to set: on a CI runner the page's first
+    // load has taken from 0.1 s to 16 s, and the window opens PRESENCE_CHECKS_MS after launch. So a
+    // sample of the window cannot say "before the checks ran" by when it is taken. What it can say
+    // is what the app says about itself a moment later: it records the tray as absent, which
+    // is what degraded reports, before it opens the window.
+    const shown = (await s.run(VISIBILITY)).shown;
+    const h = await s.run(HEALTH);
+    assert.ok(!shown || h.degraded, `shown while the checks had not given up: ${JSON.stringify(h)}`);
     const v = await s.until('the main window to be shown', SHOWN, PRESENCE_CHECKS_MS + 10_000);
     t.diagnostic(`shown after ${Date.now() - start} ms: ${JSON.stringify(v)}`);
     const tray = await s.until('the reduced-function banner', TEXT, 15_000, '.degraded__tray');
     assert.match(tray, /built but not visible/);
   });
+  if (skipped) return;
+  // The log has each step in the order it happened, whenever the test attached: the window opens
+  // once, after the third check, and not before.
+  const log = appLog(sb);
+  const steps = [
+    'TRAY: presence check 1 of 3',
+    'TRAY: presence check 2 of 3',
+    'TRAY: presence check 3 of 3',
+    'TRAY: not visible after 3 checks',
+    'FALLBACK: revealed the main window',
+  ];
+  const at = steps.map(s => log.indexOf(s));
+  assert.ok(at.every((n, i) => n >= 0 && (i === 0 || n > at[i - 1])), `steps at ${at}, expected in order:\n${log}`);
+  assert.equal(log.match(/FALLBACK: revealed the main window/g).length, 1, log);
 });
