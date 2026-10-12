@@ -866,8 +866,16 @@ fn ranked_arm(path: &str, src: &str, full_tokens: usize, line_count: usize) -> O
             // and why, on its own route.
             let lang = detect_lang(path);
             let items = outline(src, lang);
-            let text = format_outline(path, line_count, full_tokens, &items);
-            let returned = count_tokens(&text);
+            let mut text = format_outline(path, line_count, full_tokens, &items);
+            let mut returned = count_tokens(&text);
+            if returned >= full_tokens && !src.trim().is_empty() {
+                // Declines are mostly about small files, and a small file can have an outline
+                // larger than itself. The file is then the cheaper answer, and carries no note.
+                // A file with nothing visible in it keeps the outline: the same blank-reply
+                // reason as in compress_logs.
+                text = src.to_string();
+                returned = full_tokens;
+            }
             let meta = ranked_meta(&d, 0, 0);
             Some(metered_with(
                 text,
@@ -1333,13 +1341,40 @@ pub fn tool_compress_logs(args: &Value) -> Outcome {
 
     let text = format!("{}{}", header, result.text);
     let orig_lines = result.original_lines as i64;
-    // Compare raw compressed vs raw original (header is constant overhead, not savings).
+
+    // The caller pays for the header and the body together, so that is what is counted and what
+    // is compared with the log. The header's own "saved N" still sets compressed against raw,
+    // which is what it says it does.
+    let returned_tokens = count_tokens(&text);
+    let inflated = returned_tokens >= result.original_tokens;
+    // A log with nothing visible in it keeps the header. Answering it with itself would send an
+    // empty text block, which a client may reject outright, and that costs the conversation
+    // rather than a header.
+    if inflated && !src.trim().is_empty() {
+        // Compression saved less than the header costs, or nothing: the log itself is the
+        // cheapest honest answer. No note either, which would be a cost the log does not carry.
+        return metered_with(
+            src,
+            result.original_tokens,
+            result.original_tokens,
+            "mcp__lumen__compress_logs",
+            lumen_core::ranked::Decline::WouldInflate.route(),
+            &meter_path,
+            Some(orig_lines),
+            None,
+            lumen_core::meter::RankedMeta::default(),
+        );
+    }
     metered(
         text,
         result.original_tokens,
-        result.compressed_tokens,
+        returned_tokens,
         "mcp__lumen__compress_logs",
-        "compress_logs",
+        if inflated {
+            lumen_core::ranked::Decline::WouldInflate.route()
+        } else {
+            "compress_logs"
+        },
         &meter_path,
         Some(orig_lines),
         None,
@@ -2243,7 +2278,9 @@ mod tests {
 
     #[test]
     fn compress_logs_reads_from_a_path() {
-        let (_d, path) = fixture("run.log", &"repeat me\n".repeat(30));
+        // Long enough to win against a header that names a long temp-dir path; a log the header
+        // outweighs is answered with the log itself, which names no file.
+        let (_d, path) = fixture("run.log", &"repeat me\n".repeat(300));
         let out = tool_compress_logs(&json!({ "path": &path }));
         assert!(text_of(&out).contains(&path), "header must name the file");
         assert_eq!(out.meter.unwrap().path, path);
@@ -2282,6 +2319,167 @@ mod tests {
             0,
             "incompressible input must claim zero savings"
         );
+    }
+
+    // ── compress_logs: what is counted is what was sent ──────────────────────
+
+    /// Tokens of the reply text itself, counted here from the text and not read back from the
+    /// tool's own `_meta`, which is the figure under test.
+    fn reply_tokens(out: &Outcome) -> i64 {
+        count_tokens(&text_of(out)) as i64
+    }
+
+    /// The caller's `_meta` and the ledger row both describe the reply that went out, and the
+    /// reply costs no more than the log it was asked to shrink. A log with nothing visible in it
+    /// is the one case that cannot be answered with itself, and gets a reply that is not blank.
+    fn assert_metered_as_sent(label: &str, out: &Outcome, log: &str) {
+        let sent = reply_tokens(out);
+        let full = count_tokens(log) as i64;
+        let row = out.meter.as_ref().expect("compress_logs meters");
+        assert_eq!(
+            meta(out, "returned_tokens"),
+            sent,
+            "[{label}] _meta.returned_tokens must be the cost of the reply as sent"
+        );
+        assert_eq!(
+            row.returned_tokens, sent,
+            "[{label}] the ledger row must be the cost of the reply as sent"
+        );
+        assert_eq!(meta(out, "full_tokens"), full, "[{label}] full_tokens");
+        assert_eq!(row.full_tokens, full, "[{label}] row full_tokens");
+        assert_eq!(
+            meta(out, "saved_tokens"),
+            full - sent,
+            "[{label}] saved_tokens"
+        );
+        assert_eq!(row.saved_tokens, full - sent, "[{label}] row saved_tokens");
+        if log.trim().is_empty() {
+            assert!(
+                !text_of(out).trim().is_empty(),
+                "[{label}] a blank log must not be answered with a blank text block"
+            );
+        } else {
+            assert!(
+                sent <= full,
+                "[{label}] the reply costs {sent} tokens for a log of {full}"
+            );
+        }
+    }
+
+    /// One line that compresses, repeated enough to be a log.
+    const REPEATED: &str = "worker 7 failed to flush the write-ahead log to disk\n";
+
+    /// Logs on every side of the point where the header stops paying for itself.
+    fn log_cases() -> Vec<(&'static str, String)> {
+        vec![
+            ("empty", String::new()),
+            ("one line", "hello\n".to_string()),
+            ("one line, no newline", "hello".to_string()),
+            ("tiny", "one\ntwo\nthree\n".to_string()),
+            (
+                "incompressible",
+                (0..40)
+                    .map(|i| format!("request {i} served in {} ms\n", 13 + i * 7))
+                    .collect(),
+            ),
+            // Compresses, but by less than the header costs.
+            ("band", REPEATED.repeat(3)),
+            ("repetitive", REPEATED.repeat(400)),
+            ("blank runs", "a\n\n\n\n\n\n\nb\n".to_string()),
+            ("crlf", "boom\r\n".repeat(50)),
+            ("whitespace only", "   \n\t\n  \n".to_string()),
+        ]
+    }
+
+    #[test]
+    fn compress_logs_meters_the_reply_it_sent_for_every_kind_of_log() {
+        for (label, log) in log_cases() {
+            let out = tool_compress_logs(&json!({ "text": &log }));
+            assert_metered_as_sent(&format!("{label}, text"), &out, &log);
+
+            let (_d, path) = fixture("run.log", &log);
+            let out = tool_compress_logs(&json!({ "path": &path }));
+            assert_metered_as_sent(&format!("{label}, path"), &out, &log);
+        }
+    }
+
+    #[test]
+    fn a_log_that_compresses_by_less_than_its_header_is_returned_as_it_is() {
+        let log = REPEATED.repeat(3);
+        let r = compress_logs(&log);
+        let smallest_header = count_tokens(
+            "# (inline text) — compressed\n\
+             # 1 lines → 1 lines | 1 tokens → 1 tokens | saved 0\n\n",
+        );
+        assert!(
+            r.compressed_tokens < r.original_tokens
+                && r.original_tokens - r.compressed_tokens < smallest_header,
+            "premise: this log compresses, but by less than any header costs \
+             ({} → {} tokens, header at least {smallest_header})",
+            r.original_tokens,
+            r.compressed_tokens
+        );
+
+        let out = tool_compress_logs(&json!({ "text": &log }));
+        assert_eq!(text_of(&out), log, "the log, not a larger rendering of it");
+        let row = out.meter.as_ref().unwrap();
+        assert_eq!(row.routed_via, "would_inflate");
+        assert_eq!(row.saved_tokens, 0);
+        assert_eq!(row.returned_tokens, row.full_tokens);
+    }
+
+    #[test]
+    fn a_log_that_wins_is_answered_exactly_as_before_and_counted_with_its_header() {
+        let log = REPEATED.repeat(400);
+        let r = compress_logs(&log);
+        let out = tool_compress_logs(&json!({ "text": &log }));
+        let expected = format!(
+            "# (inline text) — compressed\n\
+             # {} lines → {} lines | {} tokens → {} tokens | saved {}\n\n{}",
+            r.original_lines,
+            r.compressed_lines,
+            r.original_tokens,
+            r.compressed_tokens,
+            r.original_tokens - r.compressed_tokens,
+            r.text
+        );
+        assert_eq!(text_of(&out), expected, "the win case is unchanged");
+        let row = out.meter.as_ref().unwrap();
+        assert_eq!(row.routed_via, "compress_logs");
+        assert!(
+            row.returned_tokens > r.compressed_tokens as i64,
+            "the header is part of what the caller pays for"
+        );
+        assert!(row.saved_tokens > 0);
+    }
+
+    /// Nothing visible to return: the log itself would be an empty or all-whitespace text block,
+    /// which a client may refuse. The reply is the same header-and-body it always was, counted
+    /// as sent, and filed under the route that keeps it out of the savings.
+    #[test]
+    fn a_blank_log_keeps_its_header_rather_than_becoming_an_empty_reply() {
+        for log in ["", "   \n\t\n  \n", "\n"] {
+            let r = compress_logs(log);
+            let out = tool_compress_logs(&json!({ "text": log }));
+            let expected = format!(
+                "# (inline text) — compressed\n\
+                 # {} lines → {} lines | {} tokens → {} tokens | saved {}\n\n{}",
+                r.original_lines,
+                r.compressed_lines,
+                r.original_tokens,
+                r.compressed_tokens,
+                r.original_tokens as i64 - r.compressed_tokens as i64,
+                r.text
+            );
+            assert_eq!(text_of(&out), expected, "log {log:?}");
+            assert!(!text_of(&out).trim().is_empty());
+            let row = out.meter.as_ref().unwrap();
+            assert_eq!(row.routed_via, "would_inflate", "log {log:?}");
+            assert!(
+                row.returned_tokens > row.full_tokens && row.saved_tokens < 0,
+                "log {log:?}: the header is a cost, and the row says so"
+            );
+        }
     }
 
     // ── dispatch ─────────────────────────────────────────────────────────────

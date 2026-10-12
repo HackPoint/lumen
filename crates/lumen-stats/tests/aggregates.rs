@@ -671,6 +671,70 @@ async fn optimizer_sums_only_lumen_routes() {
     );
 }
 
+/// Insert what a Lumen tool records when it answers with the file because its own reply would
+/// have cost as much: route `would_inflate`, written by every metered tool, measured, with the
+/// counts of what was actually sent.
+async fn returned_the_file_instead(pool: &SqlitePool, tool: &str, c: Counts) {
+    sqlx::query(sqlx::AssertSqlSafe(
+        "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,
+                                 saved_tokens,routed_via,channel,token_source)
+         VALUES(datetime('now'),?1,'/some/path.log',100,?2,?3,?4,'would_inflate','cli','measured')"
+            .to_string(),
+    ))
+    .bind(tool)
+    .bind(c.0)
+    .bind(c.1)
+    .bind(c.2)
+    .execute(pool)
+    .await
+    .expect("insert would_inflate read_event");
+}
+
+/// A call answered with the file, because the view it would have sent cost as much, is a
+/// refusal and not a saving, whichever tool made it. It must leave every total, the per-tool and
+/// per-channel breakdowns and the dollar figures exactly as they were: counting its zero or
+/// negative saving would lower the figure the Optimizer screen leads with, and counting its call
+/// would charge it a round it did not cost.
+#[tokio::test]
+async fn a_call_that_returned_the_file_instead_changes_no_saving() {
+    assert!(
+        !LUMEN_ROUTES.contains(&"would_inflate"),
+        "a refusal is not a Lumen saving"
+    );
+    let (_d, pool) = fixture().await;
+    event(
+        &pool,
+        "datetime('now')",
+        "compress_logs",
+        "cli",
+        (100, 1000, 900),
+    )
+    .await;
+    // The cost side needs 200 turns to be computed at all.
+    turns_for_cost(&pool, 200, 100_000, 1_000).await;
+    let mut before = get_optimizer_stats(&pool).await.unwrap();
+    assert_eq!(
+        (before.lifetime_optimized_tokens, before.by_tool.len()),
+        (900, 1),
+        "premise: the real saving is counted"
+    );
+    assert!(before.round_cost_usd > 0.0 && before.net_value_usd != 0.0);
+
+    // compress_logs gives back the log itself (zero saved); the others give the file behind a note
+    // that costs a little more (a small negative saving).
+    returned_the_file_instead(&pool, "mcp__lumen__compress_logs", (1000, 1000, 0)).await;
+    returned_the_file_instead(&pool, "mcp__lumen__smart_read", (1027, 1000, -27)).await;
+    returned_the_file_instead(&pool, "mcp__lumen__recall_file", (1027, 1000, -27)).await;
+
+    let after = get_optimizer_stats(&pool).await.unwrap();
+    // Three more metered rows is the only thing that moves.
+    before.provenance_total_rows += 3;
+    assert_eq!(
+        after, before,
+        "a would_inflate row reached a saving, a breakdown or the net value"
+    );
+}
+
 #[tokio::test]
 async fn optimizer_counts_builtin_reads_as_missed_not_saved() {
     let (_d, pool) = fixture().await;

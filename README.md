@@ -491,11 +491,16 @@ rather than a bytes/4 guess, which is asserted by a test rather than asserted he
 **→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
 measurement, including the things that would make the figure above dishonest: **8 of 1,608
 eligible reads bypassed** the optimizer, all of them the intercept's deliberate fail-open guards, 3.4M tokens of binary-file noise excluded from the
-baseline, and the 17 of 31 files where interception costs more than it saves. No Lumen tool can
-return more than the file it was asked about — that is a backstop with a corpus test behind it,
-not an observation. Every figure there is produced and asserted by
-`cargo test --release -p lumen-mcp --test efficiency -- --nocapture`, so a regression fails CI
-instead of ageing into a stale claim.
+baseline, and the 31 of 61 files in this repository where interception costs more than it saves
+(measured 2026-10-12; the test prints the count and the eight least avoided). A Lumen tool's
+reply is held to the size of the file it was asked about, plus the one line a fallback adds and
+the header of `smart_read(mode="full")`, except for a file or log with nothing in it. A corpus
+test checks that on this repository's files; the page lists what it does not cover (error
+replies, repeat-read replies and the JSON-RPC envelope, among others). The page's repository
+figures are produced by
+`cargo test --release -p lumen-mcp --test efficiency -- --nocapture` and its thresholds are
+asserted, so a regression fails CI instead of ageing into a stale claim; its ledger figures
+come from the machine that ran it.
 
 The Optimizer screen shows two clearly separated numbers:
 

@@ -30,6 +30,11 @@ jobs:
   # On a tag push, GITHUB_REF_NAME is the tag. On workflow_dispatch it is the
   # branch (e.g. "main"), so we read the tag from the input instead. Every other
   # job consumes these outputs rather than GITHUB_REF_NAME directly.
+  #
+  # On a tag push this job also refuses a tag whose CHANGELOG.md has no block for
+  # its version, before any build starts: the block is the release's notes, and
+  # there is no other source to fall back on. A manual dispatch only attaches
+  # artifacts to a release that already exists, so it needs no notes.
   # ════════════════════════════════════════════════════════════════════════════
   resolve:
     name: Resolve tag/version
@@ -39,6 +44,14 @@ jobs:
       version:   ${{ steps.r.outputs.version }}
       build_ref: ${{ steps.r.outputs.build_ref }}
     steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'push'
+        with:
+          sparse-checkout: |
+            /CHANGELOG.md
+            /scripts/release-notes.sh
+          sparse-checkout-cone-mode: false
+
       - id: r
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -55,6 +68,12 @@ jobs:
           echo "version=${TAG#v}"        >> "$GITHUB_OUTPUT"
           echo "build_ref=${BUILD_REF}"  >> "$GITHUB_OUTPUT"
           echo "Resolved tag=${TAG} version=${TAG#v} build_ref=${BUILD_REF}"
+
+      - name: Require this version's CHANGELOG block
+        if: github.event_name == 'push'
+        env:
+          VERSION: ${{ steps.r.outputs.version }}
+        run: bash scripts/release-notes.sh "$VERSION" CHANGELOG.md > /dev/null
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 1: Build both artifacts on Apple Silicon (tag push only)
@@ -193,21 +212,10 @@ jobs:
           DMG_NAME="${{ steps.checksums.outputs.dmg_name }}"
           TARBALL_NAME="${{ steps.meta.outputs.tarball_name }}"
 
-          # Use CHANGELOG.md entry for this version as release notes, if present
-          NOTES_OPT=""
-          if [[ -f CHANGELOG.md ]]; then
-            # Extract just this version's block (between its header and the next one)
-            awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found" \
-              CHANGELOG.md > /tmp/release_notes.md
-            [[ -s /tmp/release_notes.md ]] && NOTES_OPT="--notes-file /tmp/release_notes.md"
-          fi
-          if [[ -z "$NOTES_OPT" ]]; then
-            if [[ -f RELEASE_NOTES.md ]]; then
-              NOTES_OPT="--notes-file RELEASE_NOTES.md"
-            else
-              NOTES_OPT="--generate-notes"
-            fi
-          fi
+          # The notes are this version's CHANGELOG block and nothing else. The script
+          # fails the step when the block is missing or empty (the resolve job has
+          # already failed the run earlier for the same reason).
+          bash scripts/release-notes.sh "$VERSION" CHANGELOG.md > /tmp/release_notes.md
 
           # The tag filter accepts prereleases (v1.1.0-rc.1), but without
           # --prerelease gh would mark one as Latest — pointing every
@@ -224,7 +232,7 @@ jobs:
             "${TARBALL}#${TARBALL_NAME}" \
             --title "Lumen ${TAG}" \
             $PRERELEASE_OPT \
-            $NOTES_OPT
+            --notes-file /tmp/release_notes.md
 
   # ════════════════════════════════════════════════════════════════════════════
   # Job 2: Cross-platform CLI artifacts (Linux + Windows)
