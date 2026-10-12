@@ -410,9 +410,10 @@ pub fn diff(old: &[Sym], new: &[Sym]) -> Delta {
 
 // ── what the model is told ───────────────────────────────────────────────────
 
-/// The sentence every unchanged answer carries. MCP carries no caller identity, so a
-/// subagent sharing the parent's session can be told "unchanged" about a read it never saw;
-/// this is how it gets out.
+/// The sentence every unchanged answer carries. The hook names the caller's context, but what
+/// happens inside it cannot all be seen (a compaction in a subagent, an event not yet
+/// ingested), so a model can be told "unchanged" about a read it no longer holds; this is how
+/// it gets out.
 pub fn unchanged_text(tool: &str) -> String {
     if tool == "smart_read" {
         "Unchanged since an earlier read of this file in this session. If that read is not in \

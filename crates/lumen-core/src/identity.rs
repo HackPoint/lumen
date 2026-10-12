@@ -75,12 +75,27 @@ pub const FORMAT: i64 = 1;
 /// the call is answered as unknown, which only costs it the repeat-read saving.
 pub const MAX_AGE_MS: i64 = 60 * 60 * 1000;
 
+/// How far ahead of the clock a record's time may be. The hook and the server share one clock,
+/// so a record further ahead than this was made before the clock was set back, or is not one of
+/// ours, and its age cannot be told: it is unknown, as a record that is too old is.
+pub const MAX_SKEW_MS: i64 = 60 * 1000;
+
 /// Records kept at most. The age bound alone is a rate times an hour, and a model denied
 /// the same call in a loop is a high rate.
 pub const MAX_RECORDS: usize = 256;
 
 const PREFIX: &str = "lumen_call_";
 const SUFFIX: &str = ".json";
+
+/// A record is written under this name and renamed into place. It does not start like a
+/// record's name, so the server never claims one, and only a crash leaves one behind.
+const TMP_PREFIX: &str = ".lumen_call_";
+const TMP_SUFFIX: &str = ".tmp";
+
+/// Whether a record made at `ts_ms` can belong to a call being made at `now_ms`.
+fn is_fresh(now_ms: i64, ts_ms: i64) -> bool {
+    now_ms.saturating_sub(ts_ms) <= MAX_AGE_MS && ts_ms.saturating_sub(now_ms) <= MAX_SKEW_MS
+}
 
 /// Longest session or agent id accepted. Claude Code's are UUIDs and short tokens.
 const MAX_FIELD: usize = 256;
@@ -120,6 +135,8 @@ pub enum Why {
     Malformed,
     /// A record older than [`MAX_AGE_MS`].
     Stale,
+    /// A record dated further ahead than [`MAX_SKEW_MS`].
+    Future,
     /// A record made for a call to another tool.
     OtherTool,
 }
@@ -133,6 +150,7 @@ impl fmt::Display for Why {
             Why::Unreadable => "the hook record could not be read",
             Why::Malformed => "the hook record is not in a format this build reads",
             Why::Stale => "the hook record is too old to belong to this call",
+            Why::Future => "the hook record is dated in the future",
             Why::OtherTool => "the hook record is for a call to another tool",
         })
     }
@@ -213,8 +231,36 @@ pub fn write(
         "session_id": who.session,
         "agent_id": who.agent,
         "ts_ms": now_ms,
-    });
-    std::fs::write(record_path(dir, call_id), body.to_string()).map_err(WriteError::Io)
+    })
+    .to_string();
+    // Written beside the record and renamed into place, so the server never reads half of one,
+    // and readable by this user only: it names a conversation.
+    let tmp = dir.join(format!(
+        "{TMP_PREFIX}{call_id}.{}{TMP_SUFFIX}",
+        std::process::id()
+    ));
+    write_private(&tmp, body.as_bytes()).map_err(WriteError::Io)?;
+    if let Err(e) = std::fs::rename(&tmp, record_path(dir, call_id)) {
+        // Whatever is left of it is pruned by age like any other stray.
+        if let Err(rm) = std::fs::remove_file(&tmp) {
+            eprintln!("lumen: cannot remove {}: {rm}", tmp.display());
+        }
+        return Err(WriteError::Io(e));
+    }
+    Ok(())
+}
+
+/// A file only this user can read, where the platform has such a thing.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(bytes)
 }
 
 /// Take the record for `call_id`: read it and remove it, so it serves this call only.
@@ -266,6 +312,9 @@ fn parse(text: &str, tool: &str, now_ms: i64) -> Lookup {
     let Some(ts) = v["ts_ms"].as_i64() else {
         return Lookup::Unknown(Why::Malformed);
     };
+    if ts.saturating_sub(now_ms) > MAX_SKEW_MS {
+        return Lookup::Unknown(Why::Future);
+    }
     if now_ms.saturating_sub(ts) > MAX_AGE_MS {
         return Lookup::Unknown(Why::Stale);
     }
@@ -285,11 +334,14 @@ pub struct Pruned {
     pub failed: Vec<(PathBuf, std::io::Error)>,
 }
 
-/// Remove the records nobody will claim: those past [`MAX_AGE_MS`], and the oldest beyond
-/// [`MAX_RECORDS`]. Only files named like a record are looked at.
+/// Remove the records nobody will claim: those past [`MAX_AGE_MS`] or dated beyond
+/// [`MAX_SKEW_MS`] ahead, and the oldest beyond [`MAX_RECORDS`]. Only files named like a record,
+/// or like the file one is written under, are looked at.
 ///
 /// A record's age is the `ts_ms` it carries, or the file's modification time when it cannot be
-/// read, so garbage in the directory goes too. A directory that cannot be listed prunes nothing.
+/// read, so garbage in the directory goes too. A file left by a write that never finished is
+/// removed once it is as old as a record may be; a younger one may be a write in progress. A
+/// directory that cannot be listed prunes nothing.
 pub fn prune(dir: &Path, now_ms: i64) -> Pruned {
     let mut out = Pruned::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -299,7 +351,9 @@ pub fn prune(dir: &Path, now_ms: i64) -> Pruned {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with(PREFIX) || !name.ends_with(SUFFIX) {
+        let is_record = name.starts_with(PREFIX) && name.ends_with(SUFFIX);
+        let is_temp = name.starts_with(TMP_PREFIX) && name.ends_with(TMP_SUFFIX);
+        if !is_record && !is_temp {
             continue;
         }
         // A directory that happens to be named like a record is not ours to remove.
@@ -307,18 +361,26 @@ pub fn prune(dir: &Path, now_ms: i64) -> Pruned {
             continue;
         }
         let path = entry.path();
+        let modified = || {
+            let m = entry.metadata().ok()?.modified().ok()?;
+            let d = m.duration_since(std::time::UNIX_EPOCH).ok()?;
+            Some(d.as_millis() as i64)
+        };
+        if is_temp {
+            match modified() {
+                Some(b) if is_fresh(now_ms, b) => {}
+                _ => remove(&path, &mut out),
+            }
+            continue;
+        }
         let born = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
             .and_then(|v| v["ts_ms"].as_i64())
-            .or_else(|| {
-                let m = entry.metadata().ok()?.modified().ok()?;
-                let d = m.duration_since(std::time::UNIX_EPOCH).ok()?;
-                Some(d.as_millis() as i64)
-            });
+            .or_else(modified);
         // A record whose age cannot be told at all is as good as old.
         match born {
-            Some(b) if now_ms.saturating_sub(b) <= MAX_AGE_MS => kept.push((b, path)),
+            Some(b) if is_fresh(now_ms, b) => kept.push((b, path)),
             _ => remove(&path, &mut out),
         }
     }
@@ -546,6 +608,59 @@ mod tests {
             claim(d.path(), "smart_read", Some("m"), NOW),
             Lookup::Known(_)
         ));
+        // A record dated ahead of the clock is no younger than any other: its age cannot be
+        // told. A little ahead is the two processes reading the clock a moment apart.
+        put("n", &good("mcp__lumen__smart_read", NOW + MAX_SKEW_MS + 1));
+        assert_eq!(
+            claim(d.path(), "smart_read", Some("n"), NOW),
+            Lookup::Unknown(Why::Future)
+        );
+        put("o", &good("mcp__lumen__smart_read", NOW + MAX_SKEW_MS));
+        assert!(matches!(
+            claim(d.path(), "smart_read", Some("o"), NOW),
+            Lookup::Known(_)
+        ));
+    }
+
+    #[test]
+    fn a_record_is_put_in_place_whole_and_is_for_its_owner_to_read() {
+        let d = TempDir::new().unwrap();
+        let tool = "mcp__lumen__smart_read";
+        write(d.path(), tool, "toolu_01", &who(Some("a1")), NOW).unwrap();
+        // Nothing is left beside it: the file it was written under was renamed, not copied.
+        assert_eq!(names(d.path()), ["lumen_call_toolu_01.json"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(record_path(d.path(), "toolu_01"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "it names a conversation");
+        }
+        // A second announcement of the same call replaces the first.
+        write(d.path(), tool, "toolu_01", &who(None), NOW).unwrap();
+        assert_eq!(
+            claim(d.path(), "smart_read", Some("toolu_01"), NOW),
+            Lookup::Known(who(None))
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_put_in_place_leaves_nothing_behind() {
+        let d = TempDir::new().unwrap();
+        // A directory where the record goes: the rename onto it fails after the write worked.
+        std::fs::create_dir(record_path(d.path(), "toolu_01")).unwrap();
+        let err = write(
+            d.path(),
+            "mcp__lumen__smart_read",
+            "toolu_01",
+            &who(None),
+            NOW,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WriteError::Io(_)), "{err}");
+        assert_eq!(names(d.path()), ["lumen_call_toolu_01.json"]);
     }
 
     #[test]
@@ -631,6 +746,66 @@ mod tests {
                 "lumen_call_notes.txt"
             ]
         );
+    }
+
+    #[test]
+    fn prune_takes_a_write_that_never_finished_but_not_one_in_progress() {
+        let d = TempDir::new().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let stray = d.path().join(".lumen_call_toolu_01.4242.tmp");
+        std::fs::write(&stray, "{").unwrap();
+        let aged = std::fs::File::options().write(true).open(&stray).unwrap();
+        aged.set_modified(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis((now - MAX_AGE_MS - 5000) as u64),
+        )
+        .unwrap();
+        drop(aged);
+        std::fs::write(d.path().join(".lumen_call_toolu_02.4243.tmp"), "{").unwrap();
+        // Not a stray of ours: neither its name nor its kind.
+        std::fs::write(d.path().join(".lumen_other.tmp"), "x").unwrap();
+        std::fs::create_dir(d.path().join(".lumen_call_dir.tmp")).unwrap();
+
+        let p = prune(d.path(), now);
+        assert_eq!(p.removed, 1, "{:?}", p.failed);
+        assert_eq!(
+            names(d.path()),
+            [
+                ".lumen_call_dir.tmp",
+                ".lumen_call_toolu_02.4243.tmp",
+                ".lumen_other.tmp"
+            ]
+        );
+        // The server never claims a file written under that name.
+        assert_eq!(
+            claim(d.path(), "smart_read", Some("toolu_02.4243"), now),
+            Lookup::Unknown(Why::BadCallId)
+        );
+    }
+
+    #[test]
+    fn prune_takes_a_record_dated_in_the_future() {
+        let d = TempDir::new().unwrap();
+        let tool = "mcp__lumen__smart_read";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        write(
+            d.path(),
+            tool,
+            "ahead",
+            &who(None),
+            now + MAX_SKEW_MS + 5000,
+        )
+        .unwrap();
+        write(d.path(), tool, "now", &who(None), now + 1000).unwrap();
+        let p = prune(d.path(), now);
+        assert_eq!(p.removed, 1, "{:?}", p.failed);
+        assert_eq!(names(d.path()), ["lumen_call_now.json"]);
     }
 
     #[test]

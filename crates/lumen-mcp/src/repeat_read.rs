@@ -1,10 +1,13 @@
 //! `smart_read` and `recall_file` repeat reads: the glue between `lumen_core::repeat` and the
 //! tools.
 //!
-//! The base is what this process returned earlier in the session, held in memory. Whether the
-//! model still has it is answered from the transcript events the daemon records
-//! (`session_events`), and for what cannot be known — a subagent sharing the session, an event
-//! not yet ingested — every repeat answer tells the model how to ask again with `fresh=true`.
+//! The base is what this process returned earlier to one context, held in memory under the
+//! (session, agent) the PreToolUse hook named for the call, so a subagent is told apart from its
+//! parent and a call that cannot be placed gets the full answer. Whether the model still has the
+//! base is answered from the transcript events the daemon records (`session_events`). What cannot
+//! be known — a compaction inside a subagent, whose events the daemon skips as a sidechain, and
+//! an event not yet ingested — is why every repeat answer tells the model how to ask again with
+//! `fresh=true`.
 
 use lumen_core::identity::Identity;
 use lumen_core::meter::RankedMeta;

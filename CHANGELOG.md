@@ -23,15 +23,23 @@ session. Nothing in the MCP request says which conversation it is from (`_meta` 
   by the hook and when the server starts. The hook records `identity_unrecorded` when it cannot
   write one.
 - Upgrade: an install from 1.6.0 or 1.7.0 has the intercept on `Read` alone, so the validator
-  reports it stale and Setup registers the three new matchers. Until then every Lumen call is
-  answered in full, which `lumen doctor` now says. The plugin registers the same hook under its
-  own tool names (`mcp__plugin_lumen_lumen__*`).
+  reports it stale and Setup registers the three new matchers. Until Setup is re-run (or the
+  plugin reinstalled) on such an install, Lumen calls cannot be attributed to a conversation:
+  repeat reads give the full result and the ledger's session column stays empty. The validator
+  and `lumen doctor` say so and say to re-run Setup. The redirect after a working `smart_read`
+  (#36, below) still works there: it also accepts a row with no session for the same path from
+  the last hour, so the retry is redirected as it was before this change. A row from a known
+  other conversation never counts. The plugin registers the same hook under its own tool names
+  (`mcp__plugin_lumen_lumen__*`); with the plugin and Setup both installed a call to
+  `mcp__lumen__*` runs the hook twice, as `Read` already did, and the two write the same record.
+- A record is written to a temporary file and renamed into place, readable by its owner only, and
+  one dated more than a minute ahead of the clock is treated as unknown, like an old one.
 - `read_events` gains `agent_id` (a plain ALTER through `init_schema`, nothing to migrate).
 - Cost. Live, on a 331-line file after a `/clear`: the full 256-token outline (2,457 tokens as a
   plain read) where the server used to send a 30-token stub the model could not use. Repeats inside
   one conversation are unchanged on the `repeat_reads` fixture: 30 tokens for an unchanged file
-  against 743, a 107-token delta against a 603-token outline. The hook adds about 1 ms to a Lumen
-  call and the server's claim about 1 ms (medians over 200 runs).
+  against 743, a 107-token delta against a 603-token outline. The hook and the server's claim
+  each add about 1–2 ms to a Lumen call (medians over 200 runs).
 
 ### The retry escape valve no longer hands back a whole file after a working `smart_read` (#36)
 

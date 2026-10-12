@@ -19,6 +19,7 @@ use tempfile::TempDir;
 const STALE: &str = "00000000-0000-0000-0000-00000000dead";
 const S1: &str = "11111111-2222-3333-4444-555555555551";
 const S2: &str = "11111111-2222-3333-4444-555555555552";
+const S3: &str = "11111111-2222-3333-4444-555555555553";
 const ON: &[(&str, &str)] = &[("LUMEN_REPEAT_READS", "on")];
 
 struct Rig {
@@ -759,35 +760,62 @@ fn switching_the_read_intercept_off_does_not_switch_off_the_identity() {
     assert_eq!(sessions(&rig), [Some(S1.to_string())]);
 }
 
-/// A hook that sees a tool that is not Lumen's writes nothing.
+/// A hook that sees a tool that is not Lumen's writes nothing, and one that sees a tool that is
+/// writes a record, under either of the names the server can have.
 #[test]
 fn only_lumen_tool_calls_are_recorded() {
     let rig = rig();
     let f = rig.file("a.rs", &source(3, 3));
     let mut p = rig.payload("smart_read", S1, None, "toolu_01", &f);
-    p["tool_name"] = "mcp__other__smart_read".into();
-    assert_eq!(rig.hook(&rig.db, &[], &p).code, 0);
-    p["tool_name"] = "Bash".into();
-    assert_eq!(rig.hook(&rig.db, &[], &p).code, 0);
+    for other in ["mcp__other__smart_read", "Bash", "mcp__lumen__ping"] {
+        p["tool_name"] = other.into();
+        assert_eq!(rig.hook(&rig.db, &[], &p).code, 0, "{other}");
+    }
     assert!(rig.records().is_empty(), "{:?}", rig.records());
+
+    // The same payload for Lumen's own tools is recorded. Without this the check above would
+    // hold for a hook that records nothing at all.
+    for (i, own) in [
+        "mcp__lumen__smart_read",
+        "mcp__plugin_lumen_lumen__recall_file",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        p["tool_name"] = own.into();
+        p["tool_use_id"] = format!("toolu_l{i}").into();
+        assert_eq!(rig.hook(&rig.db, &[], &p).code, 0, "{own}");
+    }
+    assert_eq!(
+        rig.records(),
+        ["lumen_call_toolu_l0.json", "lumen_call_toolu_l1.json"]
+    );
 }
 
-/// Two Claude windows are two Claude processes, and a stdio server belongs to the process
-/// that spawned it. What one window announces is not the other's: their ids differ.
+/// Two Claude windows are two Claude processes, each with a server of its own, on one ledger.
+/// Each answers for the conversation its own calls name: a file window one has read is still a
+/// first read in window two, a `/clear` in one window is not a `/clear` in the other, and the
+/// rows name the conversation that made the call, not the one id both servers started under.
 #[test]
-fn two_servers_on_one_ledger_do_not_see_each_others_conversations() {
+fn two_servers_on_one_ledger_each_answer_for_their_own_conversation() {
     let rig = rig();
     let f = rig.file("a.rs", &source(40, 6));
     let mut one = rig.start(ON);
     let mut two = rig.start(ON);
-    one.step(&rig, S1, None, "toolu_w1_1", &f);
-    two.step(&rig, S2, None, "toolu_w2_1", &f);
+    assert!(is_full(&one.step(&rig, S1, None, "toolu_w1_1", &f)));
+    // Window two has not read it: a stub here would refer to what it never saw.
+    let first_in_two = two.step(&rig, S2, None, "toolu_w2_1", &f);
+    assert!(is_full(&first_in_two), "{}", first_in_two.text);
     assert!(is_stub(&one.step(&rig, S1, None, "toolu_w1_2", &f)));
     assert!(is_stub(&two.step(&rig, S2, None, "toolu_w2_2", &f)));
-    // Window two is cleared; window one is not affected.
-    let cleared = two.step(&rig, S2, None, "toolu_w2_3", &f);
-    assert!(is_stub(&cleared));
-    assert!(is_stub(&one.step(&rig, S1, None, "toolu_w1_3", &f)));
+    // Window one is cleared and window two is not.
+    let cleared = one.step(&rig, S3, None, "toolu_w1_3", &f);
+    assert!(is_full(&cleared), "{}", cleared.text);
+    assert!(is_stub(&two.step(&rig, S2, None, "toolu_w2_3", &f)));
     one.end();
     two.end();
+    assert_eq!(
+        sessions(&rig),
+        [S1, S2, S1, S2, S3, S2].map(|s| Some(s.to_string()))
+    );
 }
