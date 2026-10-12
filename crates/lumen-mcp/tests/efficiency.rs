@@ -1729,9 +1729,9 @@ fn no_reply_costs_more_than_the_file_and_its_label_on_any_real_file() {
     // or more: the guard is what answers it.
     t.expect("recall range all", "inflation fallback", most);
     t.expect("recall range nearly all", "inflation fallback", most);
-    // A source file rarely compresses by more than the header costs, so it comes back as it is.
-    t.expect("compress_logs path", "the log itself", n / 2);
-    t.expect("compress_logs text", "the log itself", n / 2);
+    // Source rarely beats the header and comes back as it is; a CRLF checkout compresses more.
+    t.expect("compress_logs path", "the log itself", n / 5);
+    t.expect("compress_logs text", "the log itself", n / 5);
 }
 
 /// Files below the interception threshold, which no file in the corpus above is. At this size an
