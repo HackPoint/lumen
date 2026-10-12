@@ -621,8 +621,9 @@ Claude with no way to read the file at all:
   for it and the read is allowed through. Without this the hook can deadlock a session —
   it blocks the built-in `Read` while the replacement is unreachable.
 - **A fault record** — one JSON line appended to `faults.jsonl` beside the database when
-  a hook lets through a read it would have redirected, or loses an event it should have
-  metered. It contains the file path, its line count, what went wrong, and the session id
+  a hook lets through a read it would have redirected, loses an event it should have
+  metered, or a tool call crashes and is answered with an error. It contains the file path,
+  its line count, what went wrong, and the session id
   — **never file contents**. `lumen report` reads these; nothing is sent anywhere unless
   you explicitly file a report. Set `LUMEN_CAPTURE=0` to keep the hooks and record nothing.
 

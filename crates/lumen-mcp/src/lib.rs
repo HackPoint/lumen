@@ -8,6 +8,7 @@
 
 use lumen_core::{
     compress::compress_logs,
+    faults::{self, FaultRecord},
     identity::{self, Identity, Lookup, Why},
     meter::{detect_channel, insert_read_event},
     ranked,
@@ -32,6 +33,7 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 /// JSON-RPC error codes we emit.
 pub const INVALID_PARAMS: i32 = -32602;
 pub const NOT_FOUND: i32 = -32601;
+pub const INTERNAL_ERROR: i32 = -32603;
 
 // ── JSON-RPC wire types ──────────────────────────────────────────────────────
 
@@ -943,14 +945,8 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
             .collect()
     });
 
-    let start_line = args
-        .get("start_line")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize);
-    let end_line = args
-        .get("end_line")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize);
+    let start_line = line_arg(args, "start_line");
+    let end_line = line_arg(args, "end_line");
 
     // Computed before `names` is consumed below. The key must reflect what was
     // asked for, not just which file: two recall_file calls on one file requesting
@@ -1111,10 +1107,19 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         )
     } else if let (Some(start), Some(end)) = (start_line, end_line) {
         // Explicit line range
-        let start0 = start.saturating_sub(1);
-        let end0 = end.min(line_count);
-        let ctx_start = start0.saturating_sub(3);
-        let ctx_end = (end0 + 3).min(line_count);
+        let window = match range_window(start, end, line_count) {
+            Ok(w) => w,
+            Err(why) => {
+                return Outcome::err(
+                    INVALID_PARAMS,
+                    format!(
+                        "recall_file: start_line {start} {why} \
+                         (asked for L{start}-{end}; {path} has {line_count} lines)"
+                    ),
+                );
+            }
+        };
+        let (ctx_start, ctx_end) = (window.start, window.end);
 
         let mut buf = format!("# {path} — L{start}-{end} (+3 lines context)\n\n");
         for (i, &line) in src_lines[ctx_start..ctx_end].iter().enumerate() {
@@ -1173,6 +1178,34 @@ pub fn tool_recall_file(args: &Value) -> Outcome {
         );
     }
     o
+}
+
+/// A value too big for `usize` saturates, so it is refused as past the end rather than wrapped.
+fn line_arg(args: &Value, key: &str) -> Option<usize> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+}
+
+/// Index range of the lines to read for `start..=end` (1-based) with context, or why there is none.
+fn range_window(
+    start: usize,
+    end: usize,
+    line_count: usize,
+) -> Result<std::ops::Range<usize>, &'static str> {
+    if start > line_count {
+        return Err("is past the end of the file");
+    }
+    if start > end {
+        return Err("is after end_line");
+    }
+    // A start of 0 is not refused: it reads from the first line.
+    let first = start.saturating_sub(1).saturating_sub(CTX_LINES);
+    let last = end
+        .min(line_count)
+        .saturating_add(CTX_LINES)
+        .min(line_count);
+    Ok(first..last)
 }
 
 /// The source lines `start..=end` (1-based) as the text of a piece.
@@ -1379,6 +1412,144 @@ pub fn dispatch(method: &str, params: Option<Value>) -> Outcome {
         "tools/list" => Outcome::ok(handle_tools_list()),
         "tools/call" => handle_tools_call(params),
         other => Outcome::err(NOT_FOUND, format!("Method not found: {other}")),
+    }
+}
+
+// ── panic guard ──────────────────────────────────────────────────────────────
+
+/// The fault kind a request that panicked is filed under.
+pub const REQUEST_PANIC: &str = "request_panic";
+
+/// Characters of a panic message kept in the error reply: whatever panicked formats it.
+const PANIC_MESSAGE_CHARS: usize = 300;
+
+/// Characters of the requested path kept in a fault: no file on a supported system has a longer one.
+const FAULT_PATH_CHARS: usize = 4096;
+
+/// A fixed set: the label becomes a fault's variant, so a name the client chose must not.
+const REQUEST_LABELS: &[&str] = &[
+    "lumen_ping",
+    "smart_read",
+    "recall_file",
+    "compress_logs",
+    "initialize",
+    "ping",
+    "tools/list",
+];
+
+/// [`dispatch`], with a panic in a handler answered as an error: one process serves the session.
+pub fn dispatch_guarded(method: &str, params: Option<Value>) -> Outcome {
+    let label = request_label(method, params.as_ref());
+    let path = request_path(params.as_ref());
+    guarded(label, path, record_fault, repeat_read::forget, || {
+        dispatch(method, params)
+    })
+}
+
+fn request_label(method: &str, params: Option<&Value>) -> &'static str {
+    let asked = match method {
+        "tools/call" => params
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(method),
+        _ => method,
+    };
+    REQUEST_LABELS
+        .iter()
+        .copied()
+        .find(|label| *label == asked)
+        .unwrap_or("other")
+}
+
+fn request_path(params: Option<&Value>) -> Option<String> {
+    let path = params?.get("arguments")?.get("path")?.as_str()?;
+    Some(path.chars().take(FAULT_PATH_CHARS).collect())
+}
+
+thread_local! {
+    /// Where the last panic on this thread was raised, as `file:line:column`.
+    static PANIC_SITE: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+}
+
+/// A caught panic has no location and its message can quote file text, so the hook notes the site.
+fn note_panic_sites() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(at) = info.location() {
+                let site = format!("{}:{}:{}", at.file(), at.line(), at.column());
+                if PANIC_SITE.try_with(|s| s.set(Some(site))).is_err() {
+                    eprintln!("lumen: where a panic on an ending thread was raised was not kept");
+                }
+            }
+            previous(info);
+        }));
+    });
+}
+
+/// Run `run`; on a panic, file a fault through `record`, call `forget`, and answer with an error.
+fn guarded(
+    label: &str,
+    path: Option<String>,
+    record: impl FnOnce(&FaultRecord),
+    forget: impl FnOnce(),
+    run: impl FnOnce() -> Outcome,
+) -> Outcome {
+    note_panic_sites();
+    let panic = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(outcome) => return outcome,
+        Err(panic) => panic,
+    };
+    let msg = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no message".to_string());
+    let msg: String = msg.chars().take(PANIC_MESSAGE_CHARS).collect();
+    eprintln!("lumen: a {label} request panicked: {msg}; it was answered with an error");
+
+    let site = PANIC_SITE.try_with(std::cell::Cell::take).ok().flatten();
+    let detail = match &site {
+        Some(site) => format!("panicked at {site}"),
+        None => "where it panicked was not noted".to_string(),
+    };
+    let mut rec = FaultRecord::now(REQUEST_PANIC, label).with_detail(detail);
+    rec.path = path;
+    record(&rec);
+
+    // What the call remembered was never delivered, so a repeat of it must not be answered as unchanged.
+    forget();
+    Outcome::err(
+        INTERNAL_ERROR,
+        format!(
+            "{label} hit an internal error and could not answer ({msg}); the server is still running"
+        ),
+    )
+}
+
+fn record_fault(rec: &FaultRecord) {
+    let capture = std::env::var("LUMEN_CAPTURE").ok();
+    record_fault_to(capture.as_deref(), faults::spool_path(), rec);
+}
+
+/// Append a fault to `spool`; `LUMEN_CAPTURE=0` records nothing, as it does for the hooks.
+fn record_fault_to(capture: Option<&str>, spool: Option<std::path::PathBuf>, rec: &FaultRecord) {
+    if capture == Some("0") {
+        return;
+    }
+    let Some(spool) = spool else {
+        eprintln!(
+            "lumen: no fault spool resolved (LUMEN_FAULT_SPOOL and LUMEN_DB unset, no home \
+             directory); the panic above was not recorded"
+        );
+        return;
+    };
+    if let Err(e) = faults::try_record_at(&spool, rec) {
+        eprintln!(
+            "lumen: could not write the fault spool {}: {e}",
+            spool.display()
+        );
     }
 }
 
@@ -1972,6 +2143,531 @@ mod tests {
         assert!(text.contains("line10"), "must include the last real line");
     }
 
+    // ── recall_file: which lines a range reads ───────────────────────────────
+
+    fn numbered(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("line{i} // padding to make this file worth a partial read\n"))
+            .collect()
+    }
+
+    fn recall_range(path: &str, start: u64, end: u64) -> Outcome {
+        tool_recall_file(&json!({ "path": path, "start_line": start, "end_line": end }))
+    }
+
+    #[test]
+    fn a_range_inside_the_file_gets_three_lines_of_context_each_side() {
+        assert_eq!(range_window(10, 12, 400), Ok(6..15));
+        assert_eq!(range_window(1, 2, 10), Ok(0..5));
+        assert_eq!(range_window(5, 5, 10), Ok(1..8));
+    }
+
+    #[test]
+    fn an_end_past_the_file_is_clamped_to_its_last_line() {
+        assert_eq!(range_window(8, 9999, 10), Ok(4..10));
+        assert_eq!(range_window(8, usize::MAX, 10), Ok(4..10));
+        assert_eq!(range_window(1, usize::MAX, 10), Ok(0..10));
+    }
+
+    #[test]
+    fn the_last_line_is_a_valid_start() {
+        assert_eq!(range_window(10, 10, 10), Ok(6..10));
+        assert_eq!(range_window(10, usize::MAX, 10), Ok(6..10));
+    }
+
+    #[test]
+    fn a_start_past_the_last_line_is_refused() {
+        for start in [11, 12, 14, 15, 16, 1000, usize::MAX - 1, usize::MAX] {
+            for end in [start, start.saturating_add(5), usize::MAX] {
+                assert!(
+                    range_window(start, end, 10).is_err(),
+                    "L{start}-{end} of a 10-line file"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_start_after_the_end_is_refused() {
+        for (start, end) in [(50, 10), (12, 10), (100, 1), (2, 1), (usize::MAX, 1)] {
+            assert!(
+                range_window(start, end, 100).is_err(),
+                "L{start}-{end} of a 100-line file"
+            );
+        }
+    }
+
+    #[test]
+    fn a_start_of_zero_reads_from_the_first_line() {
+        assert_eq!(range_window(0, 5, 10), Ok(0..8));
+        assert_eq!(range_window(0, 0, 10), Ok(0..3));
+        assert_eq!(range_window(0, 0, 0), Ok(0..0));
+    }
+
+    #[test]
+    fn an_empty_file_has_no_line_to_start_at() {
+        assert!(range_window(1, 1, 0).is_err());
+        assert!(range_window(1, 5, 0).is_err());
+    }
+
+    #[test]
+    fn every_accepted_range_is_a_window_inside_the_file() {
+        for n in 0..=12usize {
+            let marks: Vec<usize> = (0..=n + 6).chain([usize::MAX - 1, usize::MAX]).collect();
+            for &start in &marks {
+                for &end in &marks {
+                    let got = range_window(start, end, n);
+                    assert_eq!(
+                        got.is_err(),
+                        start > n || start > end,
+                        "L{start}-{end} of {n} lines: {got:?}"
+                    );
+                    let Ok(w) = got else { continue };
+                    // Three lines of context either side, and never past either end of the file.
+                    let first = start.saturating_sub(1).saturating_sub(3);
+                    let last = (end.min(n) + 3).min(n);
+                    assert_eq!(w, first..last, "L{start}-{end} of {n} lines");
+                    assert!(
+                        w.start <= w.end && w.end <= n,
+                        "L{start}-{end} of {n}: {w:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_non_negative_integer_is_a_line_number() {
+        let arg = |v: Value| line_arg(&json!({ "start_line": v }), "start_line");
+        assert_eq!(arg(json!(0)), Some(0));
+        assert_eq!(arg(json!(7)), Some(7));
+        assert_eq!(arg(json!(u64::MAX)), Some(usize::MAX));
+        for v in [
+            json!(-1),
+            json!(1.5),
+            json!("10"),
+            json!(null),
+            json!(true),
+            json!([3]),
+        ] {
+            assert_eq!(arg(v.clone()), None, "{v}");
+        }
+        assert_eq!(line_arg(&json!({}), "start_line"), None);
+    }
+
+    #[test]
+    fn a_start_past_the_end_is_an_error_that_says_how_long_the_file_is() {
+        let (_d, path) = fixture("nums.txt", &numbered(200));
+        let out = recall_range(&path, 500, 600);
+        assert_eq!(out.error_code(), Some(INVALID_PARAMS));
+        let msg = out.error_message().expect("an error message");
+        assert!(msg.contains("200 lines"), "{msg}");
+        assert!(msg.contains("L500-600"), "{msg}");
+        assert!(msg.contains("past the end"), "{msg}");
+        assert!(
+            out.meter.is_none(),
+            "a refused range read nothing, so it meters nothing"
+        );
+    }
+
+    #[test]
+    fn a_start_after_the_end_is_an_error_that_names_the_order() {
+        let (_d, path) = fixture("nums.txt", &numbered(200));
+        let out = recall_range(&path, 150, 10);
+        assert_eq!(out.error_code(), Some(INVALID_PARAMS));
+        let msg = out.error_message().expect("an error message");
+        assert!(msg.contains("after end_line"), "{msg}");
+        assert!(
+            msg.contains("L150-10") && msg.contains("200 lines"),
+            "{msg}"
+        );
+        assert!(out.meter.is_none());
+    }
+
+    #[test]
+    fn huge_line_numbers_are_refused_rather_than_overflowing() {
+        let (_d, path) = fixture("nums.txt", &numbered(200));
+        for (start, end) in [
+            (u64::MAX, u64::MAX),
+            (i64::MAX as u64, i64::MAX as u64),
+            (u64::MAX, 1),
+            (u64::MAX - 1, u64::MAX),
+        ] {
+            let out = recall_range(&path, start, end);
+            assert_eq!(out.error_code(), Some(INVALID_PARAMS), "L{start}-{end}");
+        }
+    }
+
+    #[test]
+    fn an_end_of_u64_max_clamps_and_the_header_keeps_what_was_asked() {
+        let (_d, path) = fixture("nums.txt", &numbered(200));
+        let text = text_of(&recall_range(&path, 195, u64::MAX));
+        assert!(
+            text.contains(&format!("L195-{} (+3 lines context)", u64::MAX)),
+            "{text}"
+        );
+        assert!(
+            text.contains("192|line192 ") && text.contains("200|line200 "),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_start_of_zero_is_served_from_the_first_line() {
+        let (_d, path) = fixture("nums.txt", &numbered(200));
+        let text = text_of(&recall_range(&path, 0, 5));
+        assert!(text.contains("L0-5 (+3 lines context)"), "{text}");
+        assert!(
+            text.contains("1|line1 ") && text.contains("8|line8 "),
+            "{text}"
+        );
+        assert!(!text.contains("9|line9 "), "{text}");
+    }
+
+    #[test]
+    fn a_range_in_an_empty_file_is_refused_with_its_length() {
+        let (_d, path) = fixture("empty.txt", "");
+        let out = recall_range(&path, 1, 5);
+        assert_eq!(out.error_code(), Some(INVALID_PARAMS));
+        assert!(out.error_message().expect("message").contains("0 lines"));
+    }
+
+    /// The header and every line of the window behind its number, restated without `range_window`.
+    fn range_text_as_before(path: &str, src: &str, start: usize, end: usize) -> String {
+        let lines: Vec<&str> = src.lines().collect();
+        let first = start.saturating_sub(1).saturating_sub(3);
+        let last = (end.min(lines.len()) + 3).min(lines.len());
+        let mut text = format!("# {path} — L{start}-{end} (+3 lines context)\n\n");
+        for (i, line) in lines[first..last].iter().enumerate() {
+            text.push_str(&gutter_line(first + i + 1, line));
+        }
+        text
+    }
+
+    #[test]
+    fn a_range_the_file_can_satisfy_reads_exactly_what_it_read_before() {
+        let src = numbered(400);
+        let (_d, path) = fixture("nums.txt", &src);
+        let full = count_tokens(&src) as i64;
+        for (start, end) in [
+            (10, 12),
+            (1, 2),
+            (1, 1),
+            (0, 5),
+            (0, 0),
+            (5, 5),
+            (396, 400),
+            (400, 400),
+            (390, u64::MAX),
+            (200, 239),
+            (4, 4),
+            (399, 1000),
+        ] {
+            let out = recall_range(&path, start, end);
+            let want = range_text_as_before(&path, &src, start as usize, end as usize);
+            assert_eq!(text_of(&out), want, "L{start}-{end}");
+            let returned = count_tokens(&want) as i64;
+            assert_eq!(meta(&out, "returned_tokens"), returned, "L{start}-{end}");
+            assert_eq!(meta(&out, "full_tokens"), full, "L{start}-{end}");
+            assert_eq!(
+                meta(&out, "saved_tokens"),
+                full - returned,
+                "L{start}-{end}"
+            );
+        }
+    }
+
+    // ── no input panics a tool ───────────────────────────────────────────────
+
+    /// Source that parses in `ext`'s language, so the damaged variants below damage something real.
+    fn native_source(ext: &str) -> &'static str {
+        match ext {
+            "rs" => {
+                "pub struct S;\nimpl S {\n    pub fn m(&self) {}\n}\npub fn a() {}\nmod inner {\n    pub fn b() {}\n}\n"
+            }
+            "py" => "class S:\n    def m(self):\n        pass\n\n\ndef a():\n    pass\n",
+            "ts" | "tsx" => {
+                "export class S {\n  m() {}\n}\nexport function a() {}\nconst b = () => 1;\n"
+            }
+            _ => "plain text\nmore plain text\n",
+        }
+    }
+
+    /// Files a careless slice, index or unwrap cannot take: empty, CRLF, multibyte, NUL, cut off, huge.
+    fn odd_files(ext: &str) -> Vec<(&'static str, String)> {
+        let native = native_source(ext);
+        vec![
+            ("as is", native.to_string()),
+            ("empty", String::new()),
+            ("a lone newline", "\n".to_string()),
+            ("only blank lines", "\n\n  \n\t\n".to_string()),
+            ("no final newline", native.trim_end().to_string()),
+            ("crlf", native.replace('\n', "\r\n")),
+            ("lone cr", native.replace('\n', "\r")),
+            ("multibyte names", native.replace('a', "é日🦀")),
+            ("byte order mark", format!("\u{feff}{native}")),
+            ("nul bytes", format!("{native}\0\n{native}")),
+            ("cut in half", native[..native.len() / 2].to_string()),
+            (
+                "unterminated syntax",
+                "fn a( {\nstruct {{{{ \"unclosed\n/* never closed\n".to_string(),
+            ),
+            (
+                "one long multibyte line",
+                format!("// {}\n{native}", "é日🦀".repeat(300)),
+            ),
+            (
+                "one long ascii line",
+                format!("// {}\n{native}", "word ".repeat(600)),
+            ),
+            ("many tiny lines", "a\n".repeat(400)),
+        ]
+    }
+
+    /// What went wrong in one call, if anything: a panic, or an error other than invalid params.
+    fn trouble(label: &str, call: impl FnOnce() -> Outcome) -> Option<String> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+            Err(p) => {
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "no message".to_string());
+                Some(format!("{label}: panicked: {msg}"))
+            }
+            Ok(out) => match out.error_code() {
+                None | Some(INVALID_PARAMS) => None,
+                Some(code) => Some(format!("{label}: error code {code}")),
+            },
+        }
+    }
+
+    type Tool = fn(&Value) -> Outcome;
+
+    fn call(label: impl Into<String>, tool: Tool, args: Value) -> (String, Tool, Value) {
+        (label.into(), tool, args)
+    }
+
+    fn selector_calls(path: &str) -> Vec<(String, Tool, Value)> {
+        let mut calls = vec![
+            call("smart_read", tool_smart_read, json!({ "path": path })),
+            call(
+                "smart_read full",
+                tool_smart_read,
+                json!({ "path": path, "mode": "full" }),
+            ),
+            call(
+                "smart_read, mode not a string",
+                tool_smart_read,
+                json!({ "path": path, "mode": 7 }),
+            ),
+            call(
+                "recall_file, no selector",
+                tool_recall_file,
+                json!({ "path": path }),
+            ),
+            call(
+                "compress_logs, path",
+                tool_compress_logs,
+                json!({ "path": path }),
+            ),
+        ];
+        for names in [
+            json!(["a"]),
+            json!(["S", "m"]),
+            json!(["nope"]),
+            json!([""]),
+            json!(["  "]),
+            json!([]),
+            json!([1, null, true]),
+            json!(["x".repeat(5_000)]),
+            json!(["é日🦀"]),
+        ] {
+            let shown: String = names.to_string().chars().take(24).collect();
+            calls.push(call(
+                format!("recall_file, names {shown}"),
+                tool_recall_file,
+                json!({ "path": path, "names": names }),
+            ));
+        }
+        calls
+    }
+
+    fn range_calls(path: &str, lines: usize) -> Vec<(String, Tool, Value)> {
+        let n = lines as u64;
+        [
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (0, 0),
+            (0, 3),
+            (3, 3),
+            (n, n),
+            (n, 1),
+            (1, n),
+            (n + 1, n + 1),
+            (n + 4, n + 4),
+            (n + 5, n + 9),
+            (1, u64::MAX),
+            (u64::MAX, u64::MAX),
+            (u64::MAX, 1),
+            (i64::MAX as u64, i64::MAX as u64),
+        ]
+        .into_iter()
+        .map(|(start, end)| {
+            call(
+                format!("recall_file, L{start}-{end}"),
+                tool_recall_file,
+                json!({ "path": path, "start_line": start, "end_line": end }),
+            )
+        })
+        .collect()
+    }
+
+    fn assert_no_trouble(found: Vec<String>) {
+        assert!(
+            found.is_empty(),
+            "{} calls went wrong, first {}:\n{}",
+            found.len(),
+            found.len().min(12),
+            found
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn no_tool_panics_on_an_odd_file() {
+        let mut found = vec![];
+        for ext in ["rs", "py", "ts", "tsx", "txt"] {
+            for (what, body) in odd_files(ext) {
+                let (_d, path) = fixture(&format!("odd.{ext}"), &body);
+                for (label, tool, args) in selector_calls(&path) {
+                    found.extend(trouble(&format!("{ext} / {what} / {label}"), || {
+                        tool(&args)
+                    }));
+                }
+                // compress_logs also takes the text itself.
+                found.extend(trouble(
+                    &format!("{ext} / {what} / compress_logs, text"),
+                    || tool_compress_logs(&json!({ "text": body })),
+                ));
+            }
+        }
+        assert_no_trouble(found);
+    }
+
+    #[test]
+    fn no_line_range_panics_on_an_odd_file() {
+        let mut found = vec![];
+        for ext in ["rs", "py", "ts", "tsx", "txt"] {
+            for (what, body) in odd_files(ext) {
+                let (_d, path) = fixture(&format!("odd.{ext}"), &body);
+                for (label, tool, args) in range_calls(&path, body.lines().count()) {
+                    found.extend(trouble(&format!("{ext} / {what} / {label}"), || {
+                        tool(&args)
+                    }));
+                }
+            }
+        }
+        assert_no_trouble(found);
+    }
+
+    #[test]
+    fn the_ranked_outline_does_not_panic_on_an_odd_file() {
+        // A cheap round and a large nominal file, so every body reaches the parser.
+        let econ = lumen_core::econ::Econ {
+            context_tokens: 1_000.0,
+            ..Default::default()
+        };
+        for ext in ["rs", "py", "ts", "tsx"] {
+            for (what, body) in odd_files(ext) {
+                let path = format!("odd.{ext}");
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ranked::ranked_outline(&path, &body, 50_000, &econ, &count_tokens)
+                }));
+                let decision = caught.unwrap_or_else(|_| panic!("{ext} / {what}: panicked"));
+                assert_ne!(
+                    decision.outcome.as_ref().err(),
+                    Some(&ranked::Decline::NotWorthIt),
+                    "{ext} / {what}: the body never reached the parser"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_is_an_error_not_a_crash() {
+        let dir = TempDir::new().expect("tempdir");
+        let file = dir.path().join("bytes.rs");
+        std::fs::write(&file, b"fn a() {}\n\xff\xfe\xc3\x28\n").expect("write");
+        let path = file.to_string_lossy().to_string();
+        for (label, out) in [
+            ("smart_read", tool_smart_read(&json!({ "path": path }))),
+            ("recall_file, range", recall_range(&path, 1, 2)),
+            (
+                "recall_file, names",
+                tool_recall_file(&json!({ "path": path, "names": ["a"] })),
+            ),
+            (
+                "compress_logs",
+                tool_compress_logs(&json!({ "path": path })),
+            ),
+        ] {
+            assert_eq!(out.error_code(), Some(INVALID_PARAMS), "{label}");
+            let msg = out.error_message().expect("message");
+            assert!(msg.contains("valid UTF-8"), "{label}: {msg}");
+        }
+    }
+
+    #[test]
+    fn arguments_of_the_wrong_shape_are_invalid_params_not_a_crash() {
+        for args in [
+            json!(null),
+            json!([]),
+            json!("x"),
+            json!(7),
+            json!({}),
+            json!({ "path": 5 }),
+            json!({ "path": null }),
+        ] {
+            for (label, out) in [
+                ("smart_read", tool_smart_read(&args)),
+                ("recall_file", tool_recall_file(&args)),
+                ("compress_logs", tool_compress_logs(&args)),
+            ] {
+                assert_eq!(out.error_code(), Some(INVALID_PARAMS), "{label} {args}");
+            }
+        }
+        // Selectors of the wrong type are no selector at all.
+        let (_d, path) = fixture("a.rs", &rust_src());
+        for extra in [
+            json!({ "names": "alpha" }),
+            json!({ "names": { "a": 1 } }),
+            json!({ "names": null }),
+            json!({ "start_line": {}, "end_line": [] }),
+        ] {
+            let mut args = json!({ "path": path });
+            args.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            let out = tool_recall_file(&args);
+            assert!(out.error_code().is_none(), "{args}: {out:?}");
+        }
+        for params in [
+            None,
+            Some(json!(null)),
+            Some(json!(5)),
+            Some(json!({ "name": 5 })),
+            Some(json!({ "name": "no_such_tool", "arguments": 5 })),
+        ] {
+            assert_eq!(handle_tools_call(params).error_code(), Some(NOT_FOUND));
+        }
+    }
+
     #[test]
     fn recall_file_with_no_selector_returns_the_outline_not_the_file() {
         // Returning the file plus a header made this the one branch that could never save
@@ -2356,6 +3052,285 @@ mod tests {
                 "{name} is advertised but not dispatchable"
             );
         }
+    }
+
+    // ── panic guard ──────────────────────────────────────────────────────────
+
+    /// What `guarded` did besides answering: the faults it filed, and how often it forgot.
+    #[derive(Default)]
+    struct Seen {
+        faults: Vec<FaultRecord>,
+        forgets: usize,
+    }
+
+    fn run_guarded(
+        label: &str,
+        path: Option<&str>,
+        run: impl FnOnce() -> Outcome,
+    ) -> (Outcome, Seen) {
+        let seen = std::cell::RefCell::new(Seen::default());
+        let out = guarded(
+            label,
+            path.map(str::to_string),
+            |rec| seen.borrow_mut().faults.push(rec.clone()),
+            || seen.borrow_mut().forgets += 1,
+            run,
+        );
+        (out, seen.into_inner())
+    }
+
+    #[test]
+    fn a_request_that_does_not_panic_is_answered_as_it_was_and_files_nothing() {
+        for answer in [
+            Outcome::ok(json!({ "pong": 1 })),
+            Outcome::err(INVALID_PARAMS, "bad"),
+        ] {
+            let (out, seen) = run_guarded("ping", None, || answer.clone());
+            assert_eq!(out, answer);
+            assert!(seen.faults.is_empty(), "{:?}", seen.faults);
+            assert_eq!(
+                seen.forgets, 0,
+                "nothing is forgotten when nothing went wrong"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_changes_no_answer_that_did_not_panic() {
+        let (_dir, path) = fixture("sample.rs", &rust_src());
+        let call = |name: &str, args: Value| Some(json!({ "name": name, "arguments": args }));
+        for (method, params) in [
+            ("initialize", None),
+            ("ping", None),
+            ("tools/list", None),
+            ("tools/teleport", None),
+            ("tools/call", None),
+            ("tools/call", call("nope", json!({}))),
+            ("tools/call", call("lumen_ping", json!({ "echo": "x" }))),
+            ("tools/call", call("smart_read", json!({ "path": path }))),
+            ("tools/call", call("compress_logs", json!({ "path": path }))),
+            (
+                "tools/call",
+                call(
+                    "recall_file",
+                    json!({ "path": path, "start_line": 5, "end_line": 9 }),
+                ),
+            ),
+            (
+                "tools/call",
+                call(
+                    "recall_file",
+                    json!({ "path": path, "start_line": 9999, "end_line": 9 }),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                dispatch_guarded(method, params.clone()),
+                dispatch(method, params),
+                "{method}"
+            );
+        }
+    }
+
+    /// The file, line and column a fault says its panic was raised at.
+    fn panic_site(rec: &FaultRecord) -> (String, u32, u32) {
+        let detail = rec.detail.as_deref().expect("a detail");
+        let site = detail
+            .strip_prefix("panicked at ")
+            .unwrap_or_else(|| panic!("no site in {detail:?}"));
+        let mut parts = site.rsplitn(3, ':');
+        let column = parts.next().and_then(|c| c.parse().ok());
+        let line = parts.next().and_then(|l| l.parse().ok());
+        match (parts.next(), line, column) {
+            (Some(file), Some(line), Some(column)) => (file.to_string(), line, column),
+            _ => panic!("not a site: {detail:?}"),
+        }
+    }
+
+    #[test]
+    fn a_panicking_handler_is_answered_with_an_error_and_filed_as_a_fault() {
+        let line_before_the_panic = std::cell::Cell::new(0);
+        let (out, seen) = run_guarded("recall_file", Some("/src/lib.rs"), || {
+            line_before_the_panic.set(line!());
+            panic!("the slice was out of range")
+        });
+
+        assert_eq!(out.error_code(), Some(INTERNAL_ERROR));
+        let msg = out.error_message().expect("an error reply");
+        assert!(msg.contains("recall_file"), "{msg}");
+        assert!(msg.contains("the slice was out of range"), "{msg}");
+        assert!(msg.contains("server is still running"), "{msg}");
+        assert!(
+            out.meter.is_none(),
+            "a request that did not answer meters nothing"
+        );
+
+        assert_eq!(seen.faults.len(), 1, "{:?}", seen.faults);
+        let fault = &seen.faults[0];
+        assert_eq!(fault.kind, REQUEST_PANIC);
+        assert_eq!(fault.variant, "recall_file");
+        assert_eq!(fault.path.as_deref(), Some("/src/lib.rs"));
+        let (file, line, column) = panic_site(fault);
+        assert_eq!(file, file!());
+        assert_eq!(line, line_before_the_panic.get() + 1);
+        assert!(column > 0);
+        assert_eq!(seen.forgets, 1, "what the call remembered is dropped");
+    }
+
+    #[test]
+    fn a_panic_message_is_told_to_the_caller_whether_it_is_a_str_a_string_or_neither() {
+        let n = 7;
+        let (a, _) = run_guarded("smart_read", None, || panic!("fixed text"));
+        let (b, _) = run_guarded("smart_read", None, || panic!("formatted {n}"));
+        let (c, _) = run_guarded("smart_read", None, || std::panic::panic_any(42_u32));
+        for (out, said) in [
+            (a, "fixed text"),
+            (b, "formatted 7"),
+            (c, "a panic with no message"),
+        ] {
+            let msg = out.error_message().expect("an error reply");
+            assert!(msg.contains(said), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_long_panic_message_is_cut_on_a_character_boundary() {
+        let long = "é".repeat(PANIC_MESSAGE_CHARS * 2);
+        let (out, _) = run_guarded("smart_read", None, || panic!("{long}"));
+        let msg = out.error_message().expect("an error reply");
+        assert_eq!(msg.matches('é').count(), PANIC_MESSAGE_CHARS);
+    }
+
+    #[test]
+    fn a_fault_for_a_panic_never_carries_the_text_the_call_was_reading() {
+        // An error that quotes the line it stopped at, unwrapped: std puts the error in the message.
+        fn read(line: &str) -> Result<(), String> {
+            Err(line.to_string())
+        }
+        let (out, seen) = run_guarded("recall_file", Some("/src/lib.rs"), || {
+            read("SECRET-LINE-OF-THE-FILE").unwrap();
+            Outcome::ok(json!({}))
+        });
+
+        let msg = out.error_message().expect("an error reply");
+        assert!(
+            msg.contains("SECRET-LINE-OF-THE-FILE"),
+            "the message quotes the text, or this test proves nothing: {msg}"
+        );
+        let filed = serde_json::to_string(&seen.faults).expect("a fault serializes");
+        assert!(!filed.contains("SECRET"), "{filed}");
+    }
+
+    #[test]
+    fn a_panic_leaves_no_caller_behind() {
+        let placed = std::cell::Cell::new(false);
+        let (out, _) = run_guarded("recall_file", None, || {
+            let _caller = Caller::enter(Lookup::Known(Identity {
+                session: "a-conversation-only-this-test-uses".to_string(),
+                agent: None,
+            }));
+            placed.set(caller().is_some());
+            panic!("after the caller was placed")
+        });
+
+        assert!(placed.get(), "the call is placed while it runs");
+        assert_eq!(out.error_code(), Some(INTERNAL_ERROR));
+        assert!(
+            caller().is_none(),
+            "the next call must not inherit this one's caller"
+        );
+    }
+
+    #[test]
+    fn a_fault_for_a_panic_lands_in_the_spool_the_report_reads() {
+        let dir = TempDir::new().expect("tempdir");
+        let spool = dir.path().join("faults.jsonl");
+        let mut filed = None;
+        let out = guarded(
+            "compress_logs",
+            Some("/tmp/build.log".to_string()),
+            |rec| {
+                filed = Some(rec.clone());
+                record_fault_to(None, Some(spool.clone()), rec)
+            },
+            || {},
+            || panic!("boom"),
+        );
+        assert_eq!(out.error_code(), Some(INTERNAL_ERROR));
+
+        let read = faults::peek_spool_at(&spool).expect("the spool is readable");
+        assert_eq!(read, vec![filed.expect("a fault was filed")]);
+        assert_eq!(read[0].kind, REQUEST_PANIC);
+        assert_eq!(read[0].variant, "compress_logs");
+        assert_eq!(read[0].path.as_deref(), Some("/tmp/build.log"));
+        assert_eq!(panic_site(&read[0]).0, file!());
+    }
+
+    #[test]
+    fn capture_off_records_nothing_and_a_spool_that_cannot_be_written_is_survived() {
+        let dir = TempDir::new().expect("tempdir");
+        let spool = dir.path().join("faults.jsonl");
+        let rec = FaultRecord::now(REQUEST_PANIC, "recall_file");
+
+        record_fault_to(Some("0"), Some(spool.clone()), &rec);
+        assert!(!spool.exists(), "LUMEN_CAPTURE=0 records no faults at all");
+
+        record_fault_to(Some("1"), Some(spool.clone()), &rec);
+        assert_eq!(faults::peek_spool_at(&spool).expect("readable").len(), 1);
+
+        // A directory cannot be appended to and no spool is nowhere to write: neither may panic.
+        record_fault_to(None, Some(dir.path().to_path_buf()), &rec);
+        record_fault_to(None, None, &rec);
+    }
+
+    #[test]
+    fn a_request_is_labelled_from_a_fixed_set() {
+        let call = |name: &str| json!({ "name": name, "arguments": {} });
+        for tool in ["lumen_ping", "smart_read", "recall_file", "compress_logs"] {
+            assert_eq!(request_label("tools/call", Some(&call(tool))), tool);
+        }
+        assert_eq!(request_label("initialize", None), "initialize");
+        assert_eq!(request_label("ping", None), "ping");
+        assert_eq!(request_label("tools/list", None), "tools/list");
+
+        // The report groups faults by this label, so nothing the client typed may become one.
+        let typed = call("whatever-the-model-typed");
+        assert_eq!(request_label("tools/call", Some(&typed)), "other");
+        assert_eq!(
+            request_label("tools/call", Some(&json!({ "name": 7 }))),
+            "other"
+        );
+        assert_eq!(request_label("tools/call", None), "other");
+        assert_eq!(request_label("tools/teleport", None), "other");
+    }
+
+    #[test]
+    fn the_path_a_request_named_is_kept_for_its_fault() {
+        let named = json!({ "name": "recall_file", "arguments": { "path": "/a/b.rs" } });
+        assert_eq!(request_path(Some(&named)).as_deref(), Some("/a/b.rs"));
+        for none in [
+            json!({}),
+            json!({ "arguments": {} }),
+            json!({ "arguments": [] }),
+            json!({ "arguments": { "path": 5 } }),
+            json!({ "arguments": { "path": null } }),
+        ] {
+            assert_eq!(request_path(Some(&none)), None, "{none}");
+        }
+        assert_eq!(request_path(None), None);
+
+        let longer_than_any_path =
+            json!({ "arguments": { "path": "é".repeat(FAULT_PATH_CHARS + 10) } });
+        let kept = request_path(Some(&longer_than_any_path)).expect("a path");
+        assert_eq!(kept.chars().count(), FAULT_PATH_CHARS);
+    }
+
+    #[test]
+    fn the_report_knows_the_fault_kind_the_guard_files() {
+        assert!(
+            lumen_core::report::FAULT_KINDS.contains(&REQUEST_PANIC),
+            "a kind the renderer does not know is shown as an unclassified fault"
+        );
     }
 
     // ── Outcome accessors ────────────────────────────────────────────────────
