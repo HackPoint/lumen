@@ -5,6 +5,7 @@ import { Cost } from '../../components/cost/cost';
 import { Usage } from '../../components/usage/usage';
 import { Firefly } from '../../components/firefly/firefly';
 import { SessionService } from '../../session.service';
+import { RepeatReadsService } from '../../repeat-reads.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { LumenTooltip } from '../../directives/tooltip.directive';
 
@@ -26,6 +27,7 @@ interface StartupHealth {
 })
 export class Home implements OnInit {
     readonly s = inject(SessionService);
+    readonly rr = inject(RepeatReadsService);
     private readonly router = inject(Router);
     private readonly bridge = inject(TauriBridge);
     private readonly destroyRef = inject(DestroyRef);
@@ -75,6 +77,7 @@ export class Home implements OnInit {
             .then(needed => { if (needed) this.router.navigate(['/setup']); })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });
         this.s.refreshFaultCount();
+        void this.rr.load();
     }
 
     private readVersion(): void {
@@ -122,5 +125,14 @@ export class Home implements OnInit {
     // D5: toggle native OS notifications.
     onNativeNotify(e: Event): void {
         this.s.setNativeNotify((e.target as HTMLInputElement).checked);
+    }
+
+    async onRepeatReads(e: Event): Promise<void> {
+        const box = e.target as HTMLInputElement;
+        const took = await this.rr.set(box.checked);
+        // A click flips the box by itself, and the binding writes it back only when the
+        // stored value changed, so a write that did not take has to put it back here.
+        const now = this.rr.setting();
+        if (!took && now) box.checked = now.on;
     }
 }
