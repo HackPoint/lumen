@@ -1,5 +1,5 @@
 use crate::busy;
-use crate::schema::{DDL, MIGRATIONS};
+use crate::schema::{BACKFILLS, DDL, MIGRATIONS};
 use rusqlite::{Connection, params};
 
 /// Detect which Claude Code channel spawned this process.
@@ -122,7 +122,8 @@ pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std
 /// Open (or create) the lumen SQLite DB, apply DDL + additive migrations.
 ///
 /// A ledger another program holds is waited for (see [`crate::busy`]); the migrations'
-/// other errors are "already applied", as in [`crate::schema::init_schema`].
+/// other errors are "already applied", as in [`crate::schema::init_schema`], and so is a
+/// backfill that stays busy.
 fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     restore_sidecar_write_bits(path);
     let conn = Connection::open(path)?;
@@ -134,6 +135,9 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
         {
             return Err(e);
         }
+    }
+    for backfill in BACKFILLS {
+        busy::retry_busy_blocking(|| conn.execute_batch(backfill)).ok();
     }
     Ok(conn)
 }

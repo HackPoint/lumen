@@ -24,8 +24,9 @@ reports the error.
 
 A migration refused for the same reason used to be skipped and counted as applied, which could
 leave a column or an index missing. A busy ledger is now an error, and the next open runs the
-migration again. Any other migration error (a column that already exists) is still read as
-applied.
+migration again. The one exception is the step that marks subagent turns: it rewrites rows, not
+the schema, and every open runs it, so an open that finds the ledger busy for it goes on without
+it, as before. Any other migration error (a column that already exists) is still read as applied.
 
 ### The app shows which version it is
 

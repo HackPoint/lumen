@@ -113,7 +113,9 @@ fn ledger_missing_a_column(dir: &Path) -> PathBuf {
 }
 
 fn has_agent_id(conn: &Connection) -> bool {
-    conn.query_row(AGENT_ID, [], |r| r.get::<_, i64>(0)).unwrap() == 1
+    conn.query_row(AGENT_ID, [], |r| r.get::<_, i64>(0))
+        .unwrap()
+        == 1
 }
 
 async fn has_agent_id_in(pool: &sqlx::SqlitePool) -> bool {
@@ -186,8 +188,8 @@ fn the_rusqlite_open_goes_on_without_a_backfill_the_ledger_stays_busy_for() {
     let path = wal_ledger(dir.path());
     let writer = Writer::hold(&path, Duration::from_secs(60));
 
-    let conn = meter::connect_db(&path)
-        .expect("the schema is whole, and the next open does the backfill");
+    let conn =
+        meter::connect_db(&path).expect("the schema is whole, and the next open does the backfill");
     assert!(
         !backfilled(&conn),
         "the writer held the ledger throughout, so the backfill cannot have run"

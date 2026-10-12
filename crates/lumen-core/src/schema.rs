@@ -18,7 +18,8 @@ use crate::busy;
 /// busy (see [`crate::busy`]) means the statement did not run, and calling that
 /// "already applied" would leave a column or an index missing for good. It is
 /// waited for, and returned if the wait runs out; the next open runs the
-/// migration again.
+/// migration again. [`BACKFILLS`] are not read that way: they rewrite rows, not the
+/// schema, so a ledger that stays busy for one does not fail the open.
 pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     busy::retry_busy(|| sqlx::raw_sql(DDL).execute(pool)).await?;
     for migration in MIGRATIONS {
@@ -32,6 +33,12 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
             return Err(e);
         }
     }
+    for backfill in BACKFILLS {
+        // Literals in BACKFILLS, as above.
+        busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(*backfill)).execute(pool))
+            .await
+            .ok();
+    }
     Ok(())
 }
 
@@ -43,22 +50,21 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
 /// asked, and the switch to WAL is the DDL's.
 pub async fn open_pool(url: &str) -> Result<sqlx::SqlitePool, sqlx::Error> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new().connect(url).await?;
-    init_schema(&pool).await?;
+    if let Err(e) = init_schema(&pool).await {
+        pool.close().await;
+        return Err(e);
+    }
     Ok(pool)
 }
 
 /// Additive migrations run after DDL to upgrade existing DBs.
-/// Each statement is idempotent (errors for "duplicate column" are swallowed by the caller).
+/// Each statement is idempotent: the openers read any error but a busy ledger as "already applied".
 pub const MIGRATIONS: &[&str] = &[
     "ALTER TABLE read_events ADD COLUMN channel TEXT NOT NULL DEFAULT 'unknown'",
     // Subagent transcripts reuse the parent's sessionId, so their turns land in
     // the parent session. They are real spend (kept in cost) but carry their own
     // fresh context, so they must NOT drive the context-fill gauge.
     "ALTER TABLE turns ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
-    // Backfill existing rows from the path they were ingested from. Idempotent,
-    // so it is safe to re-run on every open.
-    "UPDATE turns SET is_subagent = 1 \
-     WHERE is_subagent = 0 AND source_file LIKE '%/subagents/%'",
     // ── E7 instrumentation ───────────────────────────────────────────────────
     // Existing rows stay NULL. There is no honest way to backfill provenance for
     // events already recorded, and inventing it would be worse than admitting the
@@ -175,6 +181,14 @@ pub const MIGRATIONS: &[&str] = &[
         path TEXT, lines INTEGER, detail TEXT, session_id TEXT, \
         version TEXT, channel TEXT NOT NULL DEFAULT 'unknown')",
     "CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant)",
+];
+
+/// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
+/// error, and the next open runs it again.
+pub const BACKFILLS: &[&str] = &[
+    // Mark the turns ingested from a subagent path. Idempotent, so safe to re-run on every open.
+    "UPDATE turns SET is_subagent = 1 \
+     WHERE is_subagent = 0 AND source_file LIKE '%/subagents/%'",
 ];
 
 /// Column count of `read_events` on a current database — DDL plus every ALTER in
