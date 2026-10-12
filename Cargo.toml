@@ -7,6 +7,8 @@ members = [
     "crates/lumen-mcp",
     "crates/lumen-stats",
     "lumenator/src-tauri",
+    # On-demand benchmarks (benchmarks/README.md). Dev-only: no shipped binary depends on it.
+    "benchmarks/harness",
 ]
 
 # The oldest compiler this workspace builds on, inherited by every crate: sqlx 0.9 requires

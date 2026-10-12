@@ -1,0 +1,26 @@
+[package]
+name = "lumen-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+description = "On-demand benchmark harness for the Lumen MCP server and hooks. Dev-only: nothing shipped depends on it."
+
+[lib]
+name = "lumen_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lumen-bench"
+path = "src/main.rs"
+
+# Dev-only. No shipped binary (lumen-mcp, lumen-daemon, lumen-cli, the app) depends on this
+# crate, and it adds nothing to their dependency trees: every dependency below is already in
+# Cargo.lock. lumen-mcp is linked as a library only to time the hook in-process.
+[dependencies]
+lumen-core = { path = "../../crates/lumen-core" }
+lumen-mcp = { path = "../../crates/lumen-mcp" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+tempfile = "3"
