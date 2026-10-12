@@ -1,0 +1,61 @@
+name: Benchmarks
+
+# On demand only: no push, pull_request or schedule trigger, and not a required check.
+# Runs the latency part of the benchmark harness (benchmarks/README.md) on one Linux and
+# one Windows runner and uploads the JSON. Nothing is committed back: a reviewer downloads
+# the artifact. Token figures do not depend on the OS and are produced by benchmarks/run.sh.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'Recorded runs per latency series (at least 100)'
+        required: false
+        default: '200'
+      label:
+        description: 'Result name (a MAJOR.MINOR.PATCH label marks a release result)'
+        required: false
+        default: 'ci-latency'
+
+permissions:
+  contents: read
+
+jobs:
+  latency:
+    name: Latency (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      # The harness checks out the pinned Lumen commit from this clone and the v1.7.0
+      # baseline commit from its history, so it needs all of it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Latency benchmark
+        shell: bash
+        env:
+          RUNS: ${{ inputs.runs }}
+          LABEL: ${{ inputs.label }}
+        run: >
+          cargo run --release --locked -p lumen-bench --
+          --latency-only --runs "$RUNS" --label "$LABEL"
+          --cache "${RUNNER_TEMP}/lumen-bench-cache"
+          --out "${RUNNER_TEMP}/lumen-bench-results"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmarks-${{ matrix.os }}
+          path: ${{ runner.temp }}/lumen-bench-results
+          if-no-files-found: error
