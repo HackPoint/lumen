@@ -522,6 +522,8 @@ pub fn run() {
             get_context_report,
             get_fault_report,
             get_fault_count,
+            get_repeat_reads_setting,
+            set_repeat_reads_setting,
             check_for_update,
             file_fault_report,
             show_main_window,
@@ -1039,6 +1041,111 @@ async fn get_fault_count() -> Result<u64, String> {
     .map_err(|e| format!("fault count task failed: {e}"))
 }
 
+/// What the Home window's "Repeat reads" switch shows.
+///
+/// The settings file, or the default when there is none, and nothing else. In the MCP server
+/// `LUMEN_REPEAT_READS` outranks the file, but one set in a Claude Code MCP config is not in
+/// this process's environment, so the app cannot see it and does not pretend to: it never
+/// reads the variable.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatReadsSetting {
+    /// What the file says, on when there is no file. Off when the file could not be used:
+    /// the server answers every read in full then.
+    pub on: bool,
+    pub source: SettingSource,
+    /// Why the file could not be used; `None` when it could.
+    pub problem: Option<String>,
+    /// Where the file is (or would be), so the text can name it.
+    pub file: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingSource {
+    /// No file, or a file that does not mention the setting.
+    Default,
+    File,
+}
+
+/// The file's state as the window shows it.
+///
+/// An error rather than a guess for what the app never asks for: the A/B split and an
+/// environment value only come out of `resolve` when it is handed the environment, and this
+/// app does not hand it one.
+fn setting_view(
+    file: &std::path::Path,
+    r: &lumen_core::settings::Resolved,
+) -> Result<RepeatReadsSetting, String> {
+    use lumen_core::ranked::Mode;
+    use lumen_core::settings::{Problem, Source};
+    let on = match r.mode {
+        Mode::On => true,
+        Mode::Off => false,
+        Mode::Ab => return Err("the settings file asked for the A/B split".to_string()),
+    };
+    let source = match r.source {
+        Source::Default => SettingSource::Default,
+        Source::File => SettingSource::File,
+        Source::Env => return Err("the environment decided, and the app does not read it".into()),
+    };
+    let problem = match &r.problem {
+        None => None,
+        Some(Problem::File(why)) => Some(why.clone()),
+        Some(Problem::Env(v)) => return Err(format!("an environment value {v:?} was reported")),
+    };
+    Ok(RepeatReadsSetting {
+        on,
+        source,
+        problem,
+        file: file.display().to_string(),
+    })
+}
+
+/// [`get_repeat_reads_setting`] for a ledger it is given, so a test drives what the switch
+/// shows without resolving the ledger from the environment.
+///
+/// `resolve` is handed no environment on purpose, see [`RepeatReadsSetting`].
+fn repeat_reads_setting_at(db: &std::path::Path) -> Result<RepeatReadsSetting, String> {
+    let file = lumen_core::settings::settings_path(db);
+    let resolved = lumen_core::settings::resolve(None, &lumen_core::settings::read_file(&file));
+    setting_view(&file, &resolved)
+}
+
+fn set_repeat_reads_at(db: &std::path::Path, on: bool) -> Result<RepeatReadsSetting, String> {
+    lumen_core::settings::write_repeat_reads(db, on).map_err(|e| {
+        format!(
+            "cannot write {}: {e}",
+            lumen_core::settings::settings_path(db).display()
+        )
+    })?;
+    repeat_reads_setting_at(db)
+}
+
+fn ledger_path() -> Result<std::path::PathBuf, String> {
+    lumen_core::meter::db_path()
+        .ok_or_else(|| "cannot tell where the ledger lives, so where its settings file is".into())
+}
+
+/// The Repeat reads switch as the settings file has it.
+#[tauri::command]
+async fn get_repeat_reads_setting() -> Result<RepeatReadsSetting, String> {
+    tauri::async_runtime::spawn_blocking(|| repeat_reads_setting_at(&ledger_path()?))
+        .await
+        .map_err(|e| format!("repeat reads setting task failed: {e}"))?
+}
+
+/// Write the switch, then say what the file now holds.
+///
+/// Applies to the next Lumen read in every running Claude Code session: the server reads the
+/// file on each call.
+#[tauri::command]
+async fn set_repeat_reads_setting(on: bool) -> Result<RepeatReadsSetting, String> {
+    tauri::async_runtime::spawn_blocking(move || set_repeat_reads_at(&ledger_path()?, on))
+        .await
+        .map_err(|e| format!("repeat reads setting task failed: {e}"))?
+}
+
 /// Width of the tray popover. Fixed: it is positioned under the tray icon and a varying
 /// width would make it jump horizontally as rows appear.
 const PANEL_WIDTH: f64 = 320.0;
@@ -1320,5 +1427,226 @@ mod tests {
         let url = lumen_stats::db_url();
         assert!(url.starts_with("sqlite:"), "got {url}");
         assert!(url.ends_with("?mode=rwc"), "got {url}");
+    }
+
+    // ── repeat reads switch ──────────────────────────────────────────────────
+
+    /// The settings file sits beside the ledger, so only the directory needs to exist.
+    fn ledger_in(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("lumen.db")
+    }
+
+    fn settings_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        lumen_core::settings::settings_path(&ledger_in(dir))
+    }
+
+    fn shown(dir: &tempfile::TempDir) -> RepeatReadsSetting {
+        repeat_reads_setting_at(&ledger_in(dir)).expect("a state to show")
+    }
+
+    #[test]
+    fn with_no_settings_file_repeat_reads_show_on_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            shown(&dir),
+            RepeatReadsSetting {
+                on: true,
+                source: SettingSource::Default,
+                problem: None,
+                file: settings_file(&dir).display().to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_that_says_on_shows_on_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), r#"{"repeat_reads": true}"#).unwrap();
+        let v = shown(&dir);
+        assert!(v.on);
+        assert_eq!(v.source, SettingSource::File);
+        assert_eq!(v.problem, None);
+    }
+
+    #[test]
+    fn a_file_that_says_off_shows_off_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), r#"{"repeat_reads": false}"#).unwrap();
+        let v = shown(&dir);
+        assert!(!v.on);
+        assert_eq!(v.source, SettingSource::File);
+        assert_eq!(v.problem, None);
+    }
+
+    #[test]
+    fn a_file_that_does_not_mention_the_setting_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), r#"{"something_else": 1}"#).unwrap();
+        let v = shown(&dir);
+        assert!(v.on);
+        assert_eq!(v.source, SettingSource::Default);
+        assert_eq!(v.problem, None);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_used_shows_off_and_why() {
+        for (text, why) in [
+            ("{not json", "not JSON"),
+            ("[]", "not a JSON object"),
+            (r#"{"repeat_reads": "yes"}"#, "must be true or false"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(settings_file(&dir), text).unwrap();
+            let v = shown(&dir);
+            assert!(!v.on, "{text}: the server reads every file in full then");
+            assert_eq!(v.source, SettingSource::File, "{text}");
+            let problem = v.problem.expect("a reason");
+            assert!(problem.contains(why), "{text}: got {problem:?}");
+        }
+    }
+
+    #[test]
+    fn a_settings_path_that_cannot_be_read_shows_off_and_why() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: present, and not something that can be read.
+        std::fs::create_dir(settings_file(&dir)).unwrap();
+        let v = shown(&dir);
+        assert!(!v.on);
+        assert_eq!(v.source, SettingSource::File);
+        assert!(v.problem.expect("a reason").starts_with("unreadable:"));
+    }
+
+    #[test]
+    fn switching_off_writes_the_file_and_reads_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = set_repeat_reads_at(&ledger_in(&dir), false).unwrap();
+        assert!(!v.on);
+        assert_eq!(v.source, SettingSource::File);
+        assert_eq!(v.problem, None);
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings_file(&dir)).unwrap()).unwrap();
+        assert_eq!(on_disk, serde_json::json!({ "repeat_reads": false }));
+    }
+
+    #[test]
+    fn switching_back_on_reads_back_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        set_repeat_reads_at(&ledger_in(&dir), false).unwrap();
+        let v = set_repeat_reads_at(&ledger_in(&dir), true).unwrap();
+        assert!(v.on);
+        assert_eq!(v.source, SettingSource::File);
+        assert!(shown(&dir).on, "and a later read sees the same");
+    }
+
+    #[test]
+    fn switching_replaces_a_file_that_could_not_be_used() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), "{not json").unwrap();
+        let v = set_repeat_reads_at(&ledger_in(&dir), true).unwrap();
+        assert!(v.on);
+        assert_eq!(v.problem, None, "choosing the setting is the repair");
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings_file(&dir)).unwrap()).unwrap();
+        assert_eq!(on_disk, serde_json::json!({ "repeat_reads": true }));
+    }
+
+    #[test]
+    fn a_write_that_fails_is_an_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // The directory the file would go in is a regular file, so nothing can be created in it.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let db = blocker.join("lumen.db");
+        let err = set_repeat_reads_at(&db, false).unwrap_err();
+        assert!(err.contains("cannot write"), "got {err}");
+        let file = lumen_core::settings::settings_path(&db)
+            .display()
+            .to_string();
+        assert!(err.contains(&file), "names {file}: got {err}");
+    }
+
+    #[test]
+    fn a_resolution_the_app_never_asks_for_is_an_error_not_a_guess() {
+        use lumen_core::ranked::Mode;
+        use lumen_core::settings::{Problem, Resolved, Source};
+        let file = std::path::Path::new("lumen_settings.json");
+        let env_problem = Some(Problem::Env("x".into()));
+        for r in [
+            Resolved {
+                mode: Mode::Ab,
+                source: Source::Default,
+                problem: None,
+            },
+            Resolved {
+                mode: Mode::On,
+                source: Source::Env,
+                problem: None,
+            },
+            Resolved {
+                mode: Mode::Off,
+                source: Source::File,
+                problem: env_problem,
+            },
+        ] {
+            assert!(setting_view(file, &r).is_err(), "{r:?} is not a file state");
+        }
+    }
+
+    #[test]
+    fn the_setting_goes_to_the_window_under_the_keys_it_reads() {
+        let off = RepeatReadsSetting {
+            on: false,
+            source: SettingSource::File,
+            problem: Some("not JSON: x".into()),
+            file: "/d/lumen_settings.json".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&off).unwrap(),
+            serde_json::json!({
+                "on": false,
+                "source": "file",
+                "problem": "not JSON: x",
+                "file": "/d/lumen_settings.json",
+            })
+        );
+        let fresh = RepeatReadsSetting {
+            on: true,
+            source: SettingSource::Default,
+            problem: None,
+            file: "/d/lumen_settings.json".into(),
+        };
+        let v = serde_json::to_value(&fresh).unwrap();
+        assert_eq!(v["source"], "default");
+        assert!(v["problem"].is_null());
+    }
+
+    #[test]
+    fn the_switch_does_not_read_the_variable_that_outranks_the_file() {
+        // The server lets LUMEN_REPEAT_READS beat the file, but the one that matters is in a
+        // Claude Code MCP config, not in this process. A window that read its own would show
+        // an answer for the wrong place. The variable is set on a child before it starts, so
+        // no other test sees it change.
+        const CHILD: &str = "LUMEN_TEST_SWITCH_CHILD";
+        const THIS: &str = "tests::the_switch_does_not_read_the_variable_that_outranks_the_file";
+        if std::env::var_os(CHILD).is_some() {
+            let dir = tempfile::tempdir().unwrap();
+            let v = shown(&dir);
+            assert!(v.on, "the variable says off and there is no file");
+            assert_eq!(v.source, SettingSource::Default);
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([THIS, "--exact", "--nocapture"])
+            .env(CHILD, "1")
+            .env(lumen_core::settings::REPEAT_READS_ENV, "off")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "child failed:\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed"),
+            "the child ran nothing:\n{stdout}"
+        );
     }
 }
