@@ -23,9 +23,15 @@
 use lumen_core::coverage;
 use lumen_core::econ::Econ;
 use lumen_core::ranked::TagLang;
-use lumen_core::structure::{detect_lang, outline};
+use lumen_core::structure::{CodeItem, detect_lang, outline};
 use lumen_core::tokenizer::count_tokens;
-use lumen_mcp::format_outline;
+use lumen_mcp::{NOTE_ALLOWANCE, Outcome, Payload, format_outline};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Below this, a read is not intercepted, so its cost says nothing about what Lumen saves.
 const THRESHOLD_LINES: usize = 300;
@@ -39,7 +45,11 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    walk_where(dir, out, &|p| TagLang::detect(&p.to_string_lossy()).is_some());
+}
+
+fn walk_where(dir: &Path, out: &mut Vec<PathBuf>, keep: &dyn Fn(&Path) -> bool) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -55,8 +65,8 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             continue;
         }
         if p.is_dir() {
-            walk(&p, out);
-        } else if TagLang::detect(&p.to_string_lossy()).is_some() {
+            walk_where(&p, out, keep);
+        } else if keep(&p) {
             out.push(p);
         }
     }
@@ -64,9 +74,6 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 
 struct Measured {
     name: String,
-    /// The absolute path. `name` is repo-relative for readable tables, but the tools need
-    /// something they can open.
-    path: String,
     lines: usize,
     full: usize,
     /// What `smart_read` returns.
@@ -123,7 +130,6 @@ fn measure() -> Vec<Measured> {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned(),
-            path: path.to_string_lossy().into_owned(),
             lines,
             full,
             outline: count_tokens(&rendered),
@@ -938,60 +944,1368 @@ fn the_real_ledger_agrees_with_itself_when_asked() {
     assert_ledger_agrees(&conn);
 }
 
-/// No Lumen tool may return more than the file it was asked about.
-///
-/// The corpus form of the guarantee: not "this did not happen recently" but "this cannot happen",
-/// checked against every real file in the repository at or above the interception threshold and
-/// for every shape a caller can ask for.
-#[test]
-fn no_tool_returns_more_than_the_file_on_any_real_file() {
-    let files = measure();
-    assert!(!files.is_empty(), "corpus must not be empty");
+// ── No tool may return more than the file it was asked about ─────────────────────────────────
+//
+// The claim is in the README and docs/efficiency.md, so what stands behind it is written out
+// here and nowhere wider. Checked:
+//
+//   * every readable file in this repository at or above the interception threshold, code or
+//     not, because a caller may name any file;
+//   * on each, every request shape: smart_read (outline, and mode="full"); recall_file by name
+//     (exact, a substring, no match, too broad, every name), by line range (small, half, nearly
+//     all, all, past the end, one line) and with no selector; compress_logs, by path and as
+//     inline text;
+//   * the reply as a client receives it, counted again here with the tokenizer. The call's own
+//     `_meta` and its ledger row are what is compared against that count; they are not a source
+//     of truth about themselves.
+//
+// Not checked, and not claimed: error replies (they carry no file content), the replies a repeat
+// read is answered with (returned only when cheaper than the full answer, and tested in
+// repeat_reads.rs), and the JSON-RPC envelope and `_meta` block, which no one counts.
 
-    let mut worst: Option<(String, i64, i64, String)> = None;
-    for f in &files {
-        let calls = [
-            ("smart_read outline", serde_json::json!({ "path": &f.path })),
-            (
-                "recall_file no selector",
-                serde_json::json!({ "path": &f.path }),
-            ),
-            (
-                "recall_file whole range",
-                serde_json::json!({ "path": &f.path, "start_line": 1, "end_line": 999_999 }),
-            ),
-        ];
-        for (label, args) in calls {
-            let out = if label.starts_with("smart_read") {
-                lumen_mcp::tool_smart_read(&args)
+/// What one reply may cost relative to the file it describes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bound {
+    /// No more than the file, and no note: `compress_logs` hands back the log itself when it
+    /// cannot beat it.
+    Strict,
+    /// Cheaper than the file, or exactly the file behind the one line that says why.
+    Noted,
+    /// `smart_read(mode="full")`: the file behind the header that labels it.
+    Full,
+    /// A file with nothing visible in it. It cannot be answered with itself, because an empty text
+    /// block is one a client may refuse, so the ranked arm's decline keeps the outline it would
+    /// have sent. The one reply that is not bounded by the file, and the only one without a bound.
+    Kept,
+}
+
+/// BPE can pair characters differently across the join between a note or header and the text
+/// after it, so a bound built from the two parts counted separately is good to a token or two.
+const SEAM: i64 = 2;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tool {
+    SmartRead,
+    Recall,
+    Compress,
+}
+
+fn call(tool: Tool, args: &Value) -> Outcome {
+    match tool {
+        Tool::SmartRead => lumen_mcp::tool_smart_read(args),
+        Tool::Recall => lumen_mcp::tool_recall_file(args),
+        Tool::Compress => lumen_mcp::tool_compress_logs(args),
+    }
+}
+
+fn tool_name(tool: Tool) -> &'static str {
+    match tool {
+        Tool::SmartRead => "smart_read",
+        Tool::Recall => "recall_file",
+        Tool::Compress => "compress_logs",
+    }
+}
+
+/// One reply as a client receives it, with what the call recorded about it.
+struct Reply {
+    text: String,
+    /// `_meta`: full, returned, saved.
+    meta: (i64, i64, i64),
+    /// The ledger row: route, tokens_returned, full_tokens, saved_tokens.
+    ledger: (String, i64, i64, i64),
+}
+
+/// `result` is the JSON-RPC `result` object, whether it came from `Outcome` or off the wire.
+fn parse_reply(result: &Value, ledger: (String, i64, i64, i64)) -> Result<Reply, String> {
+    let blocks = result["content"].as_array().ok_or("no content array")?;
+    if blocks.len() != 1 || blocks[0]["type"] != "text" {
+        return Err(format!(
+            "expected exactly one text block, got {} block(s)",
+            blocks.len()
+        ));
+    }
+    if result["isError"] != json!(false) {
+        return Err("isError is not false".to_string());
+    }
+    let text = blocks[0]["text"]
+        .as_str()
+        .ok_or("the text block carries no string")?
+        .to_string();
+    let n = |k: &str| {
+        result["_meta"][k]
+            .as_i64()
+            .ok_or(format!("_meta.{k} is missing"))
+    };
+    Ok(Reply {
+        text,
+        meta: (n("full_tokens")?, n("returned_tokens")?, n("saved_tokens")?),
+        ledger,
+    })
+}
+
+fn reply_of(out: &Outcome) -> Result<Reply, String> {
+    let Payload::Ok(result) = &out.payload else {
+        return Err(format!("the call failed: {:?}", out.error_message()));
+    };
+    let m = out.meter.as_ref().ok_or("the call wrote no ledger row")?;
+    parse_reply(
+        result,
+        (
+            m.routed_via.clone(),
+            m.returned_tokens,
+            m.full_tokens,
+            m.saved_tokens,
+        ),
+    )
+}
+
+/// The file a call was asked about, as the checks see it.
+struct Subject<'a> {
+    name: &'a str,
+    path: &'a str,
+    src: &'a str,
+    full: i64,
+}
+
+/// What a reply is, from its first line. Used to prove the corpus reached every branch of the
+/// tools, and to tell a documented fallback from a reply that is simply too large.
+fn branch_of(text: &str) -> &'static str {
+    let first = text.lines().next().unwrap_or("");
+    if first.starts_with("# lumen: the requested view was") {
+        "inflation fallback"
+    } else if first.starts_with("# lumen: no structure could be extracted") {
+        "no structure"
+    } else if first.ends_with("— outline") {
+        "outline"
+    } else if first.ends_with("(full)") {
+        "full"
+    } else if first.starts_with("# recall_file: nothing matched") {
+        "nothing matched"
+    } else if first.starts_with("# recall_file: no selector") {
+        "no selector"
+    } else if first.starts_with("# recall_file: those names cover") {
+        "covers most"
+    } else if first.starts_with("# recall_file:") && first.contains("too many") {
+        "too many"
+    } else if first.contains("(+3 lines context)") {
+        "range"
+    } else if first.starts_with("# matched by substring") {
+        "substring excerpt"
+    } else if first.contains("item(s):") {
+        "excerpt"
+    } else {
+        "other"
+    }
+}
+
+fn agree(bad: &mut Vec<String>, who: &str, what: &str, got: i64, want: i64) {
+    if got != want {
+        bad.push(format!(
+            "{who}: {what} is {got}, but the reply as sent costs {want}"
+        ));
+    }
+}
+
+/// Every statement the guarantee makes about one reply. Violations are pushed, not panicked on,
+/// so a run over the whole corpus reports every file at once. Returns the branch the reply took
+/// and how many tokens it cost above the file (negative when it saved).
+fn check(
+    s: &Subject,
+    label: &str,
+    bound: Bound,
+    r: &Reply,
+    bad: &mut Vec<String>,
+) -> (&'static str, i64) {
+    let who = format!("{label} on {}", s.name);
+    let sent = count_tokens(&r.text) as i64;
+    let (route, l_returned, l_full, l_saved) = (&r.ledger.0, r.ledger.1, r.ledger.2, r.ledger.3);
+
+    // What a call reports is what it sent. The caller is billed for the text, so the text is what
+    // is counted, here and independently of the tool.
+    agree(bad, &who, "_meta.returned_tokens", r.meta.1, sent);
+    agree(bad, &who, "ledger tokens_returned", l_returned, sent);
+    agree(bad, &who, "_meta.saved_tokens", r.meta.2, s.full - sent);
+    agree(bad, &who, "ledger saved_tokens", l_saved, s.full - sent);
+    if r.meta.0 != s.full || l_full != s.full {
+        bad.push(format!(
+            "{who}: the file costs {} tokens, the call says {} (_meta) and {l_full} (ledger)",
+            s.full, r.meta.0
+        ));
+    }
+    // Not even a blank file is answered with a blank text block, which a client may refuse.
+    if r.text.trim().is_empty() {
+        bad.push(format!("{who}: a blank text block"));
+    }
+
+    let branch = match bound {
+        Bound::Strict if r.text == s.src => "the log itself",
+        Bound::Strict if s.src.trim().is_empty() => "blank log",
+        Bound::Strict => "compressed",
+        _ => branch_of(&r.text),
+    };
+    // The headline sums these routes. A reply that cost as much as the file, or more, must not be
+    // in one: it saved nothing, and pooling it in is how a loss reaches the savings total.
+    if lumen_stats::LUMEN_ROUTES.contains(&route.as_str()) && sent >= s.full {
+        bad.push(format!(
+            "{who}: routed as a saving ({route}), but the reply costs {sent} against {} for the file",
+            s.full
+        ));
+    }
+
+    match bound {
+        Bound::Strict => {
+            if s.src.trim().is_empty() {
+                if route != "would_inflate" {
+                    bad.push(format!("{who}: a blank log is routed {route}"));
+                }
+            } else if r.text == s.src {
+                if route != "would_inflate" || sent != s.full {
+                    bad.push(format!(
+                        "{who}: the log itself is routed {route} at {sent} tokens (log: {})",
+                        s.full
+                    ));
+                }
             } else {
-                lumen_mcp::tool_recall_file(&args)
-            };
-            let Some(m) = out.meter else { continue };
-            let over = m.returned_tokens - m.full_tokens;
-            if over > 0 && worst.as_ref().map(|w| over > w.1).unwrap_or(true) {
-                worst = Some((f.name.clone(), over, m.full_tokens, label.to_string()));
+                if sent > s.full {
+                    bad.push(format!(
+                        "{who}: the reply costs {sent} against {} for the log itself",
+                        s.full
+                    ));
+                }
+                if route != "compress_logs" || sent >= s.full {
+                    bad.push(format!(
+                        "{who}: a reply that is not the log must be cheaper than it and routed \
+                         compress_logs, got {sent} against {} routed {route}",
+                        s.full
+                    ));
+                }
             }
-            assert!(
-                m.returned_tokens <= m.full_tokens + lumen_mcp::NOTE_ALLOWANCE,
-                "{label} on {} returned {} against {} for the file (over by {over})",
-                f.name,
-                m.returned_tokens,
-                m.full_tokens,
-            );
+        }
+        Bound::Noted if sent >= s.full => match branch {
+            // A ranked call that declines hands back the file itself, with no note: it saved
+            // nothing and its route says so.
+            _ if r.text == s.src => {
+                if !route.starts_with("ranked_") || sent != s.full {
+                    bad.push(format!(
+                        "{who}: the file itself, routed {route} at {sent} tokens (file: {})",
+                        s.full
+                    ));
+                }
+            }
+            "inflation fallback" => {
+                let body = r.text.split_once("\n\n").map(|(_, rest)| rest);
+                if body != Some(s.src) {
+                    bad.push(format!("{who}: the fallback is not the file behind one note"));
+                }
+                if route != "would_inflate" {
+                    bad.push(format!("{who}: the fallback is routed {route}"));
+                }
+                if sent > s.full + NOTE_ALLOWANCE {
+                    bad.push(format!(
+                        "{who}: the fallback costs {sent} against {} for the file, over the \
+                         {NOTE_ALLOWANCE}-token allowance for its note",
+                        s.full
+                    ));
+                }
+            }
+            "no structure" => {
+                let note = format!(
+                    "# lumen: no structure could be extracted from {}, so the file is returned \
+                     instead.\n\n",
+                    s.path
+                );
+                if r.text != format!("{note}{}", s.src) {
+                    bad.push(format!("{who}: the fallback is not the file behind its note"));
+                }
+                if route != "ranked_no_defs" {
+                    bad.push(format!("{who}: the fallback is routed {route}"));
+                }
+                let allowed = s.full + count_tokens(&note) as i64 + SEAM;
+                if sent > allowed {
+                    bad.push(format!(
+                        "{who}: the fallback costs {sent}, more than the file ({}) and its note \
+                         together ({allowed})",
+                        s.full
+                    ));
+                }
+            }
+            _ => bad.push(format!(
+                "{who}: the reply costs {sent} against {} for the file, and it is not one of \
+                 the documented fallbacks (first line: {:?})",
+                s.full,
+                r.text.lines().next().unwrap_or("")
+            )),
+        },
+        Bound::Noted => {
+            if branch == "inflation fallback" || branch == "no structure" {
+                bad.push(format!("{who}: a fallback that costs less than the file"));
+            }
+        }
+        Bound::Kept => {
+            if branch != "outline" || !route.starts_with("ranked_") {
+                bad.push(format!(
+                    "{who}: a file with nothing in it should be answered with the outline of \
+                     the ranked arm's decline, got {branch:?} routed {route}"
+                ));
+            }
+        }
+        Bound::Full => {
+            let header = format!("# {} (full)\n\n", s.path);
+            if r.text != format!("{header}{}", s.src) {
+                bad.push(format!("{who}: not the file behind its one-line header"));
+            }
+            if route != "smart_read_full" {
+                bad.push(format!("{who}: routed {route}"));
+            }
+            let allowed = s.full + count_tokens(&header) as i64 + SEAM;
+            if sent > allowed {
+                bad.push(format!(
+                    "{who}: costs {sent}, more than the file ({}) and its header together ({allowed})",
+                    s.full
+                ));
+            }
+        }
+    }
+    (branch, sent - s.full)
+}
+
+/// A file in the corpus.
+struct Doc {
+    name: String,
+    path: String,
+    src: String,
+    full: i64,
+    items: Vec<CodeItem>,
+    /// `outline` found structure in it. One it cannot read comes back as a single synthetic
+    /// whole-file item, which is where the tools answer with the file itself.
+    described: bool,
+}
+
+impl Doc {
+    /// A file as the tools will meet it: read from disk, counted with the product's tokenizer.
+    /// `None` for a file that is not UTF-8 or has fewer than `min_lines` lines.
+    fn from_file(name: String, path: &Path, min_lines: usize) -> Option<Doc> {
+        let src = std::fs::read_to_string(path).ok()?;
+        if src.lines().count() < min_lines {
+            return None;
+        }
+        let p = path.to_string_lossy().into_owned();
+        let items = outline(&src, detect_lang(&p));
+        Some(Doc {
+            name,
+            full: count_tokens(&src) as i64,
+            described: !items.iter().all(|i| i.kind == "file"),
+            items,
+            path: p,
+            src,
+        })
+    }
+
+    fn lines(&self) -> usize {
+        self.src.lines().count()
+    }
+
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            name: &self.name,
+            path: &self.path,
+            src: &self.src,
+            full: self.full,
+        }
+    }
+}
+
+/// `f` over every item on as many threads as the machine has cores, results in input order.
+/// Counting tokens in a debug build is the cost of this file, and it is the same work on every
+/// core. Items are handed out in order, so a caller that puts the heaviest first finishes sooner.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 8);
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                // The tools recurse over parse trees, and a debug build's frames are large.
+                std::thread::Builder::new()
+                    .stack_size(16 << 20)
+                    .spawn_scoped(scope, || {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(item) = items.get(i) else { break };
+                            mine.push((i, f(item)));
+                        }
+                        mine
+                    })
+                    .expect("spawn a worker")
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a worker panicked"))
+            .collect()
+    });
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Above this a file is a lockfile or a measurement table, not something a model is sent to read,
+/// and every call counts the whole file at least twice. Three such files cost this test more than
+/// all the sources together; none of the tools' branches depends on size.
+const MAX_DOC_TOKENS: i64 = 50_000;
+
+/// Every readable file in the repository at or above the interception threshold, whether or not
+/// Lumen can read inside it: a caller may name any file. Binary files fail UTF-8 and are not
+/// files a text tool is asked about. Returns the corpus, heaviest first, and the files left out
+/// for being above `MAX_DOC_TOKENS`.
+fn documents() -> (Vec<Doc>, Vec<String>) {
+    let root = repo_root();
+    let mut files = Vec::new();
+    walk_where(&root, &mut files, &|_| true);
+    files.sort();
+    let mut sized: Vec<(u64, PathBuf)> = files
+        .into_iter()
+        .map(|p| (std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), p))
+        .collect();
+    sized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let built = par_map(&sized, |(_, path)| {
+        let name = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        Doc::from_file(name, path, THRESHOLD_LINES)
+    });
+    let (mut docs, mut skipped) = (Vec::new(), Vec::new());
+    for d in built.into_iter().flatten() {
+        if d.full > MAX_DOC_TOKENS {
+            skipped.push(d.name);
+        } else {
+            docs.push(d);
+        }
+    }
+    docs.sort_by(|a, b| b.full.cmp(&a.full).then_with(|| a.name.cmp(&b.name)));
+    (docs, skipped)
+}
+
+struct Shape {
+    label: &'static str,
+    tool: Tool,
+    args: Value,
+    bound: Bound,
+}
+
+fn shape(label: &'static str, tool: Tool, args: Value, bound: Bound) -> Shape {
+    Shape {
+        label,
+        tool,
+        args,
+        bound,
+    }
+}
+
+/// A query that is part of an item's name and no item's whole name, and that matches few enough
+/// items to reach `recall_file`'s labelled substring fallback rather than its "too broad" outline.
+fn substring_query(named: &[&CodeItem]) -> Option<String> {
+    for item in named {
+        let lower = item.name.as_deref()?.to_lowercase();
+        let n = lower.chars().count();
+        if n < 5 {
+            continue;
+        }
+        let q: String = lower.chars().take(n - 1).collect();
+        let q = q.trim().to_string();
+        let exact = named
+            .iter()
+            .filter(|i| i.name.as_deref().map(str::to_lowercase).as_deref() == Some(q.as_str()))
+            .count();
+        let subs = named
+            .iter()
+            .filter(|i| {
+                i.name
+                    .as_deref()
+                    .is_some_and(|n| n.to_lowercase().contains(q.as_str()))
+            })
+            .count();
+        if !q.is_empty() && exact == 0 && (1..=5).contains(&subs) {
+            return Some(q);
+        }
+    }
+    None
+}
+
+fn range_shape(path: &str, label: &'static str, from: usize, to: usize) -> Shape {
+    shape(
+        label,
+        Tool::Recall,
+        json!({ "path": path, "start_line": from, "end_line": to }),
+        Bound::Noted,
+    )
+}
+
+/// Every request shape for one file.
+///
+/// `recall_file` panics on a start line well past the end of the file and on a start line after
+/// the end line, and a panic is no reply to measure, so neither is a shape here.
+fn shapes(d: &Doc) -> Vec<Shape> {
+    let lines = d.lines();
+    let p = d.path.as_str();
+    let mut v = vec![
+        shape(
+            "smart_read outline",
+            Tool::SmartRead,
+            json!({ "path": p }),
+            Bound::Noted,
+        ),
+        shape(
+            "smart_read full",
+            Tool::SmartRead,
+            json!({ "path": p, "mode": "full" }),
+            Bound::Full,
+        ),
+        shape(
+            "recall no selector",
+            Tool::Recall,
+            json!({ "path": p }),
+            Bound::Noted,
+        ),
+        shape(
+            "recall names no match",
+            Tool::Recall,
+            json!({ "path": p, "names": ["no_such_item_anywhere_zz"] }),
+            Bound::Noted,
+        ),
+        // One letter matches nearly every name: the query behind most of the overage the 1.7.0
+        // metering found, and the one a "too broad" outline exists to answer.
+        shape(
+            "recall names too broad",
+            Tool::Recall,
+            json!({ "path": p, "names": ["e"] }),
+            Bound::Noted,
+        ),
+        shape(
+            "compress_logs path",
+            Tool::Compress,
+            json!({ "path": p }),
+            Bound::Strict,
+        ),
+        shape(
+            "compress_logs text",
+            Tool::Compress,
+            json!({ "text": d.src }),
+            Bound::Strict,
+        ),
+    ];
+
+    if lines > 0 {
+        let mid = (lines / 2).max(1);
+        let third = (lines / 3).max(1);
+        v.push(range_shape(p, "recall range small", mid, mid + 20));
+        v.push(range_shape(p, "recall range half", 1, mid));
+        if lines >= 3 {
+            v.push(range_shape(p, "recall range nearly all", 2, lines - 1));
+        }
+        v.push(range_shape(p, "recall range all", 1, 999_999));
+        v.push(range_shape(
+            p,
+            "recall range past the end",
+            lines.saturating_sub(5).max(1),
+            lines + 500,
+        ));
+        v.push(range_shape(p, "recall range one line", third, third));
+    }
+
+    let named: Vec<&CodeItem> = d.items.iter().filter(|i| i.name.is_some()).collect();
+    if !named.is_empty() {
+        let span = |i: &CodeItem| i.end_line - i.start_line + 1;
+        let mut by_span = named.clone();
+        by_span.sort_by_key(|i| span(i));
+        let name_of = |i: &CodeItem| i.name.clone().unwrap_or_default();
+        v.push(shape(
+            "recall names exact (median item)",
+            Tool::Recall,
+            json!({ "path": p, "names": [name_of(by_span[by_span.len() / 2])] }),
+            Bound::Noted,
+        ));
+        // The largest item short of the 60% the tool turns into an outline: the excerpt closest
+        // to the whole file that an exact name can produce, and so the likeliest to overshoot.
+        if let Some(big) = by_span.iter().rev().find(|i| span(i) * 100 / lines < 55) {
+            v.push(shape(
+                "recall names exact (largest item)",
+                Tool::Recall,
+                json!({ "path": p, "names": [name_of(big)] }),
+                Bound::Noted,
+            ));
+        }
+        v.push(shape(
+            "recall names every item",
+            Tool::Recall,
+            json!({ "path": p, "names": named.iter().map(|i| name_of(i)).collect::<Vec<_>>() }),
+            Bound::Noted,
+        ));
+        if let Some(q) = substring_query(&named) {
+            v.push(shape(
+                "recall names substring",
+                Tool::Recall,
+                json!({ "path": p, "names": [q] }),
+                Bound::Noted,
+            ));
+        }
+    }
+    v
+}
+
+#[derive(Default)]
+struct Tally {
+    bad: Vec<String>,
+    /// (shape, branch) -> files that took it.
+    hits: BTreeMap<(&'static str, &'static str), usize>,
+    /// shape -> (the largest overage above the file in tokens, where).
+    worst: BTreeMap<&'static str, (i64, String)>,
+    calls: usize,
+}
+
+impl Tally {
+    fn merge(&mut self, other: Tally) {
+        self.bad.extend(other.bad);
+        self.calls += other.calls;
+        for (k, n) in other.hits {
+            *self.hits.entry(k).or_default() += n;
+        }
+        for (k, w) in other.worst {
+            let mine = self.worst.entry(k).or_insert((i64::MIN, String::new()));
+            if w.0 > mine.0 {
+                *mine = w;
+            }
         }
     }
 
-    println!("\n== Worst overage across the corpus ==============================");
-    match worst {
-        Some((name, over, full, label)) => println!(
-            "  {over} tokens ({:.2}% of the file) — {label} on {name}",
-            100.0 * over as f64 / full.max(1) as f64
+    fn note(&mut self, label: &'static str, branch: &'static str, over: i64, name: &str) {
+        *self.hits.entry((label, branch)).or_default() += 1;
+        let w = self.worst.entry(label).or_insert((i64::MIN, String::new()));
+        if over > w.0 {
+            *w = (over, name.to_string());
+        }
+    }
+
+    fn reached(&self, label: &str, branch: &str) -> usize {
+        self.hits
+            .get(&(label, branch))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The run took this branch on at least this many files, or the test is not testing it.
+    fn expect(&self, label: &'static str, branch: &'static str, at_least: usize) {
+        let n = self.reached(label, branch);
+        assert!(
+            n >= at_least,
+            "{label} reached the {branch:?} branch on {n} file(s), expected at least {at_least}: \
+             the run no longer exercises it"
+        );
+    }
+
+    fn print(&self, title: &str, files: usize) {
+        println!("\n== {title} ==============================");
+        println!("  {} calls over {files} files", self.calls);
+        println!(
+            "  {:<36} {:>8}  (tokens above the file; negative = cheaper)",
+            "shape", "worst"
+        );
+        for (label, (over, name)) in &self.worst {
+            println!("  {label:<36} {over:>8}  {name}");
+        }
+        println!("\n  {:<36} {:<20} {:>6}", "shape", "reply was", "files");
+        for ((label, branch), n) in &self.hits {
+            println!("  {label:<36} {branch:<20} {n:>6}");
+        }
+    }
+}
+
+fn run_doc(d: &Doc) -> Tally {
+    let mut t = Tally::default();
+    for sh in shapes(d) {
+        let out = call(sh.tool, &sh.args);
+        t.calls += 1;
+        match reply_of(&out) {
+            Err(e) => t.bad.push(format!("{} on {}: {e}", sh.label, d.name)),
+            Ok(r) => {
+                let (branch, over) = check(&d.subject(), sh.label, sh.bound, &r, &mut t.bad);
+                t.note(sh.label, branch, over, &d.name);
+            }
+        }
+    }
+    t
+}
+
+fn run_docs(docs: &[Doc]) -> Tally {
+    let mut all = Tally::default();
+    for t in par_map(docs, run_doc) {
+        all.merge(t);
+    }
+    all
+}
+
+/// Fails with every violation at once, up to a screenful.
+fn assert_no_violations(what: &str, bad: &[String]) {
+    assert!(
+        bad.is_empty(),
+        "{what}: {} violation(s)\n  {}{}",
+        bad.len(),
+        bad.iter().take(25).cloned().collect::<Vec<_>>().join("\n  "),
+        if bad.len() > 25 { "\n  ..." } else { "" }
+    );
+}
+
+/// No Lumen tool may return more than the file it was asked about, on any real file, in any shape.
+#[test]
+fn no_tool_returns_more_than_the_file_on_any_real_file() {
+    let (docs, skipped) = documents();
+    let described = docs.iter().filter(|d| d.described).count();
+    let n = docs.len();
+    // A corpus that shrank, or a walker that stopped finding files, must not pass quietly.
+    assert!(
+        n >= 40 && described >= 25 && n - described >= 3 && skipped.len() <= 8,
+        "corpus too small to conclude anything: {n} files, {described} with structure, \
+         {} over {MAX_DOC_TOKENS} tokens left out",
+        skipped.len()
+    );
+
+    let t = run_docs(&docs);
+    t.print("No tool returns more than the file", n);
+    println!(
+        "\n  {described} files with structure, {} without; left out above {MAX_DOC_TOKENS} \
+         tokens: {}",
+        n - described,
+        skipped.join(", ")
+    );
+    assert_no_violations("the corpus", &t.bad);
+
+    // Every branch the guarantee is about was reached on real files, not merely allowed to be.
+    // Floors, not exact counts: the corpus grows and shrinks with the repository.
+    let most = n * 9 / 10;
+    t.expect("smart_read outline", "outline", described / 2);
+    t.expect("smart_read outline", "no structure", 3);
+    t.expect("smart_read full", "full", n);
+    t.expect("recall no selector", "no selector", most);
+    t.expect("recall names no match", "nothing matched", most);
+    t.expect("recall names too broad", "too many", n / 3);
+    t.expect("recall names exact (median item)", "excerpt", described / 2);
+    t.expect("recall names exact (largest item)", "excerpt", described / 2);
+    t.expect("recall names every item", "covers most", described / 2);
+    t.expect("recall names substring", "substring excerpt", described / 2);
+    for label in [
+        "recall range small",
+        "recall range half",
+        "recall range past the end",
+        "recall range one line",
+    ] {
+        t.expect(label, "range", most);
+    }
+    // A range that asks for the whole file costs more than the file, on every file of 300 lines
+    // or more: the guard is what answers it.
+    t.expect("recall range all", "inflation fallback", most);
+    t.expect("recall range nearly all", "inflation fallback", most);
+    // A source file rarely compresses by more than the header costs, so it comes back as it is.
+    t.expect("compress_logs path", "the log itself", n / 2);
+    t.expect("compress_logs text", "the log itself", n / 2);
+}
+
+/// Files below the interception threshold, which no file in the corpus above is. At this size an
+/// outline can cost more than the file it describes, so this is where the guard has the most to
+/// do.
+fn small_docs(dir: &Path) -> Vec<Doc> {
+    let padded: String = (0..6)
+        .map(|i| {
+            format!(
+                "/// Step {i}.\npub fn step_number_{i}(a: u32) -> u32 {{\n    let x = a.wrapping_mul({i});\n    \
+                 let y = x.wrapping_add(7);\n    y\n}}\n\n"
+            )
+        })
+        .collect();
+    let files: [(&str, &str); 8] = [
+        (
+            "tiny.rs",
+            "pub fn a() -> u8 { 1 }\npub fn b() -> u8 { 2 }\npub fn c() -> u8 { 3 }\n",
         ),
-        None => println!("  none: every reply cost less than reading the file"),
+        (
+            "short.py",
+            "def first():\n    return 1\n\n\ndef second():\n    return 2\n\n\nclass Third:\n    def method(self):\n        return 3\n",
+        ),
+        (
+            "short.ts",
+            "export function one(): number { return 1; }\nexport function two(): number { return 2; }\nexport class Three {\n  value = 3;\n}\n",
+        ),
+        ("padded.rs", padded.as_str()),
+        ("one_line.rs", "fn only() {}"),
+        (
+            "notes.txt",
+            "plain prose with nothing to outline\nsecond line of the same\nthird line\n",
+        ),
+        ("empty.rs", ""),
+        ("blank.txt", "\n\n   \n"),
+    ];
+    files
+        .iter()
+        .map(|(name, body)| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            Doc::from_file(name.to_string(), &p, 0).expect("a fixture is readable")
+        })
+        .collect()
+}
+
+#[test]
+fn no_tool_returns_more_than_a_small_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = small_docs(dir.path());
+
+    let t = run_docs(&docs);
+    t.print("No tool returns more than a small file", docs.len());
+    assert_no_violations("the small files", &t.bad);
+
+    // The branch this exists for: a reply that would have cost more than the file, answered with
+    // the file. And one where the outline did pay, so the test is not only about fallbacks.
+    t.expect("smart_read outline", "inflation fallback", 2);
+    t.expect("smart_read outline", "outline", 1);
+    t.expect("smart_read outline", "no structure", 1);
+    t.expect("recall no selector", "inflation fallback", 2);
+    t.expect("recall range all", "inflation fallback", 1);
+}
+
+// ── compress_logs on logs written for the purpose ────────────────────────────────────────────
+//
+// A source file is not a log, and nearly always comes back as itself. These sit on both sides of
+// the point where compressing stops paying for the header that announces it, so that every
+// branch of `compress_logs` has a case, in both ways of sending the log.
+
+const LOG_LINE: &str = "worker 7 failed to flush the write-ahead log to disk\n";
+
+fn synthetic_logs() -> Vec<(String, String)> {
+    let mut trace = String::from("Exception in thread \"main\" java.lang.IllegalStateException: boom\n");
+    for i in 0..30 {
+        trace.push_str(&format!(
+            "\tat com.example.pkg{i}.Service{i}.run(Service{i}.java:{})\n",
+            40 + i
+        ));
+    }
+    trace.push_str("Caused by: java.io.IOException: disk full\n");
+
+    let mut logs: Vec<(String, String)> = [
+        ("empty", String::new()),
+        ("one line", "hello\n".to_string()),
+        ("one line, no newline", "hello".to_string()),
+        ("tiny", "one\ntwo\nthree\n".to_string()),
+        (
+            "incompressible",
+            (0..40)
+                .map(|i| format!("request {i} served in {} ms\n", 13 + i * 7))
+                .collect(),
+        ),
+        ("one long line", format!("{}\n", "x".repeat(5_000))),
+        // Compresses, but by less than the header costs: the band this is about.
+        ("band", LOG_LINE.repeat(3)),
+        ("repetitive", LOG_LINE.repeat(400)),
+        (
+            "repetitive, no final newline",
+            LOG_LINE.repeat(400).trim_end().to_string(),
+        ),
+        ("blank runs", "a\n\n\n\n\n\n\nb\n".to_string()),
+        (
+            "blank runs, long",
+            format!("start\n{}end\n", "\n".repeat(300)),
+        ),
+        ("crlf", "boom\r\n".repeat(50)),
+        ("whitespace only", "   \n\t\n  \n".to_string()),
+        ("one newline", "\n".to_string()),
+        ("stack trace", trace),
+        ("multi-byte", "写入日志失败：磁盘已满 🚨\n".repeat(100)),
+    ]
+    .into_iter()
+    .map(|(n, l)| (n.to_string(), l))
+    .collect();
+    // From a log the header outweighs to one it does not, a line at a time.
+    for n in 1..=40 {
+        logs.push((format!("{n} identical line(s)"), LOG_LINE.repeat(n)));
+    }
+    logs
+}
+
+fn log_docs(dir: &Path) -> Vec<Doc> {
+    synthetic_logs()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, log))| {
+            let p = dir.join(format!("log{i:02}.log"));
+            std::fs::write(&p, &log).unwrap();
+            Doc::from_file(name, &p, 0).expect("a fixture is readable")
+        })
+        .collect()
+}
+
+/// The reply `compress_logs` gave before its header was counted: the header and the body,
+/// whatever they cost against the log.
+fn pre_fix_reply(label: &str, log: &str) -> String {
+    let r = lumen_core::compress::compress_logs(log);
+    format!(
+        "# {label} — compressed\n\
+         # {} lines → {} lines | {} tokens → {} tokens | saved {}\n\n{}",
+        r.original_lines,
+        r.compressed_lines,
+        r.original_tokens,
+        r.compressed_tokens,
+        r.original_tokens as i64 - r.compressed_tokens as i64,
+        r.text
+    )
+}
+
+#[derive(Default)]
+struct LogTally {
+    bad: Vec<String>,
+    /// branch -> replies that took it.
+    branches: BTreeMap<&'static str, usize>,
+    /// Replies on which the one before the fix cost more than the log.
+    costlier_before: usize,
+    /// Of those, the ones whose own header claimed the log had been made smaller.
+    claimed_a_saving: usize,
+}
+
+fn check_log(t: &mut LogTally, d: &Doc, by_path: bool) {
+    let (form, args, label) = if by_path {
+        ("path", json!({ "path": d.path }), d.path.as_str())
+    } else {
+        ("text", json!({ "text": d.src }), "(inline text)")
+    };
+    let who = format!("{} ({form})", d.name);
+    let r = match reply_of(&call(Tool::Compress, &args)) {
+        Ok(r) => r,
+        Err(e) => {
+            t.bad.push(format!("{who}: {e}"));
+            return;
+        }
+    };
+    let s = Subject {
+        name: &who,
+        path: &d.path,
+        src: &d.src,
+        full: d.full,
+    };
+    let (branch, _) = check(&s, "compress_logs", Bound::Strict, &r, &mut t.bad);
+    *t.branches.entry(branch).or_default() += 1;
+
+    // Better or equal in delivered tokens, for every input: never above what was sent before.
+    let before = pre_fix_reply(label, &d.src);
+    let before_tokens = count_tokens(&before) as i64;
+    let sent = count_tokens(&r.text) as i64;
+    if sent > before_tokens {
+        t.bad.push(format!(
+            "{who}: the reply costs {sent} tokens, and the one before the fix cost {before_tokens}"
+        ));
+    }
+    // Where compressing wins, and where nothing is visible to hand back, nothing changed.
+    if matches!(branch, "compressed" | "blank log") && r.text != before {
+        t.bad.push(format!("{who}: the reply differs from the one before the fix"));
+    }
+    if before_tokens > d.full {
+        t.costlier_before += 1;
+        let c = lumen_core::compress::compress_logs(&d.src);
+        if c.original_tokens > c.compressed_tokens {
+            t.claimed_a_saving += 1;
+        }
+    }
+}
+
+#[test]
+fn compress_logs_never_returns_more_than_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = log_docs(dir.path());
+    let mut t = LogTally::default();
+    for d in &docs {
+        check_log(&mut t, d, false);
+        check_log(&mut t, d, true);
     }
     println!(
-        "  allowance is {} tokens (one explanatory line)",
-        lumen_mcp::NOTE_ALLOWANCE
+        "\n== compress_logs on {} logs, both forms ==============================",
+        docs.len()
     );
+    for (branch, n) in &t.branches {
+        println!("  {branch:<16} {n:>4} replies");
+    }
+    println!(
+        "  before the fix, {} replies cost more than the log, and {} of those said they saved tokens",
+        t.costlier_before, t.claimed_a_saving
+    );
+    assert_no_violations("the synthetic logs", &t.bad);
+
+    let got = |b: &str| t.branches.get(b).copied().unwrap_or_default();
+    // Every branch was reached, or the test says nothing about it. A log is the reply when
+    // compressing does not pay, and the compressed form when it does.
+    assert!(got("the log itself") >= 20, "{:?}", t.branches);
+    assert!(got("compressed") >= 20, "{:?}", t.branches);
+    assert!(got("blank log") >= 6, "{:?}", t.branches);
+    // The fix is for a reply that cost more than the log: the premise holds on these inputs, and
+    // on some of them the old header said the log had shrunk.
+    assert!(t.costlier_before >= 20, "premise: {}", t.costlier_before);
+    assert!(t.claimed_a_saving >= 6, "premise: {}", t.claimed_a_saving);
+}
+
+// ── through the binary ───────────────────────────────────────────────────────────────────────
+
+const INIT_ID: i64 = 999_999;
+
+/// `calls`, made one after another on one `lumen-mcp` process the way a client makes them, with
+/// the ledger that process wrote. Result `i` is call `i`: the frame the client received, and the
+/// ledger row the call left behind.
+fn through_the_binary(env: &[(&str, &str)], calls: &[(Tool, Value)]) -> Vec<Result<Reply, String>> {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.db");
+    assert!(
+        db.starts_with(std::env::temp_dir()),
+        "the test ledger must live under the temp dir"
+    );
+
+    let mut input = String::new();
+    let mut send = |v: Value| {
+        input.push_str(&serde_json::to_string(&v).unwrap());
+        input.push('\n');
+    };
+    send(json!({"jsonrpc":"2.0","id":INIT_ID,"method":"initialize",
+        "params":{"protocolVersion":"2024-11-05","capabilities":{},
+                  "clientInfo":{"name":"t","version":"0"}}}));
+    send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    for (i, (tool, args)) in calls.iter().enumerate() {
+        send(json!({"jsonrpc":"2.0","id":i + 1,"method":"tools/call",
+            "params":{"name":tool_name(*tool),"arguments":args}}));
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"));
+    cmd.env("LUMEN_DB", &db)
+        // A deadline is a property of the machine, not of the code under test.
+        .env("LUMEN_RANKED_TIME_BUDGET_MS", "60000")
+        .env_remove("LUMEN_RANKED_OUTLINE")
+        .env_remove("LUMEN_REPEAT_READS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn lumen-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    // Replies can fill the pipe before the requests are all written, so the two ends of it are
+    // not driven from one thread.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let out = child.wait_with_output().unwrap();
+    let written = writer.join().unwrap();
+    assert!(out.status.success(), "lumen-mcp exited with {}", out.status);
+    written.expect("write the requests");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let frames: BTreeMap<i64, Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| Some((v["id"].as_i64()?, v)))
+        .collect();
+
+    let conn = rusqlite::Connection::open(&db).expect("the ledger must exist");
+    let mut stmt = conn
+        .prepare(
+            "SELECT routed_via, tokens_returned, full_tokens, saved_tokens \
+             FROM read_events ORDER BY rowid",
+        )
+        .unwrap();
+    let rows: Vec<(String, i64, i64, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), calls.len(), "one ledger row per call");
+
+    (0..calls.len())
+        .map(|i| {
+            let frame = frames
+                .get(&(i as i64 + 1))
+                .ok_or_else(|| "no reply frame".to_string())?;
+            let result = frame
+                .get("result")
+                .ok_or_else(|| format!("no result in {frame}"))?;
+            parse_reply(result, rows[i].clone())
+        })
+        .collect()
+}
+
+/// The smallest file and a middling one, of each kind the tools meet: with structure and without.
+fn sample(docs: &[Doc]) -> Vec<&Doc> {
+    let mut picked = Vec::new();
+    for described in [true, false] {
+        let kind: Vec<&Doc> = docs.iter().filter(|d| d.described == described).collect();
+        assert!(!kind.is_empty(), "the corpus has no file with described={described}");
+        // Heaviest first, so the last is the smallest.
+        picked.push(kind[kind.len() - 1]);
+        picked.push(kind[kind.len() / 2]);
+    }
+    picked
+}
+
+/// What a client receives and what lands in the ledger is what the function returned, for the
+/// same shapes as above. The checks on the function cannot see the framing, or the row the
+/// binary writes after it has replied.
+#[test]
+fn the_binary_sends_and_records_what_the_function_returns() {
+    let (docs, _) = documents();
+    let dir = tempfile::tempdir().unwrap();
+    let small = small_docs(dir.path());
+    let logs = log_docs(dir.path());
+
+    let mut cases: Vec<(&Doc, Shape)> = Vec::new();
+    for d in sample(&docs).into_iter().chain(small.iter()) {
+        cases.extend(shapes(d).into_iter().map(|sh| (d, sh)));
+    }
+    for d in &logs {
+        cases.extend(
+            shapes(d)
+                .into_iter()
+                .filter(|sh| sh.tool == Tool::Compress)
+                .map(|sh| (d, sh)),
+        );
+    }
+    let calls: Vec<(Tool, Value)> = cases.iter().map(|(_, sh)| (sh.tool, sh.args.clone())).collect();
+    let wire = through_the_binary(&[], &calls);
+    assert_eq!(wire.len(), cases.len());
+
+    let mut bad = Vec::new();
+    for ((d, sh), over_the_wire) in cases.iter().zip(wire) {
+        let here = reply_of(&call(sh.tool, &sh.args));
+        let (here, there) = match (here, over_the_wire) {
+            (Ok(h), Ok(w)) => (h, w),
+            (h, w) => {
+                bad.push(format!(
+                    "{} on {}: in process [{}], over the wire [{}]",
+                    sh.label,
+                    d.name,
+                    h.err().unwrap_or_default(),
+                    w.err().unwrap_or_default()
+                ));
+                continue;
+            }
+        };
+        check(&d.subject(), sh.label, sh.bound, &there, &mut bad);
+        if there.text != here.text || there.meta != here.meta || there.ledger != here.ledger {
+            bad.push(format!(
+                "{} on {}: the binary answered differently from the function (route {} against {})",
+                sh.label, d.name, there.ledger.0, here.ledger.0
+            ));
+        }
+    }
+    println!("\n  {} calls through the binary", cases.len());
+    assert_no_violations("through the binary", &bad);
+}
+
+/// The ranked arm is off by default and has its own way of answering a file it declines, so it
+/// is driven the way it is turned on.
+#[test]
+fn a_ranked_smart_read_never_returns_more_than_the_file() {
+    let (docs, _) = documents();
+    let dir = tempfile::tempdir().unwrap();
+    let small = small_docs(dir.path());
+    // Large enough that the arm goes ahead and ranks, whatever the sample of real files does.
+    let big_path = dir.path().join("big.rs");
+    std::fs::write(&big_path, marked_source(MARK_A, 450)).unwrap();
+    let big = Doc::from_file("big.rs".to_string(), &big_path, 0).unwrap();
+    let subjects: Vec<&Doc> = small
+        .iter()
+        .chain(sample(&docs))
+        .chain(std::iter::once(&big))
+        .collect();
+    let calls: Vec<(Tool, Value)> = subjects
+        .iter()
+        .map(|d| (Tool::SmartRead, json!({ "path": d.path })))
+        .collect();
+
+    let wire = through_the_binary(&[("LUMEN_RANKED_OUTLINE", "on")], &calls);
+    let mut bad = Vec::new();
+    let mut routes: BTreeMap<String, usize> = BTreeMap::new();
+    for (d, w) in subjects.iter().zip(wire) {
+        match w {
+            Err(e) => bad.push(format!("smart_read (ranked) on {}: {e}", d.name)),
+            Ok(r) => {
+                *routes.entry(r.ledger.0.clone()).or_default() += 1;
+                let bound = if d.src.trim().is_empty() {
+                    Bound::Kept
+                } else {
+                    Bound::Noted
+                };
+                check(&d.subject(), "smart_read ranked", bound, &r, &mut bad);
+            }
+        }
+    }
+    println!("\n  ranked routes: {routes:?}");
+    assert_no_violations("the ranked arm", &bad);
+    // Both ways out of the arm were taken: an outline chosen by rank, and a decline that answers
+    // with the file.
+    assert!(routes.get("ranked_outline").copied().unwrap_or(0) >= 1, "{routes:?}");
+    assert!(routes.get("ranked_not_worth_it").copied().unwrap_or(0) >= 1, "{routes:?}");
+}
+
+// ── a tool asked about one file never answers with another ──────────────────────────────────
+
+/// A source file of `items` functions, each name and comment carrying `marker`.
+fn marked_source(marker: &str, items: usize) -> String {
+    let mut s = format!("//! Fixture for {marker}.\n\n");
+    for i in 0..items {
+        s.push_str(&format!(
+            "/// The {marker} item number {i:04}.\npub fn {marker}_item_{i:04}(a: u32) -> u32 {{\n    let x = a.wrapping_mul({i});\n    x.wrapping_add({i})\n}}\n\n"
+        ));
+    }
+    s
+}
+
+/// One comment line, at the end of the first file and the start of the second.
+const PAD: &str = "// the same size, laid out differently\n";
+
+/// Two files with the same size to the byte and, set here, the same modification time: everything
+/// a cache keyed on a file's identity short of its path would have to go on. They differ in the
+/// marker, and in the second everything sits one line and `PAD.len()` bytes lower, so a parse of
+/// one that was applied to the other would point at the wrong places instead of reading the same.
+fn marked_pair(dir: &Path, items: usize) -> (Doc, Doc) {
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let make = |name: &str, body: String| {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        Doc::from_file(name.to_string(), &p, 0).unwrap()
+    };
+    let a = make("a.rs", format!("{}{PAD}", marked_source(MARK_A, items)));
+    let b = make("b.rs", format!("{PAD}{}", marked_source(MARK_B, items)));
+    assert_eq!(a.src.len(), b.src.len(), "premise: the same size to the byte");
+    assert_ne!(a.src, b.src);
+    (a, b)
+}
+
+const MARK_A: &str = "xalphax";
+const MARK_B: &str = "xbravox";
+
+#[test]
+fn a_tool_asked_about_one_file_never_returns_the_content_of_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = marked_pair(dir.path(), 60);
+    assert!(a.lines() >= THRESHOLD_LINES, "premise: files of a size the tools intercept");
+
+    let mut bad = Vec::new();
+    let mut answered = 0;
+    // Twice over, alternating between the files on every call: a memo that is wrong shows up on
+    // the second visit to a file, and on the first call after the other one.
+    for round in 0..2 {
+        let (sa, sb) = (shapes(&a), shapes(&b));
+        assert_eq!(
+            sa.iter().map(|s| s.label).collect::<Vec<_>>(),
+            sb.iter().map(|s| s.label).collect::<Vec<_>>(),
+            "premise: the same requests are made of both files"
+        );
+        for (x, y) in sa.iter().zip(&sb) {
+            for (d, own, other, sh) in [(&a, MARK_A, MARK_B, x), (&b, MARK_B, MARK_A, y)] {
+                let reply = match reply_of(&call(sh.tool, &sh.args)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        bad.push(format!("{} on {}: {e}", sh.label, d.name));
+                        continue;
+                    }
+                };
+                answered += 1;
+                if reply.text.contains(other) {
+                    bad.push(format!(
+                        "round {round}: {} on {} returned content of the other file ({other})",
+                        sh.label, d.name
+                    ));
+                }
+                // The reply is about the file that was asked about, so the test is not passing
+                // on replies that say nothing at all.
+                if !reply.text.contains(own) && !sh.label.ends_with("no match") {
+                    bad.push(format!(
+                        "round {round}: {} on {} does not mention {own}",
+                        sh.label, d.name
+                    ));
+                }
+            }
+        }
+    }
+    println!("\n  {answered} replies read for the other file's marker");
+    assert_no_violations("the file pair", &bad);
+    assert!(answered >= 2 * 2 * 15, "only {answered} replies were examined");
+}
+
+/// The ranked arm keeps a parse of each file between calls, which is where one file's answer could
+/// become another's. Driven through the binary, since the arm is turned on by the environment.
+///
+/// The marker alone would not show it: the outline takes its text from the file being read and
+/// only its positions from the parse, so a parse of the wrong file reads as the right file at the
+/// wrong places. What shows it is that a file is answered the same whatever was read before it.
+#[test]
+fn a_ranked_smart_read_never_returns_the_content_of_another_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // Large enough to clear the size below which the arm declines: the cache is only reached by
+    // a call that goes ahead.
+    let (a, b) = marked_pair(dir.path(), 450);
+    let env = [("LUMEN_RANKED_OUTLINE", "on")];
+    let ask = |ds: &[&Doc]| -> Vec<(Tool, Value)> {
+        ds.iter()
+            .map(|d| (Tool::SmartRead, json!({ "path": d.path })))
+            .collect()
+    };
+    let alone = |d: &Doc| -> Reply {
+        through_the_binary(&env, &ask(&[d]))
+            .remove(0)
+            .unwrap_or_else(|e| panic!("{} read on its own: {e}", d.name))
+    };
+    let (alone_a, alone_b) = (alone(&a), alone(&b));
+    assert_eq!(
+        (alone_a.ledger.0.as_str(), alone_b.ledger.0.as_str()),
+        ("ranked_outline", "ranked_outline"),
+        "premise: the ranked arm answers both files"
+    );
+    assert_ne!(alone_a.text, alone_b.text, "premise: the two files read differently");
+
+    let order = [&a, &b, &a, &b, &b, &a];
+    let wire = through_the_binary(&env, &ask(&order));
+    let mut bad = Vec::new();
+    for (i, (d, w)) in order.iter().zip(wire).enumerate() {
+        let (own, other, expected) = if d.name == a.name {
+            (MARK_A, MARK_B, &alone_a)
+        } else {
+            (MARK_B, MARK_A, &alone_b)
+        };
+        match w {
+            Err(e) => bad.push(format!("call {i} on {}: {e}", d.name)),
+            Ok(r) => {
+                if r.ledger.0 != "ranked_outline" {
+                    bad.push(format!(
+                        "call {i} on {} was routed {}, not through the ranked arm",
+                        d.name, r.ledger.0
+                    ));
+                }
+                if r.text.contains(other) {
+                    bad.push(format!("call {i} on {} returned content of the other file", d.name));
+                }
+                if !r.text.contains(own) {
+                    bad.push(format!("call {i} on {} does not mention {own}", d.name));
+                }
+                if r.text != expected.text {
+                    bad.push(format!(
+                        "call {i} on {} was answered differently from the same call made on its \
+                         own, so something kept from an earlier call changed the answer",
+                        d.name
+                    ));
+                }
+            }
+        }
+    }
+    assert_no_violations("the ranked file pair", &bad);
 }
