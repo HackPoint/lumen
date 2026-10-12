@@ -64,6 +64,10 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
   list a session loads (about 43 tokens at 4 bytes a token, an estimate), and nothing with
   repeat reads off; on the fixture one repeat read saves 713 tokens. The `optimizer_bench`
   baselines are untouched.
+- **The benchmark harness** (`benchmarks/`, #46) now sets `LUMEN_REPEAT_READS=off` in its
+  repeat-reads-off arms instead of relying on the default; left alone, every "off" figure would
+  have measured the gate. The committed pre-release results were taken with off as the default,
+  so they are the same measurement.
 
 ### Repeat reads follow the conversation, not the process (#32)
 
