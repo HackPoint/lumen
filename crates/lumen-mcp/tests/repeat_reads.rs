@@ -543,20 +543,31 @@ fn fresh_is_honoured_and_recorded_when_repeat_reads_are_turned_off() {
 fn ab_withholds_the_answer_from_control_files_and_records_what_it_would_have_done() {
     let rig = rig();
     let mut s = rig.start(&[("LUMEN_REPEAT_READS", "ab")]);
+    // The arm comes from the path, new every run: take files until each arm has four.
     let (mut treated, mut control) = (0, 0);
-    for i in 0..16 {
-        let f = rig.file(&format!("f{i}.rs"), &source(30 + i, 5));
+    let mut i = 0;
+    while treated < 4 || control < 4 {
+        assert!(i < 200, "no split in {i} files: {treated}/{control}");
+        let f = rig.file(&format!("f{i}.rs"), &source(30 + i % 16, 5));
+        let in_treatment = lumen_core::repeat::treated(lumen_core::ranked::Mode::Ab, &f);
         s.read(&f);
         let second = s.read(&f);
-        if second.text.starts_with("Unchanged since") {
+        assert_eq!(
+            second.text.starts_with("Unchanged since"),
+            in_treatment,
+            "{f} is in the {} arm: {}",
+            if in_treatment { "treated" } else { "control" },
+            second.text
+        );
+        if in_treatment {
             treated += 1;
         } else {
             assert!(second.text.contains("— outline"));
             control += 1;
         }
+        i += 1;
     }
     s.end();
-    assert!(treated >= 3 && control >= 3, "split {treated}/{control}");
     let rows = rig.rows();
     let ctl: Vec<_> = rows
         .iter()
@@ -656,29 +667,39 @@ fn recall_file_after_compaction_gets_the_full_answer() {
 
 #[test]
 fn a_repeat_costs_no_more_time_than_a_first_read() {
-    let rig = rig();
     let n = 40;
-    let big = rig.file("big.rs", &source(400, 8));
-
-    let time = |env: &[(&str, &str)]| {
-        let mut s = rig.start(env);
-        let t = Instant::now();
-        let mut last = None;
-        for _ in 0..n {
-            last = Some(s.read(&big));
-        }
-        let e = t.elapsed();
-        s.end();
-        (e, last.unwrap())
-    };
+    // The arms alternate, so load lands on both alike; medians, so one stalled read decides nothing.
+    let (rig_off, rig_on) = (rig(), rig());
+    let (big_off, big_on) = (
+        rig_off.file("big.rs", &source(400, 8)),
+        rig_on.file("big.rs", &source(400, 8)),
+    );
     // Off is asked for: with nothing set repeat reads are on, and this compares the two.
-    let (off, _) = time(&[("LUMEN_REPEAT_READS", "off")]);
-    let (on, last) = time(ON);
-    assert!(last.text.starts_with("Unchanged since"));
-    eprintln!("{n} reads of a 400-function file: off {off:?}, on {on:?}");
+    let mut off = rig_off.start(&[("LUMEN_REPEAT_READS", "off")]);
+    let mut on = rig_on.start(ON);
+    let (mut off_secs, mut on_secs) = (vec![], vec![]);
+    let mut last = None;
+    for _ in 0..n {
+        let t = Instant::now();
+        off.read(&big_off);
+        off_secs.push(t.elapsed().as_secs_f64());
+        let t = Instant::now();
+        last = Some(on.read(&big_on));
+        on_secs.push(t.elapsed().as_secs_f64());
+    }
+    off.end();
+    on.end();
+    assert!(last.unwrap().text.starts_with("Unchanged since"));
+    let (off_median, on_median) = (
+        percentile(&mut off_secs, 0.5),
+        percentile(&mut on_secs, 0.5),
+    );
+    eprintln!(
+        "{n} reads of a 400-function file, median read: off {off_median:.4}s, on {on_median:.4}s"
+    );
     assert!(
-        on.as_secs_f64() < off.as_secs_f64() * 1.5 + 1.0,
-        "repeat path slower than the path it replaces: {on:?} vs {off:?}"
+        on_median < off_median * 2.0 + 0.025,
+        "repeat path slower than the path it replaces: {on_median:.4}s vs {off_median:.4}s a read"
     );
 }
 
