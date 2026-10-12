@@ -186,12 +186,25 @@ else
   fail "the release workflow names no other source of notes" "$(head -c 300 "$WORK/hits")"
 fi
 
-uses=$(grep -c 'scripts/release-notes.sh' "$workflow")
-if [ "$uses" -ge 2 ] && grep -qF -- '--notes-file /tmp/release_notes.md' "$workflow"; then
-  pass "the release workflow checks the block before building and publishes it as the notes"
+job_block() {
+  awk -v j="$1" '$0 == "  " j ":" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$workflow"
+}
+
+gate='bash scripts/release-notes.sh "$VERSION" CHANGELOG.md > /dev/null'
+if job_block resolve | grep -qF -- "$gate"; then
+  pass "the resolve job refuses a tag with no CHANGELOG block before anything is built"
 else
-  fail "the release workflow checks the block before building and publishes it as the notes" \
-    "scripts/release-notes.sh is run $uses time(s); it must run in the resolve job and in the release step"
+  fail "the resolve job refuses a tag with no CHANGELOG block before anything is built" \
+    "the resolve job must run: $gate"
+fi
+
+publish='bash scripts/release-notes.sh "$VERSION" CHANGELOG.md > /tmp/release_notes.md'
+if job_block build | grep -qF -- "$publish" &&
+  job_block build | grep -qF -- '--notes-file /tmp/release_notes.md'; then
+  pass "the release is published with the CHANGELOG block as its notes"
+else
+  fail "the release is published with the CHANGELOG block as its notes" \
+    "the build job must run: $publish, and pass --notes-file /tmp/release_notes.md to gh"
 fi
 
 if [ "$failed" -ne 0 ]; then
