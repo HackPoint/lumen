@@ -1,18 +1,22 @@
 //! `smart_read` and `recall_file` repeat reads: the glue between `lumen_core::repeat` and the
 //! tools.
 //!
-//! The base is what this process returned earlier in the session, held in memory. Whether the
-//! model still has it is answered from the transcript events the daemon records
-//! (`session_events`), and for what cannot be known — a subagent sharing the session, an event
-//! not yet ingested — every repeat answer tells the model how to ask again with `fresh=true`.
+//! The base is what this process returned earlier to one context, held in memory under the
+//! (session, agent) the PreToolUse hook named for the call, so a subagent is told apart from its
+//! parent and a call that cannot be placed gets the full answer. Whether the model still has the
+//! base is answered from the transcript events the daemon records (`session_events`). What cannot
+//! be known — a compaction inside a subagent, whose events the daemon skips as a sidechain, and
+//! an event not yet ingested — is why every repeat answer tells the model how to ask again with
+//! `fresh=true`.
 
+use lumen_core::identity::Identity;
 use lumen_core::meter::RankedMeta;
 use lumen_core::ranked::Mode;
 use lumen_core::repeat::{self, Base, Hash, OutlineBase, RecallBase, Sym};
 use lumen_core::structure::CodeItem;
 use serde_json::Value;
 
-use super::{Outcome, count_tokens, format_outline, metered_with, session_id};
+use super::{Outcome, caller, count_tokens, format_outline, metered_with};
 
 enum Gate {
     /// Serve the full answer; the label is the plan recorded.
@@ -22,7 +26,9 @@ enum Gate {
 }
 
 pub struct Ctx {
-    session: String,
+    /// Whose context the base belongs to. `None` when the call could not be placed: nothing is
+    /// looked up for it and nothing is kept.
+    who: Option<Identity>,
     key: String,
     tool: &'static str,
     mode: Mode,
@@ -48,27 +54,44 @@ fn lock() -> std::sync::MutexGuard<'static, repeat::Store> {
     }
 }
 
-/// `None` when the flag is off and the caller did not pass `fresh` (off costs nothing), or
-/// when there is no session to key the base on.
+/// A call from `session` is about to be answered; `None` when it could not be placed. See
+/// [`repeat::Store::enter`]: every base of another conversation goes first.
+pub fn enter(session: Option<&str>) {
+    let dropped = lock().enter(session);
+    if dropped > 0 {
+        let why = if session.is_some() {
+            "the conversation changed"
+        } else {
+            "a call could not be placed"
+        };
+        eprintln!("lumen: {why}; {dropped} remembered read(s) dropped");
+    }
+}
+
+/// `None` when the flag is off and the caller did not pass `fresh` (off costs nothing).
+///
+/// A call that could not be placed in a conversation is answered in full and remembers nothing:
+/// the base it would be compared with belongs to some conversation, and which one is not known.
 pub fn begin(tool: &'static str, path: &str, req_key: &str, args: &Value) -> Option<Ctx> {
     let mode = repeat::mode_from_env();
     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
     if mode == Mode::Off && !fresh {
         return None;
     }
-    let session = session_id()?;
+    let who = caller();
     let key = format!("{tool}\0{req_key}");
-    let base = if mode == Mode::Off {
-        None
-    } else {
-        lock().get(&session, &key).cloned()
+    let base = match (&who, mode) {
+        (Some(w), m) if m != Mode::Off => lock().get(&w.owner(), &key).cloned(),
+        _ => None,
     };
     let gate = if fresh {
         Gate::Full(repeat::PLAN_FRESH)
-    } else if let Some(b) = &base {
+    } else if who.is_none() {
+        Gate::Full(repeat::PLAN_UNIDENTIFIED)
+    } else if let (Some(b), Some(w)) = (&base, &who) {
         match lumen_core::meter::db_path() {
             None => Gate::Full("unverifiable"),
-            Some(db) => match repeat::event_since(&db, &session, b.when_ms()) {
+            Some(db) => match repeat::event_since(&db, &w.session, b.when_ms()) {
                 Ok(None) => Gate::Repeat,
                 Ok(Some(kind)) if kind == "rewind" => Gate::Full("rewind"),
                 Ok(Some(kind)) if kind == "resync" => Gate::Full("resync"),
@@ -83,7 +106,7 @@ pub fn begin(tool: &'static str, path: &str, req_key: &str, args: &Value) -> Opt
     };
     Some(Ctx {
         treated: repeat::treated(mode, path),
-        session,
+        who,
         key,
         tool,
         mode,
@@ -289,7 +312,11 @@ impl Ctx {
     }
 
     fn put(&self, base: Base) {
-        lock().put(&self.session, &self.key, base);
+        // Nothing is kept for a call that could not be placed: there is no context to say the
+        // model holds it.
+        if let Some(who) = &self.who {
+            lock().put(&who.owner(), &self.key, base);
+        }
     }
 
     fn put_recall(&self, text: Hash, pieces: &[(Sym, String)]) {

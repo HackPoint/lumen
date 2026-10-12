@@ -13,6 +13,8 @@
 #   ./scripts/verify-hooks.sh                  # the hooks in ~/.claude/lumen
 #   ./scripts/verify-hooks.sh DIR              # the hooks in DIR
 #   ./scripts/verify-hooks.sh --expect 1.6.0   # and require the build that wrote them
+#   ./scripts/verify-hooks.sh --mcp-bin FILE   # run the hooks against this lumen-mcp, not
+#                                              # the one Setup baked in (a build under test)
 #
 # Exit codes: 0 all checks passed, 1 one or more failed, 2 bad usage.
 
@@ -20,12 +22,16 @@ set -uo pipefail
 
 HOOK_DIR=""
 EXPECT=""
+MCP_BIN=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --expect)
             [[ $# -ge 2 ]] || { echo "--expect needs a version" >&2; exit 2; }
             EXPECT="$2"; shift 2 ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        --mcp-bin)
+            [[ $# -ge 2 ]] || { echo "--mcp-bin needs a file" >&2; exit 2; }
+            MCP_BIN="$2"; shift 2 ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
         -*) echo "unknown argument: $1" >&2; exit 2 ;;
         *) HOOK_DIR="$1"; shift ;;
     esac
@@ -33,6 +39,11 @@ done
 if [[ -z "$HOOK_DIR" ]]; then
     [[ -n "${HOME:-}" ]] || { echo "no HOME, so no ~/.claude/lumen; name the directory" >&2; exit 2; }
     HOOK_DIR="$HOME/.claude/lumen"
+fi
+if [[ -n "$MCP_BIN" ]]; then
+    [[ -x "$MCP_BIN" ]] || { echo "--mcp-bin: no executable at $MCP_BIN" >&2; exit 2; }
+    # Each hook runs from the scratch project, so the path has to survive a cd.
+    MCP_BIN="$(cd "$(dirname "$MCP_BIN")" && pwd)/$(basename "$MCP_BIN")"
 fi
 
 PASS=0; FAIL=0; SKIP=0
@@ -131,6 +142,14 @@ post_bash() { # SESSION
     printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls","description":"List files"},"tool_response":{"stdout":"big.rs\\nsmall.rs","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false},"tool_use_id":"toolu_verify_hooks"}' \
         "$1" "$NT/proj"
 }
+# A call to one of Lumen's own tools, as the same PreToolUse hook sees it. A call from
+# inside a subagent also carries the agent's id.
+pre_lumen() { # TOOL_NAME SESSION TOOL_USE_ID [AGENT_ID]
+    local agent=""
+    [[ -n "${4:-}" ]] && agent=",\"agent_id\":\"$4\",\"agent_type\":\"general-purpose\""
+    printf '{"session_id":"%s"%s,"cwd":"%s","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":{"path":"%s"},"tool_use_id":"%s"}' \
+        "$2" "$agent" "$NT/proj" "$1" "$NT/proj/big.rs" "$3"
+}
 
 # One hook run as Claude Code makes it: the payload on stdin, the project as the
 # working directory, and on Windows through `bash`. Every path a hook may write is
@@ -143,6 +162,7 @@ run() { # SCRIPT PAYLOAD [VAR=VALUE...]
             LUMEN_METER_BASH LUMEN_SESSION_ID LUMEN_CHANNEL LUMEN_MCP_BIN CLAUDE_CODE_SESSION_ID
         export HOME="$T/home" USERPROFILE="$NT/home" TMPDIR="$NT/tmp" TMP="$NT/tmp" \
             TEMP="$NT/tmp" LUMEN_DB="$LEDGER" LUMEN_FAULT_SPOOL="$NSPOOL"
+        if [[ -n "$MCP_BIN" ]]; then export LUMEN_MCP_BIN="$(native "$MCP_BIN")"; fi
         # Each word is VAR=VALUE.
         # shellcheck disable=SC2163
         [[ $# -gt 0 ]] && export "$@"
@@ -208,6 +228,21 @@ if [[ $CODE == 0 && -z "$OUT" ]] && spooled '"variant":"retry_escape_valve"'; th
 else
     bad "intercept: the retry gave $(said); spool: $(tr '\n' ' ' <"$SPOOL" 2>/dev/null)"
 fi
+
+# Lumen's own tools, under both names Claude Code gives them. The hook says nothing,
+# blocks nothing, and leaves a record of whose call it is beside the ledger, named by the
+# call's tool_use_id, which is how the server tells a /clear from a repeat.
+for name in mcp__lumen__smart_read mcp__plugin_lumen_lumen__recall_file; do
+    id="toolu_verify_${name##*__}"
+    record="$T/ledger/lumen_call_$id.json"
+    run "$INTERCEPT" "$(pre_lumen "$name" "$SID" "$id" "agent-$$")"
+    if [[ $CODE == 0 && -z "$OUT" && -z "$ERR" && -s "$record" ]] \
+          && grep -qF "\"session_id\":\"$SID\"" "$record" && grep -qF "\"agent_id\":\"agent-$$\"" "$record"; then
+        ok "intercept: a call to $name leaves its session and agent beside the ledger"
+    else
+        bad "intercept: a call to $name gave $(said); record: $(cat "$record" 2>/dev/null)"
+    fi
+done
 
 # Lumen moved or removed: no lumen-mcp where Setup put it, none on PATH. A PATH with
 # none on it but bash, cat and date still there is, on Windows, PATH without the
