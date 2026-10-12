@@ -148,6 +148,9 @@ pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
     )
 }
 
+/// How long a row of unknown identity vouches for a path in [`lumen_answered`], in seconds.
+pub const UNATTRIBUTED_WINDOW_SECS: i64 = 3600;
+
 /// Whether `smart_read` or `recall_file` already answered for `path` in this context: the
 /// session, and inside a subagent which one (`agent`, `None` for the main agent).
 ///
@@ -156,7 +159,16 @@ pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
 /// (`would_inflate`, `ranked_*`) and do not count, nor does a built-in Read of the path.
 ///
 /// A subagent has a context of its own, so what the main agent was served does not count
-/// for it, nor the reverse. A row of unknown identity has no session and matches nobody.
+/// for it, nor the reverse. A row of known identity for another session or agent matches
+/// nobody else, which is what keeps a `/clear` correct.
+///
+/// A row of unknown identity (no session) also counts, for the same path and only within
+/// [`UNATTRIBUTED_WINDOW_SECS`]. It exists only because identity could not be established, as
+/// on an install whose settings.json predates the hook that names the conversation; it cannot
+/// be assigned to one, and matching it is no worse than before that hook existed, when the
+/// row was matched by an environment variable that a `/clear` left stale. A wrong match costs
+/// one redirect to recall_file, after which the valve releases the retry. The repeat-read gate
+/// does not share this: there an unknown identity gets the full result.
 ///
 /// Fails open in every direction, because the caller uses a yes to withhold a Read: no
 /// ledger, one that is locked, corrupt or lacks the table or the `agent_id` column, a path
@@ -168,14 +180,29 @@ pub fn lumen_answered(
     agent: Option<&str>,
     path: &str,
 ) -> bool {
+    use rusqlite::OptionalExtension;
     let Ok(conn) = open_read_only(db) else {
         return false;
     };
     let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    let mine = conn
+        .query_row(
+            "SELECT 1 FROM read_events WHERE session_id = ?1 AND agent_id IS ?2 AND path = ?3 \
+             AND routed_via IN ('smart_read', 'recall_file') LIMIT 1",
+            params![session, agent, path],
+            |_| Ok(()),
+        )
+        .optional();
+    match mine {
+        Ok(Some(())) => return true,
+        Ok(None) => {}
+        Err(_) => return false,
+    }
     conn.query_row(
-        "SELECT 1 FROM read_events WHERE session_id = ?1 AND agent_id IS ?2 AND path = ?3 \
-         AND routed_via IN ('smart_read', 'recall_file') LIMIT 1",
-        params![session, agent, path],
+        "SELECT 1 FROM read_events WHERE session_id IS NULL AND path = ?1 \
+         AND routed_via IN ('smart_read', 'recall_file') \
+         AND datetime(ts) >= datetime('now', ?2) LIMIT 1",
+        params![path, format!("-{UNATTRIBUTED_WINDOW_SECS} seconds")],
         |_| Ok(()),
     )
     .is_ok()
@@ -601,6 +628,104 @@ mod tests {
         assert!(lumen_answered(&db, "s", Some("a1"), "/sub.rs"));
         assert!(!lumen_answered(&db, "s", None, "/sub.rs"));
         assert!(!lumen_answered(&db, "s", Some("a2"), "/sub.rs"));
+    }
+
+    /// A Lumen-tool row of unknown identity: what an install whose settings.json predates the
+    /// hook that names the conversation writes.
+    fn put_unknown(db: &std::path::Path, path: &str, route: &str) {
+        insert_read_event_at(
+            db,
+            path,
+            Some(400),
+            300,
+            4000,
+            3700,
+            route,
+            "cli",
+            "t",
+            None,
+            None,
+            None,
+            &RankedMeta::default(),
+        )
+        .unwrap();
+    }
+
+    fn age_rows(db: &std::path::Path, path: &str, ts: &str) {
+        Connection::open(db)
+            .unwrap()
+            .execute(
+                "UPDATE read_events SET ts = ?1 WHERE path = ?2",
+                params![ts, path],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_recent_row_of_unknown_identity_vouches_for_its_path_to_any_context() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_unknown(&db, "/a.rs", "smart_read");
+        put_unknown(&db, "/b.rs", "recall_file");
+        assert!(lumen_answered(&db, "s", None, "/a.rs"));
+        assert!(lumen_answered(&db, "any-other", None, "/b.rs"));
+        assert!(
+            lumen_answered(&db, "s", Some("a1"), "/a.rs"),
+            "an unknown row cannot be told apart from a subagent's"
+        );
+    }
+
+    #[test]
+    fn a_row_of_unknown_identity_for_another_path_or_a_declined_route_does_not_vouch() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_unknown(&db, "/a.rs", "smart_read");
+        put_unknown(&db, "/b.rs", "would_inflate");
+        put_unknown(&db, "/b.rs", "builtin_read");
+        assert!(!lumen_answered(&db, "s", None, "/other.rs"));
+        assert!(!lumen_answered(&db, "s", None, "/b.rs"));
+    }
+
+    #[test]
+    fn a_row_of_unknown_identity_older_than_the_window_does_not_vouch() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_unknown(&db, "/old.rs", "smart_read");
+        put_unknown(&db, "/new.rs", "smart_read");
+        age_rows(&db, "/old.rs", "2020-01-01T00:00:00Z");
+        assert!(!lumen_answered(&db, "s", None, "/old.rs"));
+        assert!(lumen_answered(&db, "s", None, "/new.rs"));
+
+        // Just inside and just outside the window.
+        let ago = |secs: i64| {
+            Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+                    params![format!("-{secs} seconds")],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        age_rows(&db, "/new.rs", &ago(UNATTRIBUTED_WINDOW_SECS - 60));
+        assert!(lumen_answered(&db, "s", None, "/new.rs"));
+        age_rows(&db, "/new.rs", &ago(UNATTRIBUTED_WINDOW_SECS + 60));
+        assert!(!lumen_answered(&db, "s", None, "/new.rs"));
+    }
+
+    #[test]
+    fn a_row_of_known_identity_never_vouches_for_another_context_whatever_its_age() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_for(&db, "before-clear", None, "/a.rs", "smart_read");
+        put_for(&db, "other", Some("a1"), "/b.rs", "recall_file");
+        put_unknown(&db, "/c.rs", "smart_read");
+        assert!(!lumen_answered(&db, "after-clear", None, "/a.rs"));
+        assert!(!lumen_answered(&db, "after-clear", None, "/b.rs"));
+        assert!(!lumen_answered(&db, "other", None, "/b.rs"));
+        // The unknown row for /c.rs does not leak into a known row's path, nor the reverse.
+        assert!(!lumen_answered(&db, "after-clear", None, "/a.rs"));
+        assert!(lumen_answered(&db, "before-clear", None, "/a.rs"));
     }
 
     #[test]
