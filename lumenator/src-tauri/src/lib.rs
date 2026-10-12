@@ -1551,18 +1551,23 @@ mod tests {
     }
 
     #[test]
-    fn a_write_that_fails_is_an_error_naming_the_file() {
+    fn a_write_that_fails_is_an_error_naming_the_file_and_the_cause() {
         let dir = tempfile::tempdir().unwrap();
         // The directory the file would go in is a regular file, so nothing can be created in it.
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "").unwrap();
         let db = blocker.join("lumen.db");
         let err = set_repeat_reads_at(&db, false).unwrap_err();
-        assert!(err.contains("cannot write"), "got {err}");
         let file = lumen_core::settings::settings_path(&db)
             .display()
             .to_string();
-        assert!(err.contains(&file), "names {file}: got {err}");
+        let cause = err
+            .strip_prefix(&format!("cannot write {file}: "))
+            .unwrap_or_else(|| panic!("names {file}, then why: got {err}"));
+        assert!(
+            cause.contains("(os error"),
+            "the operating system's reason follows the file: got {err}"
+        );
     }
 
     #[test]
@@ -1648,5 +1653,102 @@ mod tests {
             stdout.contains("1 passed"),
             "the child ran nothing:\n{stdout}"
         );
+    }
+
+    // ── commands the window invokes ──────────────────────────────────────────
+
+    /// Every `.ts` file the app ships: specs and the fake bridge only describe calls.
+    fn frontend_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                frontend_sources(&path, out);
+            } else if name.ends_with(".ts")
+                && !name.ends_with(".spec.ts")
+                && !name.ends_with(".fake.ts")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The command names a source passes to `invoke` as a string literal: `invoke('x')`,
+    /// `invoke<T>('x', ...)`, `this.bridge.invoke<A | null>('x')`.
+    fn invoked_commands(src: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rest = src;
+        while let Some(at) = rest.find("invoke") {
+            rest = &rest[at + "invoke".len()..];
+            let mut tail = rest;
+            if tail.starts_with('<') {
+                let mut depth = 0;
+                let end = tail.find(|c| {
+                    match c {
+                        '<' => depth += 1,
+                        '>' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                });
+                match end {
+                    Some(i) => tail = &tail[i + 1..],
+                    None => continue,
+                }
+            }
+            if let Some(call) = tail.strip_prefix('(') {
+                if let Some(lit) = call.trim_start().strip_prefix('\'') {
+                    if let Some(end) = lit.find('\'') {
+                        names.push(lit[..end].to_string());
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    fn registered_commands() -> Vec<String> {
+        const OPEN: &str = "generate_handler![";
+        let src = include_str!("lib.rs");
+        let from = src.find(OPEN).expect("the handler list") + OPEN.len();
+        let list = &src[from..from + src[from..].find(']').expect("its end")];
+        list.split(',')
+            .map(|c| c.trim().rsplit("::").next().unwrap_or_default().to_string())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn every_command_the_window_invokes_is_registered() {
+        let mut files = Vec::new();
+        frontend_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app"),
+            &mut files,
+        );
+        let registered = registered_commands();
+        let mut invoked = Vec::new();
+        for file in &files {
+            for name in invoked_commands(&std::fs::read_to_string(file).unwrap()) {
+                assert!(
+                    registered.contains(&name),
+                    "{} invokes {name}, which no handler answers",
+                    file.display()
+                );
+                invoked.push(name);
+            }
+        }
+        for needed in ["get_repeat_reads_setting", "set_repeat_reads_setting"] {
+            assert!(
+                invoked.iter().any(|n| n == needed),
+                "the switch needs {needed}, and the scan found only {invoked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_invoke_scan_reads_each_way_a_call_is_written() {
+        let src = "invoke('a'); invoke<T>('b', x); this.bridge.invoke<A | null>(\n  'c'\n); \
+                   invoke<Array<Foo<Bar>>>('d'); invoke<T>(NAME); invoke<T>(`e`); invoke";
+        assert_eq!(invoked_commands(src), ["a", "b", "c", "d"]);
     }
 }

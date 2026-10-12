@@ -186,7 +186,7 @@
                         type="checkbox"
                         aria-label="Repeat reads"
                         [checked]="st.on"
-                        [disabled]="rr.saving()"
+                        [attr.aria-disabled]="rr.saving() ? 'true' : null"
                         (change)="onRepeatReads($event)">
                 </label>
 

@@ -129,6 +129,11 @@ export class Home implements OnInit {
 
     async onRepeatReads(e: Event): Promise<void> {
         const box = e.target as HTMLInputElement;
+        // Left enabled while it writes: a disabled box would drop the keyboard focus it holds.
+        if (this.rr.saving()) {
+            box.checked = !box.checked;
+            return;
+        }
         const took = await this.rr.set(box.checked);
         // A click flips the box by itself, and the binding writes it back only when the
         // stored value changed, so a write that did not take has to put it back here.

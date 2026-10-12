@@ -699,6 +699,17 @@ describe('Optimizer', () => {
       );
     });
 
+    it('says "1 delta", not "1 deltas", when a single edit was served as one', async () => {
+      await build(
+        report({
+          repeatReads: repeats({ unchangedServed: 2, deltasServed: 1, tokensNotResent: 90, measuredAnswers: 3 }),
+        }),
+      );
+      expect(figures()[3]).toBe(
+        'Full result asked for again (fresh=true) 0 of 3 3 = 2 unchanged + 1 delta + 0 asked again.',
+      );
+    });
+
     it('hides that figure when nothing was served, because there is nothing for it to be a share of', async () => {
       await build(report({ repeatReads: repeats({ freshRequests: 3 }) }));
       expect(said()).toContain(NONE_YET);

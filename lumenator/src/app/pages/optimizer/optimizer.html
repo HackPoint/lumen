@@ -324,7 +324,7 @@
                             </dd>
                             <dd class="repeat-card__what">
                                 {{ fmtTokens(c.asked) }} = {{ fmtTokens(c.unchangedServed) }} unchanged
-                                + {{ fmtTokens(c.deltasServed) }} deltas + {{ fmtTokens(c.freshRequests) }} asked again.
+                                + {{ fmtTokens(c.deltasServed) }} delta{{ c.deltasServed === 1 ? '' : 's' }} + {{ fmtTokens(c.freshRequests) }} asked again.
                             </dd>
                         </div>
                     </dl>

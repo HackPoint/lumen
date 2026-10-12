@@ -511,6 +511,22 @@ mod tests {
         assert_eq!(mode & 0o077, 0, "{mode:o}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_holding_the_file_open_still_sees_the_whole_old_one_after_a_write() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ledger.db");
+        write_repeat_reads(&db, false).unwrap();
+        let before = std::fs::read_to_string(settings_path(&db)).unwrap();
+        let mut held = std::fs::File::open(settings_path(&db)).unwrap();
+        write_repeat_reads(&db, true).unwrap();
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, before);
+        assert_eq!(read_file_mode(&db), Mode::On);
+    }
+
     #[test]
     fn the_writer_creates_a_missing_directory() {
         let dir = tempfile::tempdir().unwrap();

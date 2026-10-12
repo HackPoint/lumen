@@ -639,17 +639,33 @@ describe('Home', () => {
       expect(el<HTMLInputElement>(BOX).checked).toBe(false);
     });
 
-    it('holds the switch still while the write is in flight', async () => {
+    it('holds the switch still while the write is in flight, and keeps the keyboard focus on it', async () => {
       const write = deferred<RepeatReadsSetting>();
+      let writes = 0;
       await open((b) => {
-        b.setRepeatReadsSetting = () => write.promise;
+        b.setRepeatReadsSetting = () => {
+          writes += 1;
+          return write.promise;
+        };
       });
-      el<HTMLInputElement>(BOX).click();
+      const box = el<HTMLInputElement>(BOX);
+      box.focus();
+      box.click();
       await settle();
-      expect(el<HTMLInputElement>(BOX).disabled).toBe(true);
+      expect(box.getAttribute('aria-disabled')).toBe('true');
+      expect(box.disabled).toBe(false);
+      expect(document.activeElement).toBe(box);
+      box.click();
+      await settle();
+      expect(writes).toBe(1);
+      expect(box.checked).toBe(false);
       write.resolve(FILE_OFF);
       await settle();
-      expect(el<HTMLInputElement>(BOX).disabled).toBe(false);
+      expect(box.hasAttribute('aria-disabled')).toBe(false);
+      expect(document.activeElement).toBe(box);
+      box.click();
+      await settle();
+      expect(writes).toBe(2);
     });
 
     it('claims nothing about on or off before the file has been read', async () => {
