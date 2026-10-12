@@ -1075,14 +1075,7 @@ pub fn measure_builds(
             );
             let w = work.join(format!("lat-{}-pass{pass}", build.label));
             let mut series = Vec::new();
-            hooks(
-                build,
-                subjects,
-                &pass_cfg,
-                &w,
-                build.inproc,
-                &mut series,
-            )?;
+            hooks(build, subjects, &pass_cfg, &w, build.inproc, &mut series)?;
             let version = servers(build, subjects, &pass_cfg, &w, &mut series)?;
             if !versions[bi].is_empty() && versions[bi] != version {
                 return Err(format!(

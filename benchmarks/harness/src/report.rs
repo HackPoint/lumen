@@ -994,7 +994,10 @@ mod tests {
         let r = two_builds(3_400_000, 5_500_000);
         let sec = r.latency.as_ref().unwrap();
         let note = intercept_block_note(&r, sec).expect("2.1 ms slower is a finding");
-        assert!(note.contains("2.10 ms slower on pre than on v1.7.0"), "{note}");
+        assert!(
+            note.contains("2.10 ms slower on pre than on v1.7.0"),
+            "{note}"
+        );
         assert!(note.contains("5.50 ms against 3.40 ms"), "{note}");
         assert!(note.contains("#42"), "{note}");
         assert!(note.contains("lumen_answered"), "{note}");

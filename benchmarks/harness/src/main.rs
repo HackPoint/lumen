@@ -245,7 +245,12 @@ fn main_inner() -> Result<(), String> {
     };
     let runs = o
         .runs
-        .or_else(|| committed.as_ref().map(|c| c.runs).filter(|r| *r >= MIN_RUNS))
+        .or_else(|| {
+            committed
+                .as_ref()
+                .map(|c| c.runs)
+                .filter(|r| *r >= MIN_RUNS)
+        })
         .unwrap_or(DEFAULT_RUNS);
     let warmup = o
         .warmup
@@ -275,7 +280,11 @@ fn main_inner() -> Result<(), String> {
         let (subjects, now) = run::latency_only(&plan)?;
         let sides = compare::sides(&committed, &plan.builds, &now)?;
         let now_subjects: Vec<String> = subjects.iter().map(|s| s.rel.clone()).collect();
-        let corpus_sha = plan.corpora.first().map(|c| c.sha.clone()).unwrap_or_default();
+        let corpus_sha = plan
+            .corpora
+            .first()
+            .map(|c| c.sha.clone())
+            .unwrap_or_default();
         print!(
             "{}",
             compare::render(&committed, &corpus_sha, &now_subjects, &sides)

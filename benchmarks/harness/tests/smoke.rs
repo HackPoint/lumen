@@ -7,6 +7,7 @@
 
 use lumen_bench::builds::Build;
 use lumen_bench::corpus;
+use lumen_bench::driver::Identity;
 use lumen_bench::latency::LatencyConfig;
 use lumen_bench::run::{self, Output, Plan};
 use std::path::{Path, PathBuf};
@@ -122,6 +123,9 @@ fn output() -> &'static Output {
             profile: "debug",
             profile_note: "the smoke test's own profile".to_string(),
             source: "the workspace this test runs in".to_string(),
+            // Replaced by what `run::execute` finds by running the binary.
+            identity: Identity::Env,
+            inproc: true,
         };
         let plan = Plan {
             label: "smoke".to_string(),
@@ -250,15 +254,22 @@ fn the_latency_section_has_every_series_and_only_measured_or_stated_gaps() {
             assert!(s["lat"][key].as_i64().is_some_and(|n| n > 0), "{id} {key}");
         }
     }
-    // The slot for task T1's hook is present and says why it holds no figure.
+    // The per-call identity slot: this workspace's build records no per-call identity (a
+    // PreToolUse payload for a lumen tool, sent to `hook intercept`, leaves no record), so the
+    // slot holds no figure and says that, in words, with the commit it was asked of.
     let slot = find("hook.per_call_identity");
     assert!(slot["lat"].is_null());
     assert!(
         slot["status"]
             .as_str()
-            .is_some_and(|s| s.starts_with("n/a at ")),
+            .is_some_and(|s| s.starts_with("n/a — this build records no per-call identity")),
         "the identity slot: {}",
         slot["status"]
+    );
+    // An Env build has no claim path to time.
+    assert!(
+        !series.iter().any(|s| s["id"] == "server.identity.placed"),
+        "an env-identity build has no server.identity series"
     );
     // Every series that is not measured says why.
     for s in series {
@@ -278,6 +289,40 @@ fn the_summary_labels_dollars_modelled_and_has_no_headline_percentage() {
     assert!(s.contains("proxy for Claude's tokenizer"));
     assert!(s.contains("usage mix"));
     assert!(!s.contains("% saved") && !s.contains("% savings"));
+}
+
+#[test]
+fn the_documents_name_no_local_path_and_keep_each_pass_median() {
+    let out = output();
+    let json = serde_json::to_string_pretty(&out.results).expect("serialise");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    for (name, text) in [("json", &json), ("summary", &out.summary)] {
+        if !home.is_empty() {
+            assert!(!text.contains(&home), "the {name} names the home directory");
+        }
+        assert!(
+            !text.contains(&*cwd.to_string_lossy()),
+            "the {name} names the working directory"
+        );
+    }
+    let v: serde_json::Value = serde_json::from_str(&json).expect("well-formed JSON");
+    assert!(
+        v["latency"]["percentile_method"]
+            .as_str()
+            .is_some_and(|s| s.contains("nearest-rank")),
+        "the percentile method is disclosed"
+    );
+    let floor = v["latency"]["builds"][0]["series"]
+        .as_array()
+        .and_then(|s| s.iter().find(|s| s["id"] == "hook.floor"))
+        .expect("the hook floor");
+    let passes = v["latency"]["passes"].as_u64().expect("a pass count");
+    assert_eq!(
+        floor["pass_medians_ns"].as_array().map(Vec::len),
+        Some(passes as usize),
+        "one median per pass"
+    );
 }
 
 #[test]

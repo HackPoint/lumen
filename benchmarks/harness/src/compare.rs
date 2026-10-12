@@ -83,7 +83,10 @@ pub fn parse_committed(json: &str) -> Res<Committed> {
         .get("latency")
         .filter(|l| !l.is_null())
         .ok_or("the committed results have no latency section to compare with")?;
-    let info = v.get("builds").and_then(Value::as_array).ok_or("no builds")?;
+    let info = v
+        .get("builds")
+        .and_then(Value::as_array)
+        .ok_or("no builds")?;
     let role_of = |label: &str| -> Option<(String, String)> {
         info.iter()
             .find(|b| b.get("label").and_then(Value::as_str) == Some(label))
@@ -175,14 +178,17 @@ pub fn rows(committed: &[(String, i64)], now: &[(String, i64)]) -> (Vec<Row>, Ve
         };
         let normalized = floor_for(id).and_then(|f| {
             let (cf, nf) = (*get(committed, f)?, *get(now, f)?);
-            (cf > 0 && nf > 0 && *c > 0)
-                .then(|| (n as f64 / nf as f64) / (*c as f64 / cf as f64))
+            (cf > 0 && nf > 0 && *c > 0).then(|| (n as f64 / nf as f64) / (*c as f64 / cf as f64))
         });
         out.push(Row {
             id: id.clone(),
             committed_ns: *c,
             now_ns: n,
-            ratio: if *c > 0 { n as f64 / *c as f64 } else { f64::NAN },
+            ratio: if *c > 0 {
+                n as f64 / *c as f64
+            } else {
+                f64::NAN
+            },
             normalized,
         });
     }
@@ -372,7 +378,9 @@ pub fn render(
              ones, and do not take a difference in a raw median as a difference in the code.",
             MACHINE * 100.0
         ),
-        None => "THE MACHINE CANNOT BE JUDGED: a floor series has no figure on one side.".to_string(),
+        None => {
+            "THE MACHINE CANNOT BE JUDGED: a floor series has no figure on one side.".to_string()
+        }
     };
     let _ = writeln!(s, "{verdict}");
     s
@@ -450,7 +458,10 @@ mod tests {
         let now = v(&[("hook.floor", 6_000), ("hook.meter_read.spawn", 9_000)]);
         let (rows, missing) = rows(&committed, &now);
         assert!(missing.is_empty());
-        let r = rows.iter().find(|r| r.id == "hook.meter_read.spawn").unwrap();
+        let r = rows
+            .iter()
+            .find(|r| r.id == "hook.meter_read.spawn")
+            .unwrap();
         assert!((r.ratio - 1.5).abs() < 1e-9);
         assert!((r.normalized.unwrap() - 1.0).abs() < 1e-9);
         let f = rows.iter().find(|r| r.id == "hook.floor").unwrap();
@@ -459,7 +470,10 @@ mod tests {
         // The code got 20% slower on that machine too: normalized shows it, raw is 1.8.
         let now = v(&[("hook.floor", 6_000), ("hook.meter_read.spawn", 10_800)]);
         let (rows, _) = self::rows(&committed, &now);
-        let r = rows.iter().find(|r| r.id == "hook.meter_read.spawn").unwrap();
+        let r = rows
+            .iter()
+            .find(|r| r.id == "hook.meter_read.spawn")
+            .unwrap();
         assert!((r.ratio - 1.8).abs() < 1e-9);
         assert!((r.normalized.unwrap() - 1.2).abs() < 1e-9);
     }
