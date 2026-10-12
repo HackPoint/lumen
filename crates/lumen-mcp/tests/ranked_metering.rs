@@ -7,6 +7,7 @@
 //!
 //! Every case points `LUMEN_DB` at a tempdir. Nothing here may touch the real ledger.
 
+use lumen_core::tokenizer::count_tokens;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -27,6 +28,32 @@ fn smart_read(mode: Option<&str>, target: &str) -> (Vec<Row>, String) {
 }
 
 fn smart_read_with(mode: Option<&str>, target: &str, extra: &[(&str, &str)]) -> (Vec<Row>, String) {
+    let run = run_smart_read(mode, target, extra);
+    (run.rows, run.stdout)
+}
+
+/// Everything one `smart_read` through the real binary leaves behind.
+struct Run {
+    rows: Vec<Row>,
+    /// `(tokens_returned, full_tokens, saved_tokens)` per ledger row, in write order.
+    counts: Vec<(i64, i64, i64)>,
+    stdout: String,
+}
+
+impl Run {
+    /// The text of the tool reply, parsed out of the frame rather than searched for in the raw
+    /// stdout, which also carries the `initialize` reply.
+    fn reply(&self) -> String {
+        self.stdout
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["id"] == 2)
+            .and_then(|v| v["result"]["content"][0]["text"].as_str().map(str::to_owned))
+            .expect("a tools/call reply with a text block")
+    }
+}
+
+fn run_smart_read(mode: Option<&str>, target: &str, extra: &[(&str, &str)]) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("ledger.db");
     assert!(
@@ -97,7 +124,21 @@ fn smart_read_with(mode: Option<&str>, target: &str, extra: &[(&str, &str)]) -> 
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    (rows, stdout)
+    let mut stmt = conn
+        .prepare(
+            "SELECT tokens_returned, full_tokens, saved_tokens FROM read_events ORDER BY rowid",
+        )
+        .unwrap();
+    let counts: Vec<(i64, i64, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    Run {
+        rows,
+        counts,
+        stdout,
+    }
 }
 
 /// A file large enough to clear `S_min` at the measured defaults (~5.4k tokens).
@@ -151,10 +192,16 @@ fn an_unrecognised_flag_value_does_not_enable_the_experiment() {
 fn the_ranked_arm_records_every_decision_input() {
     let dir = tempfile::tempdir().unwrap();
     let target = big_rust_file(dir.path());
-    let (rows, _) = smart_read(Some("on"), &target);
+    let run = run_smart_read(Some("on"), &target, &[]);
+    let rows = &run.rows;
 
     assert_eq!(rows.len(), 1);
     let (route, budget, s_min, k, n, coeff, econ_source) = &rows[0];
+    assert_eq!(
+        count_tokens(&run.reply()) as i64,
+        run.counts[0].0,
+        "the row must carry the cost of the reply that went out"
+    );
     assert_eq!(
         route, "ranked_outline",
         "a successful ranked call gets its own route so it can never be pooled with the \
@@ -182,18 +229,32 @@ fn the_ranked_arm_records_every_decision_input() {
     assert_eq!(econ_source.as_deref(), Some("measured_defaults"));
 }
 
+/// A file below the ranked arm's break-even whose outline is still far smaller than it.
+fn modest_rust_file(dir: &std::path::Path) -> String {
+    let mut src = String::new();
+    for i in 0..6 {
+        src.push_str(&format!("/// Step {i}.\npub fn step_number_{i}(a: u32) -> u32 {{\n"));
+        for j in 0..18 {
+            src.push_str(&format!("    let v{j} = a.wrapping_mul({j}).wrapping_add({i});\n"));
+        }
+        src.push_str("    a\n}\n\n");
+    }
+    let p = dir.join("modest.rs");
+    std::fs::write(&p, src).unwrap();
+    p.to_string_lossy().to_string()
+}
+
 /// A decline still writes a row, on the decline's own route, with the decision that
 /// produced it. Without this the ledger would hold only the calls that went ahead — the
 /// population that makes any gate look unnecessary.
 #[test]
 fn a_declined_call_records_the_refusal_and_still_returns_an_outline() {
     let dir = tempfile::tempdir().unwrap();
-    // Comfortably below S_min at the measured defaults.
-    let p = dir.path().join("small.rs");
-    std::fs::write(&p, "pub fn a() -> u8 { 1 }\npub fn b() -> u8 { 2 }\n").unwrap();
-    let target = p.to_string_lossy().to_string();
+    // Comfortably below S_min at the measured defaults, and much larger than its outline.
+    let target = modest_rust_file(dir.path());
 
-    let (rows, stdout) = smart_read(Some("on"), &target);
+    let run = run_smart_read(Some("on"), &target, &[]);
+    let (rows, stdout) = (&run.rows, &run.stdout);
 
     assert_eq!(rows.len(), 1);
     let (route, budget, s_min, k, n, _, _) = &rows[0];
@@ -214,6 +275,62 @@ fn a_declined_call_records_the_refusal_and_still_returns_an_outline() {
         stdout.contains("outline"),
         "a decline must fall back to the legacy outline, not return nothing"
     );
+    let (returned, full, saved) = run.counts[0];
+    assert!(returned < full, "the outline is the cheaper answer here");
+    assert_eq!(saved, full - returned);
+}
+
+/// The fallback behind a decline is the legacy outline, and a file smaller than its own outline
+/// is exactly the file a decline is most likely to be about. Returning that outline would cost
+/// more than reading the file, on a path that exists to be a cheap fallback.
+#[test]
+fn a_declined_call_never_returns_more_than_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("small.rs");
+    let body = "pub fn a() -> u8 { 1 }\npub fn b() -> u8 { 2 }\n";
+    std::fs::write(&p, body).unwrap();
+    let target = p.to_string_lossy().to_string();
+
+    let run = run_smart_read(Some("on"), &target, &[]);
+
+    assert_eq!(run.rows.len(), 1);
+    let (route, budget, _, k, n, _, _) = &run.rows[0];
+    assert_eq!(
+        route, "ranked_not_worth_it",
+        "the refusal stays visible under its own route"
+    );
+    assert!(budget.unwrap() < 0, "premise: the arm declined for size");
+    assert_eq!((k, n), (&Some(0), &Some(0)));
+    assert_eq!(run.reply(), body, "the file, not a larger rendering of it");
+    let (returned, full, saved) = run.counts[0];
+    assert_eq!(
+        (returned, saved),
+        (full, 0),
+        "the row must say what was returned: the whole file, nothing saved"
+    );
+}
+
+/// An empty text block is a reply a client may refuse, and the file is the cheaper answer only
+/// when there is something in it to return.
+#[test]
+fn a_declined_call_on_a_blank_file_still_returns_something_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [("empty.rs", ""), ("blank.rs", "\n\n  \n")] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        let run = run_smart_read(Some("on"), &p.to_string_lossy(), &[]);
+        assert!(
+            !run.reply().trim().is_empty(),
+            "{name}: a blank file must not be answered with a blank text block"
+        );
+        let (returned, full, saved) = run.counts[0];
+        assert_eq!(
+            returned,
+            count_tokens(&run.reply()) as i64,
+            "{name}: the row counts the reply as sent"
+        );
+        assert_eq!(saved, full - returned, "{name}");
+    }
 }
 
 #[test]

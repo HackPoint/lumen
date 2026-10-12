@@ -18,38 +18,38 @@
       "full_tokens": 9472,
       "returned_tokens": 9472,
       "saved_tokens": 0,
-      "route": "compress_logs",
+      "route": "would_inflate",
       "is_error": false
     },
     "compress_logs/inline_text": {
       "tool": "compress_logs",
       "full_tokens": 6190,
-      "returned_tokens": 590,
-      "saved_tokens": 5600,
+      "returned_tokens": 621,
+      "saved_tokens": 5569,
       "route": "compress_logs",
       "is_error": false
     },
     "compress_logs/output_extension": {
       "tool": "compress_logs",
       "full_tokens": 13842,
-      "returned_tokens": 1062,
-      "saved_tokens": 12780,
+      "returned_tokens": 1097,
+      "saved_tokens": 12745,
       "route": "compress_logs",
       "is_error": false
     },
     "compress_logs/repetitive_path": {
       "tool": "compress_logs",
       "full_tokens": 18380,
-      "returned_tokens": 1180,
-      "saved_tokens": 17200,
+      "returned_tokens": 1215,
+      "saved_tokens": 17165,
       "route": "compress_logs",
       "is_error": false
     },
     "compress_logs/stack_traces": {
       "tool": "compress_logs",
       "full_tokens": 9144,
-      "returned_tokens": 804,
-      "saved_tokens": 8340,
+      "returned_tokens": 840,
+      "saved_tokens": 8304,
       "route": "compress_logs",
       "is_error": false
     },
