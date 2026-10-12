@@ -46,7 +46,9 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    walk_where(dir, out, &|p| TagLang::detect(&p.to_string_lossy()).is_some());
+    walk_where(dir, out, &|p| {
+        TagLang::detect(&p.to_string_lossy()).is_some()
+    });
 }
 
 fn walk_where(dir: &Path, out: &mut Vec<PathBuf>, keep: &dyn Fn(&Path) -> bool) {
@@ -944,7 +946,7 @@ fn the_real_ledger_agrees_with_itself_when_asked() {
     assert_ledger_agrees(&conn);
 }
 
-// ── No tool may return more than the file it was asked about ─────────────────────────────────
+// ── A reply costs no more than the file it was asked about, and its label ────────────────────
 //
 // The claim is in the README and docs/efficiency.md, so what stands behind it is written out
 // here and nowhere wider. Checked:
@@ -959,9 +961,17 @@ fn the_real_ledger_agrees_with_itself_when_asked() {
 //     `_meta` and its ledger row are what is compared against that count; they are not a source
 //     of truth about themselves.
 //
+// What a reply may cost above the file is what labels it, per `Bound`: the note a fallback adds
+// (the inflation note within `NOTE_ALLOWANCE`, the no-structure note counted from its own text,
+// which carries the path) and the header of `smart_read(mode="full")`. A file or log with nothing
+// visible in it is the one case with no bound at all.
+//
 // Not checked, and not claimed: error replies (they carry no file content), the replies a repeat
 // read is answered with (returned only when cheaper than the full answer, and tested in
-// repeat_reads.rs), and the JSON-RPC envelope and `_meta` block, which no one counts.
+// repeat_reads.rs), and the JSON-RPC envelope and `_meta` block, which no one counts. Outside the
+// corpus too: a file that is not UTF-8, a file above `MAX_DOC_TOKENS`, and a `recall_file`
+// request whose start line is after its end line or far beyond the end of the file, none of
+// which is generated.
 
 /// What one reply may cost relative to the file it describes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1195,7 +1205,9 @@ fn check(
             "inflation fallback" => {
                 let body = r.text.split_once("\n\n").map(|(_, rest)| rest);
                 if body != Some(s.src) {
-                    bad.push(format!("{who}: the fallback is not the file behind one note"));
+                    bad.push(format!(
+                        "{who}: the fallback is not the file behind one note"
+                    ));
                 }
                 if route != "would_inflate" {
                     bad.push(format!("{who}: the fallback is routed {route}"));
@@ -1215,7 +1227,9 @@ fn check(
                     s.path
                 );
                 if r.text != format!("{note}{}", s.src) {
-                    bad.push(format!("{who}: the fallback is not the file behind its note"));
+                    bad.push(format!(
+                        "{who}: the fallback is not the file behind its note"
+                    ));
                 }
                 if route != "ranked_no_defs" {
                     bad.push(format!("{who}: the fallback is routed {route}"));
@@ -1448,8 +1462,8 @@ fn range_shape(path: &str, label: &'static str, from: usize, to: usize) -> Shape
 
 /// Every request shape for one file.
 ///
-/// `recall_file` panics on a start line well past the end of the file and on a start line after
-/// the end line, and a panic is no reply to measure, so neither is a shape here.
+/// A `recall_file` request whose start line is after its end line, or far beyond the end of the
+/// file, is not a shape here: this test measures the replies of the requests it generates.
 fn shapes(d: &Doc) -> Vec<Shape> {
     let lines = d.lines();
     let p = d.path.as_str();
@@ -1592,10 +1606,7 @@ impl Tally {
     }
 
     fn reached(&self, label: &str, branch: &str) -> usize {
-        self.hits
-            .get(&(label, branch))
-            .copied()
-            .unwrap_or_default()
+        self.hits.get(&(label, branch)).copied().unwrap_or_default()
     }
 
     /// The run took this branch on at least this many files, or the test is not testing it.
@@ -1655,14 +1666,19 @@ fn assert_no_violations(what: &str, bad: &[String]) {
         bad.is_empty(),
         "{what}: {} violation(s)\n  {}{}",
         bad.len(),
-        bad.iter().take(25).cloned().collect::<Vec<_>>().join("\n  "),
+        bad.iter()
+            .take(25)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  "),
         if bad.len() > 25 { "\n  ..." } else { "" }
     );
 }
 
-/// No Lumen tool may return more than the file it was asked about, on any real file, in any shape.
+/// No reply costs more than the file it was asked about and the line or header that labels it, on
+/// any real file, in any shape. `Bound` says what each shape may add.
 #[test]
-fn no_tool_returns_more_than_the_file_on_any_real_file() {
+fn no_reply_costs_more_than_the_file_and_its_label_on_any_real_file() {
     let (docs, skipped) = documents();
     let described = docs.iter().filter(|d| d.described).count();
     let n = docs.len();
@@ -1675,7 +1691,7 @@ fn no_tool_returns_more_than_the_file_on_any_real_file() {
     );
 
     let t = run_docs(&docs);
-    t.print("No tool returns more than the file", n);
+    t.print("No reply costs more than the file and its label", n);
     println!(
         "\n  {described} files with structure, {} without; left out above {MAX_DOC_TOKENS} \
          tokens: {}",
@@ -1694,7 +1710,11 @@ fn no_tool_returns_more_than_the_file_on_any_real_file() {
     t.expect("recall names no match", "nothing matched", most);
     t.expect("recall names too broad", "too many", n / 3);
     t.expect("recall names exact (median item)", "excerpt", described / 2);
-    t.expect("recall names exact (largest item)", "excerpt", described / 2);
+    t.expect(
+        "recall names exact (largest item)",
+        "excerpt",
+        described / 2,
+    );
     t.expect("recall names every item", "covers most", described / 2);
     t.expect("recall names substring", "substring excerpt", described / 2);
     for label in [
@@ -1759,12 +1779,15 @@ fn small_docs(dir: &Path) -> Vec<Doc> {
 }
 
 #[test]
-fn no_tool_returns_more_than_a_small_file() {
+fn no_reply_costs_more_than_a_small_file_and_its_label() {
     let dir = tempfile::tempdir().unwrap();
     let docs = small_docs(dir.path());
 
     let t = run_docs(&docs);
-    t.print("No tool returns more than a small file", docs.len());
+    t.print(
+        "No reply costs more than a small file and its label",
+        docs.len(),
+    );
     assert_no_violations("the small files", &t.bad);
 
     // The branch this exists for: a reply that would have cost more than the file, answered with
@@ -1785,7 +1808,8 @@ fn no_tool_returns_more_than_a_small_file() {
 const LOG_LINE: &str = "worker 7 failed to flush the write-ahead log to disk\n";
 
 fn synthetic_logs() -> Vec<(String, String)> {
-    let mut trace = String::from("Exception in thread \"main\" java.lang.IllegalStateException: boom\n");
+    let mut trace =
+        String::from("Exception in thread \"main\" java.lang.IllegalStateException: boom\n");
     for i in 0..30 {
         trace.push_str(&format!(
             "\tat com.example.pkg{i}.Service{i}.run(Service{i}.java:{})\n",
@@ -1907,7 +1931,9 @@ fn check_log(t: &mut LogTally, d: &Doc, by_path: bool) {
     }
     // Where compressing wins, and where nothing is visible to hand back, nothing changed.
     if matches!(branch, "compressed" | "blank log") && r.text != before {
-        t.bad.push(format!("{who}: the reply differs from the one before the fix"));
+        t.bad.push(format!(
+            "{who}: the reply differs from the one before the fix"
+        ));
     }
     if before_tokens > d.full {
         t.costlier_before += 1;
@@ -1919,7 +1945,7 @@ fn check_log(t: &mut LogTally, d: &Doc, by_path: bool) {
 }
 
 #[test]
-fn compress_logs_never_returns_more_than_the_log() {
+fn compress_logs_costs_no_more_than_the_log_unless_the_log_is_blank() {
     let dir = tempfile::tempdir().unwrap();
     let docs = log_docs(dir.path());
     let mut t = LogTally::default();
@@ -2042,7 +2068,10 @@ fn sample(docs: &[Doc]) -> Vec<&Doc> {
     let mut picked = Vec::new();
     for described in [true, false] {
         let kind: Vec<&Doc> = docs.iter().filter(|d| d.described == described).collect();
-        assert!(!kind.is_empty(), "the corpus has no file with described={described}");
+        assert!(
+            !kind.is_empty(),
+            "the corpus has no file with described={described}"
+        );
         // Heaviest first, so the last is the smallest.
         picked.push(kind[kind.len() - 1]);
         picked.push(kind[kind.len() / 2]);
@@ -2072,7 +2101,10 @@ fn the_binary_sends_and_records_what_the_function_returns() {
                 .map(|sh| (d, sh)),
         );
     }
-    let calls: Vec<(Tool, Value)> = cases.iter().map(|(_, sh)| (sh.tool, sh.args.clone())).collect();
+    let calls: Vec<(Tool, Value)> = cases
+        .iter()
+        .map(|(_, sh)| (sh.tool, sh.args.clone()))
+        .collect();
     let wire = through_the_binary(&[], &calls);
     assert_eq!(wire.len(), cases.len());
 
@@ -2107,7 +2139,7 @@ fn the_binary_sends_and_records_what_the_function_returns() {
 /// The ranked arm is off by default and has its own way of answering a file it declines, so it
 /// is driven the way it is turned on.
 #[test]
-fn a_ranked_smart_read_never_returns_more_than_the_file() {
+fn a_ranked_smart_read_costs_no_more_than_the_file_and_its_note() {
     let (docs, _) = documents();
     let dir = tempfile::tempdir().unwrap();
     let small = small_docs(dir.path());
@@ -2146,8 +2178,14 @@ fn a_ranked_smart_read_never_returns_more_than_the_file() {
     assert_no_violations("the ranked arm", &bad);
     // Both ways out of the arm were taken: an outline chosen by rank, and a decline that answers
     // with the file.
-    assert!(routes.get("ranked_outline").copied().unwrap_or(0) >= 1, "{routes:?}");
-    assert!(routes.get("ranked_not_worth_it").copied().unwrap_or(0) >= 1, "{routes:?}");
+    assert!(
+        routes.get("ranked_outline").copied().unwrap_or(0) >= 1,
+        "{routes:?}"
+    );
+    assert!(
+        routes.get("ranked_not_worth_it").copied().unwrap_or(0) >= 1,
+        "{routes:?}"
+    );
 }
 
 // ── a tool asked about one file never answers with another ──────────────────────────────────
@@ -2185,7 +2223,11 @@ fn marked_pair(dir: &Path, items: usize) -> (Doc, Doc) {
     };
     let a = make("a.rs", format!("{}{PAD}", marked_source(MARK_A, items)));
     let b = make("b.rs", format!("{PAD}{}", marked_source(MARK_B, items)));
-    assert_eq!(a.src.len(), b.src.len(), "premise: the same size to the byte");
+    assert_eq!(
+        a.src.len(),
+        b.src.len(),
+        "premise: the same size to the byte"
+    );
     assert_ne!(a.src, b.src);
     (a, b)
 }
@@ -2197,7 +2239,10 @@ const MARK_B: &str = "xbravox";
 fn a_tool_asked_about_one_file_never_returns_the_content_of_another() {
     let dir = tempfile::tempdir().unwrap();
     let (a, b) = marked_pair(dir.path(), 60);
-    assert!(a.lines() >= THRESHOLD_LINES, "premise: files of a size the tools intercept");
+    assert!(
+        a.lines() >= THRESHOLD_LINES,
+        "premise: files of a size the tools intercept"
+    );
 
     let mut bad = Vec::new();
     let mut answered = 0;
@@ -2239,7 +2284,10 @@ fn a_tool_asked_about_one_file_never_returns_the_content_of_another() {
     }
     println!("\n  {answered} replies read for the other file's marker");
     assert_no_violations("the file pair", &bad);
-    assert!(answered >= 2 * 2 * 15, "only {answered} replies were examined");
+    assert!(
+        answered >= 2 * 2 * 15,
+        "only {answered} replies were examined"
+    );
 }
 
 /// The ranked arm keeps a parse of each file between calls, which is where one file's answer could
@@ -2271,7 +2319,10 @@ fn a_ranked_smart_read_never_returns_the_content_of_another_file() {
         ("ranked_outline", "ranked_outline"),
         "premise: the ranked arm answers both files"
     );
-    assert_ne!(alone_a.text, alone_b.text, "premise: the two files read differently");
+    assert_ne!(
+        alone_a.text, alone_b.text,
+        "premise: the two files read differently"
+    );
 
     let order = [&a, &b, &a, &b, &b, &a];
     let wire = through_the_binary(&env, &ask(&order));
@@ -2292,7 +2343,10 @@ fn a_ranked_smart_read_never_returns_the_content_of_another_file() {
                     ));
                 }
                 if r.text.contains(other) {
-                    bad.push(format!("call {i} on {} returned content of the other file", d.name));
+                    bad.push(format!(
+                        "call {i} on {} returned content of the other file",
+                        d.name
+                    ));
                 }
                 if !r.text.contains(own) {
                     bad.push(format!("call {i} on {} does not mention {own}", d.name));

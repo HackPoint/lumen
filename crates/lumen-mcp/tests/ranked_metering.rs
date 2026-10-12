@@ -48,7 +48,11 @@ impl Run {
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .find(|v| v["id"] == 2)
-            .and_then(|v| v["result"]["content"][0]["text"].as_str().map(str::to_owned))
+            .and_then(|v| {
+                v["result"]["content"][0]["text"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
             .expect("a tools/call reply with a text block")
     }
 }
@@ -233,9 +237,13 @@ fn the_ranked_arm_records_every_decision_input() {
 fn modest_rust_file(dir: &std::path::Path) -> String {
     let mut src = String::new();
     for i in 0..6 {
-        src.push_str(&format!("/// Step {i}.\npub fn step_number_{i}(a: u32) -> u32 {{\n"));
+        src.push_str(&format!(
+            "/// Step {i}.\npub fn step_number_{i}(a: u32) -> u32 {{\n"
+        ));
         for j in 0..18 {
-            src.push_str(&format!("    let v{j} = a.wrapping_mul({j}).wrapping_add({i});\n"));
+            src.push_str(&format!(
+                "    let v{j} = a.wrapping_mul({j}).wrapping_add({i});\n"
+            ));
         }
         src.push_str("    a\n}\n\n");
     }
