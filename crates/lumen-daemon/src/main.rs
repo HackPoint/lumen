@@ -524,8 +524,10 @@ fn advance_offset(offsets: &Offsets, path: PathBuf, end: u64) {
 ///   - Per-line serde errors skip that line and continue (malformed JSON
 ///     must not stop the rest of the file).
 ///   - INSERT OR IGNORE on message_id: same bytes ingested twice is safe.
-///   - File-open / seek / read errors are returned to the caller, who logs
-///     and skips.  This keeps error handling at the outermost loop boundary.
+///   - A transcript that is gone when it is opened has nothing to ingest:
+///     `start` is returned and no state is touched.  Every other file-open /
+///     seek / read error is returned to the caller, who logs and skips.  This
+///     keeps error handling at the outermost loop boundary.
 async fn ingest_from(
     pool: &SqlitePool,
     path: &Path,
@@ -533,7 +535,12 @@ async fn ingest_from(
     tx: &broadcast::Sender<TurnMsg>,
     broadcast_live: bool,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut file = std::fs::File::open(path)?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        // Deleted between being noticed and being opened: nothing left to ingest.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(start),
+        Err(e) => return Err(e.into()),
+    };
     file.seek(SeekFrom::Start(start))?;
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
@@ -1420,6 +1427,134 @@ mod tests {
             count, 2,
             "both turns must be in DB; no duplicates from re-read"
         );
+    }
+
+    // ── A transcript deleted before it is opened is not an ingest error ────────
+
+    /// The `io::ErrorKind` behind an `ingest_from` error, when it is an I/O error.
+    fn io_kind(e: &(dyn std::error::Error + 'static)) -> Option<std::io::ErrorKind> {
+        e.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
+    }
+
+    #[tokio::test]
+    async fn a_transcript_deleted_before_it_is_opened_is_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let (tx, _rx) = broadcast::channel(4);
+
+        // A path never read, one read up to a saved offset, and one whose directory went with
+        // it all hand the offset back.
+        let gone = dir.path().join("gone.jsonl");
+        assert_eq!(ingest_from(&pool, &gone, 0, &tx, true).await.unwrap(), 0);
+        assert_eq!(
+            ingest_from(&pool, &gone, 137, &tx, true).await.unwrap(),
+            137
+        );
+        let in_gone_dir = dir.path().join("session/gone.jsonl");
+        assert_eq!(
+            ingest_from(&pool, &in_gone_dir, 42, &tx, true)
+                .await
+                .unwrap(),
+            42
+        );
+        assert_eq!(event_kinds(&pool).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_transcript_that_vanishes_and_returns_is_tailed_as_if_it_never_left() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        let read = [
+            tree_prompt("u1", ""),
+            tree_asst("a1", "u1"),
+            tree_prompt("u2", "a1"),
+            tree_asst("a2", "u2"),
+        ];
+        let mut lines: Vec<&str> = read.iter().map(String::as_str).collect();
+        write_jsonl(&jsonl, &lines);
+        let (tx, _rx) = broadcast::channel(4);
+        let off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+
+        std::fs::remove_file(&jsonl).unwrap();
+        assert_eq!(
+            ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap(),
+            off
+        );
+
+        // Back at the same path with a line that branches back past u2: the tracker that read
+        // the first four is still there to call it a rewind, not a resync.
+        let rewind = tree_prompt("u3", "a1");
+        lines.push(&rewind);
+        write_jsonl(&jsonl, &lines);
+        ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+        assert_eq!(event_kinds(&pool).await, ["rewind"]);
+    }
+
+    #[tokio::test]
+    async fn a_transcript_that_vanishes_without_its_tracker_resyncs_when_it_returns() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let jsonl = dir.path().join("s.jsonl");
+        write_jsonl(&jsonl, &[&tree_prompt("u1", ""), &tree_asst("a1", "u1")]);
+        let (tx, _rx) = broadcast::channel(4);
+        let off = ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+
+        lose_tracker(&jsonl);
+        std::fs::remove_file(&jsonl).unwrap();
+        assert_eq!(
+            ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap(),
+            off
+        );
+
+        write_jsonl(
+            &jsonl,
+            &[
+                &tree_prompt("u1", ""),
+                &tree_asst("a1", "u1"),
+                &tree_prompt("u2", "a1"),
+            ],
+        );
+        ingest_from(&pool, &jsonl, off, &tx, false).await.unwrap();
+        assert_eq!(event_kinds(&pool).await, ["resync"]);
+    }
+
+    #[tokio::test]
+    async fn a_transcript_that_cannot_be_read_for_any_other_reason_is_still_an_error() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let (tx, _rx) = broadcast::channel(4);
+
+        // A directory with a transcript's name: refused at open on Windows, at read elsewhere.
+        let a_dir = dir.path().join("dir.jsonl");
+        std::fs::create_dir(&a_dir).unwrap();
+        assert!(ingest_from(&pool, &a_dir, 0, &tx, true).await.is_err());
+
+        // Bytes that are not text fail the read after the open has succeeded.
+        let binary = dir.path().join("binary.jsonl");
+        std::fs::write(&binary, [0xff, 0xfe, b'\n']).unwrap();
+        let err = ingest_from(&pool, &binary, 0, &tx, true).await.unwrap_err();
+        assert_eq!(io_kind(&*err), Some(std::io::ErrorKind::InvalidData));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_transcript_that_cannot_be_opened_for_any_other_reason_is_still_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let (tx, _rx) = broadcast::channel(4);
+        let locked = dir.path().join("locked.jsonl");
+        write_jsonl(&locked, &[&BILLABLE_LINE.replace("__ID__", "msg-locked")]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root opens it whatever its mode, which leaves nothing to refuse.
+        if std::fs::File::open(&locked).is_ok() {
+            return;
+        }
+
+        let err = ingest_from(&pool, &locked, 0, &tx, true).await.unwrap_err();
+        assert_eq!(io_kind(&*err), Some(std::io::ErrorKind::PermissionDenied));
     }
 
     // ── walk_jsonl: finds only .jsonl files ──────────────────────────────────
