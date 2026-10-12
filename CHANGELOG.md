@@ -145,6 +145,26 @@ records a `resync` event stamped now, which the repeat-read gate answers with th
 same direction an event with no usable timestamp already took. A restart is unaffected: its initial
 pass reads every transcript from byte 0, so it neither loses a tracker nor writes a resync.
 
+### A release is never published with another version's notes
+
+The release workflow took a release's notes from its `## [<version>]` block in `CHANGELOG.md`. When
+there was no such block it published `RELEASE_NOTES.md` instead, which still held the v0.1.0 text,
+and generated notes if that file was gone, so a tag pushed before its changelog block existed
+would have been released under 0.1.0's notes with nothing failing. A block with only blank lines
+under its header was published as empty notes.
+
+- `scripts/release-notes.sh <version>` prints a version's block. It prints nothing and fails when
+  there is no block, when it is empty, and when the file cannot be read. The version is matched
+  literally: `1.8.0` no longer matches a header such as `## [1x8y0]`.
+- The workflow's first job runs it on a tag push, so a tag without a block stops the run before
+  any build starts, and the release step runs it again and publishes its output as the notes.
+  `RELEASE_NOTES.md` is deleted and `--generate-notes` is gone: there is no other source. A
+  prerelease tag (`v1.8.0-rc.1`) needs a `## [1.8.0-rc.1]` block of its own.
+- `scripts/test-release-notes.sh` runs in CI on Linux and macOS, the two systems the release
+  workflow runs it on. It covers a missing, an empty, a blank-only, a CRLF and a last block and
+  lookalike headers, parses the repository's newest release block, and fails if
+  `RELEASE_NOTES.md` comes back or the workflow names another source of notes.
+
 ## [1.7.0] — 2026-10-11
 
 ### Repeat reads: a second `smart_read` or `recall_file` of the same thing no longer costs the same again
