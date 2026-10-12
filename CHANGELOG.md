@@ -142,8 +142,8 @@ large file was read into memory each time, and a named pipe or a device where th
 could block every call. A file larger than 64 KiB, or one that is not a regular file, is now
 reported as unreadable: repeat reads are off, as for any unreadable file, and the problem says
 why. A wrong-typed value in the file, and a `LUMEN_REPEAT_READS` that is not `on`, `off` or `ab`,
-are repeated back in the fault row and on stderr as their first 64 characters and an ellipsis. A
-valid file is read exactly as before.
+are repeated back in the fault row and on stderr as written when that is at most 64 characters,
+and otherwise as its first 64 characters and an ellipsis. A valid file is read exactly as before.
 
 ### A rewind the daemon could not see is now treated as one
 
