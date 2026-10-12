@@ -4,11 +4,13 @@
 # Lumen Setup installs, generated from the same template in setup.rs. Do not
 # hand-edit; regenerate with `LUMEN_BLESS_HOOKS=1 cargo test -p Lumen`.
 #
-# PreToolUse hook for Read. `lumen-mcp hook intercept` decides whether a large
-# source or log file goes to the lumen tools (exit 2) or is read as asked (exit 0).
-# Without that binary the MCP server cannot be running either, so the read is let
-# through, with a fault and a line on stderr. LUMEN_HOOK_ENABLED=0 switches the
-# intercept off.
+# PreToolUse hook for Read and for Lumen's own tools. `lumen-mcp hook intercept`
+# decides whether a large source or log file goes to the lumen tools (exit 2) or
+# is read as asked (exit 0), and records which conversation each smart_read,
+# recall_file or compress_logs call belongs to, so the server can tell /clear from
+# a repeat. Without that binary the MCP server cannot be running either, so the
+# call is let through, with a fault and a line on stderr. LUMEN_HOOK_ENABLED=0
+# switches the Read intercept off; it does not switch the recording off.
 #
 # Nothing is baked in: a plugin cannot know where Lumen is installed. The binary is
 # the one built in this checkout, else lumen-mcp on PATH, and lumen-mcp finds the

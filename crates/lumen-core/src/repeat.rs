@@ -36,6 +36,9 @@ pub const PLAN_FIRST: &str = "first";
 pub const PLAN_FRESH: &str = "fresh";
 pub const PLAN_UNCHANGED: &str = "unchanged";
 pub const PLAN_DELTA: &str = "delta";
+/// The call could not be tied to a conversation, so nothing was assumed about what the model
+/// holds: the full answer, and no base kept for next time.
+pub const PLAN_UNIDENTIFIED: &str = "unidentified";
 
 /// Read the rollout mode from `LUMEN_REPEAT_READS`. Anything unrecognised is `Off`.
 pub fn mode_from_env() -> Mode {
@@ -407,9 +410,10 @@ pub fn diff(old: &[Sym], new: &[Sym]) -> Delta {
 
 // ── what the model is told ───────────────────────────────────────────────────
 
-/// The sentence every unchanged answer carries. MCP carries no caller identity, so a
-/// subagent sharing the parent's session can be told "unchanged" about a read it never saw;
-/// this is how it gets out.
+/// The sentence every unchanged answer carries. The hook names the caller's context, but what
+/// happens inside it cannot all be seen (a compaction in a subagent, an event not yet
+/// ingested), so a model can be told "unchanged" about a read it no longer holds; this is how
+/// it gets out.
 pub fn unchanged_text(tool: &str) -> String {
     if tool == "smart_read" {
         "Unchanged since an earlier read of this file in this session. If that read is not in \
@@ -726,19 +730,40 @@ const MAX_PIECE_BYTES: usize = 256 * 1024;
 pub struct Store {
     map: HashMap<(String, String), (u64, Base)>,
     seq: u64,
+    /// The conversation the bases in `map` were delivered to, when it is known.
+    conversation: Option<String>,
 }
 
 impl Store {
-    pub fn get(&self, session: &str, key: &str) -> Option<&Base> {
+    /// Declare whose call is about to be answered. Bases belong to one conversation, so a call
+    /// from any other, or from one that could not be identified, drops every base before it
+    /// is looked at: a `/clear` or a `/resume` keeps this process alive and gives the model
+    /// an empty context, and a call that cannot be placed may be from either. Returns how many
+    /// bases were dropped.
+    ///
+    /// Subagents share their parent's session id and are told apart by the key, not here: a
+    /// subagent starting must not cost the main agent its bases.
+    pub fn enter(&mut self, session: Option<&str>) -> usize {
+        if session.is_some() && self.conversation.as_deref() == session {
+            return 0;
+        }
+        let dropped = self.map.len();
+        // A fresh map, not `clear()`: the point is to give the memory back.
+        self.map = HashMap::new();
+        self.conversation = session.map(str::to_string);
+        dropped
+    }
+
+    pub fn get(&self, owner: &str, key: &str) -> Option<&Base> {
         self.map
-            .get(&(session.to_string(), key.to_string()))
+            .get(&(owner.to_string(), key.to_string()))
             .map(|(_, b)| b)
     }
 
-    pub fn put(&mut self, session: &str, key: &str, base: Base) {
+    pub fn put(&mut self, owner: &str, key: &str, base: Base) {
         self.seq += 1;
         self.map
-            .insert((session.to_string(), key.to_string()), (self.seq, base));
+            .insert((owner.to_string(), key.to_string()), (self.seq, base));
         if self.map.len() > CAP
             && let Some(oldest) = self
                 .map
@@ -759,9 +784,10 @@ impl Store {
     }
 }
 
-/// The process-wide base. Stdio MCP servers are per session, so one process holds one
-/// session's reads; the session id is still part of the key because a subagent shares it and
-/// a test may not.
+/// The process-wide base. A stdio server is per Claude Code process, not per conversation:
+/// `/clear` starts a new conversation in the same process. So the base is keyed by an owner
+/// (the session, and inside a subagent which one: see `identity::Identity::owner`), and
+/// [`Store::enter`] empties it when the conversation changes.
 pub fn store() -> &'static Mutex<Store> {
     static S: OnceLock<Mutex<Store>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(Store::default()))
@@ -1032,6 +1058,54 @@ mod tests {
         }
         assert_eq!(s.len(), CAP);
         assert!(s.get("s", "0").is_none() && s.get("s", &(CAP + 9).to_string()).is_some());
+    }
+
+    fn a_base() -> Base {
+        Base::Outline(OutlineBase {
+            when_ms: 0,
+            file: [0; 20],
+            lines: 0,
+            syms: vec![],
+        })
+    }
+
+    #[test]
+    fn a_new_conversation_empties_the_store_and_the_same_one_does_not() {
+        let mut s = Store::default();
+        assert_eq!(s.enter(Some("one")), 0);
+        s.put("one", "k", a_base());
+        s.put("one\0agent", "k", a_base());
+        assert_eq!(
+            s.enter(Some("one")),
+            0,
+            "the same conversation keeps its bases"
+        );
+        assert_eq!(s.len(), 2);
+
+        assert_eq!(s.enter(Some("two")), 2);
+        assert!(
+            s.is_empty(),
+            "/clear: nothing of the old conversation is held"
+        );
+        s.put("two", "k", a_base());
+        // Coming back to the first is /resume: its bases went when it was left.
+        assert_eq!(s.enter(Some("one")), 1);
+        assert!(s.get("one", "k").is_none() && s.get("two", "k").is_none());
+    }
+
+    #[test]
+    fn a_call_that_cannot_be_placed_drops_everything_and_so_does_the_next_one() {
+        let mut s = Store::default();
+        s.enter(Some("one"));
+        s.put("one", "k", a_base());
+        assert_eq!(s.enter(None), 1);
+        assert_eq!(s.enter(None), 0);
+        // Even the conversation it was in: the unplaced call may have been in another.
+        s.enter(Some("one"));
+        assert!(s.is_empty());
+        s.put("one", "k", a_base());
+        assert_eq!(s.enter(Some("one")), 0);
+        assert!(s.get("one", "k").is_some());
     }
 
     #[test]
