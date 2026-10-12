@@ -70,8 +70,10 @@ impl Problem {
             ),
             Problem::File(why) => format!(
                 "{} cannot be used ({why}): repeat reads are off, every read is in full. \
-                 Fix or delete the file (deleting it gives the default, on), or set \
-                 {REPEAT_READS_ENV} to on or off, which takes precedence over the file.",
+                 Fix or delete the file (deleting it gives the default, on), or choose a \
+                 setting with the Repeat reads switch in the Home window of the Lumen app, \
+                 which rewrites it. Setting {REPEAT_READS_ENV} to on or off takes precedence \
+                 over the file.",
                 file.display()
             ),
         }
@@ -229,10 +231,8 @@ pub fn surface(problem: &Problem, file: &Path, min_interval: std::time::Duration
 
 /// Write the persisted setting for a ledger at `db`.
 ///
-/// Nothing in the app calls this yet: there is no toggle, so today the file is edited by hand
-/// or `LUMEN_REPEAT_READS` is set (the README and `lumen doctor` say so). It is the writer a
-/// toggle would use, kept beside the reader so the two agree on the format, and the tests
-/// round-trip it.
+/// The Repeat reads switch in the Lumen app's Home window calls this (`set_repeat_reads_setting`).
+/// It sits beside the reader so the two agree on the format, and the tests round-trip it.
 ///
 /// Atomic (written beside, renamed into place) so a reader never sees half a file, and
 /// private to this user. Other keys in a valid existing file are kept. A file that cannot be
@@ -426,12 +426,17 @@ mod tests {
         assert!(said.contains("/data/lumen_settings.json"), "{said}");
         assert!(said.contains("delete the file"), "{said}");
         assert!(said.contains(REPEAT_READS_ENV), "{said}");
-        // There is no switch in the app to go back to: do not send anyone looking for one.
-        assert!(!said.contains("in the app"), "{said}");
+        // The Home window's switch rewrites the file, so it repairs a file that cannot be used.
+        assert!(
+            said.contains("Repeat reads switch in the Home window"),
+            "{said}"
+        );
+        // It writes the file, and the variable outranks the file: a bad value there is not
+        // something it can fix, so that message must not send anyone to it.
         assert!(
             !Problem::Env("x".into())
                 .describe(file)
-                .contains("in the app"),
+                .contains("Home window"),
             "the same for the environment variable's message"
         );
     }
