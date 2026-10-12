@@ -105,7 +105,6 @@ pub enum FileState {
 /// Read the settings file at `path`: a regular file of at most [`MAX_FILE_BYTES`], or the reason
 /// it cannot be used. It is never read past the cap, and a pipe or device is not opened.
 pub fn read_file(path: &Path) -> FileState {
-    use std::io::Read;
     let opened = std::fs::metadata(path).and_then(|m| {
         if m.is_file() {
             std::fs::File::open(path)
@@ -113,18 +112,25 @@ pub fn read_file(path: &Path) -> FileState {
             Err(std::io::Error::other("not a regular file"))
         }
     });
-    let mut bytes = Vec::new();
-    match opened.and_then(|f| f.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)) {
+    match opened.and_then(read_capped) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileState::Absent,
         Err(e) => FileState::Unreadable(e.to_string()),
-        Ok(_) if bytes.len() as u64 > MAX_FILE_BYTES => {
+        Ok(bytes) if bytes.len() as u64 > MAX_FILE_BYTES => {
             FileState::Unreadable(format!("larger than {MAX_FILE_BYTES} bytes"))
         }
-        Ok(_) => match String::from_utf8(bytes) {
+        Ok(bytes) => match String::from_utf8(bytes) {
             Ok(t) => FileState::Text(t),
             Err(_) => FileState::Unreadable("stream did not contain valid UTF-8".to_string()),
         },
     }
+}
+
+/// At most one byte past the cap: enough to tell a file over it from one at it.
+fn read_capped(r: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    r.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// `s` as it is, or its first [`ECHO_MAX`] characters and an ellipsis.
@@ -593,31 +599,46 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_that_never_ends_is_read_only_up_to_the_cap() {
+        struct Endless(u64);
+        impl std::io::Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 > MAX_FILE_BYTES + 1 {
+                    return Err(std::io::Error::other("read past the cap"));
+                }
+                buf.fill(b'x');
+                self.0 += buf.len() as u64;
+                Ok(buf.len())
+            }
+        }
+        let bytes = read_capped(Endless(0)).unwrap();
+        assert_eq!(bytes.len() as u64, MAX_FILE_BYTES + 1);
+    }
+
+    #[test]
     fn a_wrong_typed_value_is_echoed_short_and_a_short_one_whole() {
+        let prefix = "repeat_reads must be true or false, not ";
         let long = "y".repeat(10_000);
         let why = parse_file(&text(&format!(r#"{{"repeat_reads":"{long}"}}"#))).unwrap_err();
-        assert!(why.contains("must be true or false"), "{why}");
-        assert!(why.chars().count() < 200, "{} chars", why.chars().count());
+        assert_eq!(why, format!("{prefix}\"{}…", "y".repeat(63)));
         let why = parse_file(&text(&format!(r#"{{"repeat_reads":[{long:?}]}}"#))).unwrap_err();
-        assert!(why.chars().count() < 200, "{} chars", why.chars().count());
+        assert_eq!(
+            why.chars().count(),
+            prefix.chars().count() + 64 + 1,
+            "{why}"
+        );
         let short = parse_file(&text(r#"{"repeat_reads":"yes"}"#)).unwrap_err();
-        assert!(short.contains(r#""yes""#), "{short}");
+        assert_eq!(short, format!("{prefix}\"yes\""));
     }
 
     #[test]
     fn an_env_value_that_means_nothing_is_echoed_short_and_a_short_one_whole() {
         for long in ["z".repeat(10_000), "é".repeat(10_000)] {
-            match resolve(Some(&long), &FileState::Absent).problem {
-                Some(Problem::Env(v)) => {
-                    assert!(
-                        v.chars().count() <= ECHO_MAX + 1,
-                        "{} chars",
-                        v.chars().count()
-                    );
-                    assert!(v.starts_with(&long[..2]), "{v}");
-                }
-                other => panic!("{other:?}"),
-            }
+            let first_64: String = long.chars().take(64).collect();
+            assert_eq!(
+                resolve(Some(&long), &FileState::Absent).problem,
+                Some(Problem::Env(format!("{first_64}…")))
+            );
         }
         assert_eq!(
             resolve(Some("bogus"), &FileState::Absent).problem,
