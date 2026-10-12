@@ -1738,7 +1738,8 @@ fn no_reply_costs_more_than_the_file_and_its_label_on_any_real_file() {
 /// outline can cost more than the file it describes, so this is where the guard has the most to
 /// do.
 fn small_docs(dir: &Path) -> Vec<Doc> {
-    let padded: String = (0..6)
+    // A wide margin: the temp path in the outline's header cannot decide the branch.
+    let padded: String = (0..30)
         .map(|i| {
             format!(
                 "/// Step {i}.\npub fn step_number_{i}(a: u32) -> u32 {{\n    let x = a.wrapping_mul({i});\n    \
