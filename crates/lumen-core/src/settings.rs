@@ -29,6 +29,10 @@ pub const REPEAT_READS_ENV: &str = "LUMEN_REPEAT_READS";
 pub const FILE_NAME: &str = "lumen_settings.json";
 /// The key in the file.
 pub const REPEAT_READS_KEY: &str = "repeat_reads";
+/// The most the settings file may hold. It is read on every call; a larger one is a mistake.
+pub const MAX_FILE_BYTES: u64 = 64 * 1024;
+/// The most characters of a bad value that a problem repeats back.
+const ECHO_MAX: usize = 64;
 
 /// Where the setting file is for a ledger at `db`.
 pub fn settings_path(db: &Path) -> PathBuf {
@@ -512,5 +516,86 @@ mod tests {
         let db = dir.path().join("not").join("yet").join("ledger.db");
         write_repeat_reads(&db, false).unwrap();
         assert_eq!(read_file_mode(&db), Mode::Off);
+    }
+
+    fn padded_to(len: usize) -> String {
+        let bare = r#"{"repeat_reads":false,"pad":""}"#.len();
+        format!(
+            r#"{{"repeat_reads":false,"pad":"{}"}}"#,
+            "x".repeat(len - bare)
+        )
+    }
+
+    #[test]
+    fn a_file_at_the_cap_is_read_and_one_byte_over_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let cap = MAX_FILE_BYTES as usize;
+        std::fs::write(&path, padded_to(cap)).unwrap();
+        assert_eq!(resolve(None, &read_file(&path)).mode, Mode::Off);
+        assert!(
+            resolve(None, &read_file(&path)).problem.is_none(),
+            "a file at the cap is a setting"
+        );
+        std::fs::write(&path, padded_to(cap + 1)).unwrap();
+        let r = resolve(None, &read_file(&path));
+        assert_eq!(r.mode, Mode::Off);
+        assert!(
+            matches!(&r.problem, Some(Problem::File(why)) if why.contains("larger than")),
+            "{r:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_file_should_be_is_a_problem_and_never_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(read_file(&path)).unwrap());
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(FileState::Unreadable(why)) => {
+                assert!(why.contains("not a regular file"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_wrong_typed_value_is_echoed_short_and_a_short_one_whole() {
+        let long = "y".repeat(10_000);
+        let why = parse_file(&text(&format!(r#"{{"repeat_reads":"{long}"}}"#))).unwrap_err();
+        assert!(why.contains("must be true or false"), "{why}");
+        assert!(why.chars().count() < 200, "{} chars", why.chars().count());
+        let why = parse_file(&text(&format!(r#"{{"repeat_reads":[{long:?}]}}"#))).unwrap_err();
+        assert!(why.chars().count() < 200, "{} chars", why.chars().count());
+        let short = parse_file(&text(r#"{"repeat_reads":"yes"}"#)).unwrap_err();
+        assert!(short.contains(r#""yes""#), "{short}");
+    }
+
+    #[test]
+    fn an_env_value_that_means_nothing_is_echoed_short_and_a_short_one_whole() {
+        for long in ["z".repeat(10_000), "é".repeat(10_000)] {
+            match resolve(Some(&long), &FileState::Absent).problem {
+                Some(Problem::Env(v)) => {
+                    assert!(
+                        v.chars().count() <= ECHO_MAX + 1,
+                        "{} chars",
+                        v.chars().count()
+                    );
+                    assert!(v.starts_with(&long[..2]), "{v}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(
+            resolve(Some("bogus"), &FileState::Absent).problem,
+            Some(Problem::Env("bogus".into()))
+        );
     }
 }
