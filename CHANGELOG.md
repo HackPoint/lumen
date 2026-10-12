@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### A transcript deleted before the daemon read it is not a fault
+
+The daemon opens a transcript after it has noticed it, from a watcher event or a directory
+listing, and the file can be deleted in between. The open failed with `No such file or directory`
+and was filed as an `ingest_failed` fault, on the `notify`, `poll` and `init` paths alike. A path
+that is not there is now nothing to ingest: the saved offset and the transcript's tracker are left
+as they were, so if the same path comes back it is tailed, or resynced, exactly as before. Only a
+missing file is excused. A transcript that cannot be read for any other reason (permissions, a
+directory with its name, bytes that are not text) is still recorded.
+
 ### The app shows which version it is
 
 The version was only in a startup log line, so someone filing a report could not say which build
