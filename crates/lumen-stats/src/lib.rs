@@ -10,6 +10,10 @@
 // `rename_all = "camelCase"` attributes are load-bearing: renaming a field here
 // silently breaks the UI.
 
+use lumen_core::repeat::{
+    ARM_TREATMENT, PLAN_FRESH, PLAN_UNIDENTIFIED, ROUTE_DELTA, ROUTE_RECALL_DELTA,
+    ROUTE_RECALL_UNCHANGED, ROUTE_UNCHANGED,
+};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -350,6 +354,38 @@ pub struct ToolBreakdown {
     pub full_tokens: i64,
 }
 
+/// What repeat reads did, counted apart from everything else in [`OptimizerReport`].
+///
+/// A served answer is a row whose route is one of the four repeat routes. None of them is in
+/// [`LUMEN_ROUTES`], so the token totals, the breakdowns and the net value above do not include
+/// these rows; the provenance counts, which take every row that carries a count, do.
+///
+/// Served rows are found by route and by nothing else. In the A/B experiment a control row
+/// records the plan the server WOULD have run (`unchanged`, `delta`) under an ordinary route:
+/// nothing was served, so counting by plan would count answers nobody was given.
+#[derive(Serialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatReads {
+    /// Reads answered "unchanged since an earlier read" instead of with the result again.
+    pub unchanged_served: i64,
+    /// Reads of an edited file answered with only what changed.
+    pub deltas_served: i64,
+    /// `saved_tokens` of the served answers whose count was measured: what each did not send,
+    /// against reading the whole file again. Not against the outline the same call would have
+    /// returned with the feature off, which is a smaller baseline.
+    pub tokens_not_resent: i64,
+    /// The served answers behind `tokens_not_resent`. Fewer than `unchanged_served +
+    /// deltas_served` means the others carry no measured count and add nothing to it.
+    pub measured_answers: i64,
+    /// Calls that passed `fresh=true` while repeat reads were answering (the treatment arm): the
+    /// whole result asked for again. A control call, or one made while the feature was off, was
+    /// not a request to bypass an answer.
+    pub fresh_requests: i64,
+    /// Calls answered in full because Lumen could not tell which conversation they came from,
+    /// in either arm: it says something about the install, not about the feature.
+    pub unidentified_reads: i64,
+}
+
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerReport {
@@ -405,6 +441,8 @@ pub struct OptimizerReport {
     /// Rounds each intercept actually costs. Measured at 1.604 — 60.4% of `smart_read`
     /// calls are followed by a `recall_file` on the same file.
     pub pair_multiplier: f64,
+    /// Repeat reads, lifetime. Counted apart from every figure above.
+    pub repeat_reads: RepeatReads,
 }
 
 pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, String> {
@@ -602,6 +640,8 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     };
     let gross = if round_cost == 0.0 { 0.0 } else { gross };
 
+    let repeat_reads = repeat_reads(pool).await?;
+
     Ok(OptimizerReport {
         lifetime_optimized_tokens,
         lifetime_full_tokens,
@@ -620,6 +660,50 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
         round_cost_usd: round_cost,
         value_rounds: VALUE_ROUNDS,
         pair_multiplier: PAIR_MULTIPLIER,
+        repeat_reads,
+    })
+}
+
+async fn repeat_reads(pool: &SqlitePool) -> Result<RepeatReads, String> {
+    // The four routes are found by name and the plan is never consulted for them: a control-arm
+    // row has the same plan and an ordinary route, and nothing was served.
+    let (
+        unchanged_served,
+        deltas_served,
+        tokens_not_resent,
+        measured_answers,
+        fresh_requests,
+        unidentified_reads,
+    ): (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            COALESCE(SUM(CASE WHEN routed_via IN (?1, ?2) THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN routed_via IN (?3, ?4) THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN routed_via IN (?1, ?2, ?3, ?4) AND token_source = 'measured'
+                              THEN saved_tokens ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN routed_via IN (?1, ?2, ?3, ?4) AND token_source = 'measured'
+                              THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN repeat_plan = ?5 AND repeat_arm = ?6 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN repeat_plan = ?7 THEN 1 ELSE 0 END), 0)
+         FROM read_events",
+    )
+    .bind(ROUTE_UNCHANGED)
+    .bind(ROUTE_RECALL_UNCHANGED)
+    .bind(ROUTE_DELTA)
+    .bind(ROUTE_RECALL_DELTA)
+    .bind(PLAN_FRESH)
+    .bind(ARM_TREATMENT)
+    .bind(PLAN_UNIDENTIFIED)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(RepeatReads {
+        unchanged_served,
+        deltas_served,
+        tokens_not_resent,
+        measured_answers,
+        fresh_requests,
+        unidentified_reads,
     })
 }
 
