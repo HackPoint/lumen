@@ -71,9 +71,9 @@ impl Problem {
             Problem::File(why) => format!(
                 "{} cannot be used ({why}): repeat reads are off, every read is in full. \
                  Fix or delete the file (deleting it gives the default, on), or choose a \
-                 setting with the Repeat reads switch in the Home window of the Lumen app, \
-                 which rewrites it. Setting {REPEAT_READS_ENV} to on or off takes precedence \
-                 over the file.",
+                 setting with the Repeat reads switch on the Context tab of the main window \
+                 in the Lumen app, which rewrites it. Setting {REPEAT_READS_ENV} to on or off \
+                 takes precedence over the file.",
                 file.display()
             ),
         }
@@ -231,7 +231,7 @@ pub fn surface(problem: &Problem, file: &Path, min_interval: std::time::Duration
 
 /// Write the persisted setting for a ledger at `db`.
 ///
-/// The Repeat reads switch in the Lumen app's Home window calls this (`set_repeat_reads_setting`).
+/// The Repeat reads switch in the Lumen app (`set_repeat_reads_setting`) calls this.
 /// It sits beside the reader so the two agree on the format, and the tests round-trip it.
 ///
 /// Atomic (written beside, renamed into place) so a reader never sees half a file, and
@@ -426,9 +426,9 @@ mod tests {
         assert!(said.contains("/data/lumen_settings.json"), "{said}");
         assert!(said.contains("delete the file"), "{said}");
         assert!(said.contains(REPEAT_READS_ENV), "{said}");
-        // The Home window's switch rewrites the file, so it repairs a file that cannot be used.
+        // The main window's switch rewrites the file, so it repairs a file that cannot be used.
         assert!(
-            said.contains("Repeat reads switch in the Home window"),
+            said.contains("Repeat reads switch on the Context tab of the main window"),
             "{said}"
         );
         // It writes the file, and the variable outranks the file: a bad value there is not
@@ -436,7 +436,7 @@ mod tests {
         assert!(
             !Problem::Env("x".into())
                 .describe(file)
-                .contains("Home window"),
+                .contains("Context tab"),
             "the same for the environment variable's message"
         );
     }

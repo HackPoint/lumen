@@ -124,8 +124,9 @@ impl Finding {
                 ),
                 lumen_core::settings::Problem::File(_) => format!(
                     "fix {file} so it reads {{\"repeat_reads\": true}} (or false), or delete it \
-                     to get the default, on. In the Lumen app, the Repeat reads switch in the \
-                     Home window rewrites it. It applies to the next Lumen call, with no restart."
+                     to get the default, on. In the Lumen app, the Repeat reads switch on the \
+                     Context tab of the main window rewrites it. It applies to the next Lumen \
+                     call, with no restart."
                 ),
             },
         }
@@ -1256,7 +1257,7 @@ mod tests {
         };
         let fix = findings(&f)[0].remedy();
         assert!(
-            fix.contains("Repeat reads switch in the Home window"),
+            fix.contains("Repeat reads switch on the Context tab of the main window"),
             "{fix}"
         );
         assert!(fix.contains("rewrites"), "{fix}");
@@ -1267,7 +1268,7 @@ mod tests {
             ..healthy()
         };
         let fix = findings(&f)[0].remedy();
-        assert!(!fix.contains("Home window"), "{fix}");
+        assert!(!fix.contains("Context tab"), "{fix}");
     }
 
     #[test]
