@@ -2,8 +2,11 @@ name: Benchmarks
 
 # On demand only: no push, pull_request or schedule trigger, and not a required check.
 # Runs the latency part of the benchmark harness (benchmarks/README.md) on one Linux and
-# one Windows runner and uploads the JSON. Nothing is committed back: a reviewer downloads
-# the artifact. Token figures do not depend on the OS and are produced by benchmarks/run.sh.
+# one Windows runner, uploads the result files as an artifact, and commits them to a NEW branch
+# `bench-results/<os>-<run id>`. Never to main and never to the branch it was dispatched from;
+# the owner opens a pull request from that branch if the numbers are worth keeping. Pushes made
+# with the workflow token do not start other workflows, so nothing loops. Token figures do not
+# depend on the OS and are produced by benchmarks/run.sh.
 on:
   workflow_dispatch:
     inputs:
@@ -12,12 +15,13 @@ on:
         required: false
         default: '200'
       label:
-        description: 'Result name (a MAJOR.MINOR.PATCH label marks a release result)'
+        description: 'Result name; empty means pre-release-<12 characters of the commit>. A MAJOR.MINOR.PATCH label marks a release result.'
         required: false
-        default: 'ci-latency'
+        default: ''
 
+# contents: write is for the one push of the results branch below, and nothing else.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   latency:
@@ -47,11 +51,15 @@ jobs:
         env:
           RUNS: ${{ inputs.runs }}
           LABEL: ${{ inputs.label }}
-        run: >
-          cargo run --release --locked -p lumen-bench --
-          --latency-only --runs "$RUNS" --label "$LABEL"
-          --cache "${RUNNER_TEMP}/lumen-bench-cache"
-          --out "${RUNNER_TEMP}/lumen-bench-results"
+        run: |
+          set -euo pipefail
+          args=(--latency-only --runs "$RUNS"
+                --cache "${RUNNER_TEMP}/lumen-bench-cache"
+                --out "${RUNNER_TEMP}/lumen-bench-results")
+          if [ -n "$LABEL" ]; then
+            args+=(--label "$LABEL")
+          fi
+          cargo run --release --locked -p lumen-bench -- "${args[@]}"
 
       - name: Upload results
         uses: actions/upload-artifact@v7
@@ -59,3 +67,27 @@ jobs:
           name: benchmarks-${{ matrix.os }}
           path: ${{ runner.temp }}/lumen-bench-results
           if-no-files-found: error
+
+      # The result files, and only them, on a branch that does not exist yet. `git push` without
+      # --force refuses to touch one that does.
+      - name: Commit the results to a new branch
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          os="$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
+          branch="bench-results/${os}-${RUN_ID}"
+          if [ "$RUN_ATTEMPT" != "1" ]; then
+            branch="${branch}-${RUN_ATTEMPT}"
+          fi
+          git config user.name "HackPoint"
+          git config user.email "6758579+HackPoint@users.noreply.github.com"
+          git switch -c "$branch"
+          mkdir -p benchmarks/results
+          cp "${RUNNER_TEMP}"/lumen-bench-results/* benchmarks/results/
+          git add benchmarks/results
+          git commit -m "bench: latency results from a ${os} runner (run ${RUN_ID})"
+          git push origin "$branch"
+          echo "Results are on branch ${branch}; open a pull request from it to keep them."
