@@ -79,6 +79,42 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
   have measured the gate. The committed pre-release results were taken with off as the default,
   so they are the same measurement.
 
+### The app can turn repeat reads off, and shows what they have done
+
+Turning repeat reads off meant an environment variable or a hand-edited JSON file, and nothing
+showed what they had done. Nothing the MCP server sends changes: no tool's output, `tools/list` or
+hook.
+
+- **A Repeat reads switch** on the Context tab of the main window, on by default. It writes the
+  `lumen_settings.json` described above (atomically, readable by its owner only, the other keys of
+  a valid file kept), so a change applies to the next Lumen read in every running Claude Code
+  session with no restart, and it survives a restart, unlike the alert thresholds beside it.
+- **It shows the settings file, not the server.** The window shows what the file says, or the
+  default when there is no file. It does not read `LUMEN_REPEAT_READS`: a value in a Claude Code
+  MCP config outranks the file and the app cannot see it, nor a `LUMEN_DB` there that makes the
+  server read another ledger's settings file. Its text says both.
+- **A file that cannot be used is shown as off, with the reason**: the same off the server
+  applies, which it records as a `repeat_reads_config` fault. Switching on rewrites the file. A
+  setting that cannot be read shows neither state and offers Retry; a change that cannot be saved
+  puts the switch back and says why. Nothing is shown as saved that was not.
+- **`lumen doctor` and the server's message about an unusable settings file** name the switch as
+  the way to repair it, where they said only to edit or delete the file.
+- **A Repeat reads card on the Optimizer tab**: the unchanged answers and the deltas served, the
+  tokens they did not re-send, and how often the full result was asked for again with `fresh=true`,
+  as n of m (m is the unchanged answers, the deltas and the `fresh` requests together; only
+  requests made while repeat reads were on are counted, so it stops moving when they are off).
+  It is counted apart from every total on the tab: in none of the token totals, the by-tool and
+  by-channel breakdowns or the net value (the provenance counts do include these rows). It shows
+  no dollar figure and no percentage. The tokens are counted against reading the whole file again,
+  which is more than the outline a read returns with repeat reads off, so the card does not call
+  them a saving and says what they are counted against. The figure covers only answers whose token
+  count was measured, says how many when that is fewer than all of them, and is a dash when none
+  was. The card says when the settings file turns repeat reads off, and counts the reads answered in
+  full because Lumen could not tell which conversation they came from, with a link to Setup (the
+  app install's remedy; on the plugin, update or reinstall it, as the upgrade notes above say).
+- **Stats.** The optimizer report gains `repeatReads`; there is no schema change. A backend that
+  does not send it gets no card.
+
 ### Repeat reads follow the conversation, not the process (#32)
 
 `/clear` and `/resume` keep `lumen-mcp` running, and it read `CLAUDE_CODE_SESSION_ID` once at
