@@ -61,6 +61,37 @@ fn source(defs: usize, body: usize) -> String {
     s
 }
 
+/// The real `lumen-mcp hook intercept`, run on one PreToolUse payload.
+fn run_hook(db: &Path, spool: &Path, tmp: &Path, payload: &serde_json::Value) -> Ran {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"))
+        .args(["hook", "intercept"])
+        .env("LUMEN_DB", db)
+        .env("LUMEN_FAULT_SPOOL", spool)
+        .env("TMPDIR", tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .env_remove("LUMEN_HOOK_ENABLED")
+        .env_remove("LUMEN_LINE_THRESHOLD")
+        .env_remove("LUMEN_CAPTURE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.stdout.is_empty(), "the intercept printed to stdout");
+    Ran {
+        code: out.status.code().unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
 impl Rig {
     fn file(&self, name: &str, body: &str) -> PathBuf {
         let p = self.dir.path().join(name);
@@ -76,33 +107,7 @@ impl Rig {
             "tool_input": {"file_path": file.to_string_lossy()},
             "cwd": self.dir.path().to_string_lossy(),
         });
-        let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"))
-            .args(["hook", "intercept"])
-            .env("LUMEN_DB", &self.db)
-            .env("LUMEN_FAULT_SPOOL", &self.spool)
-            .env("TMPDIR", &self.tmp)
-            .env("TMP", &self.tmp)
-            .env("TEMP", &self.tmp)
-            .env_remove("LUMEN_HOOK_ENABLED")
-            .env_remove("LUMEN_LINE_THRESHOLD")
-            .env_remove("LUMEN_CAPTURE")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.stdout.is_empty(), "the intercept printed to stdout");
-        Ran {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }
+        run_hook(&self.db, &self.spool, &self.tmp, &payload)
     }
 
     fn faults(&self) -> Vec<serde_json::Value> {
@@ -119,7 +124,6 @@ impl Rig {
             .env("LUMEN_PROJECTS_DIR", self.dir.path().join("projects"))
             .env_remove("LUMEN_RANKED_OUTLINE")
             .env_remove("LUMEN_REPEAT_READS")
-            .env("CLAUDE_CODE_SESSION_ID", session)
             .env("LUMEN_RANKED_TIME_BUDGET_MS", "60000")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -133,6 +137,11 @@ impl Rig {
             stdin,
             out,
             id: 1,
+            calls: 0,
+            session: session.to_string(),
+            db: self.db.clone(),
+            spool: self.spool.clone(),
+            tmp: self.tmp.clone(),
         };
         live.rpc(
             "initialize",
@@ -148,6 +157,13 @@ struct Live {
     stdin: Option<ChildStdin>,
     out: BufReader<ChildStdout>,
     id: i64,
+    /// Which conversation the calls belong to. The server is told by the PreToolUse hook, as
+    /// in the field, and not by its environment.
+    session: String,
+    calls: usize,
+    db: PathBuf,
+    spool: PathBuf,
+    tmp: PathBuf,
 }
 
 impl Live {
@@ -164,9 +180,30 @@ impl Live {
     /// Tokens the tool returned. The server replies first and writes its ledger row after;
     /// it is sequential, so once the second answer arrives the row is there.
     fn call(&mut self, tool: &str, args: serde_json::Value) -> i64 {
+        // What Claude Code does for a Lumen tool: the PreToolUse hook runs first and leaves the
+        // conversation under the call's id, and the request carries that id.
+        self.calls += 1;
+        let call_id = format!("toolu_{}", self.calls);
+        let announced = run_hook(
+            &self.db,
+            &self.spool,
+            &self.tmp,
+            &serde_json::json!({
+                "session_id": self.session,
+                "hook_event_name": "PreToolUse",
+                "tool_name": format!("mcp__lumen__{tool}"),
+                "tool_use_id": call_id,
+                "tool_input": args,
+            }),
+        );
+        assert_eq!(announced.code, 0, "{}", announced.stderr);
         let v = self.rpc(
             "tools/call",
-            serde_json::json!({"name": tool, "arguments": args}),
+            serde_json::json!({
+                "name": tool,
+                "arguments": args,
+                "_meta": {"claudecode/toolUseId": call_id},
+            }),
         );
         self.rpc("tools/list", serde_json::json!({}));
         v["result"]["_meta"]["returned_tokens"]

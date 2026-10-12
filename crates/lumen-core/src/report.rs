@@ -293,6 +293,7 @@ pub const FAULT_KINDS: &[&str] = &[
     "ingest_failed",
     "reporter_degraded",
     "ws_restart",
+    "identity_unrecorded",
     "ranked_decline",
 ];
 
@@ -300,7 +301,7 @@ pub const FAULT_KINDS: &[&str] = &[
 const UNCLASSIFIED: &str = "Unclassified fault. See the table below.";
 
 /// Where a kind this build does not know sorts: after every known one.
-const CATCH_ALL_PRIORITY: u8 = 7;
+const CATCH_ALL_PRIORITY: u8 = 8;
 
 /// Sort order for the table and for picking the headline. A fired fail-open guard
 /// outranks everything: it means the routing contract broke in the field.
@@ -318,7 +319,10 @@ fn kind_priority(kind: &str) -> u8 {
         // how much the rest of the report can be trusted.
         "reporter_degraded" => 4,
         "ws_restart" => 5,
-        "ranked_decline" => 6,
+        // Costs the calls it touches their saving and their attribution, and nothing else:
+        // they are answered in full. Above a ranked decline, which is not a failure.
+        "identity_unrecorded" => 6,
+        "ranked_decline" => 7,
         _ => CATCH_ALL_PRIORITY,
     }
 }
@@ -352,6 +356,12 @@ fn impact(kind: &str) -> &'static str {
         "reporter_degraded" => {
             "One of this report's own sources could not be read, so the report is \
              incomplete. What is listed is still real; what is missing is unknown."
+        }
+        "identity_unrecorded" => {
+            "The identity hook could not record whose call a Lumen tool call was, so the call \
+             was answered in full and its ledger row has no session. Nothing is wrong with the \
+             answer; repeat reads save nothing on these calls and the rows cannot be tied to a \
+             conversation."
         }
         "ranked_decline" => {
             "The ranked outline refused and fell back to the legacy outline. Not a failure \
@@ -549,6 +559,10 @@ fn headline(top: &Group, version: &str) -> String {
             top.count, top.variant
         ),
         "ws_restart" => format!("the daemon's WebSocket server restarted {}×", top.count),
+        "identity_unrecorded" => format!(
+            "identity hook could not record {}× ({}) — those calls were answered in full",
+            top.count, top.variant
+        ),
         "reporter_degraded" => "this report is incomplete".to_string(),
         other => format!("{} ×{}", humanize(other), top.count),
     };
