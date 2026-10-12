@@ -108,7 +108,7 @@ five modes:
 | mode | call | what it is |
 |---|---|---|
 | full | none | the file's own tokens: what a plain Read puts in context |
-| outline | `smart_read(path)` | the first read, repeat reads off (the shipped default) |
+| outline | `smart_read(path)` | the first read, repeat reads off (`LUMEN_REPEAT_READS=off`; on is the default from 1.8.0) |
 | recall | `recall_file(path, [one item])` | one representative item |
 | stub | the second identical `smart_read(path)`, `LUMEN_REPEAT_READS=on` | "unchanged since you read it" |
 | delta | a third `smart_read(path)` after one small edit, repeat reads on | only what changed |

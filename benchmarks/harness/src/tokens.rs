@@ -6,7 +6,7 @@
 //! | mode    | what is called                                                                  |
 //! |---------|---------------------------------------------------------------------------------|
 //! | full    | nothing: the file's own tokens (what a plain Read would put in context)         |
-//! | outline | `smart_read(path)`, first read, repeat reads off (the shipped default)          |
+//! | outline | `smart_read(path)`, first read, repeat reads off (`LUMEN_REPEAT_READS=off`)     |
 //! | recall  | `recall_file(path, names=[representative item])`, repeat reads off              |
 //! | stub    | the second identical `smart_read(path)` with `LUMEN_REPEAT_READS=on`            |
 //! | delta   | `smart_read(path)` a third time, after one small deterministic edit, flag on    |

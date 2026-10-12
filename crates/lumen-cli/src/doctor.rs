@@ -52,6 +52,16 @@ pub struct Facts {
     /// Of the newest calls to a Lumen tool that carry a repeat plan: how many were answered as
     /// `unidentified`, and how many there were in all. `None` when there is no ledger to read.
     pub recent_repeat_plans: Option<(u64, u64)>,
+    /// Whether repeat reads are on, as the server would decide it from this machine: the
+    /// environment (or Claude Code's `env` block in settings.json, which is where a server it
+    /// starts gets it from), then the setting file, then on. `None` when it could not be worked
+    /// out, which is read as the default, on.
+    pub repeat_reads: Option<lumen_core::settings::Resolved>,
+    /// Where the setting file is, for the report and for a finding about it.
+    pub repeat_reads_file: Option<String>,
+    /// `LUMEN_REPEAT_READS` was taken from Claude Code's `env` block in settings.json, not from
+    /// this shell.
+    pub repeat_reads_env_from_claude_settings: bool,
 }
 
 /// What doctor concluded, most actionable first.
@@ -76,6 +86,13 @@ pub enum Finding {
         missing: Vec<String>,
         unidentified: Option<(u64, u64)>,
     },
+    /// The repeat-reads switch holds something that cannot be read as on or off, so repeat
+    /// reads are off and every read is in full. Turned off on purpose is not a finding; this
+    /// is the off nobody chose.
+    RepeatReadsSetting {
+        problem: lumen_core::settings::Problem,
+        file: String,
+    },
 }
 
 impl Finding {
@@ -98,14 +115,35 @@ impl Finding {
                 "launchctl bootout gui/$(id -u)/Lumen; rm -f ~/Library/LaunchAgents/Lumen.plist"
                     .to_string()
             }
-            Finding::RepeatReadsInert { .. } => {
-                "open Lumen and run Setup again (it registers the PreToolUse hook on the three \
-                 Lumen tools), or reinstall the plugin, then restart Claude Code"
-                    .to_string()
-            }
+            Finding::RepeatReadsInert { .. } => INERT_REMEDY.to_string(),
+            Finding::RepeatReadsSetting { problem, file } => match problem {
+                lumen_core::settings::Problem::Env(_) => format!(
+                    "set LUMEN_REPEAT_READS to on or off, or unset it (check your shell profile \
+                     and the \"env\" block of ~/.claude/settings.json), then restart Claude Code. \
+                     To keep the setting file ({file}) in charge, unset the variable."
+                ),
+                lumen_core::settings::Problem::File(_) => format!(
+                    "fix {file} so it reads {{\"repeat_reads\": true}} (or false), or delete it \
+                     to get the default, on. It applies to the next Lumen call, with no restart."
+                ),
+            },
         }
     }
 }
+
+/// What to do when the PreToolUse hook that tells the server which conversation a call is from
+/// is missing. It depends on how Lumen was installed, and only the person at the keyboard knows
+/// that, so each way is named. The app does not edit `~/.claude/settings.json` when it
+/// launches; Setup does, and Setup runs on its own only while its marker file is missing,
+/// which is why the first fix removes the marker.
+const INERT_REMEDY: &str = "how to fix it depends on how you installed Lumen. \
+     (1) Lumen app (Homebrew cask or .dmg): quit Lumen, run `rm ~/.claude/lumen/.setup_done`, \
+     open Lumen again - it opens on Setup and registers the hook - then restart Claude Code. \
+     (2) Claude Code plugin: update or reinstall the plugin (its hooks come with it), then \
+     restart Claude Code. \
+     (3) Homebrew `lumen-cli` only: that installs the `lumen` command and nothing else, no MCP \
+     server and no hooks, so there are no repeat reads to fix - install the Lumen app or the \
+     plugin to get them. To turn repeat reads off instead, set LUMEN_REPEAT_READS=off";
 
 /// Whether a hook `matcher` selects `tool_name`. Claude Code reads a matcher made only of
 /// letters, digits, `_` and `|` as an exact name or a list of them, and anything else as a
@@ -177,6 +215,18 @@ pub fn findings(f: &Facts) -> Vec<Finding> {
         });
     }
 
+    if let Some(r) = &f.repeat_reads
+        && let Some(problem) = &r.problem
+    {
+        out.push(Finding::RepeatReadsSetting {
+            problem: problem.clone(),
+            file: f
+                .repeat_reads_file
+                .clone()
+                .unwrap_or_else(|| lumen_core::settings::FILE_NAME.to_string()),
+        });
+    }
+
     if let Some(finding) = repeat_reads_inert(f) {
         out.push(finding);
     }
@@ -184,7 +234,20 @@ pub fn findings(f: &Facts) -> Vec<Finding> {
     out
 }
 
+/// Whether repeat reads are off on this machine, for whatever reason. Unknown is not off: the
+/// default is on, and a doctor that stays quiet because it could not tell would hide the one
+/// thing it is for.
+fn repeat_reads_off(f: &Facts) -> bool {
+    f.repeat_reads
+        .as_ref()
+        .is_some_and(|r| r.mode == lumen_core::ranked::Mode::Off)
+}
+
 /// Whether repeat reads cannot work for want of the identity hook.
+///
+/// Silent when repeat reads are off: then nothing is stubbed, nothing needs to know which
+/// conversation a call is from, and a missing hook costs only the ledger's session column. Off
+/// by a setting nobody could read is reported on its own (`RepeatReadsSetting`).
 ///
 /// Two accounts of it, and the ledger's wins. settings.json lacking the hook is a reason to
 /// suspect, but a plugin install registers its hooks from the plugin, so the file alone would
@@ -193,6 +256,9 @@ pub fn findings(f: &Facts) -> Vec<Finding> {
 /// file says; if any was not, the hook is reaching the server and a missing entry here is the
 /// plugin's doing.
 fn repeat_reads_inert(f: &Facts) -> Option<Finding> {
+    if repeat_reads_off(f) {
+        return None;
+    }
     // settings.json unreadable (`None`) accuses nothing: only the ledger can then raise the finding.
     let missing: Vec<String> = match &f.identity_hook_missing {
         Some(m) => m.clone(),
@@ -318,7 +384,18 @@ pub fn render(f: &Facts) -> String {
     }
     let _ = writeln!(s);
 
-    let _ = writeln!(s, "repeat reads (which conversation a Lumen call is from)");
+    let _ = writeln!(
+        s,
+        "repeat reads (on by default; which conversation a call is from)"
+    );
+    let _ = writeln!(
+        s,
+        "  state                   {}",
+        repeat_reads_state_line(f)
+    );
+    if let Some(file) = &f.repeat_reads_file {
+        let _ = writeln!(s, "  setting file            {file}");
+    }
     match &f.identity_hook_missing {
         None => {
             let _ = writeln!(s, "  hook in settings.json   (settings.json not readable)");
@@ -367,6 +444,33 @@ pub fn render(f: &Facts) -> String {
     s
 }
 
+fn repeat_reads_state_line(f: &Facts) -> String {
+    use lumen_core::ranked::Mode;
+    use lumen_core::settings::Source;
+    let Some(r) = &f.repeat_reads else {
+        return "(could not be worked out; the default is on)".to_string();
+    };
+    let env = if f.repeat_reads_env_from_claude_settings {
+        "LUMEN_REPEAT_READS in ~/.claude/settings.json"
+    } else {
+        "LUMEN_REPEAT_READS"
+    };
+    let word = match r.mode {
+        Mode::On => "on",
+        Mode::Off => "OFF",
+        Mode::Ab => "A/B experiment",
+    };
+    let why = match (&r.problem, r.source) {
+        (Some(_), _) => {
+            "turned off because the setting could not be read (see findings)".to_string()
+        }
+        (None, Source::Default) => "the default".to_string(),
+        (None, Source::File) => "set by the setting file".to_string(),
+        (None, Source::Env) => format!("set by {env}"),
+    };
+    format!("{word}  ({why})")
+}
+
 fn describe(x: &Finding) -> String {
     match x {
         Finding::IconHiddenByPreference { domain, .. } => format!(
@@ -381,6 +485,9 @@ fn describe(x: &Finding) -> String {
         Finding::NoLog => "Lumen is running but has written no log file.".to_string(),
         Finding::StaleLoginItem { path } => {
             format!("A login item at {path} points at an app that no longer exists.")
+        }
+        Finding::RepeatReadsSetting { problem, file } => {
+            lumen_core::settings::Problem::describe(problem, std::path::Path::new(file))
         }
         Finding::RepeatReadsInert {
             missing,
@@ -474,13 +581,47 @@ fn parse_pref_line(domain: &str, line: &str) -> Option<StatusItemPref> {
     })
 }
 
-/// The Lumen tools `~/.claude/settings.json` has no PreToolUse hook for; `None` when the file
-/// is absent or is not JSON. Setup writes it there, and Setup is where it is repaired.
-fn settings_identity_hook_missing() -> Option<Vec<String>> {
+/// `~/.claude/settings.json` as JSON; `None` when it is absent or is not JSON. Setup writes the
+/// hooks there, and Setup is where they are repaired.
+fn claude_settings() -> Option<serde_json::Value> {
     let path = dirs::home_dir()?.join(".claude").join("settings.json");
     let text = std::fs::read_to_string(path).ok()?;
-    let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
-    Some(identity_hook_missing(&settings))
+    serde_json::from_str(&text).ok()
+}
+
+/// `LUMEN_REPEAT_READS` in the `env` block of Claude Code's settings.json: Claude Code puts that
+/// block in the environment of the servers it starts, so it is where a user who wants repeat
+/// reads off for Claude Code alone would put it, and a terminal running doctor cannot see it.
+pub fn repeat_reads_env_in(settings: &serde_json::Value) -> Option<String> {
+    let v = settings
+        .get("env")?
+        .get(lumen_core::settings::REPEAT_READS_ENV)?;
+    Some(
+        v.as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| v.to_string()),
+    )
+}
+
+/// Decide the way the server would: the shell's environment first, then Claude Code's `env`
+/// block, then the setting file, then on. The bool says the value came from the `env` block.
+pub fn decide_repeat_reads(
+    process_env: Option<String>,
+    claude_env: Option<String>,
+    file: &lumen_core::settings::FileState,
+) -> (lumen_core::settings::Resolved, bool) {
+    let says_something = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let (env, from_claude) = if says_something(&process_env) {
+        (process_env, false)
+    } else if says_something(&claude_env) {
+        (claude_env, true)
+    } else {
+        (None, false)
+    };
+    (
+        lumen_core::settings::resolve(env.as_deref(), file),
+        from_claude,
+    )
 }
 
 /// Of the newest calls to a Lumen tool that carry a repeat plan, `(unidentified, all)`. Read
@@ -518,7 +659,31 @@ pub fn collect() -> Facts {
         f.db_path = Some(db.to_string_lossy().to_string());
         f.recent_repeat_plans = recent_repeat_plans(&db);
     }
-    f.identity_hook_missing = settings_identity_hook_missing();
+    let settings = claude_settings();
+    f.identity_hook_missing = settings.as_ref().map(identity_hook_missing);
+
+    // The shell's variable may not be unicode; it is then a value that means nothing, which the
+    // decision reports, rather than an absent one.
+    let process_env = match std::env::var(lumen_core::settings::REPEAT_READS_ENV) {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(raw)) => Some(raw.to_string_lossy().into_owned()),
+    };
+    let db = lumen_core::meter::db_path();
+    let file = db
+        .as_deref()
+        .map(lumen_core::settings::settings_path)
+        .map(|p| (lumen_core::settings::read_file(&p), p));
+    let (state, from_claude) = decide_repeat_reads(
+        process_env,
+        settings.as_ref().and_then(repeat_reads_env_in),
+        file.as_ref()
+            .map(|(s, _)| s)
+            .unwrap_or(&lumen_core::settings::FileState::Absent),
+    );
+    f.repeat_reads = Some(state);
+    f.repeat_reads_env_from_claude_settings = from_claude;
+    f.repeat_reads_file = file.map(|(_, p)| p.to_string_lossy().to_string());
 
     #[cfg(target_os = "macos")]
     {
@@ -961,8 +1126,172 @@ mod tests {
             out.contains("no PreToolUse hook for smart_read, recall_file, compress_logs"),
             "{out}"
         );
-        assert!(out.contains("run Setup again"), "{out}");
+        assert!(out.contains("rm ~/.claude/lumen/.setup_done"), "{out}");
         assert!(out.contains("MISSING for smart_read"), "{out}");
+    }
+
+    fn resolved(
+        env: Option<&str>,
+        file: lumen_core::settings::FileState,
+    ) -> lumen_core::settings::Resolved {
+        lumen_core::settings::resolve(env, &file)
+    }
+
+    /// Off on purpose, by either switch: a missing hook then costs only the ledger's session
+    /// column, and `lumen doctor` has nothing to say about repeat reads.
+    #[test]
+    fn a_user_who_turned_repeat_reads_off_is_not_told_the_hook_is_missing() {
+        use lumen_core::settings::FileState;
+        let missing = identity_hook_missing(&settings_with(serde_json::json!([entry("Read")])));
+        for off in [
+            resolved(Some("off"), FileState::Absent),
+            resolved(None, FileState::Text(r#"{"repeat_reads": false}"#.into())),
+            resolved(
+                Some("0"),
+                FileState::Text(r#"{"repeat_reads": true}"#.into()),
+            ),
+        ] {
+            let f = Facts {
+                identity_hook_missing: Some(missing.clone()),
+                // What a full-results server records: no plan on any call.
+                recent_repeat_plans: Some((0, 0)),
+                repeat_reads: Some(off),
+                ..healthy()
+            };
+            assert_eq!(inert(&f), None, "{:?}", f.repeat_reads);
+            assert_eq!(findings(&f), Vec::<Finding>::new());
+            let out = render(&f);
+            assert!(!out.contains("inert"), "{out}");
+            assert!(out.contains("OFF"), "{out}");
+        }
+    }
+
+    /// The same machine with repeat reads on, or with nothing known about it, is loud.
+    #[test]
+    fn repeat_reads_on_with_the_hook_missing_is_loud_and_says_what_to_run() {
+        use lumen_core::settings::FileState;
+        let missing = identity_hook_missing(&settings_with(serde_json::json!([entry("Read")])));
+        for state in [
+            Some(resolved(None, FileState::Absent)),
+            Some(resolved(Some("on"), FileState::Absent)),
+            Some(resolved(
+                None,
+                FileState::Text(r#"{"repeat_reads": true}"#.into()),
+            )),
+            None,
+        ] {
+            let f = Facts {
+                identity_hook_missing: Some(missing.clone()),
+                repeat_reads: state,
+                ..healthy()
+            };
+            let found = inert(&f).expect("loud");
+            let fix = found.remedy();
+            for must in [
+                "rm ~/.claude/lumen/.setup_done",
+                "Claude Code plugin",
+                "lumen-cli",
+                "LUMEN_REPEAT_READS=off",
+            ] {
+                assert!(fix.contains(must), "{must}: {fix}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_setting_that_cannot_be_read_is_reported_with_what_to_fix() {
+        use lumen_core::settings::FileState;
+        let file = "/data/lumen_settings.json".to_string();
+        let f = Facts {
+            repeat_reads: Some(resolved(None, FileState::Text("{broken".into()))),
+            repeat_reads_file: Some(file.clone()),
+            // Even with the hook missing, the off nobody chose is reported once, as itself.
+            identity_hook_missing: Some(vec!["smart_read".into()]),
+            ..healthy()
+        };
+        let found = findings(&f);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(matches!(
+            &found[0],
+            Finding::RepeatReadsSetting {
+                problem: lumen_core::settings::Problem::File(_),
+                ..
+            }
+        ));
+        let out = render(&f);
+        assert!(out.contains(&file), "{out}");
+        assert!(out.contains("every read is in full"), "{out}");
+        assert!(
+            out.contains("turned off because the setting could not be read"),
+            "{out}"
+        );
+        assert!(
+            found[0].remedy().contains("repeat_reads"),
+            "{}",
+            found[0].remedy()
+        );
+
+        let f = Facts {
+            repeat_reads: Some(resolved(Some("enabled"), FileState::Absent)),
+            ..healthy()
+        };
+        let found = findings(&f);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].remedy().contains("unset it"),
+            "{}",
+            found[0].remedy()
+        );
+        assert!(render(&f).contains("\"enabled\""), "{}", render(&f));
+    }
+
+    #[test]
+    fn a_healthy_default_install_says_on_by_default_and_reports_nothing() {
+        let f = Facts {
+            identity_hook_missing: Some(Vec::new()),
+            repeat_reads: Some(resolved(None, lumen_core::settings::FileState::Absent)),
+            ..healthy()
+        };
+        assert_eq!(findings(&f), Vec::<Finding>::new());
+        assert!(render(&f).contains("on  (the default)"), "{}", render(&f));
+    }
+
+    #[test]
+    fn the_env_block_of_claude_settings_is_where_a_server_gets_its_variable() {
+        use lumen_core::ranked::Mode;
+        use lumen_core::settings::{FileState, Source};
+        let settings = serde_json::json!({ "env": { "LUMEN_REPEAT_READS": "off" } });
+        let claude = repeat_reads_env_in(&settings);
+        assert_eq!(claude.as_deref(), Some("off"));
+        assert_eq!(repeat_reads_env_in(&serde_json::json!({})), None);
+
+        // The shell says nothing: the block decides, and the report says so.
+        let (r, from_claude) = decide_repeat_reads(None, claude.clone(), &FileState::Absent);
+        assert_eq!(
+            (r.mode, r.source, from_claude),
+            (Mode::Off, Source::Env, true)
+        );
+        let f = Facts {
+            repeat_reads: Some(r),
+            repeat_reads_env_from_claude_settings: from_claude,
+            ..healthy()
+        };
+        assert!(
+            render(&f).contains("in ~/.claude/settings.json"),
+            "{}",
+            render(&f)
+        );
+
+        // An empty shell variable says nothing either.
+        let (r, _) = decide_repeat_reads(Some(" ".into()), claude.clone(), &FileState::Absent);
+        assert_eq!(r.mode, Mode::Off);
+        // The shell's own value wins over the block, as it would for a server started from it.
+        let (r, from_claude) = decide_repeat_reads(Some("on".into()), claude, &FileState::Absent);
+        assert_eq!((r.mode, from_claude), (Mode::On, false));
+        // A value that is not a string and not a word for a mode is reported, not skipped.
+        let odd = serde_json::json!({ "env": { "LUMEN_REPEAT_READS": ["off"] } });
+        let (r, _) = decide_repeat_reads(None, repeat_reads_env_in(&odd), &FileState::Absent);
+        assert!(r.problem.is_some(), "{r:?}");
     }
 
     #[test]

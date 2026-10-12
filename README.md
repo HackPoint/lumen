@@ -572,9 +572,9 @@ grep -n '"command": .*/lumen_' ~/.claude/settings.json
 # expected: lumen_read_intercept.sh four times (PreToolUse on Read, and on the three Lumen
 #           tools mcp__lumen__smart_read, recall_file and compress_logs)
 #           and lumen_meter.sh twice (PostToolUse on Read and on Bash)
-# more meter lines than that: an older Setup also hooked the lumen tools; re-run Setup
-# fewer intercept lines: an install from before 1.8.0; re-run Setup. Without the three
-# tool entries the server cannot tell whose call it is and repeat reads answer in full.
+# more meter lines than that: an older Setup also hooked the lumen tools; run Setup again (below)
+# fewer intercept lines: an install from before 1.8.0; run Setup again (below). Without the
+# three tool entries the server cannot tell whose call it is and repeat reads answer in full.
 
 # confirm hook scripts exist and are executable
 ls -la ~/.claude/lumen/
@@ -584,8 +584,10 @@ From a checkout of this repository, `./scripts/verify-hooks.sh` goes further: it
 installed hooks the way Claude Code does, against a scratch ledger it deletes afterwards,
 and says what each one did.
 
-If any check fails, re-run Setup from the Lumen menu (right-click tray → Setup)
-and restart Claude Code.
+If any check fails, run Setup again: quit Lumen, delete `~/.claude/lumen/.setup_done`, open
+Lumen (it opens on Setup and runs it), and restart Claude Code. There is no menu item for it
+(the tray menu has Open and Quit). On the plugin, update or reinstall it and restart Claude
+Code. The Homebrew `lumen-cli` on its own installs no hooks.
 
 ---
 
@@ -724,19 +726,59 @@ the `env` block when it runs again or upgrades Lumen. Removing the `Bash` entry 
 `PostToolUse` also stops it, but only until the next time Setup runs, because Setup puts
 that entry back.
 
-### Experimental: repeat reads (1.7.0, off by default)
+### Repeat reads (on by default since 1.8.0)
 
 When the model asks `smart_read` or `recall_file` for something it already holds, the second
-answer repeats tokens it has. With `LUMEN_REPEAT_READS` set in the environment Claude Code
-passes to the MCP server, Lumen remembers what it last returned in this session for each
-`(session, request)` and answers a repeat with less. The built-in Read is not touched: Claude
-Code already dedups it.
+answer would repeat tokens it has. Lumen remembers what it last returned in this session for
+each `(session, request)` and answers a repeat with less. The built-in Read is not touched:
+Claude Code already dedups it. It was an opt-in flag in 1.7.0 (`LUMEN_REPEAT_READS=on`); from
+1.8.0 it is on unless you turn it off.
 
-| value | behaviour |
+**Turning it off.** Either of these, and the environment variable wins when both are set:
+
+- the environment variable, in the `env` block of `~/.claude/settings.json` (or wherever Claude
+  Code gets its environment): `"env": { "LUMEN_REPEAT_READS": "off" }`. It is read when Claude
+  Code starts the server, so it applies from the next Claude Code session.
+- the persisted setting, a small file in the Lumen data directory beside the ledger:
+  `lumen_settings.json` containing `{"repeat_reads": false}` (macOS
+  `~/Library/Application Support/io.hackpoint.lumen/`, Linux `~/.local/share/io.hackpoint.lumen/`,
+  Windows `%APPDATA%\io.hackpoint.lumen\`; `LUMEN_DB` moves it with the ledger). The server reads
+  it on every Lumen call (about 30 microseconds), so a change applies to the next call, with no
+  restart. `lumen doctor` prints the path it is using and the state.
+
+With it off every read is answered as it always was, nothing is remembered, and the `fresh`
+option is not advertised. Switching from off to on in the middle of a session leaves the
+client's cached tool list without `fresh` until the next session; that is harmless, because the
+stub text names `fresh=true` and the server honours it whether or not it was advertised.
+
+A value that cannot be told is never guessed at: an unrecognised `LUMEN_REPEAT_READS`, or a
+settings file that is not valid JSON, is not a boolean or cannot be read, turns repeat reads
+**off** (every answer in full), is recorded as a `repeat_reads_config` fault (the app's fault
+count and `lumen report` pick it up), and `lumen doctor` names it and says what to fix. Write
+the file as UTF-8 **without a byte-order mark**: a BOM, UTF-16 or an empty file is rejected as
+corrupt, which is off plus the fault. A mistyped key (`repeat_read`) is only an unknown key: it
+is ignored and repeat reads stay **on**, so check the state `lumen doctor` prints after editing.
+
+| `LUMEN_REPEAT_READS` | behaviour |
 |---|---|
-| unset, or anything unrecognised | **off** — every read is answered as it always was, and nothing is remembered |
-| `on` | repeats are answered as below |
-| `ab` | half of files, split by a stable hash of the path, take the new path; the other half are answered as before, and the row records what the new path would have done |
+| unset or empty | the setting file decides; no file, or no `repeat_reads` key in it: **on** |
+| `on`, `1`, `true` | on, whatever the file says |
+| `off`, `0`, `false` | off, whatever the file says |
+| `ab` | half of files, split by a stable hash of the path, take the new path; the other half are answered as before, and the row records what the new path would have done (for measuring) |
+| anything else | **off**, and reported as above; the file is not consulted |
+
+**Upgrading from 1.7.0.** The server answers repeats as soon as it is updated, but it can only
+tell whose call it is through the PreToolUse hooks on the three Lumen tools, which 1.7.0 never
+registered. Until they are registered every call is answered in full (nothing breaks, nothing
+is saved) and `lumen doctor` and Setup's hook check say so. How each install gets them:
+
+| install | how the hooks arrive |
+|---|---|
+| Lumen app | Setup registers them, once. Launching the app does not edit `~/.claude/settings.json`. After updating, quit Lumen, delete `~/.claude/lumen/.setup_done`, open Lumen (it opens on Setup and runs it), then restart Claude Code |
+| Claude Code plugin | `hooks/hooks.json` carries them; update or reinstall the plugin, then restart Claude Code |
+| Homebrew `lumen-cli` alone | there is nothing to update: it installs `lumen` (doctor, stats) and no MCP server or hooks. Install the app or the plugin to have the tools; `lumen doctor` says the same |
+
+The table below is what a repeat is answered with.
 
 | the file since the last read in this session | the answer |
 |---|---|

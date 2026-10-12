@@ -116,7 +116,7 @@ pub const MIGRATIONS: &[&str] = &[
     // ── 1.7.0: repeat reads ──────────────────────────────────────────────────
     // repeat_arm  — 'treatment' when the repeat-read path was live for this read,
     //               'control' when the path was withheld by the A/B split. NULL on every
-    //               row written while LUMEN_REPEAT_READS is off, and on every hook row.
+    //               row written while repeat reads are off, and on every hook row.
     // repeat_plan — what the repeat decision was: first, fresh, unchanged, delta, or a full
     //               answer for a stated reason (compaction, rewind, unverifiable, no_base,
     //               outline, delta_too_big, unchanged_not_smaller), or `unidentified` when the
@@ -234,7 +234,7 @@ CREATE TABLE IF NOT EXISTS read_events (
     n_total         INTEGER,
     coeff_version   INTEGER,
     target_outline  INTEGER,
-    -- 1.7.0 repeat reads. NULL while LUMEN_REPEAT_READS is off.
+    -- 1.7.0 repeat reads. NULL while repeat reads are off.
     repeat_arm      TEXT,             -- treatment | control
     repeat_plan     TEXT,
     -- 1.8.0 conversation identity. The subagent that made the call; NULL for the main agent.
