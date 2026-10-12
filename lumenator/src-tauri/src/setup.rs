@@ -326,6 +326,18 @@ fn marker_path() -> PathBuf {
     marker_path_in(&home())
 }
 
+/// How to run Setup again, as a person at the keyboard can do it. There is no menu item for
+/// it: Setup opens by itself while its marker is missing, so removing the marker and opening
+/// Lumen is the way. Said in full wherever a report asks for a re-run, so that "re-run Setup"
+/// is never the whole instruction.
+fn rerun_setup_hint(home: &Path) -> String {
+    format!(
+        "re-run Setup: quit Lumen, delete {}, open Lumen (it opens on Setup), then restart \
+         Claude Code",
+        marker_path_in(home).display()
+    )
+}
+
 // ── Binary resolution ─────────────────────────────────────────────────────────
 //
 // In release (.app bundle): sidecars sit alongside the main exe in
@@ -862,7 +874,7 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
         return ArtifactStatus {
             id: "hooks".into(),
             healthy: false,
-            detail: "no lumen hooks registered — run Setup".into(),
+            detail: format!("no lumen hooks registered — {}", rerun_setup_hint(home)),
         };
     }
 
@@ -874,8 +886,9 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
     }
     if !unquoted.is_empty() {
         problems.push(format!(
-            "will not run as registered (unquoted path): {} — re-run Setup",
-            unquoted.join("; ")
+            "will not run as registered (unquoted path): {} — {}",
+            unquoted.join("; "),
+            rerun_setup_hint(home)
         ));
     }
     let absent: Vec<&str> = METER_MATCHERS
@@ -899,10 +912,11 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
         {
             // The consequence, so the Setup screen says what is wrong and not only that
             // something is: with these absent the server cannot tell whose call it is.
-            p.push_str(
+            p.push_str(&format!(
                 " (without them the Lumen tools cannot tell which conversation a call is \
-                 from, so repeat reads send every result in full — re-run Setup)",
-            );
+                 from, so repeat reads send every result in full — {})",
+                rerun_setup_hint(home)
+            ));
         }
         problems.push(p);
     }
@@ -3992,6 +4006,19 @@ mod tests {
         assert!(
             st.detail.contains("repeat reads"),
             "and says what it costs: {}",
+            st.detail
+        );
+        // There is no menu item for Setup, so "re-run Setup" alone sends nobody anywhere: the
+        // report carries the steps, with the marker's real path.
+        let marker = marker_path_in(h.path());
+        assert!(
+            st.detail.contains(&format!("delete {}", marker.display())),
+            "and says how to run Setup again, with the marker to delete: {}",
+            st.detail
+        );
+        assert!(
+            st.detail.contains("restart Claude Code"),
+            "and that Claude Code must be restarted to pick the hooks up: {}",
             st.detail
         );
         assert!(
