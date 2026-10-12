@@ -2237,6 +2237,7 @@ mod tests {
         assert_eq!(range_window(0, 5, 10), Ok(0..8));
         assert_eq!(range_window(0, 0, 10), Ok(0..3));
         assert_eq!(range_window(0, 0, 0), Ok(0..0));
+        assert_eq!(range_window(0, 5, 0), Ok(0..0));
     }
 
     #[test]

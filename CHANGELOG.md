@@ -16,8 +16,8 @@ Lumen tool away for the rest of the session.
   still read from the first line. Three requests that used to be answered now get the error instead,
   because the answer was not what they asked for: a `start_line` one to four lines past the end (the
   last lines of the file, or nothing, under the range asked for), a `start_line` slightly after the
-  `end_line` (a window around lines nobody named), and any range on an empty file (a reply that
-  cost tokens for a file that had none).
+  `end_line` (a window around lines nobody named), and a range that starts at line 1 or later on an
+  empty file (a reply that cost tokens for a file that had none).
 - A panic anywhere in a request is now caught per request: the call is answered with an error
   (`-32603`), the server keeps serving, and a `request_panic` fault is recorded with the tool's name
   and the file and line it panicked at. The panic message is in the error reply and on stderr but not
