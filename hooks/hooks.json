@@ -9,6 +9,60 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
           }
         ]
+      },
+      {
+        "matcher": "mcp__lumen__smart_read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__lumen__recall_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__lumen__compress_logs",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_lumen_lumen__smart_read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_lumen_lumen__recall_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_lumen_lumen__compress_logs",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/lumen_read_intercept.sh\""
+          }
+        ]
       }
     ],
     "PostToolUse": [

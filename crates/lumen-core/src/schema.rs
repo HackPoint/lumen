@@ -43,7 +43,11 @@ pub const MIGRATIONS: &[&str] = &[
     // session_id  — from CLAUDE_CODE_SESSION_ID, which Claude Code exports to both
     //               hooks and the MCP server. Lets a read be tied to the turn that
     //               caused it, which bare second-precision timestamps cannot do
-    //               when several sessions run at once.
+    //               when several sessions run at once. From 1.8.0 the MCP tools' rows
+    //               take it from the PreToolUse hook's record of the call, not from
+    //               the environment: that server outlives `/clear`, and its
+    //               environment names the conversation it started in. NULL is the
+    //               honest value for a call the hook did not announce.
     "ALTER TABLE read_events ADD COLUMN session_id TEXT",
     // file_mtime  — file modification time at read time, so a re-read of an
     //               unchanged file is distinguishable from a re-read after an edit.
@@ -115,11 +119,18 @@ pub const MIGRATIONS: &[&str] = &[
     //               row written while LUMEN_REPEAT_READS is off, and on every hook row.
     // repeat_plan — what the repeat decision was: first, fresh, unchanged, delta, or a full
     //               answer for a stated reason (compaction, rewind, unverifiable, no_base,
-    //               outline, delta_too_big, unchanged_not_smaller). A control
+    //               outline, delta_too_big, unchanged_not_smaller), or `unidentified` when the
+    //               call could not be tied to a conversation. A control
     //               row records what the treatment arm WOULD have done, which is what
     //               makes the two arms comparable on the same population of repeat reads.
     "ALTER TABLE read_events ADD COLUMN repeat_arm TEXT",
     "ALTER TABLE read_events ADD COLUMN repeat_plan TEXT",
+    // ── 1.8.0: whose call it was ─────────────────────────────────────────────
+    // agent_id — which subagent made the call, NULL for the main agent. Subagents share their
+    //            parent's session_id, so the pair (session_id, agent_id) is the context
+    //            that holds what a read returned. NULL also on every row whose session_id is
+    //            NULL: nothing is claimed about a call that could not be placed.
+    "ALTER TABLE read_events ADD COLUMN agent_id TEXT",
     // Compactions and rewinds the daemon saw in a session's transcript, one row per
     // event, so lumen-mcp can tell that what it delivered earlier may no longer be in the
     // model's context. Also in DDL; repeated here for the reason `faults` is.
@@ -146,7 +157,7 @@ pub const MIGRATIONS: &[&str] = &[
 /// [`MIGRATIONS`]. `lumen report` compares the live table against this to detect a
 /// database that missed a migration, so adding an ALTER means bumping this number;
 /// `read_events_column_count_matches_the_constant` fails if you forget.
-pub const READ_EVENTS_COLUMNS: usize = 26;
+pub const READ_EVENTS_COLUMNS: usize = 27;
 
 pub const DDL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -225,7 +236,9 @@ CREATE TABLE IF NOT EXISTS read_events (
     target_outline  INTEGER,
     -- 1.7.0 repeat reads. NULL while LUMEN_REPEAT_READS is off.
     repeat_arm      TEXT,             -- treatment | control
-    repeat_plan     TEXT
+    repeat_plan     TEXT,
+    -- 1.8.0 conversation identity. The subagent that made the call; NULL for the main agent.
+    agent_id        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_read_events_ts ON read_events(ts);
 
@@ -711,10 +724,11 @@ mod tests {
         "target_outline",
     ];
 
-    /// What a migrated 1.5.1 database has: the surviving 1.5.1 columns, then 1.7.0's two.
+    /// What a migrated 1.5.1 database has: the surviving 1.5.1 columns, then 1.7.0's two and
+    /// 1.8.0's one.
     fn migrated_columns() -> Vec<String> {
         let mut c = SURVIVING.map(String::from).to_vec();
-        c.extend(["repeat_arm".into(), "repeat_plan".into()]);
+        c.extend(["repeat_arm".into(), "repeat_plan".into(), "agent_id".into()]);
         c
     }
 

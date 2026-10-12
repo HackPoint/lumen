@@ -84,6 +84,7 @@ python3 -c "import json; d=json.load(open('/Users/$USER/.claude/settings.json'))
 ```
 
 - [ ] Shows `PreToolUse Read` (the intercept hook)
+- [ ] Shows `PreToolUse mcp__lumen__smart_read`, `mcp__lumen__recall_file` and `mcp__lumen__compress_logs` (the same hook, which tells the server whose call it is)
 - [ ] Shows `PostToolUse Read` (the meter hook)
 
 ### 1.6 Restart Claude Code after setup

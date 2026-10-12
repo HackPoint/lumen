@@ -289,9 +289,10 @@ impl Rig {
         ran
     }
 
-    /// The PreToolUse hook registered for Read.
+    /// The PreToolUse hook registered for the payload's tool: `Read`, or one of Lumen's.
     fn intercept(&self, payload: &Value, env: &[(&str, &str)]) -> Ran {
-        let command = self.registered("PreToolUse", "Read");
+        let tool = payload["tool_name"].as_str().expect("tool_name");
+        let command = self.registered("PreToolUse", tool);
         let ran = self.run(&command, &serde_json::to_vec(payload).unwrap(), env);
         assert_eq!(ran.stdout, "", "the intercept printed to stdout: {ran:?}");
         ran
@@ -1435,6 +1436,110 @@ fn a_large_read_is_blocked_once_through_the_installed_hook() {
     assert_eq!(f.channel, "cli");
 }
 
+/// What the hook is told about a call to one of Lumen's tools: the payload's session and,
+/// in a subagent, its agent, under the call's `tool_use_id`.
+fn lumen_call(tool_name: &str, id: &str, session: &str, agent: Option<&str>) -> Value {
+    let mut p = json!({
+        "session_id": session,
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_use_id": id,
+        "tool_input": {"path": "/x/y.rs"},
+    });
+    if let Some(a) = agent {
+        p["agent_id"] = Value::from(a);
+        p["agent_type"] = Value::from("general-purpose");
+    }
+    p
+}
+
+/// The record `lumen-mcp` would claim for `tool`'s call `id`, claimed.
+fn claimed(dir: &Path, tool: &str, id: &str) -> lumen_core::identity::Lookup {
+    lumen_core::identity::claim(dir, tool, Some(id), lumen_core::repeat::now_ms())
+}
+
+/// A call to a Lumen tool through the installed hook: nothing said, nothing blocked, and the
+/// conversation it came from is left beside the ledger for the server to claim (#32). The
+/// environment names another session on purpose: the payload is what counts, never the
+/// variable the server was started with.
+#[test]
+fn a_lumen_tool_call_through_the_installed_hook_leaves_its_conversation() {
+    use lumen_core::identity::Lookup;
+    let rig = Rig::new();
+    rig.install(&rig.real_mcp());
+    let dir = rig.db.parent().unwrap().to_path_buf();
+    let env = rig.claude_env("the-session-the-server-started-under");
+
+    let cases = [
+        ("smart_read", None),
+        ("recall_file", Some("agent-7")),
+        ("compress_logs", None),
+    ];
+    for (i, (tool, agent)) in cases.into_iter().enumerate() {
+        let id = format!("toolu_e2e_{i}");
+        let payload = lumen_call(&format!("mcp__lumen__{tool}"), &id, READ_SESSION, agent);
+        let ran = rig.intercept(&payload, &env);
+        assert_eq!((ran.code, ran.stderr.as_str()), (0, ""), "{tool}: {ran:?}");
+        match claimed(&dir, tool, &id) {
+            Lookup::Known(who) => assert_eq!(
+                (who.session.as_str(), who.agent.as_deref()),
+                (READ_SESSION, agent),
+                "{tool}"
+            ),
+            other => panic!("{tool}: {other:?}"),
+        }
+    }
+    assert!(!rig.spool.exists(), "{:?}", rig.faults());
+}
+
+/// Where the record cannot be written the call still goes through, with a fault and a line
+/// on stderr, and the server then answers it as unidentified, in full.
+#[test]
+fn a_lumen_tool_call_whose_record_cannot_be_written_is_let_through_and_reported() {
+    use lumen_core::identity::Lookup;
+    let rig = Rig::new();
+    rig.install(&rig.real_mcp());
+    let dir = rig.db.parent().unwrap().to_path_buf();
+    // Where the ledger's directory should be there is a file: the write cannot succeed, on
+    // any OS and as any user, which a read-only mode would not promise.
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::write(&dir, "not a directory").unwrap();
+    // The spool is kept somewhere that still works, so the fault can be read back.
+    let spool = rig.tmp.join("faults.jsonl");
+    let spool_var = spool.to_string_lossy().into_owned();
+    let mut env = rig.claude_env(READ_SESSION).to_vec();
+    env.push(("LUMEN_FAULT_SPOOL", &spool_var));
+
+    let payload = lumen_call("mcp__lumen__smart_read", "toolu_e2e_ro", READ_SESSION, None);
+    let ran = rig.intercept(&payload, &env);
+    assert_eq!(ran.code, 0, "{ran:?}");
+    assert!(
+        ran.stderr.contains("cannot record who is calling"),
+        "{ran:?}"
+    );
+    let faults = faults_in(&spool);
+    let got: Vec<_> = faults
+        .iter()
+        .map(|f| (f.kind.as_str(), f.variant.as_str(), f.session_id.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        [(
+            "identity_unrecorded",
+            "record_unwritable",
+            Some(READ_SESSION)
+        )]
+    );
+    // Whatever the OS calls a record looked up under a file, it is not an identity.
+    assert!(
+        matches!(
+            claimed(&dir, "smart_read", "toolu_e2e_ro"),
+            Lookup::Unknown(_)
+        ),
+        "nothing was recorded"
+    );
+}
+
 #[test]
 fn a_large_log_read_is_sent_to_compress_logs_through_the_installed_hook() {
     let rig = Rig::new();
@@ -1910,9 +2015,11 @@ fn an_upgrade_from_1_5_1_refreshes_the_scripts_and_keeps_what_the_user_set() {
     write_json(
         &global_settings_path_in(&plain.home),
         &json!({"hooks": {
-            "PreToolUse": [
-                {"matcher": "Read", "hooks": [{"type": "command", "command": native(&plain_intercept)}]}
-            ],
+            // The current matcher set, so the one thing the validator can object to
+            // here is the form of the command.
+            "PreToolUse": INTERCEPT_MATCHERS.map(|m| json!(
+                {"matcher": m, "hooks": [{"type": "command", "command": native(&plain_intercept)}]}
+            )),
             "PostToolUse": [
                 {"matcher": "Read", "hooks": [{"type": "command", "command": native(&plain_meter)}]},
                 {"matcher": "Bash", "hooks": [{"type": "command", "command": native(&plain_meter)}]}
@@ -2166,6 +2273,45 @@ fn without_a_build_the_plugin_hooks_use_lumen_mcp_on_path() {
     let rows = rig.rows();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].writer_hook.as_deref(), Some(PLUGIN_WRITER));
+}
+
+/// The plugin names its own server `plugin_lumen_lumen`, so a session that has Lumen through
+/// the plugin calls `mcp__plugin_lumen_lumen__smart_read`, not `mcp__lumen__smart_read`. The
+/// plugin's hooks.json registers both, and the script it runs records either.
+#[test]
+fn the_plugin_hook_records_a_lumen_tool_call_under_either_server_name() {
+    use lumen_core::identity::{Lookup, MATCHERS, PLUGIN_MATCHERS};
+    let rig = Rig::new();
+    let root = rig.plugin(PLUGIN, false);
+    std::fs::copy(
+        sidecar(),
+        rig.bin
+            .join(format!("lumen-mcp{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    let dir = rig.db.parent().unwrap().to_path_buf();
+    let env = rig.claude_env("the-session-the-server-started-under");
+    for (i, name) in MATCHERS.into_iter().chain(PLUGIN_MATCHERS).enumerate() {
+        let short = lumen_core::identity::short_name(name).unwrap();
+        let agent = (i % 2 == 1).then_some("agent-3");
+        let id = format!("toolu_plugin_{i}");
+        let ran = rig.plugin_hook(
+            &root,
+            "PreToolUse",
+            &lumen_call(name, &id, READ_SESSION, agent),
+            &env,
+        );
+        assert_eq!((ran.code, ran.stderr.as_str()), (0, ""), "{name}: {ran:?}");
+        match claimed(&dir, short, &id) {
+            Lookup::Known(who) => assert_eq!(
+                (who.session.as_str(), who.agent.as_deref()),
+                (READ_SESSION, agent),
+                "{name}"
+            ),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert!(!rig.spool.exists(), "{:?}", rig.faults());
 }
 
 /// Fail open through the plugin, with its negative control: a large read is blocked
@@ -2482,7 +2628,7 @@ fn verify_hooks_passes_the_hooks_setup_installs() {
     rig.install(&rig.real_mcp());
     let (code, results, raw) = verify_hooks(&rig, &lumen_dir_in(&rig.home));
     eprintln!("verify-hooks [{OS}] Setup's hooks: exit {code}\n{raw}");
-    assert_eq!(results.len(), 13, "{raw}");
+    assert_eq!(results.len(), 15, "{raw}");
     assert_eq!(with_status(&results, "FAIL"), Vec::<&str>::new(), "{raw}");
     // The rows are read with sqlite3, and only its absence may skip that.
     for skipped in with_status(&results, "SKIP") {

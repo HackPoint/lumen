@@ -569,9 +569,12 @@ If interception is not happening in the CLI:
 ```bash
 # confirm hooks are registered
 grep -n '"command": .*/lumen_' ~/.claude/settings.json
-# expected: lumen_read_intercept.sh once (PreToolUse on Read)
+# expected: lumen_read_intercept.sh four times (PreToolUse on Read, and on the three Lumen
+#           tools mcp__lumen__smart_read, recall_file and compress_logs)
 #           and lumen_meter.sh twice (PostToolUse on Read and on Bash)
 # more meter lines than that: an older Setup also hooked the lumen tools; re-run Setup
+# fewer intercept lines: an install from before 1.8.0; re-run Setup. Without the three
+# tool entries the server cannot tell whose call it is and repeat reads answer in full.
 
 # confirm hook scripts exist and are executable
 ls -la ~/.claude/lumen/
@@ -599,10 +602,18 @@ on stdin. If the file is a source or log file at or above the line threshold, it
 the read and writes a redirect message to stderr for Claude to act on. **It opens the
 file only to count its lines, and keeps nothing of it.**
 
-It writes two things, both local, and both there so that a redirect can never leave
+It is also registered before Lumen's own tools (`mcp__lumen__smart_read`,
+`mcp__lumen__recall_file`, `mcp__lumen__compress_logs`, and under the plugin's server name
+`mcp__plugin_lumen_lumen__*`). There it blocks nothing and prints nothing: it writes a small
+record naming the call's session (and, inside a subagent, its agent) beside the ledger so the
+server can tell which conversation a call is from (see repeat reads below). The record holds
+ids and a timestamp, never a path or contents.
+
+It writes two other things, both local, and both there so that a redirect can never leave
 Claude with no way to read the file at all:
 
-- **A session marker** — `lumen_intercept_<session-id>` in the temp directory, one line
+- **A session marker** — `lumen_intercept_<session-id>` in the temp directory (inside a
+  subagent `lumen_intercept_<session-id>.<agent-id>`), one line
   per file already redirected in this session. A file is redirected at most once: if
   Claude comes back to the built-in `Read` for the same file, the Lumen route did not work
   for it and the read is allowed through. Without this the hook can deadlock a session —
@@ -738,20 +749,36 @@ A repeat answer is used only when it costs fewer tokens than the full answer it 
 The base is held in memory by `lumen-mcp`; a restart loses it and the next read is the full
 answer. "Unchanged" is decided by content, never by modification time.
 
+**Whose read is it? (1.8.0)** `lumen-mcp` is started once per Claude Code process and outlives
+`/clear`, which begins another conversation in the same process. The environment variable the
+server was started with names the first conversation only, and the MCP request carries no
+session (only a `tool_use_id`), so the server learns who is asking from the PreToolUse hook:
+for each call to `smart_read`, `recall_file` or `compress_logs` the hook leaves
+`lumen_call_<tool_use_id>.json` beside the ledger with the call's `session_id` and, inside a
+subagent, its `agent_id`, and the server reads and removes it when the request arrives. Bases are
+held per conversation, a subagent counting as its own; when the conversation changes, which is
+what `/clear` and `/resume` do, every base is dropped. A call whose conversation cannot be told
+(the hook is not registered, did not run, could not write, or left a record that is malformed or
+an hour old) is answered in full, recorded with no session and the plan `unidentified`, and
+nothing is remembered from it. The old variable is never used for this. `lumen doctor` and
+Setup's hook check say when the hook is missing. Hook records for calls the user then declines
+are pruned by age and count.
+
 **Is the base still in the model's context?** The daemon reads the Claude Code transcript and
 records one `session_events` row per compaction (`compact_boundary`) and per rewind (a message
 whose parent branches back past the session's latest real prompt; subagent sidechains are
 excluded), and one per `resync`: a transcript the daemon went on tailing after losing its
 tracker, which could hide a rewind. If any of them happened after the base was returned, or the
-ledger cannot be asked, the answer is the full one. Two cases cannot be seen: a subagent calling through the same session
-that never saw the parent's read, and an event the daemon has not ingested yet. That is why
-every repeat answer tells the model to call again with `fresh=true`. Both tools accept
+ledger cannot be asked, the answer is the full one. Two cases cannot be seen: a compaction inside
+a subagent, which the daemon does not read, and an event the daemon has not ingested yet. That is
+why every repeat answer tells the model to call again with `fresh=true`. Both tools accept
 `fresh`; it always returns the full result and is recorded, and its rate is the error rate of
 this feature.
 
 Each `read_events` row records `repeat_arm` and `repeat_plan` (`first`, `fresh`, `unchanged`,
 `delta`, and for a full answer the reason: `compaction`, `rewind`, `resync`, `unverifiable`, `no_base`,
-`outline`, `delta_too_big`, `unchanged_not_smaller`). Routes: `smart_read_unchanged`,
+`unidentified`, `outline`, `delta_too_big`, `unchanged_not_smaller`) and, for a call made inside a
+subagent, `agent_id`. Routes: `smart_read_unchanged`,
 `smart_read_delta`, `recall_file_unchanged`, `recall_file_delta`.
 
 The size of a delta is measured per delta served against the outline it replaces, headers and

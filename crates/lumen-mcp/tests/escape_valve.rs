@@ -61,6 +61,37 @@ fn source(defs: usize, body: usize) -> String {
     s
 }
 
+/// The real `lumen-mcp hook intercept`, run on one PreToolUse payload.
+fn run_hook(db: &Path, spool: &Path, tmp: &Path, payload: &serde_json::Value) -> Ran {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"))
+        .args(["hook", "intercept"])
+        .env("LUMEN_DB", db)
+        .env("LUMEN_FAULT_SPOOL", spool)
+        .env("TMPDIR", tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .env_remove("LUMEN_HOOK_ENABLED")
+        .env_remove("LUMEN_LINE_THRESHOLD")
+        .env_remove("LUMEN_CAPTURE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.stdout.is_empty(), "the intercept printed to stdout");
+    Ran {
+        code: out.status.code().unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
 impl Rig {
     fn file(&self, name: &str, body: &str) -> PathBuf {
         let p = self.dir.path().join(name);
@@ -76,33 +107,7 @@ impl Rig {
             "tool_input": {"file_path": file.to_string_lossy()},
             "cwd": self.dir.path().to_string_lossy(),
         });
-        let mut child = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"))
-            .args(["hook", "intercept"])
-            .env("LUMEN_DB", &self.db)
-            .env("LUMEN_FAULT_SPOOL", &self.spool)
-            .env("TMPDIR", &self.tmp)
-            .env("TMP", &self.tmp)
-            .env("TEMP", &self.tmp)
-            .env_remove("LUMEN_HOOK_ENABLED")
-            .env_remove("LUMEN_LINE_THRESHOLD")
-            .env_remove("LUMEN_CAPTURE")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.stdout.is_empty(), "the intercept printed to stdout");
-        Ran {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }
+        run_hook(&self.db, &self.spool, &self.tmp, &payload)
     }
 
     fn faults(&self) -> Vec<serde_json::Value> {
@@ -119,7 +124,6 @@ impl Rig {
             .env("LUMEN_PROJECTS_DIR", self.dir.path().join("projects"))
             .env_remove("LUMEN_RANKED_OUTLINE")
             .env_remove("LUMEN_REPEAT_READS")
-            .env("CLAUDE_CODE_SESSION_ID", session)
             .env("LUMEN_RANKED_TIME_BUDGET_MS", "60000")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -133,6 +137,12 @@ impl Rig {
             stdin,
             out,
             id: 1,
+            calls: 0,
+            session: session.to_string(),
+            hooked: true,
+            db: self.db.clone(),
+            spool: self.spool.clone(),
+            tmp: self.tmp.clone(),
         };
         live.rpc(
             "initialize",
@@ -148,6 +158,16 @@ struct Live {
     stdin: Option<ChildStdin>,
     out: BufReader<ChildStdout>,
     id: i64,
+    /// Which conversation the calls belong to. The server is told by the PreToolUse hook, as
+    /// in the field, and not by its environment.
+    session: String,
+    /// Whether the PreToolUse hook that names the conversation is registered. An install from
+    /// before 1.8.0 has the intercept on `Read` alone, so its Lumen calls are never announced.
+    hooked: bool,
+    calls: usize,
+    db: PathBuf,
+    spool: PathBuf,
+    tmp: PathBuf,
 }
 
 impl Live {
@@ -164,9 +184,32 @@ impl Live {
     /// Tokens the tool returned. The server replies first and writes its ledger row after;
     /// it is sequential, so once the second answer arrives the row is there.
     fn call(&mut self, tool: &str, args: serde_json::Value) -> i64 {
+        // What Claude Code does for a Lumen tool: the PreToolUse hook runs first and leaves the
+        // conversation under the call's id, and the request carries that id.
+        self.calls += 1;
+        let call_id = format!("toolu_{}", self.calls);
+        if self.hooked {
+            let announced = run_hook(
+                &self.db,
+                &self.spool,
+                &self.tmp,
+                &serde_json::json!({
+                    "session_id": self.session,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": format!("mcp__lumen__{tool}"),
+                    "tool_use_id": call_id,
+                    "tool_input": args,
+                }),
+            );
+            assert_eq!(announced.code, 0, "{}", announced.stderr);
+        }
         let v = self.rpc(
             "tools/call",
-            serde_json::json!({"name": tool, "arguments": args}),
+            serde_json::json!({
+                "name": tool,
+                "arguments": args,
+                "_meta": {"claudecode/toolUseId": call_id},
+            }),
         );
         self.rpc("tools/list", serde_json::json!({}));
         v["result"]["_meta"]["returned_tokens"]
@@ -274,6 +317,131 @@ fn with_no_working_lumen_read_the_retry_is_released_as_before() {
     let faults = rig.faults();
     assert_eq!(faults.len(), 1, "{faults:?}");
     assert!(faults[0]["detail"].is_null(), "{faults:?}");
+}
+
+/// An install from before 1.8.0 has the intercept on `Read` alone: Lumen's own calls are never
+/// announced, so the server cannot name their conversation and writes the row with no session.
+/// The check behind the redirect must still see that row, or the same Read costs the whole file
+/// where 1.7.0 sent it to recall_file.
+#[test]
+fn on_an_install_that_cannot_name_the_conversation_the_redirect_after_smart_read_still_holds() {
+    let rig = rig();
+    let big = rig.file("big.rs", &source(120, 8));
+
+    let first = rig.intercept(SESSION, &big);
+    assert_eq!(first.code, 2, "{}", first.stderr);
+
+    let mut s = rig.start(SESSION);
+    s.hooked = false;
+    s.call("smart_read", serde_json::json!({ "path": big }));
+    s.end();
+    let conn = lumen_core::meter::open_read_only(&rig.db).unwrap();
+    let unattributed: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM read_events WHERE routed_via = 'smart_read' \
+             AND session_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unattributed, 1,
+        "the precondition: a smart_read row with no session"
+    );
+
+    let second = rig.intercept(SESSION, &big);
+    assert_eq!(
+        second.code, 2,
+        "the whole file was released after a working smart_read: {}",
+        second.stderr
+    );
+    assert!(
+        second.stderr.contains("lumen:recall_file(path="),
+        "{}",
+        second.stderr
+    );
+    let third = rig.intercept(SESSION, &big);
+    assert_eq!((third.code, third.stderr.as_str()), (0, ""));
+    let faults = rig.faults();
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert_eq!(faults[0]["detail"], "after_lumen_read");
+}
+
+/// The other side of it. A row whose conversation is known and is not this one must not buy a
+/// redirect, or a `/clear` would be answered as if the model still held what it read before.
+#[test]
+fn a_smart_read_from_another_known_conversation_does_not_buy_a_redirect() {
+    let rig = rig();
+    let big = rig.file("big.rs", &source(120, 8));
+
+    let mut s = rig.start("before-the-clear");
+    s.call("smart_read", serde_json::json!({ "path": big }));
+    s.end();
+
+    let first = rig.intercept(SESSION, &big);
+    assert_eq!(first.code, 2, "{}", first.stderr);
+    let retry = rig.intercept(SESSION, &big);
+    assert_eq!((retry.code, retry.stderr.as_str()), (0, ""));
+    let faults = rig.faults();
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(faults[0]["detail"].is_null(), "{faults:?}");
+}
+
+/// A row with no session vouches for its own path and only while it is recent: it says nothing
+/// about another file, and an old row is as likely another conversation's as this one's.
+#[test]
+fn a_row_with_no_session_vouches_only_for_its_own_path_and_only_while_recent() {
+    let rig = rig();
+    let recent = rig.file("recent.rs", &source(120, 8));
+    let stale = rig.file("stale.rs", &source(120, 8));
+    let unserved = rig.file("unserved.rs", &source(120, 8));
+
+    let mut s = rig.start(SESSION);
+    s.hooked = false;
+    s.call("smart_read", serde_json::json!({ "path": recent }));
+    s.call("smart_read", serde_json::json!({ "path": stale }));
+    s.end();
+    lumen_core::meter::connect_db(&rig.db)
+        .unwrap()
+        .execute(
+            "UPDATE read_events SET ts = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2 hours') \
+             WHERE path LIKE '%stale.rs'",
+            [],
+        )
+        .unwrap();
+
+    // The recent one: the first Read is told the outline is already in hand, and the retry is
+    // released after a working smart_read.
+    let first = rig.intercept(SESSION, &recent);
+    assert_eq!(first.code, 2);
+    assert!(
+        first.stderr.contains("has already"),
+        "recent, own path: {}",
+        first.stderr
+    );
+    assert_eq!(rig.intercept(SESSION, &recent).code, 0);
+    // The old one and the one never read through Lumen: the ordinary redirect, and the retry
+    // is released as before.
+    for (file, why) in [(&stale, "two hours old"), (&unserved, "another path")] {
+        let first = rig.intercept(SESSION, file);
+        assert_eq!(first.code, 2);
+        assert!(
+            !first.stderr.contains("has already"),
+            "{why}: {}",
+            first.stderr
+        );
+        let retry = rig.intercept(SESSION, file);
+        assert_eq!((retry.code, retry.stderr.as_str()), (0, ""), "{why}");
+    }
+    let details: Vec<_> = rig.faults().iter().map(|f| f["detail"].clone()).collect();
+    assert_eq!(
+        details,
+        [
+            serde_json::json!("after_lumen_read"),
+            serde_json::Value::Null,
+            serde_json::Value::Null
+        ]
+    );
 }
 
 /// The lookup runs before every large-file Read, so it must stay cheap on a real ledger: a

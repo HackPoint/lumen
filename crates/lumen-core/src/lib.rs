@@ -3,6 +3,7 @@ pub mod coverage;
 pub mod econ;
 pub mod events;
 pub mod faults;
+pub mod identity;
 pub mod meter;
 pub mod project;
 pub mod ranked;

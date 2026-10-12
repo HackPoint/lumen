@@ -886,10 +886,27 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
     if !absent.is_empty() {
         problems.push(format!("PostToolUse not registered: {}", absent.join(", ")));
     }
-    if !has("PreToolUse", INTERCEPT_MATCHER) {
-        problems.push(format!("PreToolUse not registered: {INTERCEPT_MATCHER}"));
+    let absent_pre: Vec<&str> = INTERCEPT_MATCHERS
+        .iter()
+        .copied()
+        .filter(|m| !has("PreToolUse", m))
+        .collect();
+    if !absent_pre.is_empty() {
+        let mut p = format!("PreToolUse not registered: {}", absent_pre.join(", "));
+        if absent_pre
+            .iter()
+            .any(|m| lumen_core::identity::MATCHERS.contains(m))
+        {
+            // The consequence, so the Setup screen says what is wrong and not only that
+            // something is: with these absent the server cannot tell whose call it is.
+            p.push_str(
+                " (without them the Lumen tools cannot tell which conversation a call is \
+                 from, so repeat reads send every result in full — re-run Setup)",
+            );
+        }
+        problems.push(p);
     }
-    let stale: Vec<&str> = RETIRED_MATCHERS
+    let stale: Vec<&str> = RETIRED_METER_MATCHERS
         .iter()
         .copied()
         .filter(|m| has("PostToolUse", m))
@@ -925,20 +942,31 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
 /// `Bash` is observation only: output volume, no PreToolUse hook, nothing intercepted.
 const METER_MATCHERS: [&str; 2] = ["Read", "Bash"];
 
-/// The tool the PreToolUse intercept applies to.
-const INTERCEPT_MATCHER: &str = "Read";
+/// The tools the PreToolUse hook (`lumen_read_intercept.sh`) is registered on, in one list for
+/// the installer, the validator and the plugin check, for the reason [`METER_MATCHERS`] gives.
+///
+/// `Read` is the intercept itself. The three Lumen tools are how the MCP server learns whose
+/// call it is answering (1.8.0, #32): the request carries only a `tool_use_id`, and the hook's
+/// payload is the one place Claude Code says which conversation that id belongs to. Without
+/// them every call is unidentified and answered in full, so an install from 1.7.0 or earlier
+/// is reported stale until Setup registers them.
+const INTERCEPT_MATCHERS: [&str; 4] = [
+    "Read",
+    lumen_core::identity::MATCHERS[0],
+    lumen_core::identity::MATCHERS[1],
+    lumen_core::identity::MATCHERS[2],
+];
 
-/// Matchers earlier versions registered that must now be removed.
+/// PostToolUse matchers earlier versions registered that must now be removed.
 ///
 /// The `mcp__lumen__*` tools meter themselves in-process, so the meter script's `case`
 /// fell straight through to `exit 0` for them — every `smart_read`, `recall_file` and
 /// `compress_logs` call forked a bash and a python3 to do nothing. Their continued
-/// presence is a defect the validator reports, not merely untidiness.
-const RETIRED_MATCHERS: [&str; 3] = [
-    "mcp__lumen__smart_read",
-    "mcp__lumen__recall_file",
-    "mcp__lumen__compress_logs",
-];
+/// presence on PostToolUse is a defect the validator reports, not merely untidiness.
+///
+/// They are not retired on PreToolUse: there the same names carry the identity hook
+/// ([`INTERCEPT_MATCHERS`]), which does work the server cannot do for itself.
+const RETIRED_METER_MATCHERS: [&str; 3] = lumen_core::identity::MATCHERS;
 
 /// Every artifact setup persists outside the app bundle.
 ///
@@ -1075,11 +1103,13 @@ __LUMEN_REPORT__"#;
 const INTERCEPT_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # lumen_read_intercept.sh — __LUMEN_ORIGIN__
 #
-# PreToolUse hook for Read. `lumen-mcp hook intercept` decides whether a large
-# source or log file goes to the lumen tools (exit 2) or is read as asked (exit 0).
-# Without that binary the MCP server cannot be running either, so the read is let
-# through, with a fault and a line on stderr. LUMEN_HOOK_ENABLED=0 switches the
-# intercept off.
+# PreToolUse hook for Read and for Lumen's own tools. `lumen-mcp hook intercept`
+# decides whether a large source or log file goes to the lumen tools (exit 2) or
+# is read as asked (exit 0), and records which conversation each smart_read,
+# recall_file or compress_logs call belongs to, so the server can tell /clear from
+# a repeat. Without that binary the MCP server cannot be running either, so the
+# call is let through, with a fault and a line on stderr. LUMEN_HOOK_ENABLED=0
+# switches the Read intercept off; it does not switch the recording off.
 #
 __LUMEN_LOCATE__
 
@@ -1499,16 +1529,14 @@ fn step_install_hooks_in(home: &Path) -> SetupStep {
         root["hooks"] = serde_json::json!({});
     }
 
-    merge_hook_entry(
-        &mut root["hooks"]["PreToolUse"],
-        INTERCEPT_MATCHER,
-        &intercept,
-    );
+    for matcher in INTERCEPT_MATCHERS {
+        merge_hook_entry(&mut root["hooks"]["PreToolUse"], matcher, &intercept);
+    }
 
     for matcher in METER_MATCHERS {
         merge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher, &meter);
     }
-    for matcher in RETIRED_MATCHERS {
+    for matcher in RETIRED_METER_MATCHERS {
         unmerge_hook_entry(&mut root["hooks"]["PostToolUse"], matcher);
     }
     if keep_bash_off {
@@ -1613,7 +1641,8 @@ fn unmerge_hook_entry(arr_val: &mut serde_json::Value, matcher: &str) {
 /// A Lumen meter on `Read` with none on `Bash` says so, and nothing else does: every
 /// Setup from 0.1.0 to 1.2.0 registered `Read` with the three retired matchers, and
 /// every one since registers `Read` with `Bash`. An install still carrying a retired
-/// matcher never had `Bash`, and gets it.
+/// matcher never had `Bash`, and gets it. Only PostToolUse is looked at: the same tool
+/// names are registered on PreToolUse now, for another hook.
 fn bash_meter_removed(root: &serde_json::Value) -> bool {
     let lumen_on = |matcher: &str| {
         root["hooks"]["PostToolUse"].as_array().is_some_and(|arr| {
@@ -1626,7 +1655,7 @@ fn bash_meter_removed(root: &serde_json::Value) -> bool {
             })
         })
     };
-    lumen_on("Read") && !lumen_on("Bash") && !RETIRED_MATCHERS.iter().any(|m| lumen_on(m))
+    lumen_on("Read") && !lumen_on("Bash") && !RETIRED_METER_MATCHERS.iter().any(|m| lumen_on(m))
 }
 
 // ── Main orchestration ────────────────────────────────────────────────────────
@@ -2272,7 +2301,7 @@ mod tests {
         // "Read", which the validator accepted because it only looked for dangling
         // paths; it now also compares the matcher set, so a partial registration is
         // correctly unhealthy and would make this test's own premise false.
-        settings_with_matchers(h.path(), &[INTERCEPT_MATCHER], &METER_MATCHERS);
+        settings_with_matchers(h.path(), &INTERCEPT_MATCHERS, &METER_MATCHERS);
         let settings = global_settings_path_in(h.path());
 
         // A key Lumen does not own, to prove validation leaves the rest of the file
@@ -3636,12 +3665,25 @@ mod tests {
         let dir = lumen_dir_in(h.path());
 
         let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 1, "one PreToolUse matcher: Read");
-        assert_eq!(pre[0]["matcher"], "Read");
+        let pre_matchers: Vec<&str> = pre.iter().map(|e| e["matcher"].as_str().unwrap()).collect();
         assert_eq!(
-            program(&pre[0]),
-            shell_path(&dir.join("lumen_read_intercept.sh").to_string_lossy())
+            pre_matchers,
+            vec![
+                "Read",
+                "mcp__lumen__smart_read",
+                "mcp__lumen__recall_file",
+                "mcp__lumen__compress_logs"
+            ],
+            "the intercept on Read, and on the three Lumen tools so the server learns whose \
+             call it is answering (#32)"
         );
+        for e in pre {
+            assert_eq!(
+                program(e),
+                shell_path(&dir.join("lumen_read_intercept.sh").to_string_lossy()),
+                "every PreToolUse matcher points at the one hook that handles both jobs"
+            );
+        }
 
         let post = v["hooks"]["PostToolUse"].as_array().unwrap();
         let matchers: Vec<&str> = post
@@ -3915,6 +3957,149 @@ mod tests {
             "setup's own output must satisfy the validator: {}",
             st.detail
         );
+    }
+
+    /// A 1.6.0 or 1.7.0 install: every script present, the intercept on `Read` and the meter
+    /// on `Read` and `Bash`, which was exactly current until the server needed to be told whose
+    /// call it answers (#32). Without the three Lumen-tool matchers every call is unidentified
+    /// and answered in full, so the validator must call it stale, name them, and say what
+    /// the user loses; Hooks are validate-and-report, so this report is the whole upgrade
+    /// path. Then Setup must repair it, and the repair must leave the rest as it was.
+    #[test]
+    fn a_1_7_0_install_is_reported_stale_and_setup_repairs_it() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(h.path(), &["Read"], &["Read", "Bash"]);
+        let settings = global_settings_path_in(h.path());
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        root["theme"] = json!("dark");
+        std::fs::write(&settings, root.to_string()).unwrap();
+
+        let st = validate_hooks_in(h.path());
+        assert!(!st.healthy, "{}", st.detail);
+        for m in lumen_core::identity::MATCHERS {
+            assert!(
+                st.detail.contains(m),
+                "the report names {m} as not registered: {}",
+                st.detail
+            );
+        }
+        assert!(
+            st.detail.contains("PreToolUse not registered"),
+            "{}",
+            st.detail
+        );
+        assert!(
+            st.detail.contains("repeat reads"),
+            "and says what it costs: {}",
+            st.detail
+        );
+        assert!(
+            !st.detail.contains("PostToolUse"),
+            "the meter side is current and is not blamed: {}",
+            st.detail
+        );
+
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
+        let st = validate_hooks_in(h.path());
+        assert!(st.healthy, "Setup repairs it: {}", st.detail);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark", "what is not Lumen's is left alone");
+        let pre: Vec<&str> = v["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(pre, INTERCEPT_MATCHERS, "Read first, then the three tools");
+        let post: Vec<&str> = v["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            post, METER_MATCHERS,
+            "no PostToolUse entry for the Lumen tools"
+        );
+    }
+
+    /// The Lumen tools are retired as meter matchers and registered as intercept matchers,
+    /// under the same names. The two lists must not be confused for each other: a PostToolUse
+    /// entry for them is still a defect, and a PreToolUse entry for them is the requirement.
+    #[test]
+    fn the_lumen_tool_matchers_are_required_before_and_retired_after() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(
+            h.path(),
+            &INTERCEPT_MATCHERS,
+            &["Read", "Bash", "mcp__lumen__smart_read"],
+        );
+        let st = validate_hooks_in(h.path());
+        assert!(!st.healthy, "{}", st.detail);
+        assert!(
+            st.detail
+                .contains("retired, still registered: mcp__lumen__smart_read"),
+            "{}",
+            st.detail
+        );
+        assert!(
+            !st.detail.contains("PreToolUse"),
+            "the PreToolUse registration is correct: {}",
+            st.detail
+        );
+    }
+
+    /// One of the three missing is as stale as all three: a call to that tool alone is
+    /// unidentified.
+    #[test]
+    fn a_single_missing_lumen_tool_matcher_is_reported() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(
+            h.path(),
+            &[
+                "Read",
+                "mcp__lumen__smart_read",
+                "mcp__lumen__compress_logs",
+            ],
+            &METER_MATCHERS,
+        );
+        let st = validate_hooks_in(h.path());
+        assert!(!st.healthy, "{}", st.detail);
+        assert!(
+            st.detail
+                .contains("PreToolUse not registered: mcp__lumen__recall_file"),
+            "{}",
+            st.detail
+        );
+    }
+
+    /// An install that is current in every other respect but has lost `Read` on PreToolUse
+    /// does not mention repeat reads: that loss is the intercept's, and the sentence about
+    /// identity would be wrong about it.
+    #[test]
+    fn a_missing_read_intercept_is_not_blamed_on_identity() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(
+            h.path(),
+            &[
+                "mcp__lumen__smart_read",
+                "mcp__lumen__recall_file",
+                "mcp__lumen__compress_logs",
+            ],
+            &METER_MATCHERS,
+        );
+        let st = validate_hooks_in(h.path());
+        assert!(!st.healthy, "{}", st.detail);
+        assert!(
+            st.detail.contains("PreToolUse not registered: Read"),
+            "{}",
+            st.detail
+        );
+        assert!(!st.detail.contains("repeat reads"), "{}", st.detail);
     }
 
     /// A dangling command is still caught, alongside the new matcher check.

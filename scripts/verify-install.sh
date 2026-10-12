@@ -219,11 +219,19 @@ fi
 section "Hook scripts"
 HOOK_DIR="${HOME}/.claude/lumen"
 VERIFY_HOOKS="$(dirname "${BASH_SOURCE[0]}")/verify-hooks.sh"
+# The hooks Setup installed name the lumen-mcp it installed. Given --bin-dir the build is what
+# is being checked, as it is for the binaries above, so the hooks run against its lumen-mcp:
+# an older Lumen installed on the machine would be judged for what only this build does. A
+# --bin-dir without one (the CLI-only install) has nothing to run the hooks against.
+HOOK_ARGS=()
+if [[ -n "$BIN_DIR" && -n "$MCP" && -x "$MCP" ]]; then HOOK_ARGS=(--mcp-bin "$MCP"); fi
 if [[ ! -d "$HOOK_DIR" ]]; then
     skip "no ~/.claude/lumen — Setup has not run on this machine"
+elif [[ -n "$BIN_DIR" && ${#HOOK_ARGS[@]} -eq 0 ]]; then
+    skip "no lumen-mcp in --bin-dir to run the installed hooks against"
 elif [[ ! -f "$VERIFY_HOOKS" ]]; then
     bad "no verify-hooks.sh beside this script to check the hooks with"
-elif bash "$VERIFY_HOOKS" ${EXPECT:+--expect "$EXPECT"} "$HOOK_DIR"; then
+elif bash "$VERIFY_HOOKS" "${HOOK_ARGS[@]+"${HOOK_ARGS[@]}"}" ${EXPECT:+--expect "$EXPECT"} "$HOOK_DIR"; then
     ok "the hooks meter, intercept and fail open as they should"
 else
     bad "the hooks failed the checks above"

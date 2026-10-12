@@ -124,8 +124,10 @@ fn the_plugin_hooks_are_what_setups_templates_generate() {
     }
 }
 
-/// hooks.json registers what Setup registers, nothing more: the intercept before a
-/// Read, the meter after a Read or a Bash, and so none of the matchers Setup retired.
+/// hooks.json registers what Setup registers, and the plugin's own tool names beside them: the
+/// intercept before a Read and before each Lumen tool, under either server name, so the server
+/// learns whose call it is whichever way Claude Code was given it; the meter after a Read or a
+/// Bash; and none of the matchers Setup retired from PostToolUse.
 #[test]
 fn the_plugin_registers_the_hooks_setup_registers() {
     let path = repo().join("hooks/hooks.json");
@@ -152,12 +154,16 @@ fn the_plugin_registers_the_hooks_setup_registers() {
     let runs = |script: &str| {
         vec![serde_json::json!({"type": "command", "command": plugin_command(script)})]
     };
+    // Setup's list is the plugin's, with the plugin's own server names added after it.
+    let pre: Vec<&str> = INTERCEPT_MATCHERS
+        .into_iter()
+        .chain(lumen_core::identity::PLUGIN_MATCHERS)
+        .collect();
     assert_eq!(
         registered("PreToolUse"),
-        [(
-            INTERCEPT_MATCHER.to_string(),
-            runs("lumen_read_intercept.sh")
-        )]
+        pre.iter()
+            .map(|m| (m.to_string(), runs("lumen_read_intercept.sh")))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         registered("PostToolUse"),

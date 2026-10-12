@@ -44,6 +44,14 @@ pub struct Facts {
     pub monitors: Vec<(i64, i64, i64, i64)>,
     pub launch_agent: Option<String>,
     pub launch_agent_target_exists: Option<bool>,
+    /// The Lumen tools that have no PreToolUse hook in `~/.claude/settings.json`: the hook is
+    /// how the server learns which conversation a call belongs to. `None` when settings.json
+    /// could not be read as JSON; a plugin install keeps its hooks elsewhere, so absence from
+    /// this file alone is not proof, and the ledger's own account (below) can overrule it.
+    pub identity_hook_missing: Option<Vec<String>>,
+    /// Of the newest calls to a Lumen tool that carry a repeat plan: how many were answered as
+    /// `unidentified`, and how many there were in all. `None` when there is no ledger to read.
+    pub recent_repeat_plans: Option<(u64, u64)>,
 }
 
 /// What doctor concluded, most actionable first.
@@ -61,6 +69,13 @@ pub enum Finding {
     NoLog,
     /// A login item points at a path that no longer exists.
     StaleLoginItem { path: String },
+    /// The Lumen tools cannot tell which conversation a call is from, so every `smart_read`,
+    /// `recall_file` and `compress_logs` is answered in full and repeat reads save nothing.
+    /// `missing` is what settings.json lacks; `unidentified` is the ledger's own count.
+    RepeatReadsInert {
+        missing: Vec<String>,
+        unidentified: Option<(u64, u64)>,
+    },
 }
 
 impl Finding {
@@ -83,8 +98,47 @@ impl Finding {
                 "launchctl bootout gui/$(id -u)/Lumen; rm -f ~/Library/LaunchAgents/Lumen.plist"
                     .to_string()
             }
+            Finding::RepeatReadsInert { .. } => {
+                "open Lumen and run Setup again (it registers the PreToolUse hook on the three \
+                 Lumen tools), or reinstall the plugin, then restart Claude Code"
+                    .to_string()
+            }
         }
     }
+}
+
+/// Whether a hook `matcher` selects `tool_name`. Claude Code reads a matcher made only of
+/// letters, digits, `_` and `|` as an exact name or a list of them, and anything else as a
+/// regular expression; the two spellings of "everything" and a trailing `.*` are the only
+/// regular expressions worth recognising here, since a wrongly raised finding sends the
+/// reader after something that is not broken.
+fn matcher_selects(matcher: &str, tool_name: &str) -> bool {
+    let m = matcher.trim();
+    if m.is_empty() || m == "*" || m == ".*" {
+        return true;
+    }
+    if let Some(prefix) = m.strip_suffix(".*") {
+        return tool_name.starts_with(prefix);
+    }
+    m.split('|').any(|name| name == tool_name)
+}
+
+/// The Lumen tools no PreToolUse hook in `settings` selects, as their short names.
+pub fn identity_hook_missing(settings: &serde_json::Value) -> Vec<String> {
+    // No `hooks.PreToolUse` array is no entries: every Lumen tool is then reported as unhooked.
+    let none = Vec::new();
+    let entries = settings["hooks"]["PreToolUse"].as_array().unwrap_or(&none);
+    lumen_core::identity::TOOLS
+        .iter()
+        .filter(|tool| {
+            let full = format!("{}{tool}", lumen_core::identity::TOOL_PREFIX);
+            !entries.iter().any(|e| {
+                e["hooks"].as_array().is_some_and(|h| !h.is_empty())
+                    && matcher_selects(e["matcher"].as_str().unwrap_or(""), &full)
+            })
+        })
+        .map(|tool| tool.to_string())
+        .collect()
 }
 
 /// Decide what is wrong, most actionable first.
@@ -123,7 +177,37 @@ pub fn findings(f: &Facts) -> Vec<Finding> {
         });
     }
 
+    if let Some(finding) = repeat_reads_inert(f) {
+        out.push(finding);
+    }
+
     out
+}
+
+/// Whether repeat reads cannot work for want of the identity hook.
+///
+/// Two accounts of it, and the ledger's wins. settings.json lacking the hook is a reason to
+/// suspect, but a plugin install registers its hooks from the plugin, so the file alone would
+/// accuse a healthy machine. What the server has actually done is not in doubt: if every recent
+/// call that carried a plan was answered `unidentified`, repeat reads are inert whatever the
+/// file says; if any was not, the hook is reaching the server and a missing entry here is the
+/// plugin's doing.
+fn repeat_reads_inert(f: &Facts) -> Option<Finding> {
+    // settings.json unreadable (`None`) accuses nothing: only the ledger can then raise the finding.
+    let missing: Vec<String> = match &f.identity_hook_missing {
+        Some(m) => m.clone(),
+        None => Vec::new(),
+    };
+    let seen = f.recent_repeat_plans;
+    let every_call_unidentified = seen.is_some_and(|(u, all)| all > 0 && u == all);
+    let some_call_identified = seen.is_some_and(|(u, all)| u < all);
+    if every_call_unidentified || (!missing.is_empty() && !some_call_identified) {
+        return Some(Finding::RepeatReadsInert {
+            missing,
+            unidentified: seen,
+        });
+    }
+    None
 }
 
 fn human_bytes(n: u64) -> String {
@@ -234,6 +318,37 @@ pub fn render(f: &Facts) -> String {
     }
     let _ = writeln!(s);
 
+    let _ = writeln!(s, "repeat reads (which conversation a Lumen call is from)");
+    match &f.identity_hook_missing {
+        None => {
+            let _ = writeln!(s, "  hook in settings.json   (settings.json not readable)");
+        }
+        Some(m) if m.is_empty() => {
+            let _ = writeln!(
+                s,
+                "  hook in settings.json   registered for all three tools"
+            );
+        }
+        Some(m) => {
+            let _ = writeln!(s, "  hook in settings.json   MISSING for {}", m.join(", "));
+        }
+    }
+    match f.recent_repeat_plans {
+        None => {
+            let _ = writeln!(s, "  recent calls            (ledger not readable)");
+        }
+        Some((_, 0)) => {
+            let _ = writeln!(s, "  recent calls            none with a repeat plan yet");
+        }
+        Some((u, all)) => {
+            let _ = writeln!(
+                s,
+                "  recent calls            {u} of the last {all} were answered in full for want of an identity"
+            );
+        }
+    }
+    let _ = writeln!(s);
+
     let found = findings(f);
     let _ = writeln!(s, "findings");
     if found.is_empty() {
@@ -266,6 +381,29 @@ fn describe(x: &Finding) -> String {
         Finding::NoLog => "Lumen is running but has written no log file.".to_string(),
         Finding::StaleLoginItem { path } => {
             format!("A login item at {path} points at an app that no longer exists.")
+        }
+        Finding::RepeatReadsInert {
+            missing,
+            unidentified,
+        } => {
+            let mut why = String::new();
+            if !missing.is_empty() {
+                why.push_str(&format!(
+                    " settings.json has no PreToolUse hook for {}.",
+                    missing.join(", ")
+                ));
+            }
+            if let Some((u, all)) = unidentified.filter(|(u, _)| *u > 0) {
+                why.push_str(&format!(
+                    " {u} of the last {all} calls were answered in full for want of an identity."
+                ));
+            }
+            format!(
+                "Repeat reads are inert: without the hook, smart_read, recall_file and \
+                 compress_logs cannot tell which conversation a call is from, so every result \
+                 is sent in full (the safe answer) and the ledger's session column stays \
+                 empty.{why}"
+            )
         }
     }
 }
@@ -336,6 +474,36 @@ fn parse_pref_line(domain: &str, line: &str) -> Option<StatusItemPref> {
     })
 }
 
+/// The Lumen tools `~/.claude/settings.json` has no PreToolUse hook for; `None` when the file
+/// is absent or is not JSON. Setup writes it there, and Setup is where it is repaired.
+fn settings_identity_hook_missing() -> Option<Vec<String>> {
+    let path = dirs::home_dir()?.join(".claude").join("settings.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(identity_hook_missing(&settings))
+}
+
+/// Of the newest calls to a Lumen tool that carry a repeat plan, `(unidentified, all)`. Read
+/// only, and `None` when the ledger cannot be opened or has no such column (a database from
+/// before 1.7.0), which the report says rather than reading as "none".
+fn recent_repeat_plans(db: &std::path::Path) -> Option<(u64, u64)> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    let (unidentified, all): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(repeat_plan = ?1), 0), COUNT(*) FROM (
+                 SELECT repeat_plan FROM read_events
+                 WHERE routed_via IN ('smart_read', 'recall_file', 'compress_logs')
+                   AND repeat_plan IS NOT NULL
+                 ORDER BY rowid DESC LIMIT 50)",
+            [lumen_core::repeat::PLAN_UNIDENTIFIED],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()?;
+    Some((u64::try_from(unidentified).ok()?, u64::try_from(all).ok()?))
+}
+
 /// Collect what we can. Every field is optional because doctor's whole purpose is to run on a
 /// machine where things are missing.
 pub fn collect() -> Facts {
@@ -348,7 +516,9 @@ pub fn collect() -> Facts {
     if let Some(db) = lumen_core::meter::db_path() {
         f.db_size_bytes = std::fs::metadata(&db).ok().map(|m| m.len());
         f.db_path = Some(db.to_string_lossy().to_string());
+        f.recent_repeat_plans = recent_repeat_plans(&db);
     }
+    f.identity_hook_missing = settings_identity_hook_missing();
 
     #[cfg(target_os = "macos")]
     {
@@ -751,5 +921,176 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(18 * 1024 * 1024), "18.0 MB");
+    }
+
+    // ── repeat reads and the identity hook ───────────────────────────────────────
+
+    fn settings_with(pre: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "hooks": { "PreToolUse": pre } })
+    }
+
+    fn entry(matcher: &str) -> serde_json::Value {
+        serde_json::json!({
+            "matcher": matcher,
+            "hooks": [{ "type": "command", "command": "/h/lumen_read_intercept.sh" }]
+        })
+    }
+
+    fn inert(f: &Facts) -> Option<Finding> {
+        findings(f)
+            .into_iter()
+            .find(|x| matches!(x, Finding::RepeatReadsInert { .. }))
+    }
+
+    /// An install from before 1.8.0 registers the intercept on Read alone. Its repeat reads
+    /// cannot tell a `/clear` from a repeat, so every Lumen call is answered in full, and
+    /// `lumen doctor` is where that is said.
+    #[test]
+    fn a_1_7_0_install_is_reported_as_having_inert_repeat_reads() {
+        let old = settings_with(serde_json::json!([entry("Read")]));
+        let missing = identity_hook_missing(&old);
+        assert_eq!(missing, ["smart_read", "recall_file", "compress_logs"]);
+
+        let f = Facts {
+            identity_hook_missing: Some(missing),
+            ..healthy()
+        };
+        let out = render(&f);
+        assert!(out.contains("Repeat reads are inert"), "{out}");
+        assert!(
+            out.contains("no PreToolUse hook for smart_read, recall_file, compress_logs"),
+            "{out}"
+        );
+        assert!(out.contains("run Setup again"), "{out}");
+        assert!(out.contains("MISSING for smart_read"), "{out}");
+    }
+
+    #[test]
+    fn the_hook_on_all_three_tools_is_not_reported() {
+        let new = settings_with(serde_json::json!([
+            entry("Read"),
+            entry("mcp__lumen__smart_read"),
+            entry("mcp__lumen__recall_file"),
+            entry("mcp__lumen__compress_logs"),
+        ]));
+        assert!(identity_hook_missing(&new).is_empty());
+        // The two spellings Claude Code accepts for a list, and the catch-alls.
+        for m in [
+            "mcp__lumen__smart_read|mcp__lumen__recall_file|mcp__lumen__compress_logs",
+            "mcp__lumen__.*",
+            ".*",
+            "*",
+            "",
+        ] {
+            let one = settings_with(serde_json::json!([entry(m)]));
+            assert!(identity_hook_missing(&one).is_empty(), "matcher {m:?}");
+        }
+        let f = Facts {
+            identity_hook_missing: Some(Vec::new()),
+            ..healthy()
+        };
+        assert_eq!(inert(&f), None);
+        assert!(
+            render(&f).contains("registered for all three tools"),
+            "{}",
+            render(&f)
+        );
+    }
+
+    #[test]
+    fn one_missing_tool_is_named_and_a_hook_with_no_command_does_not_count() {
+        let two = settings_with(serde_json::json!([entry(
+            "mcp__lumen__smart_read|mcp__lumen__compress_logs"
+        ),]));
+        assert_eq!(identity_hook_missing(&two), ["recall_file"]);
+
+        let empty = serde_json::json!({ "hooks": { "PreToolUse": [
+            { "matcher": "mcp__lumen__smart_read", "hooks": [] }
+        ] } });
+        assert_eq!(
+            identity_hook_missing(&empty),
+            ["smart_read", "recall_file", "compress_logs"]
+        );
+        // No hooks at all, and a hook of another server's tool, are the same as none.
+        assert_eq!(identity_hook_missing(&serde_json::json!({})).len(), 3);
+        let other = settings_with(serde_json::json!([entry("mcp__other__smart_read")]));
+        assert_eq!(identity_hook_missing(&other).len(), 3);
+    }
+
+    /// settings.json alone cannot condemn a plugin install, whose hooks live in the plugin:
+    /// what the server has answered can.
+    #[test]
+    fn the_ledger_overrules_a_settings_file_that_lacks_the_hook() {
+        let missing = Some(vec!["smart_read".to_string()]);
+        let identified = Facts {
+            identity_hook_missing: missing.clone(),
+            recent_repeat_plans: Some((1, 10)),
+            ..healthy()
+        };
+        assert_eq!(inert(&identified), None, "the hook reached the server");
+
+        let unidentified = Facts {
+            identity_hook_missing: missing.clone(),
+            recent_repeat_plans: Some((10, 10)),
+            ..healthy()
+        };
+        assert!(inert(&unidentified).is_some());
+
+        // Proven by the ledger alone, with settings.json absent or unreadable.
+        let proven = Facts {
+            identity_hook_missing: None,
+            recent_repeat_plans: Some((4, 4)),
+            ..healthy()
+        };
+        let out = render(&proven);
+        assert!(out.contains("Repeat reads are inert"), "{out}");
+        assert!(
+            out.contains("4 of the last 4 calls were answered in full for want of an identity"),
+            "{out}"
+        );
+
+        // Nothing known, or nothing yet, is not a finding.
+        for facts in [
+            Facts {
+                identity_hook_missing: None,
+                recent_repeat_plans: None,
+                ..healthy()
+            },
+            Facts {
+                identity_hook_missing: None,
+                recent_repeat_plans: Some((0, 0)),
+                ..healthy()
+            },
+        ] {
+            assert_eq!(inert(&facts), None);
+        }
+    }
+
+    #[test]
+    fn the_ledger_is_read_for_its_newest_lumen_calls_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lumen.db");
+        let conn = lumen_core::meter::connect_db(&db).unwrap();
+        let add = |routed_via: &str, plan: Option<&str>| {
+            conn.execute(
+                "INSERT INTO read_events(ts, tool, path, tokens_returned, full_tokens, \
+                 saved_tokens, routed_via, repeat_plan) \
+                 VALUES ('2026-01-01T00:00:00Z', 't', 'p', 1, 1, 0, ?1, ?2)",
+                rusqlite::params![routed_via, plan],
+            )
+            .unwrap();
+        };
+        // A ledger with no calls yet.
+        assert_eq!(recent_repeat_plans(&db), Some((0, 0)));
+        add("smart_read", Some("fresh"));
+        add("recall_file", Some(lumen_core::repeat::PLAN_UNIDENTIFIED));
+        add("compress_logs", Some(lumen_core::repeat::PLAN_UNIDENTIFIED));
+        // Neither a built-in Read nor a call that carried no plan is a repeat-read verdict.
+        add("builtin_read", Some(lumen_core::repeat::PLAN_UNIDENTIFIED));
+        add("smart_read", None);
+        assert_eq!(recent_repeat_plans(&db), Some((2, 3)));
+
+        // No database at all is unknown, not zero.
+        assert_eq!(recent_repeat_plans(&dir.path().join("absent.db")), None);
     }
 }

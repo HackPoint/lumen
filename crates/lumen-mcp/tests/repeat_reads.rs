@@ -55,6 +55,9 @@ struct Live {
     stdin: Option<ChildStdin>,
     out: BufReader<ChildStdout>,
     id: i64,
+    /// Where the PreToolUse hook leaves what it learned about each call.
+    records: std::path::PathBuf,
+    calls: usize,
 }
 
 impl Rig {
@@ -70,7 +73,6 @@ impl Rig {
             .env("LUMEN_PROJECTS_DIR", self.dir.path().join("projects"))
             .env_remove("LUMEN_RANKED_OUTLINE")
             .env_remove("LUMEN_REPEAT_READS")
-            .env("CLAUDE_CODE_SESSION_ID", SESSION)
             .env("LUMEN_RANKED_TIME_BUDGET_MS", "60000")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -86,6 +88,8 @@ impl Rig {
             stdin,
             out,
             id: 1,
+            records: self.dir.path().to_path_buf(),
+            calls: 0,
         };
         live.rpc(
             "initialize",
@@ -137,9 +141,29 @@ impl Live {
     }
 
     fn call(&mut self, tool: &str, args: serde_json::Value) -> Reply {
+        // The conversation of a call is what the PreToolUse hook left under the call's id; the
+        // server's environment is not consulted. `live_identity.rs` runs the real hook for
+        // this, so here the record is written the way the hook does and the calls stay cheap.
+        self.calls += 1;
+        let call_id = format!("toolu_{}", self.calls);
+        lumen_core::identity::write(
+            &self.records,
+            &format!("mcp__lumen__{tool}"),
+            &call_id,
+            &lumen_core::identity::Identity {
+                session: SESSION.to_string(),
+                agent: None,
+            },
+            lumen_core::repeat::now_ms(),
+        )
+        .unwrap();
         let v = self.rpc(
             "tools/call",
-            serde_json::json!({"name": tool, "arguments": args}),
+            serde_json::json!({
+                "name": tool,
+                "arguments": args,
+                "_meta": {"claudecode/toolUseId": call_id},
+            }),
         );
         // The server replies first and writes its ledger row after. The server is sequential,
         // so once this answer arrives that write is done and the test may touch the ledger.
