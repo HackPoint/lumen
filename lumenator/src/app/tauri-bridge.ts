@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { moveWindow, Position } from '@tauri-apps/plugin-positioner';
@@ -35,6 +36,15 @@ export class TauriBridge {
   /** Call a `#[tauri::command]`. */
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     return invoke<T>(cmd, args);
+  }
+
+  /**
+   * The version this build was made as: the app's `PackageInfo`, which Tauri fills from
+   * `tauri.conf.json` when the app is compiled. The tray menu's version line is made from the
+   * same value, so the window and the tray cannot disagree.
+   */
+  getVersion(): Promise<string> {
+    return getVersion();
   }
 
   isPermissionGranted(): Promise<boolean> {

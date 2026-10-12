@@ -3,7 +3,7 @@ import { Router, provideRouter } from '@angular/router';
 import { Home } from './home';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
-import { FakeTauriBridge } from '../../tauri-bridge.fake';
+import { APP_VERSION_CMD, FakeTauriBridge } from '../../tauri-bridge.fake';
 
 describe('Home', () => {
   let fixture: ComponentFixture<Home>;
@@ -402,5 +402,72 @@ describe('Home', () => {
   it('renders no usage block before the report loads', async () => {
     await build();
     expect(fixture.nativeElement.querySelector('.usage')).toBeNull();
+  });
+
+  // ── the version ────────────────────────────────────────────────────────────
+  //
+  // The version was only ever in a startup log line, so a user filing a report could not say
+  // which build they had. It is read from the Tauri runtime, never written in the page: these
+  // use a version no release has, so a literal in the template or the component would fail them.
+  // That the runtime's answer is the one tauri.conf.json and Cargo.toml declare is the Rust
+  // test `the_version_the_ui_shows_is_the_one_tauri_conf_and_every_cargo_toml_declare`, and the
+  // built app's text is checked by lumenator/e2e.
+
+  const SEEDED = '9.8.7';
+
+  it('shows the version the runtime returned in the header', async () => {
+    await build(b => b.responses.set(APP_VERSION_CMD, SEEDED));
+    expect(el<HTMLElement>('.home__version').textContent).toBe(`Lumen ${SEEDED}`);
+    // Inside the header, with the brand, as one text node.
+    expect(el<HTMLElement>('.home__head .home__version').childNodes.length).toBe(1);
+  });
+
+  it('shows the same version in the About section', async () => {
+    await build(b => b.responses.set(APP_VERSION_CMD, SEEDED));
+    expect(el<HTMLElement>('.about__version').textContent).toBe(SEEDED);
+  });
+
+  it('follows whatever version the runtime returns', async () => {
+    await build(b => b.responses.set(APP_VERSION_CMD, '0.0.1-rc.2'));
+    expect(el<HTMLElement>('.home__version').textContent).toBe('Lumen 0.0.1-rc.2');
+    expect(el<HTMLElement>('.about__version').textContent).toBe('0.0.1-rc.2');
+  });
+
+  it('asks the runtime for the version once', async () => {
+    await build(b => b.responses.set(APP_VERSION_CMD, SEEDED));
+    expect(bridge.countOf(APP_VERSION_CMD)).toBe(1);
+  });
+
+  it('labels the About section by its heading, and the version by its term', async () => {
+    await build(b => b.responses.set(APP_VERSION_CMD, SEEDED));
+    const section = el<HTMLElement>('section.about');
+    const heading = fixture.nativeElement.querySelector(`#${section.getAttribute('aria-labelledby')}`);
+    expect(heading?.textContent?.trim()).toBe('About');
+    const list = el<HTMLElement>('.about__list');
+    expect(list.querySelector('dt')?.textContent?.trim()).toBe('Version');
+    expect(list.querySelector('dt + dd')?.textContent).toBe(SEEDED);
+  });
+
+  it('shows no version in the header until the runtime has given one', async () => {
+    // Held open: a placeholder would be a version the user did not install.
+    bridge = new FakeTauriBridge();
+    bridge.responses.set('lumen_setup_needed', false);
+    vi.spyOn(bridge, 'getVersion').mockReturnValue(new Promise<string>(() => {}));
+    TestBed.configureTestingModule({
+      providers: [provideRouter([]), { provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Home);
+    fixture.detectChanges();
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.home__version')).toBeNull();
+    expect(el<HTMLElement>('.about__version').textContent).toBe('');
+  });
+
+  it('says the version is unavailable when the runtime cannot give it', async () => {
+    const h = await build(b => b.failures.add(APP_VERSION_CMD));
+    expect(h.version()).toBeNull();
+    expect(fixture.nativeElement.querySelector('.home__version')).toBeNull();
+    expect(el<HTMLElement>('.about__version').textContent).toBe('unavailable');
   });
 });
