@@ -13,7 +13,8 @@
 //! ```
 //!
 //! It is read on every `tools/call`, not once at startup: a setting change takes effect on the
-//! very next read, with no restart of Claude Code. The read is one small `open + read`.
+//! very next read, with no restart of Claude Code. The read is one stat and one small read,
+//! never more than 64 KiB.
 //!
 //! Anything that cannot be read as an answer is the safe side, which is OFF (every read in
 //! full, nothing stubbed) and is reported, not swallowed: [`Resolved::problem`] says what was
@@ -101,12 +102,36 @@ pub enum FileState {
     Unreadable(String),
 }
 
-/// Read the settings file at `path`.
+/// Read the settings file at `path`: a regular file of at most [`MAX_FILE_BYTES`], or the reason
+/// it cannot be used. It is never read past the cap, and a pipe or device is not opened.
 pub fn read_file(path: &Path) -> FileState {
-    match std::fs::read_to_string(path) {
-        Ok(t) => FileState::Text(t),
+    use std::io::Read;
+    let opened = std::fs::metadata(path).and_then(|m| {
+        if m.is_file() {
+            std::fs::File::open(path)
+        } else {
+            Err(std::io::Error::other("not a regular file"))
+        }
+    });
+    let mut bytes = Vec::new();
+    match opened.and_then(|f| f.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileState::Absent,
         Err(e) => FileState::Unreadable(e.to_string()),
+        Ok(_) if bytes.len() as u64 > MAX_FILE_BYTES => {
+            FileState::Unreadable(format!("larger than {MAX_FILE_BYTES} bytes"))
+        }
+        Ok(_) => match String::from_utf8(bytes) {
+            Ok(t) => FileState::Text(t),
+            Err(_) => FileState::Unreadable("stream did not contain valid UTF-8".to_string()),
+        },
+    }
+}
+
+/// `s` as it is, or its first [`ECHO_MAX`] characters and an ellipsis.
+fn bounded(s: &str) -> String {
+    match s.char_indices().nth(ECHO_MAX) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s.to_string(),
     }
 }
 
@@ -122,7 +147,7 @@ fn parse_env(v: Option<&str>) -> Option<Result<Mode, String>> {
         "on" | "1" | "true" => Ok(Mode::On),
         "off" | "0" | "false" => Ok(Mode::Off),
         "ab" => Ok(Mode::Ab),
-        _ => Err(t.to_string()),
+        _ => Err(bounded(t)),
     })
 }
 
@@ -141,7 +166,8 @@ fn parse_file(state: &FileState) -> Result<Option<bool>, String> {
         None => Ok(None),
         Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
         Some(other) => Err(format!(
-            "{REPEAT_READS_KEY} must be true or false, not {other}"
+            "{REPEAT_READS_KEY} must be true or false, not {}",
+            bounded(&other.to_string())
         )),
     }
 }
@@ -216,7 +242,7 @@ fn with_env(file: &FileState) -> Resolved {
         Err(std::env::VarError::NotUnicode(raw)) => Resolved {
             mode: Mode::Off,
             source: Source::Env,
-            problem: Some(Problem::Env(raw.to_string_lossy().into_owned())),
+            problem: Some(Problem::Env(bounded(&raw.to_string_lossy()))),
         },
     }
 }
