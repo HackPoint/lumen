@@ -20,9 +20,10 @@ A run needs `git`, a Rust toolchain, network access to fetch the corpus (or a lo
 below), about 1 GiB of disk for the cache (the corpus plus the v1.7.0 build) and another GiB or
 so for this checkout's release build, and a clean checkout: the
 candidate build refuses uncommitted changes outside `benchmarks/results` (override with
-`--allow-dirty` for a throwaway run, which the output then marks as a dirty tree). The full run
-takes roughly 10 to 15 minutes on an idle laptop, most of it the v1.7.0 build and the latency
-series.
+`--allow-dirty` for a throwaway run, which the output then marks as a dirty tree). With the
+corpus and the v1.7.0 build already cached, a full run took about 4 minutes on the M4 laptop
+(most of it the latency series); the first run also fetches the corpus and makes two release
+builds, which is the longest part.
 
 ## Outputs
 
@@ -195,16 +196,28 @@ lower-median file by line count among those with a representative item and an ed
 listed in the JSON and the summary. Hooks only ever see source files, and the repository is
 Rust, so latency does not depend on the other corpora.
 
-Latency varies. A reviewer should accept a re-run within 20% on the same machine at similar
-load, and should not compare a laptop with a CI runner. Measured repeatability: two full latency
-runs back to back on the Apple M4 laptop of the first run, while other work kept its load
-average at 6 to 9, agreed within 20% on 38 of the 42 series medians. Every process-spawn series
-(`hook.*.spawn`, `hook.floor`, `server.start`) and `server.ping` agreed within 7%. The four that
-did not were the longer server calls and one in-process hook
-(`server.smart_read.1000-2999` on v1.7.0, `server.repeat_changed.1000-2999` and
-`server.repeat_unchanged.300-999` on the current build, `hook.intercept_block.inproc`); which
-series move differs from run to run. On an idle machine expect better; under load, compare
-medians only between runs whose recorded load is alike.
+Latency varies, and on a shared machine it varies more than 20%. Tokens are exact; latency is
+not, and this section says how far. All runs below are the full latency run (42 series
+medians across both builds) on one Apple M4 laptop that other work was using, so its load
+average ranged from 4 to 25 during the session:
+
+| pair of runs (same code, one machine) | series medians within 20% |
+|---|---|
+| two latency-only runs 2 minutes apart, load 6 to 9 | 38 of 42 |
+| two full runs 3 minutes apart, load 4 to 6 | 29 of 42 |
+| a full run against a latency-only run 18 minutes earlier | 18 of 42 |
+| the committed run against that same run, 21 minutes earlier | 15 of 42 |
+
+In the back-to-back pair every process-spawn series (`hook.*.spawn`, `hook.floor`,
+`server.start`) and `server.ping` agreed within 7%; the four that did not were longer server
+calls and one in-process hook. In the other pairs whole families moved together, including
+`hook.floor` (a process that does nothing) and `server.ping` (a round trip that does nothing).
+That is the sign that the machine changed between the runs (power and thermal state, the
+operating system's security scans, other builds), not the code. A longer warm-up did not help;
+pooling over passes (above) did. So: compare two latency runs only when their `hook.floor` and
+`server.ping` medians agree, take them on the same machine at similar recorded load, do not
+compare a laptop with a CI runner, and on a machine that is quiet end to end expect the
+better of these figures.
 
 ## Reading a result
 
