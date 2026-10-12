@@ -181,10 +181,7 @@ fn spooled_faults(spool: &std::path::Path) -> Vec<lumen_core::faults::FaultRecor
     lumen_core::faults::peek_spool_at(spool).expect("read the fault spool")
 }
 
-/// The `ingest_failed` faults spooled for a file whose name satisfies `named`, oldest first.
-///
-/// A daemon files other faults too (a WebSocket port a neighbouring daemon got first, say), and
-/// those say nothing about a transcript.
+/// The `ingest_failed` faults spooled for files whose name satisfies `named`, oldest first.
 fn ingest_failures(
     spool: &std::path::Path,
     named: impl Fn(&str) -> bool,
@@ -202,11 +199,7 @@ fn ingest_failures(
         .collect()
 }
 
-/// A directory with a transcript's name, which the daemon cannot read: refused at open on
-/// Windows, at read elsewhere, and skipped by the poll, so only the watcher reports it.
-///
-/// Numbered so a test can keep making new ones: the watcher reports only what happens after it
-/// is registered, and a fault for one of these is the first sign that it is.
+/// A directory with a transcript's name: the daemon cannot read it, and only the watcher reports it.
 fn make_unreadable(projects: &std::path::Path, n: usize) {
     std::fs::create_dir(projects.join(format!("unreadable-{n}.jsonl"))).unwrap();
 }
@@ -589,11 +582,7 @@ async fn a_snapshot_labels_the_session_with_its_project() {
 async fn a_transcript_deleted_before_the_daemon_reads_it_is_not_a_fault() {
     let fx = start_daemon().await;
 
-    // A round deletes a transcript the moment it is written, so the watcher reports a path the
-    // daemon then finds gone, and makes a directory the daemon does file a fault for. Events are
-    // handled in order, and the daemon records one fault per variant a minute, so the first one
-    // spooled says whether the deletion was one. A round that ran before the watcher was
-    // registered is lost, so rounds repeat, with names of their own, until one is heard.
+    // Rounds repeat under new names until one is heard: a round before the watcher registers is lost.
     let mut round = 0;
     wait_until("a fault for the directory made after a deletion", || {
         round += 1;
