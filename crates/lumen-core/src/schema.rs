@@ -38,10 +38,11 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
 /// Open the ledger at `url` as a pool and bring it up to date: what the daemon runs before it
 /// serves anything and what the app runs before it reads.
 ///
-/// A ledger another program holds at that moment is waited for, not failed on: the connection
-/// itself can be refused (it switches the file to WAL) as well as the statements after it.
+/// A ledger another program holds at that moment is waited for, not failed on, by [`init_schema`].
+/// The connection takes no lock a writer could refuse: sqlx leaves the journal mode alone unless
+/// asked, and the switch to WAL is the DDL's.
 pub async fn open_pool(url: &str) -> Result<sqlx::SqlitePool, sqlx::Error> {
-    let pool = busy::retry_busy(|| sqlx::sqlite::SqlitePoolOptions::new().connect(url)).await?;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new().connect(url).await?;
     init_schema(&pool).await?;
     Ok(pool)
 }
