@@ -25,6 +25,12 @@ jobs:
       # ── Checkout + toolchains ─────────────────────────────────────────────
       - uses: actions/checkout@v7
 
+      # The release workflow takes a release's notes from CHANGELOG.md alone, with
+      # scripts/release-notes.sh, on Linux (its first job) and macOS (the build).
+      # This step runs the script's tests on macOS; the `test` job runs them on Linux.
+      - name: Release notes come from the CHANGELOG
+        run: bash scripts/test-release-notes.sh
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -158,6 +164,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Release notes come from the CHANGELOG
+        if: runner.os == 'Linux'
+        run: bash scripts/test-release-notes.sh
 
       - name: Probe the hook environment
         run: |
