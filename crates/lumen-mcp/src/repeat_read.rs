@@ -68,12 +68,39 @@ pub fn enter(session: Option<&str>) {
     }
 }
 
-/// `None` when the flag is off and the caller did not pass `fresh` (off costs nothing).
+/// How often a problem with the setting is written to the fault spool. The check runs on every
+/// call; the row says it once in a while, so a broken file is visible without being a row per read.
+const PROBLEM_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether repeat reads are on for the call being answered now: the environment, then the
+/// setting file, then on (see [`lumen_core::settings`]). Read per call, so a change to the
+/// setting applies to the next read. A setting that cannot be read is off, and says so.
+///
+/// Turning off also forgets what was remembered: a base kept before it was turned off would be
+/// stale by the time it is turned on again, since reads in between were not tracked.
+pub fn mode() -> Mode {
+    let resolved = lumen_core::settings::repeat_reads();
+    if let Some(problem) = &resolved.problem {
+        let file = lumen_core::meter::db_path()
+            .map(|db| lumen_core::settings::settings_path(&db))
+            .unwrap_or_else(|| lumen_core::settings::FILE_NAME.into());
+        lumen_core::settings::surface(problem, &file, PROBLEM_EVERY);
+    }
+    if resolved.mode == Mode::Off {
+        let dropped = lock().enter(None);
+        if dropped > 0 {
+            eprintln!("lumen: repeat reads are off; {dropped} remembered read(s) dropped");
+        }
+    }
+    resolved.mode
+}
+
+/// `None` when repeat reads are off and the caller did not pass `fresh` (off costs nothing).
 ///
 /// A call that could not be placed in a conversation is answered in full and remembers nothing:
 /// the base it would be compared with belongs to some conversation, and which one is not known.
 pub fn begin(tool: &'static str, path: &str, req_key: &str, args: &Value) -> Option<Ctx> {
-    let mode = repeat::mode_from_env();
+    let mode = mode();
     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
     if mode == Mode::Off && !fresh {
         return None;

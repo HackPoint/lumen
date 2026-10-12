@@ -716,7 +716,7 @@ fn servers(
 
     let n = cfg.warmup + cfg.runs;
 
-    // Repeat reads off: the shipped default.
+    // Repeat reads off, asked for (`Server::start` sets the variable): on is the default from 1.8.0.
     let iso = Isolation::create(&work.join("srv-plain"))?;
     let mut s = Server::start(
         &build.bin,

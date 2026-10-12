@@ -207,12 +207,6 @@ const ALLOWED: &[Allowed] = &[
         "Unset selects the default outline mode.",
     ),
     allow(
-        "crates/lumen-core/src/repeat.rs",
-        OrDefault,
-        "LUMEN_REPEAT_READS",
-        "Unset selects the default: off.",
-    ),
-    allow(
         "crates/lumen-core/src/report.rs",
         NumberForError,
         "INCLUDE_SOURCE_BYTE_CAP",

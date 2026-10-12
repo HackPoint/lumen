@@ -40,20 +40,9 @@ pub const PLAN_DELTA: &str = "delta";
 /// holds: the full answer, and no base kept for next time.
 pub const PLAN_UNIDENTIFIED: &str = "unidentified";
 
-/// Read the rollout mode from `LUMEN_REPEAT_READS`. Anything unrecognised is `Off`.
-pub fn mode_from_env() -> Mode {
-    parse_mode(&std::env::var("LUMEN_REPEAT_READS").unwrap_or_default())
-}
-
-pub fn parse_mode(v: &str) -> Mode {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "on" | "1" | "true" => Mode::On,
-        "ab" => Mode::Ab,
-        _ => Mode::Off,
-    }
-}
-
-/// Whether this path gets the repeat-read path. The salt keeps this split independent of the
+/// Whether this path gets the repeat-read path. The mode itself is decided in one place,
+/// [`crate::settings::repeat_reads`] (environment, then the persisted setting, then on). The
+/// salt keeps this split independent of the
 /// ranked-outline split: with the same hash, "ranked" and "repeat" would be the same files,
 /// and neither experiment could be read without the other.
 pub fn treated(mode: Mode, path: &str) -> bool {
@@ -1106,13 +1095,5 @@ mod tests {
         s.put("one", "k", a_base());
         assert_eq!(s.enter(Some("one")), 0);
         assert!(s.get("one", "k").is_some());
-    }
-
-    #[test]
-    fn mode_parses() {
-        assert_eq!(parse_mode("on"), Mode::On);
-        assert_eq!(parse_mode("AB"), Mode::Ab);
-        assert_eq!(parse_mode(""), Mode::Off);
-        assert_eq!(parse_mode("nonsense"), Mode::Off);
     }
 }

@@ -552,16 +552,17 @@ pub fn handle_initialize() -> Value {
 pub fn handle_tools_list() -> Value {
     let mut list = base_tools_list();
     // Advertised only when repeat reads are on, so the list the model sees is byte-identical
-    // with the flag off. `fresh` is still honoured either way.
-    if lumen_core::repeat::mode_from_env() != lumen_core::ranked::Mode::Off
+    // with them off. `fresh` is still honoured either way. Every session with repeat reads on
+    // pays for each byte of this, twice (two tools), so it says no more than what the flag does:
+    // the answer that sends the model here already spells out `fresh=true`.
+    if repeat_read::mode() != lumen_core::ranked::Mode::Off
         && let Some(tools) = list["tools"].as_array_mut()
     {
         for t in tools {
             if matches!(t["name"].as_str(), Some("smart_read" | "recall_file")) {
                 t["inputSchema"]["properties"]["fresh"] = json!({
                     "type": "boolean",
-                    "default": false,
-                    "description": "Set true to get the full result. Use it when an earlier answer said it refers to a previous read and that read is not in your context."
+                    "description": "Full result, not an unchanged/delta answer."
                 });
             }
         }
@@ -736,7 +737,8 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
     }
 
     // Repeat reads: answer a second read of the same file with less than a second outline,
-    // when the flag is on and the first answer is provably still in the model's context.
+    // when repeat reads are on (the default) and the first answer is provably still in the
+    // model's context.
     let Some(r) = repeat_read::begin("smart_read", path, path, args) else {
         return outline_read(path, &src, full_tokens, line_count);
     };
@@ -761,7 +763,7 @@ pub fn tool_smart_read(args: &Value) -> Outcome {
 }
 
 /// The outline for a first read, a changed read the delta could not serve, and everything
-/// when the repeat flag is off.
+/// when repeat reads are off.
 fn outline_read(path: &str, src: &str, full_tokens: usize, line_count: usize) -> Outcome {
     // outline mode. Which implementation depends on the rollout flag; `Off` is the
     // default and reaches nothing below.
