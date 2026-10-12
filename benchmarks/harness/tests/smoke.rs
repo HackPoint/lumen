@@ -236,12 +236,15 @@ fn the_latency_section_has_every_series_and_only_measured_or_stated_gaps() {
         "hook.intercept_block.inproc",
         "hook.meter_read.inproc",
         "hook.meter_bash.inproc",
+        "hook.per_call_identity",
         "server.start",
         "server.ping",
         "server.smart_read.300-999",
         "server.recall_file.300-999",
         "server.repeat_unchanged.300-999",
         "server.repeat_changed.300-999",
+        "server.identity.placed",
+        "server.identity.unplaced",
     ] {
         let s = find(id);
         let status = s["status"].as_str().expect("a status");
@@ -254,23 +257,27 @@ fn the_latency_section_has_every_series_and_only_measured_or_stated_gaps() {
             assert!(s["lat"][key].as_i64().is_some_and(|n| n > 0), "{id} {key}");
         }
     }
-    // The per-call identity slot: this workspace's build records no per-call identity (a
-    // PreToolUse payload for a lumen tool, sent to `hook intercept`, leaves no record), so the
-    // slot holds no figure and says that, in words, with the commit it was asked of.
-    let slot = find("hook.per_call_identity");
-    assert!(slot["lat"].is_null());
-    assert!(
-        slot["status"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("n/a — this build records no per-call identity")),
-        "the identity slot: {}",
-        slot["status"]
-    );
-    // An Env build has no claim path to time.
-    assert!(
-        !series.iter().any(|s| s["id"] == "server.identity.placed"),
-        "an env-identity build has no server.identity series"
-    );
+    // This workspace's build records per-call identity (the PreToolUse hook on Lumen's own tools
+    // writes a record per call, the server claims it), and the harness finds that by running the
+    // build. So the hook and the server's claim are timed like any other series, and both derived
+    // figures exist. The `n/a` slot a build without the hook gets is covered where it is made.
+    assert_eq!(v["builds"][0]["identity"], "hook");
+    for id in ["server.identity.placed", "server.identity.unplaced"] {
+        assert_eq!(find(id)["status"], "measured", "{id}");
+    }
+    let derived = v["latency"]["builds"][0]["derived"]
+        .as_array()
+        .expect("a derived list");
+    for id in [
+        "hook.per_call_identity.spawn_minus_floor",
+        "hook.per_call_identity.server_claim",
+    ] {
+        let d = derived
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap_or_else(|| panic!("no derived figure {id}"));
+        assert!(d["median_ns"].is_i64(), "{id} has no figure: {d}");
+    }
     // Every series that is not measured says why.
     for s in series {
         let status = s["status"].as_str().expect("a status");
