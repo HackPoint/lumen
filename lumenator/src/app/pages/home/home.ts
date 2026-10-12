@@ -48,6 +48,21 @@ export class Home implements OnInit {
      */
     readonly restored = signal<string[]>([]);
 
+    /**
+     * The version this build was made as, as the Tauri runtime reports it, or null until it has.
+     *
+     * Read from the runtime and never written down here: the one place a version is declared is
+     * `tauri.conf.json`, and a copy in this file would go stale at the next release without
+     * anything failing. The tray menu shows the same value from the same source.
+     */
+    readonly version = signal<string | null>(null);
+
+    /** Set when the runtime could not say, so the About section says so rather than staying blank. */
+    readonly versionFailed = signal(false);
+
+    /** The About section's value: the version, `unavailable` once reading it has failed, else empty. */
+    readonly aboutVersion = computed(() => this.version() ?? (this.versionFailed() ? 'unavailable' : ''));
+
     ngOnInit(): void {
         // Subscribed before the first read. A reason that arrives later, such as the tray checks
         // giving up six seconds in, comes with this event, and the window opened for it is this
@@ -55,10 +70,18 @@ export class Home implements OnInit {
         const sub = this.bridge.listen$('startup-health').subscribe(() => this.readHealth());
         this.destroyRef.onDestroy(() => sub.unsubscribe());
         this.readHealth();
+        this.readVersion();
         this.bridge.invoke<boolean>('lumen_setup_needed')
             .then(needed => { if (needed) this.router.navigate(['/setup']); })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });
         this.s.refreshFaultCount();
+    }
+
+    private readVersion(): void {
+        this.bridge.getVersion()
+            .then(v => this.version.set(v))
+            // Non-fatal, and said so in the About section instead of faking a number.
+            .catch(() => this.versionFailed.set(true));
     }
 
     private readHealth(): void {

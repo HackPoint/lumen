@@ -11,6 +11,8 @@
 #   - both preferences are cleared before the tray is built, and do not read false afterwards
 #   - the icon is on screen, and the main window opens
 #   - the window says why: the icon had been hidden by macOS, and Quit Lumen is how to stop it
+#   - the window says which version this is, in its header and in About: the one tauri.conf.json
+#     declares. macOS has no WebDriver, so this is where the version is read off a built app there
 #
 # Then the control: a launch with nothing planted must do none of that, and keep its window
 # closed.
@@ -40,6 +42,18 @@ fi
 DOMAIN=io.hackpoint.lumen
 KEYS=("NSStatusItem Visible Item-0" "NSStatusItem VisibleCC Item-0")
 EXE="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
+
+# The version this build is, from the two files that declare it, read now rather than written
+# here: step 5 looks for it in the window. tauri.conf.json is what Tauri compiles into the app
+# and answers getVersion() from; plutil reads JSON as well as plists.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CONF_VERSION=$(plutil -extract version raw -o - "$ROOT/lumenator/src-tauri/tauri.conf.json" 2>/dev/null)
+CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/lumenator/src-tauri/Cargo.toml" | head -n1)
+if [ -z "$CONF_VERSION" ] || [ "$CONF_VERSION" != "$CARGO_VERSION" ]; then
+  echo "cannot say which version to look for: tauri.conf.json declares '$CONF_VERSION', the Tauri crate's Cargo.toml '$CARGO_VERSION'" >&2
+  exit 2
+fi
+VERSION=$CONF_VERSION
 mkdir -p "$OUT"
 FAILED=0
 LIMITED=0
@@ -246,6 +260,28 @@ elif [ "$HOW" != "the accessibility API" ] && ! grep -qi "lumen" <<<"$TEXT"; the
   limited "the screenshot does not show the window's content (no Screen Recording permission)"
 else
   fail "the window does not explain the restored icon"
+fi
+
+# The version, which the window shows in its header as "Lumen <version>" and again in About. The
+# accessibility API gives one line per text node, so each is matched as a whole line; text
+# recognition may split or misread a line, so there a miss is a limitation, not a failure.
+if [ -z "$TEXT" ]; then
+  : # reported as a limitation above
+elif [ "$HOW" = "the accessibility API" ]; then
+  if grep -qxF "Lumen $VERSION" <<<"$TEXT"; then
+    ok "the header says \"Lumen $VERSION\""
+  else
+    fail "the header does not say \"Lumen $VERSION\""
+  fi
+  if grep -qxF "$VERSION" <<<"$TEXT"; then
+    ok "About says $VERSION"
+  else
+    fail "About does not say $VERSION"
+  fi
+elif grep -qF "Lumen $VERSION" <<<"$TEXT"; then
+  ok "the header says \"Lumen $VERSION\" (by text recognition)"
+else
+  limited "text recognition did not find \"Lumen $VERSION\" in the screenshot"
 fi
 
 cp "$HOME/Library/Logs/$DOMAIN/Lumen.log" "$OUT/Lumen.log" 2>/dev/null

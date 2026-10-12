@@ -1,6 +1,9 @@
 import { Observable, Subject } from 'rxjs';
 import type { TauriBridge } from './tauri-bridge';
 
+/** The command behind `getVersion()` in `@tauri-apps/api/app`. */
+export const APP_VERSION_CMD = 'plugin:app|version';
+
 /**
  * Test double for {@link TauriBridge}.
  *
@@ -41,6 +44,15 @@ export class FakeTauriBridge implements TauriBridge {
       return Promise.reject(new Error(`fake: ${cmd} failed`));
     }
     return Promise.resolve(this.responses.get(cmd) as T);
+  }
+
+  /**
+   * Stands in for `getVersion()`, which in the app is the `plugin:app|version` command. It is
+   * recorded, seeded and failed like any other command, under that name:
+   * `responses.set(APP_VERSION_CMD, '1.2.3')`.
+   */
+  getVersion(): Promise<string> {
+    return this.invoke<string>(APP_VERSION_CMD);
   }
 
   isPermissionGranted(): Promise<boolean> {

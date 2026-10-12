@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### The app shows which version it is
+
+The version was only in a startup log line, so someone filing a report could not say which build
+they had without opening the log.
+
+- The main window's header reads `Lumen <version>` under the tagline, and an About section at the
+  bottom of the same window lists it under `Version`. Lumen has no separate settings window, so
+  that is where its settings are and where About went.
+- The tray menu starts with the same line, `Lumen <version>`, greyed out. It is disabled, so no
+  platform delivers a click on it, and the menu's handler would ignore it if one did.
+- Both read the app's own `PackageInfo`, which Tauri fills from `tauri.conf.json` when the app is
+  built (the window through `getVersion()`, the tray menu directly). There is no version string of
+  Lumen's own in the frontend or in Rust to keep in step.
+- A test now fails when the version the app was built as differs from `tauri.conf.json`, the
+  Tauri crate's `Cargo.toml` or any crate's, which covers the sidecars the app bundles. The app
+  e2e (Linux and Windows) and the Issue 5 launch check (macOS) read the version from those files
+  and assert the window's text.
+
 ### Repeat reads follow the conversation, not the process (#32)
 
 `/clear` and `/resume` keep `lumen-mcp` running, and it read `CLAUDE_CODE_SESSION_ID` once at

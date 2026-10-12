@@ -150,6 +150,15 @@ fn render_tray_icon(_percent: u8, status: &str) -> tauri::image::Image<'static> 
     tauri::image::Image::new_owned(rgba, size, size)
 }
 
+/// The context the app runs with: `tauri.conf.json` and the assets, embedded at compile time.
+///
+/// `tauri::generate_context!()` may be expanded once per binary (it defines a symbol), and the
+/// unit-test binary contains `run()` too. So this is the one place it is expanded, and the test
+/// that the version the UI shows is the one the manifests declare reads the context from here.
+pub(crate) fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -410,14 +419,16 @@ pub fn run() {
                     .menu(menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
-                        "quit" => app.exit(0),
-                        "show" => {
+                        health::TRAY_QUIT_ID => app.exit(0),
+                        health::TRAY_SHOW_ID => {
                             if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.unminimize();
                                 let _ = w.show();
                                 let _ = w.set_focus();
                             }
                         }
+                        // The version line is disabled, so no click on it arrives here; any
+                        // other id is not one this menu has.
                         _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
@@ -524,7 +535,7 @@ pub fn run() {
             setup::lumen_set_autostart,
             setup::lumen_artifact_health
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application")
         .run(|app, event| match event {
             // Kill the daemon on the way out. The daemon's own stdin watchdog covers
