@@ -165,6 +165,96 @@ under its header was published as empty notes.
   lookalike headers, parses the repository's newest release block, and fails if
   `RELEASE_NOTES.md` comes back or the workflow names another source of notes.
 
+### A log that compresses badly is returned as it is, and its cost is counted as sent
+
+`compress_logs` compared the body it compressed with the log and left out the header it adds, so a
+log that compressed by less than the header cost came back costing more than the log, under a
+header that said it saved tokens. On 56 synthetic logs, by path and inline (112 replies), 31 cost
+more than the log and 11 of those headers said they saved tokens.
+
+- The reply is counted whole, header and body. When that is not cheaper than the log, the log
+  itself comes back with no note, recorded as `would_inflate`, the route the other tools use when
+  they return the file instead. A log with nothing visible in it keeps its header: answering it
+  with itself would send an empty text block, which a client may reject.
+- A log that does compress is answered with the same text as before, and what is recorded for it
+  is lower: `_meta` and the ledger now include the header, so `saved_tokens` falls by its cost.
+  That is 31 to 36 tokens on the optimizer benchmark's four compressed logs, more for a longer
+  path, and `optimizer_baseline.json` moves to match (tokens returned 590 to 621, 1,062 to 1,097,
+  1,180 to 1,215, 804 to 840). The header's own `saved N` still counts the body only, so it reads
+  higher than `_meta` by that amount. The benchmark's incompressible log cost 9,507 tokens while
+  being recorded as 9,472; it now costs 9,472.
+- Each call counts the reply once more, about 0.13 ms per 1,000 tokens of reply in a release build:
+  0.1 to 0.2 ms on the optimizer benchmark's four compressed logs, 1.2 ms on its incompressible
+  one, whose reply is as long as the log.
+- With `LUMEN_RANKED_OUTLINE=on`, a file the ranked arm declined was answered with its outline even
+  when the outline cost more than the file, which a small file's can. It is now answered with the
+  file, recorded as saving nothing. A blank file keeps the outline.
+
+### The guarantee that no tool returns more than the file is worded as far as it is checked
+
+1.6.0 put its backstop "at the single point every metered reply passes through" and gave the worst
+overage as 27 tokens, 0.33% of the file. There is no such point, and `compress_logs` was outside
+the guard until the entry above. The guard sits where each reply is built: in `metered_guarded`
+(the `smart_read` outline and every `recall_file` branch), on the ranked arm's decline, in the
+fallback for a file with no structure, and in a check of `compress_logs`'s own. `smart_read` with
+`mode="full"` has none: the whole file is what it was asked for.
+
+A corpus test, in `crates/lumen-mcp/tests/efficiency.rs`, counts the text each reply sent instead
+of trusting what the reply says about itself, and holds it to the file plus what labels it. It asks
+70 files of this repository (every UTF-8 file of 300 lines or more that fits in 50,000 tokens, of
+any extension), 8 small files and 56 synthetic logs, in every request shape: 1,134 calls on the 70
+files. What a reply may cost above the file:
+
+- the file returned instead of a view that would have cost as much, behind a one-line note: at most
+  80 tokens (27 at most seen);
+- a file with no structure, behind a note that carries its path: the note;
+- `smart_read(mode="full")`, behind a header that carries the path: the header;
+- `compress_logs`: nothing, the log itself when its reply cannot cost less;
+- a file or log with nothing visible in it: no bound, because the reply must not be an empty text
+  block, which a client may reject.
+
+Not checked: error replies, the answers to repeat reads, the JSON-RPC envelope and `_meta`, a file
+that is not UTF-8 or is over 50,000 tokens, and a `recall_file` request whose start line is after
+its end line or far beyond the end of the file, which the test does not generate. The README and
+`docs/efficiency.md` say the same and carry the re-measured figures: interception costs more than
+it saves on 31 of the 61 files of 300 lines or more in this repository, not 17 of 31, and an
+outline costs 7.4% of the file, not 6.2%.
+
+### The startup claims of 1.6.0 are held to the source
+
+1.6.0 said nothing in the tray or sidecar startup uses `?` or `expect`. Its one stated exception,
+`Builder::build`'s `expect`, stands. The rest was too broad: `build_tray_menu_items`,
+`write_atomic` and `stable_binary` use `?`, each handing a failure back to a caller that deals with
+it, so none of them can abort startup, but "nothing uses `?`" was not true of the code.
+
+`crates/lumen-core/tests/startup_scan.rs` now reads the app's four production files (comments,
+strings and test modules blanked out; standard library only, nothing new in the tool path) and
+fails when:
+
+- the `.setup` closure, or any function of the crate that it reaches by name, uses `?` other than
+  those three, or one of them stops using `?`, or its caller stops dealing with the error;
+- production code has an `expect` other than `Builder::build`'s in `run`.
+
+`unwrap` is not claimed. Five remain in production code (four on a `Mutex` lock, one on a JSON
+value the lines before have made an array); the scan lists them and does not pin them. Also not
+checked: calls through trait objects or function pointers, code outside the crate, and a `?` in a
+function startup does not name.
+
+### Release logging is held to the source, and not to a launch
+
+1.6.0 said logging is registered unconditionally, at `Warn` in release. The same scan fails when
+the log plugin is registered anywhere but the top level of the `.setup` closure, or behind a `cfg`,
+a condition or an earlier exit; when it loses its file target (`TargetKind::LogDir`) or takes its
+level from anything but `log_level_from`, whose release default a unit test pins to `Warn`
+(`the_log_level_defaults_differ_by_profile_but_are_never_off`); when the `STARTUP:` line that
+follows it is gone; when a second logger appears; and when a `Cargo.toml` in the workspace caps the
+`log` level with a `max_level_*` feature or makes the plugin optional.
+
+Not checked: that a release binary writes `Lumen.log`. Nothing launches a release build of the app
+and looks for the file: the app e2e and the Issue 5 launch check run debug builds, and
+`scripts/verify-install.sh` only checks that an installed app is running. A `release_max_level_*`
+feature switched on by a dependency cannot be read from a manifest.
+
 ## [1.7.0] — 2026-10-11
 
 ### Repeat reads: a second `smart_read` or `recall_file` of the same thing no longer costs the same again
