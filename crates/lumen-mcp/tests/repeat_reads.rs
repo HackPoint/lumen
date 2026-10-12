@@ -532,7 +532,7 @@ fn fresh_always_returns_the_full_outline_and_is_recorded() {
 fn fresh_is_honoured_and_counted_with_the_flag_off() {
     let rig = rig();
     let f = rig.file("a.rs", &source(40, 6));
-    let mut s = rig.start(&[]);
+    let mut s = rig.start(&[("LUMEN_REPEAT_READS", "off")]);
     let a = s.fresh(&f);
     assert!(a.text.contains("— outline"));
     s.end();
@@ -671,7 +671,8 @@ fn a_repeat_costs_no_more_time_than_a_first_read() {
         s.end();
         (e, last.unwrap())
     };
-    let (off, _) = time(&[]);
+    // Off is asked for: with nothing set repeat reads are on, and this compares the two.
+    let (off, _) = time(&[("LUMEN_REPEAT_READS", "off")]);
     let (on, last) = time(ON);
     assert!(last.text.starts_with("Unchanged since"));
     eprintln!("{n} reads of a 400-function file: off {off:?}, on {on:?}");
