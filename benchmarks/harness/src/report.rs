@@ -565,8 +565,10 @@ fn pass_stability(sec: &LatencySection) -> (usize, usize) {
     (within, total)
 }
 
-/// A hook that got slower between the baseline and the candidate, when it did, with the cause the
-/// code gives. Built from this run's own medians, so it says nothing when the run shows nothing.
+/// A hook that got slower between the baseline and the candidate, when it did. Built from this
+/// run's own medians, so it says nothing when the run shows nothing. It names no cause: the run
+/// times the hook, it does not trace it, so it points at where to look and leaves the finding to
+/// whoever reads the diff.
 fn intercept_block_note(r: &Results, sec: &LatencySection) -> Option<String> {
     const ID: &str = "hook.intercept_block.spawn";
     let role_of = |label: &str| {
@@ -598,9 +600,20 @@ fn intercept_block_note(r: &Results, sec: &LatencySection) -> Option<String> {
         med(base, "hook.intercept_pass.spawn"),
         med(cand, "hook.intercept_pass.spawn"),
     ) {
+        (Some(pb), Some(pc)) if (pc - pb).abs() < 500_000 && (pc as f64) < pb as f64 * 1.1 => {
+            format!(
+                " The hook that lets a Read through (`hook.intercept_pass.spawn`) is {} on {} \
+                 and {} on {}, which is no slower, so the extra time is in the blocking path \
+                 rather than in starting the process.",
+                fmt_ns(pc),
+                cand.label,
+                fmt_ns(pb),
+                base.label
+            )
+        }
         (Some(pb), Some(pc)) => format!(
             " The hook that lets a Read through (`hook.intercept_pass.spawn`) is {} on {} and {} \
-             on {}, so the extra time is in the blocking path, not in starting the process.",
+             on {}, so starting the process, or what every hook does, may be part of it.",
             fmt_ns(pc),
             cand.label,
             fmt_ns(pb),
@@ -608,19 +621,24 @@ fn intercept_block_note(r: &Results, sec: &LatencySection) -> Option<String> {
         ),
         _ => String::new(),
     };
+    let sha = |label: &str| {
+        r.builds
+            .iter()
+            .find(|b| b.label == label)
+            .map_or_else(String::new, |b| b.sha.chars().take(12).collect())
+    };
     Some(format!(
         "`{ID}` is {} slower on {} than on {} ({} against {}, medians as measured on this \
-         machine in this run). Reading the code, the cause is the lookup #42 (the `recall_file` \
-         redirect) added: on every blocked first Read of a file the hook now asks the ledger, \
-         with a read-only query (`meter::lumen_answered`), whether Lumen already answered for \
-         that file, before it decides what to tell the model; {} makes no such lookup. It is a \
-         cost of that redirect, not noise.{pass}",
+         machine in this run). This run times the hook, it does not trace it, so it does not say \
+         why. To find the cause, read what changed in the blocking path of `hook intercept` \
+         between the two commits (`git log {}..{} -- crates/lumen-mcp crates/lumen-core`).{pass}",
         fmt_ns(c - b),
         cand.label,
         base.label,
         fmt_ns(c),
         fmt_ns(b),
-        base.label
+        sha(&base.label),
+        sha(&cand.label),
     ))
 }
 
@@ -999,8 +1017,13 @@ mod tests {
             "{note}"
         );
         assert!(note.contains("5.50 ms against 3.40 ms"), "{note}");
-        assert!(note.contains("#42"), "{note}");
-        assert!(note.contains("lumen_answered"), "{note}");
+        // No cause is asserted: the run cannot know it. It points at the two commits instead.
+        assert!(!note.contains("#42"), "{note}");
+        assert!(!note.contains("lumen_answered"), "{note}");
+        assert!(note.contains("does not say why"), "{note}");
+        assert!(note.contains("git log "), "{note}");
+        // The pass-through hook is the same on both builds here: the extra time is not process start.
+        assert!(note.contains("no slower"), "{note}");
         // Same speed, or faster: nothing to say.
         let same = two_builds(3_400_000, 3_450_000);
         assert!(intercept_block_note(&same, same.latency.as_ref().unwrap()).is_none());

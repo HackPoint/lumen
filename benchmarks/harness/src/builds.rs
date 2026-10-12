@@ -216,21 +216,28 @@ pub fn prebuilt(label: &str, role: &'static str, sha: &str, bin: &Path) -> Res<B
     if !bin.is_file() {
         return Err(format!("{} is not a file", bin.display()));
     }
+    // What the caller called it, not where it is, and not what a symlink points at.
+    let name = bin.file_name().map_or_else(
+        || "lumen-mcp".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    // The server is started with the corpus as its working directory, so a path relative to where
+    // the harness was run would not be found there: spawn would say "No such file".
+    let bin = bin
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", bin.display()))?;
     if !is_full_sha(sha) {
         return Err(format!(
             "the {role} binary {} needs the full 40-character commit SHA it was built from, got {sha:?}",
             bin.display()
         ));
     }
-    let name = bin
-        .file_name()
-        .map_or_else(|| "lumen-mcp".into(), |n| n.to_string_lossy());
     Ok(Build {
         label: label.to_string(),
         role,
         sha: sha.to_string(),
         dirty: false,
-        bin: bin.to_path_buf(),
+        bin,
         profile: "release",
         profile_note: "release, as supplied by --candidate-bin / --baseline-bin".to_string(),
         source: format!("prebuilt binary `{name}`, supplied by the caller"),
@@ -265,6 +272,29 @@ mod tests {
         assert_eq!(b.sha, sha);
         // The commit is the caller's word and must be a whole one.
         assert!(prebuilt("current", "candidate", "dd565a9", &bin).is_err());
+    }
+
+    #[test]
+    fn a_path_that_is_not_absolute_or_not_tidy_is_resolved_before_the_server_is_started() {
+        // The server's working directory is the corpus, not where the harness was run, so what
+        // reaches the spawn must be a whole path with no `..` in it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let bin = dir.path().join("lumen-mcp");
+        std::fs::write(&bin, b"x").unwrap();
+        let untidy = dir.path().join("sub").join("..").join("lumen-mcp");
+        let sha = "dd565a9f0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e";
+        let b = prebuilt("current", "candidate", sha, &untidy).unwrap();
+        assert!(b.bin.is_absolute());
+        assert!(
+            !b.bin
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "{}",
+            b.bin.display()
+        );
+        assert_eq!(b.bin, bin.canonicalize().unwrap());
+        assert!(b.source.contains("`lumen-mcp`"), "{}", b.source);
     }
 
     #[test]

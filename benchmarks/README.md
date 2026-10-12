@@ -326,7 +326,10 @@ file), and say whether it ran on mains or battery. Do not quote a latency figure
 not a required check). It runs `--latency-only` on `ubuntu-latest` and `windows-latest`, uploads
 each `results` directory as an artifact, and commits the result files (`<label>-<os>.json` and
 `<label>-<os>-summary.md`) to a **new branch** `bench-results/<os>-<run id>`, as HackPoint, with
-`permissions: contents: write` for that one push. It never pushes to `main` or to the branch it
+`permissions: contents: write` for that one push. A re-run of the same workflow run (GitHub's
+"Re-run jobs") has the same run id, so from the second attempt on the branch is
+`bench-results/<os>-<run id>-<attempt>` (`-2`, `-3`, ...); the first attempt has no suffix. That
+keeps a re-run from colliding with the first attempt's branch. It never pushes to `main` or to the branch it
 was dispatched from, and a push made with the workflow's own token starts no other workflow, so
 nothing loops. Nothing is merged: the owner opens a pull request from that branch if the numbers
 are worth keeping. The label defaults to `pre-release-<12 characters of the commit>`.
