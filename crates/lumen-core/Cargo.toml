@@ -8,6 +8,9 @@ rust-version.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
+# Only `time`, for the pause between tries in `busy`: sqlx's runtime-tokio already pulls the
+# same crate in with it, so this names a dependency the build has and adds none.
+tokio = { version = "1", default-features = false, features = ["time"] }
 # `bundled` compiles SQLite from source via libsqlite3-sys — no system libsqlite3
 # needed on any OS. Feature unifies with sqlx-sqlite (shared libsqlite3-sys 0.37),
 # so the whole workspace builds on macOS, Linux, and Windows without a system lib.

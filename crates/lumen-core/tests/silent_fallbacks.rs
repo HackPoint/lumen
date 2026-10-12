@@ -171,13 +171,6 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-core/src/meter.rs",
         DroppedWrite,
-        "execute_batch(migration)",
-        "A duplicate column is the expected outcome. Any other failure leaves a column \
-         missing, and the insert that binds it files meter_write_failed.",
-    ),
-    allow(
-        "crates/lumen-core/src/meter.rs",
-        DroppedWrite,
         "set_permissions(&side",
         "Another owner's sidecar keeps its mode, and the write it then refuses is filed as \
          meter_write_failed.",
@@ -256,14 +249,6 @@ const ALLOWED: &[Allowed] = &[
         OrDefault,
         "let html =",
         "The link shown after filing, once the POST has already succeeded.",
-    ),
-    allow(
-        "crates/lumen-core/src/schema.rs",
-        DroppedWrite,
-        "AssertSqlSafe(*migration)",
-        "A duplicate column is the expected outcome. Any other failure leaves a column \
-         missing, and the insert that binds it fails and is filed (ingest_failed, \
-         meter_write_failed): how 1.1.3's missing column would show now.",
     ),
     allow(
         "crates/lumen-core/src/update.rs",

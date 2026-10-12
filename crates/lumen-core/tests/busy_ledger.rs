@@ -82,7 +82,11 @@ fn wal_ledger(dir: &Path) -> PathBuf {
 
 fn backfilled(conn: &Connection) -> bool {
     let marked: i64 = conn
-        .query_row("SELECT is_subagent FROM turns WHERE message_id = 'm1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT is_subagent FROM turns WHERE message_id = 'm1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     marked == 1
 }
@@ -121,7 +125,10 @@ fn the_rusqlite_open_gives_up_busy_once_the_budget_is_spent() {
     writer.release();
 
     assert!(busy::is_busy_rusqlite(&err), "{err}");
-    assert!(took >= busy::BUSY_BUDGET, "gave up after {took:?}, which is early");
+    assert!(
+        took >= busy::BUSY_BUDGET,
+        "gave up after {took:?}, which is early"
+    );
     assert!(
         took < busy::BUSY_BUDGET + Duration::from_secs(3),
         "kept trying for {took:?}"
@@ -165,7 +172,10 @@ async fn the_pool_open_gives_up_busy_once_the_budget_is_spent() {
     writer.release();
 
     assert!(busy::is_busy(&err), "{err}");
-    assert!(took >= busy::BUSY_BUDGET, "gave up after {took:?}, which is early");
+    assert!(
+        took >= busy::BUSY_BUDGET,
+        "gave up after {took:?}, which is early"
+    );
     assert!(
         took < busy::BUSY_BUDGET + Duration::from_secs(3),
         "kept trying for {took:?}"
@@ -221,12 +231,17 @@ async fn a_ledger_that_stays_busy_is_an_error_not_an_already_applied_migration()
     writer.release();
 
     assert!(busy::is_busy(&err), "{err}");
-    assert!(took >= busy::BUSY_BUDGET, "gave up after {took:?}, which is early");
+    assert!(
+        took >= busy::BUSY_BUDGET,
+        "gave up after {took:?}, which is early"
+    );
     assert!(
         took < busy::BUSY_BUDGET + Duration::from_secs(3),
         "kept trying for {took:?}"
     );
 
-    schema::init_schema(&pool).await.expect("the next open finishes the job");
+    schema::init_schema(&pool)
+        .await
+        .expect("the next open finishes the job");
     assert!(backfilled_in(&pool).await);
 }

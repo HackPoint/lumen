@@ -1,3 +1,5 @@
+use crate::busy;
+
 /// Bring a database up to date: create anything missing, then migrate.
 ///
 /// **Every sqlx consumer must call this instead of executing [`DDL`] alone.** DDL
@@ -10,23 +12,36 @@
 ///
 /// Migration errors are swallowed, as they are on the rusqlite side: each
 /// statement is additive and idempotent, so "duplicate column" is the expected
-/// outcome on an already-current database.
+/// outcome on an already-current database. Any other failure leaves a column
+/// missing, and the insert that binds it fails and is filed (`ingest_failed`,
+/// `meter_write_failed`). One error is not read that way: a ledger that stayed
+/// busy (see [`crate::busy`]) means the statement did not run, and calling that
+/// "already applied" would leave a column or an index missing for good. It is
+/// waited for, and returned if the wait runs out; the next open runs the
+/// migration again.
 pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(DDL).execute(pool).await?;
+    busy::retry_busy(|| sqlx::raw_sql(DDL).execute(pool)).await?;
     for migration in MIGRATIONS {
         // AssertSqlSafe is sound here: every statement is a literal in
         // MIGRATIONS above, so no runtime value can reach the SQL.
-        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
-            .execute(pool)
-            .await;
+        let outcome =
+            busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(*migration)).execute(pool)).await;
+        if let Err(e) = outcome
+            && busy::is_busy(&e)
+        {
+            return Err(e);
+        }
     }
     Ok(())
 }
 
 /// Open the ledger at `url` as a pool and bring it up to date: what the daemon runs before it
 /// serves anything and what the app runs before it reads.
+///
+/// A ledger another program holds at that moment is waited for, not failed on: the connection
+/// itself can be refused (it switches the file to WAL) as well as the statements after it.
 pub async fn open_pool(url: &str) -> Result<sqlx::SqlitePool, sqlx::Error> {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new().connect(url).await?;
+    let pool = busy::retry_busy(|| sqlx::sqlite::SqlitePoolOptions::new().connect(url)).await?;
     init_schema(&pool).await?;
     Ok(pool)
 }

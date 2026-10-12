@@ -1,3 +1,4 @@
+use crate::busy;
 use crate::schema::{DDL, MIGRATIONS};
 use rusqlite::{Connection, params};
 
@@ -119,13 +120,20 @@ pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std
 }
 
 /// Open (or create) the lumen SQLite DB, apply DDL + additive migrations.
+///
+/// A ledger another program holds is waited for (see [`crate::busy`]); the migrations'
+/// other errors are "already applied", as in [`crate::schema::init_schema`].
 fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     restore_sidecar_write_bits(path);
     let conn = Connection::open(path)?;
-    conn.execute_batch(DDL)?;
+    busy::retry_busy_blocking(|| conn.execute_batch(DDL))?;
     for migration in MIGRATIONS {
-        // Ignore "duplicate column" errors — migration already applied.
-        let _ = conn.execute_batch(migration);
+        let outcome = busy::retry_busy_blocking(|| conn.execute_batch(migration));
+        if let Err(e) = outcome
+            && busy::is_busy_rusqlite(&e)
+        {
+            return Err(e);
+        }
     }
     Ok(conn)
 }

@@ -12,6 +12,21 @@ as they were, so if the same path comes back it is tailed, or resynced, exactly 
 missing file is excused. A transcript that cannot be read for any other reason (permissions, a
 directory with its name, bytes that are not text) is still recorded.
 
+### Two programs opening the ledger at the same moment no longer fail with "database is locked"
+
+A ledger that is not in WAL mode yet (a first run, or one last written by an old build) is
+switched by whichever program opens it first, and SQLite does not let a second opener wait for
+that: it refuses at once, whatever the busy timeout says, because the two could otherwise wait on
+each other for good. The daemon and a hook, or the app and the daemon, starting together could so
+fail an open that a moment's wait would have let through (seen on Windows in the upgrade tests).
+Every opener (hooks, MCP server, CLI, daemon, app) now tries again for up to two seconds before it
+reports the error.
+
+A migration refused for the same reason used to be skipped and counted as applied, which could
+leave a column or an index missing. A busy ledger is now an error, and the next open runs the
+migration again. Any other migration error (a column that already exists) is still read as
+applied.
+
 ### The app shows which version it is
 
 The version was only in a startup log line, so someone filing a report could not say which build

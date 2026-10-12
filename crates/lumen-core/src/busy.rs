@@ -11,22 +11,54 @@
 //! Openers retry for [`BUSY_BUDGET`] and then give the error back.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long an opener keeps trying a busy ledger, counted from its first attempt.
 pub const BUSY_BUDGET: Duration = Duration::from_secs(2);
 
+/// The wait after the first refusal; it doubles up to [`LONGEST_PAUSE`].
+const FIRST_PAUSE: Duration = Duration::from_millis(5);
+const LONGEST_PAUSE: Duration = Duration::from_millis(25);
+
+/// SQLITE_BUSY. Its extended forms (BUSY_RECOVERY 261, BUSY_SNAPSHOT 517, BUSY_TIMEOUT 773)
+/// carry it in the low byte; SQLITE_LOCKED (6), a table held inside one process, is not it.
+const SQLITE_BUSY: i32 = 5;
+
 /// Whether `e` is SQLITE_BUSY in any of its extended forms.
-pub fn is_busy(_e: &sqlx::Error) -> bool {
-    false
+pub fn is_busy(e: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db) = e else {
+        return false;
+    };
+    db.code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code & 0xff == SQLITE_BUSY)
 }
 
 /// Whether `e` is SQLITE_BUSY in any of its extended forms.
-pub fn is_busy_rusqlite(_e: &rusqlite::Error) -> bool {
-    false
+pub fn is_busy_rusqlite(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy
+    )
+}
+
+/// How long to wait before the next try, or `None` once `budget` is spent.
+fn pause_before_retry(started: Instant, budget: Duration, retries: u32) -> Option<Duration> {
+    let left = budget
+        .checked_sub(started.elapsed())
+        .filter(|left| !left.is_zero())?;
+    Some(
+        (FIRST_PAUSE * (1 << retries.min(3)))
+            .min(LONGEST_PAUSE)
+            .min(left),
+    )
 }
 
 /// Run `op`, again while it fails with SQLITE_BUSY, for up to [`BUSY_BUDGET`].
+///
+/// Any other error is returned as it is, and so is the last busy one when the budget runs out.
+/// An attempt that itself used the budget (it waited out a busy timeout) is not repeated.
 pub async fn retry_busy<T, F, Fut>(op: F) -> Result<T, sqlx::Error>
 where
     F: FnMut() -> Fut,
@@ -35,12 +67,24 @@ where
     retry_busy_for(BUSY_BUDGET, op).await
 }
 
-async fn retry_busy_for<T, F, Fut>(_budget: Duration, mut op: F) -> Result<T, sqlx::Error>
+async fn retry_busy_for<T, F, Fut>(budget: Duration, mut op: F) -> Result<T, sqlx::Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, sqlx::Error>>,
 {
-    op().await
+    let started = Instant::now();
+    let mut retries = 0;
+    loop {
+        let busy = match op().await {
+            Err(e) if is_busy(&e) => e,
+            done => return done,
+        };
+        let Some(pause) = pause_before_retry(started, budget, retries) else {
+            return Err(busy);
+        };
+        tokio::time::sleep(pause).await;
+        retries += 1;
+    }
 }
 
 /// [`retry_busy`] for the rusqlite openers, which block.
@@ -49,10 +93,22 @@ pub fn retry_busy_blocking<T>(op: impl FnMut() -> rusqlite::Result<T>) -> rusqli
 }
 
 fn retry_busy_blocking_for<T>(
-    _budget: Duration,
+    budget: Duration,
     mut op: impl FnMut() -> rusqlite::Result<T>,
 ) -> rusqlite::Result<T> {
-    op()
+    let started = Instant::now();
+    let mut retries = 0;
+    loop {
+        let busy = match op() {
+            Err(e) if is_busy_rusqlite(&e) => e,
+            done => return done,
+        };
+        let Some(pause) = pause_before_retry(started, budget, retries) else {
+            return Err(busy);
+        };
+        std::thread::sleep(pause);
+        retries += 1;
+    }
 }
 
 #[cfg(test)]
@@ -166,11 +222,10 @@ mod tests {
     fn blocking_retry_gives_the_busy_error_back_when_the_budget_is_spent() {
         let calls = Cell::new(0);
         let started = Instant::now();
-        let out: rusqlite::Result<()> =
-            retry_busy_blocking_for(Duration::from_millis(120), || {
-                calls.set(calls.get() + 1);
-                Err(rusqlite_code(5))
-            });
+        let out: rusqlite::Result<()> = retry_busy_blocking_for(Duration::from_millis(120), || {
+            calls.set(calls.get() + 1);
+            Err(rusqlite_code(5))
+        });
         let took = started.elapsed();
         assert!(is_busy_rusqlite(&out.unwrap_err()));
         assert!(calls.get() >= 3, "tried {} times in 120 ms", calls.get());
@@ -182,12 +237,11 @@ mod tests {
     fn blocking_retry_does_not_repeat_a_call_that_used_the_budget_by_itself() {
         // A call that waited the whole busy timeout and still failed was already given its chance.
         let calls = Cell::new(0);
-        let out: rusqlite::Result<()> =
-            retry_busy_blocking_for(Duration::from_millis(30), || {
-                calls.set(calls.get() + 1);
-                std::thread::sleep(Duration::from_millis(60));
-                Err(rusqlite_code(5))
-            });
+        let out: rusqlite::Result<()> = retry_busy_blocking_for(Duration::from_millis(30), || {
+            calls.set(calls.get() + 1);
+            std::thread::sleep(Duration::from_millis(60));
+            Err(rusqlite_code(5))
+        });
         assert!(is_busy_rusqlite(&out.unwrap_err()));
         assert_eq!(calls.get(), 1);
     }

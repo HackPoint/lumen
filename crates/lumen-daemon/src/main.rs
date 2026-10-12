@@ -2,7 +2,6 @@ use futures_util::{SinkExt, StreamExt};
 use lumen_core::record::Record;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -255,13 +254,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     lumen_core::meter::restore_sidecar_write_bits(Path::new(&db_path));
     let conn = format!("sqlite:{db_path}?mode=rwc");
-    let pool = SqlitePoolOptions::new().connect(&conn).await?;
     logline!("lumen-daemon using db: {db_path}");
 
-    // init_schema, not raw DDL: DDL alone is CREATE TABLE IF NOT EXISTS, so on an
+    // open_pool runs init_schema, not raw DDL: DDL alone is CREATE TABLE IF NOT EXISTS, so on an
     // existing database it is a no-op and the is_subagent column added in 1.1.0
     // never appeared — making every insert below fail on an unknown column.
-    lumen_core::schema::init_schema(&pool).await?;
+    let pool = lumen_core::schema::open_pool(&conn).await?;
 
     let (tx, _rx) = broadcast::channel::<TurnMsg>(1000);
 
