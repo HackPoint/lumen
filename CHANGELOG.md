@@ -20,6 +20,46 @@ they had without opening the log.
   e2e (Linux and Windows) and the Issue 5 launch check (macOS) read the version from those files
   and assert the window's text.
 
+### Repeat reads are on by default
+
+1.7.0 shipped repeat reads (a repeat `smart_read` or `recall_file` of an unchanged file answered
+with one sentence, an edited one with a delta) behind `LUMEN_REPEAT_READS=on`. They are now on
+unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
+
+- **Turning it off.** `LUMEN_REPEAT_READS=off` (also `0`, `false`) in the environment the MCP
+  server gets, which applies from the next Claude Code session; or the persisted setting, a
+  `lumen_settings.json` holding `{"repeat_reads": false}` in the Lumen data directory beside the
+  ledger (macOS `~/Library/Application Support/io.speedata.lumen/`), read on every Lumen call
+  (about 30 microseconds), so it applies to the next call with no restart. The environment
+  variable wins over the file when both say something. `ab` is still accepted for the
+  experiment, by the environment variable only. With it off the answers are byte-identical to
+  1.7.0's off, nothing is remembered, and `fresh` is not advertised.
+- **A switch that cannot be read is off, and says so.** An unrecognised `LUMEN_REPEAT_READS`, or a
+  settings file that is not valid JSON, not an object, has a `repeat_reads` that is not a boolean,
+  or cannot be read, answers every read in full (it does not fall back to the other source) and
+  is recorded as a `repeat_reads_config` fault, at most one row every five minutes, with one line
+  on the server's stderr. `lumen doctor` names the value or file and what to write instead.
+  Previously an unrecognised value was silently the same as unset.
+- **Identity or base uncertain: the full result**, as in #32 below. Nothing about the default
+  changes that.
+- **Upgrade, by install.** The new behaviour needs the PreToolUse hooks of #32 (below), which 1.7.0
+  never registered, so after updating until they are registered every call is answered in full,
+  the same as with the switch off. Lumen app: Setup registers them and runs by itself only while
+  `~/.claude/lumen/.setup_done` is missing; launching the app never edits `settings.json`. To run
+  it again: quit Lumen, delete that file, open Lumen, restart Claude Code (there is no menu item
+  for it; the Setup screen's hook check now says this, with the path). Claude Code plugin:
+  `hooks/hooks.json` already carries them; update or reinstall the plugin and restart Claude Code.
+  Homebrew `lumen-cli` alone: it installs `lumen` only, with no MCP server and no hooks, so there
+  is nothing to update; install the app or the plugin.
+- **`lumen doctor`.** The `repeat reads` check is silent when repeat reads are off, however they
+  were turned off, and says nothing is wrong. When they are on but the hooks are not registered it
+  says so, names what that costs, and says what to run for each install. It now prints the state
+  (on or off, and whether the default, the file or the environment decided) and the settings
+  file's path.
+- **Cost.** A two-read scenario (the `repeat_reads` fixture, an unchanged file read twice):
+  1.7.0 as shipped (default off) sends the outline twice, the second read 743 tokens; now the
+  second read is 30 tokens (two reads: 1,486 tokens, now 773; the first read is the same bytes either way). The `optimizer_bench` baselines are untouched.
+
 ### Repeat reads follow the conversation, not the process (#32)
 
 `/clear` and `/resume` keep `lumen-mcp` running, and it read `CLAUDE_CODE_SESSION_ID` once at
