@@ -39,7 +39,10 @@ is stamped **pre-release** in the JSON (`"pre_release": true`) and at the top of
 default label is `pre-release-<12 characters of the commit that was built>`, and the candidate
 build is labelled `pre-<7 characters>` in the tables, so a result always says which commit it is a
 measurement of and never calls it "main" (main moves; the commit does not). The files committed
-here are a measurement of one commit before 1.8.0 and are not a 1.8.0 result.
+here are a measurement of one commit before 1.8.0 and are not a 1.8.0 result. That commit is
+this pull request's branch, whose `crates/` and `lumenator/` are identical to `main` at
+`3008af7` (`git diff 3008af7 <commit> -- crates lumenator` is empty): the harness was added, no
+shipped code was touched.
 
 ## MEASURED and MODELLED
 
@@ -239,6 +242,7 @@ average ranged from 4 to 25 during the session:
 | two full runs 3 minutes apart, load 4 to 6 | 29 of 42 |
 | a full run against a latency-only run 18 minutes earlier | 18 of 42 |
 | the committed run against that same run, 21 minutes earlier | 15 of 42 |
+| `compare` (100 runs per series) against the committed run, a few minutes later, 1-minute load 3.6 against the committed run's 7.4 | 39 of 42 as measured, 32 of 34 after dividing by the floor; the floors were within 5%, and `compare` said the machine matched |
 
 In the back-to-back pair every process-spawn series (`hook.*.spawn`, `hook.floor`,
 `server.start`) and `server.ping` agreed within 7%; the four that did not were longer server

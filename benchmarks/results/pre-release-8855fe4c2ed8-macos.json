@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "label": "current-main",
+  "label": "pre-release-8855fe4c2ed8",
   "pre_release": true,
   "tokenizer": {
     "name": "cl100k_base",
@@ -72,6 +72,8 @@
       "profile": "release",
       "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
       "source": "git archive of 5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94",
+      "identity": "env",
+      "identity_note": "CLAUDE_CODE_SESSION_ID, read once when the server starts",
       "reported_version": "1.7.0",
       "tokens": {
         "digest": "2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7",
@@ -1575,13 +1577,15 @@
       }
     },
     {
-      "label": "current",
+      "label": "pre-8855fe4",
       "role": "candidate",
-      "sha": "5bf97e3fb88c10b026efeefd88b1d6027788d536",
+      "sha": "8855fe4c2ed896d91abd5ef410f5815e0538e655",
       "dirty": false,
       "profile": "release",
       "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
       "source": "the checkout this harness was run from, built in its own target directory",
+      "identity": "env",
+      "identity_note": "CLAUDE_CODE_SESSION_ID, read once when the server starts",
       "reported_version": "1.7.0",
       "tokens": {
         "digest": "2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7",
@@ -3093,6 +3097,8 @@
     "minimum_runs": 100,
     "clock": "std::time::Instant, a monotonic clock, nanosecond resolution",
     "warmup_note": "per series per pass, run the same way as the recorded runs, so caches, page tables and the ledger file are warm; hook spawns are warm-start, not first launch after boot",
+    "percentile_method": "nearest-rank: the percentile p of n runs is the run at rank ceil(p x n / 100) of the sorted runs, fastest first, with no interpolation. With n = 200 the median is run 100 (of the two middle runs of an even count, the faster), p90 is run 180, and p99 is run 198, which leaves the slowest 2 runs above it.",
+    "samples_note": "not written. Each series carries `pass_medians_ns`, the median of each pass on its own, in pass order: how far they sit from one another is how much the machine moved while the run was going on.",
     "subjects": [
       {
         "bucket": "<300",
@@ -3120,8 +3126,8 @@
       {
         "label": "v1.7.0",
         "reported_version": "1.7.0",
-        "load_before": "load average 6.33 7.12 9.78 (1, 5, 15 min)",
-        "load_after": "load average 4.35 6.07 8.98 (1, 5, 15 min)",
+        "load_before": "load average 7.43 11.61 17.81 (1, 5, 15 min)",
+        "load_after": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
         "series": [
           {
             "id": "hook.floor",
@@ -3130,13 +3136,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2422209,
-              "median_ns": 3380625,
-              "p90_ns": 4298375,
-              "p99_ns": 5029709,
-              "max_ns": 6044042
+              "min_ns": 1994167,
+              "median_ns": 2257875,
+              "p90_ns": 2876042,
+              "p99_ns": 3263292,
+              "max_ns": 3596958
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2181916,
+              2281541,
+              2273750,
+              2866666,
+              2092334
+            ]
           },
           {
             "id": "hook.intercept_pass.spawn",
@@ -3145,13 +3158,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2507291,
-              "median_ns": 3613125,
-              "p90_ns": 4361291,
-              "p99_ns": 5553625,
-              "max_ns": 8204541
+              "min_ns": 2040250,
+              "median_ns": 2324333,
+              "p90_ns": 2607250,
+              "p99_ns": 2897500,
+              "max_ns": 18913292
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2153917,
+              2355875,
+              2355125,
+              2559542,
+              2154333
+            ]
           },
           {
             "id": "hook.intercept_block.spawn",
@@ -3160,13 +3180,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2505792,
-              "median_ns": 3430375,
-              "p90_ns": 3919625,
-              "p99_ns": 4268583,
-              "max_ns": 4821042
+              "min_ns": 2011750,
+              "median_ns": 2270042,
+              "p90_ns": 2452958,
+              "p99_ns": 3070833,
+              "max_ns": 4717500
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2120209,
+              2315375,
+              2313625,
+              2419125,
+              2118708
+            ]
           },
           {
             "id": "hook.meter_read.spawn",
@@ -3175,13 +3202,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 38292458,
-              "median_ns": 47514750,
-              "p90_ns": 62734667,
-              "p99_ns": 71993667,
-              "max_ns": 108378042
+              "min_ns": 28986666,
+              "median_ns": 29615041,
+              "p90_ns": 30263125,
+              "p99_ns": 34807875,
+              "max_ns": 37666250
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              29481125,
+              29586708,
+              29775708,
+              29739125,
+              29491667
+            ]
           },
           {
             "id": "hook.meter_bash.spawn",
@@ -3190,53 +3224,65 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 34188458,
-              "median_ns": 41209250,
-              "p90_ns": 66963792,
-              "p99_ns": 96844833,
-              "max_ns": 102243500
+              "min_ns": 28055042,
+              "median_ns": 29018416,
+              "p90_ns": 29983417,
+              "p99_ns": 31423042,
+              "max_ns": 38618667
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              29673333,
+              28685417,
+              28611959,
+              29135416,
+              28949208
+            ]
           },
           {
             "id": "hook.intercept_pass.inproc",
             "what": "run_with, warm: PreToolUse Read under the threshold",
             "subject": null,
-            "status": "n/a: the harness links the candidate's hook library only; the baseline's comparable figure is spawn minus floor",
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
             "lat": null,
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": []
           },
           {
             "id": "hook.intercept_block.inproc",
             "what": "run_with, warm: PreToolUse Read over the threshold, blocked",
             "subject": null,
-            "status": "n/a: the harness links the candidate's hook library only; the baseline's comparable figure is spawn minus floor",
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
             "lat": null,
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": []
           },
           {
             "id": "hook.meter_read.inproc",
             "what": "run_with, warm: PostToolUse Read, one ledger row",
             "subject": null,
-            "status": "n/a: the harness links the candidate's hook library only; the baseline's comparable figure is spawn minus floor",
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
             "lat": null,
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": []
           },
           {
             "id": "hook.meter_bash.inproc",
             "what": "run_with, warm: PostToolUse Bash, one ledger row",
             "subject": null,
-            "status": "n/a: the harness links the candidate's hook library only; the baseline's comparable figure is spawn minus floor",
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
             "lat": null,
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": []
           },
           {
             "id": "hook.per_call_identity",
-            "what": "per-call identity hook overhead (PreToolUse on a Lumen MCP tool), spawn",
+            "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
             "subject": null,
-            "status": "n/a at 5d1ec0408ad2: this build has no identity hook (`hook` accepts: meter, intercept)",
+            "status": "n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 5d1ec0408ad2)",
             "lat": null,
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": []
           },
           {
             "id": "server.start",
@@ -3245,13 +3291,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2358250,
-              "median_ns": 2880292,
-              "p90_ns": 3258666,
-              "p99_ns": 3565000,
-              "max_ns": 3701833
+              "min_ns": 1772791,
+              "median_ns": 2025042,
+              "p90_ns": 2291792,
+              "p99_ns": 2565417,
+              "max_ns": 2711084
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2025042,
+              2244292,
+              1924792,
+              2148917,
+              1907292
+            ]
           },
           {
             "id": "server.ping",
@@ -3260,13 +3313,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 7584,
-              "median_ns": 11708,
-              "p90_ns": 14833,
-              "p99_ns": 37125,
-              "max_ns": 41542
+              "min_ns": 7125,
+              "median_ns": 11833,
+              "p90_ns": 13500,
+              "p99_ns": 17375,
+              "max_ns": 20583
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              11125,
+              11917,
+              12417,
+              11333,
+              11042
+            ]
           },
           {
             "id": "server.smart_read.<300",
@@ -3275,15 +3335,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 589042,
-              "median_ns": 754333,
-              "p90_ns": 819875,
-              "p99_ns": 1767959,
-              "max_ns": 2636125
+              "min_ns": 486000,
+              "median_ns": 517709,
+              "p90_ns": 561042,
+              "p99_ns": 643792,
+              "max_ns": 723583
             },
             "routes": {
               "smart_read": 300
-            }
+            },
+            "pass_medians_ns": [
+              509000,
+              560333,
+              510375,
+              518417,
+              516375
+            ]
           },
           {
             "id": "server.recall_file.<300",
@@ -3292,15 +3359,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 622041,
-              "median_ns": 784292,
-              "p90_ns": 906333,
-              "p99_ns": 1094958,
-              "max_ns": 1293166
+              "min_ns": 503334,
+              "median_ns": 610667,
+              "p90_ns": 772041,
+              "p99_ns": 979917,
+              "max_ns": 1131625
             },
             "routes": {
               "recall_file": 300
-            }
+            },
+            "pass_medians_ns": [
+              689000,
+              713542,
+              528291,
+              603792,
+              610667
+            ]
           },
           {
             "id": "server.smart_read.300-999",
@@ -3309,15 +3383,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2215041,
-              "median_ns": 2796208,
-              "p90_ns": 3568083,
-              "p99_ns": 3892583,
-              "max_ns": 4277333
+              "min_ns": 1997500,
+              "median_ns": 2091375,
+              "p90_ns": 2267000,
+              "p99_ns": 2403708,
+              "max_ns": 2534209
             },
             "routes": {
               "smart_read": 300
-            }
+            },
+            "pass_medians_ns": [
+              2156709,
+              2215542,
+              2039583,
+              2043416,
+              2071750
+            ]
           },
           {
             "id": "server.recall_file.300-999",
@@ -3326,15 +3407,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2241208,
-              "median_ns": 2781459,
-              "p90_ns": 3365750,
-              "p99_ns": 3607250,
-              "max_ns": 3678875
+              "min_ns": 1909625,
+              "median_ns": 1976333,
+              "p90_ns": 2036791,
+              "p99_ns": 2130167,
+              "max_ns": 2512333
             },
             "routes": {
               "recall_file": 300
-            }
+            },
+            "pass_medians_ns": [
+              1959875,
+              2001000,
+              1971958,
+              1964000,
+              1989750
+            ]
           },
           {
             "id": "server.smart_read.1000-2999",
@@ -3343,15 +3431,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 5627500,
-              "median_ns": 7541208,
-              "p90_ns": 8961000,
-              "p99_ns": 9563583,
-              "max_ns": 15713166
+              "min_ns": 4855041,
+              "median_ns": 4989709,
+              "p90_ns": 5110000,
+              "p99_ns": 5575625,
+              "max_ns": 5969625
             },
             "routes": {
               "smart_read": 300
-            }
+            },
+            "pass_medians_ns": [
+              4989375,
+              4973083,
+              4993916,
+              4962917,
+              5018875
+            ]
           },
           {
             "id": "server.recall_file.1000-2999",
@@ -3360,15 +3455,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 5865750,
-              "median_ns": 8252041,
-              "p90_ns": 10511959,
-              "p99_ns": 20925708,
-              "max_ns": 21579958
+              "min_ns": 4797541,
+              "median_ns": 4920209,
+              "p90_ns": 5073375,
+              "p99_ns": 5297875,
+              "max_ns": 5435750
             },
             "routes": {
               "recall_file": 300
-            }
+            },
+            "pass_medians_ns": [
+              4895916,
+              4947875,
+              4976625,
+              4904333,
+              4884333
+            ]
           },
           {
             "id": "server.repeat_unchanged.<300",
@@ -3377,15 +3479,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1814583,
-              "median_ns": 3117292,
-              "p90_ns": 4273833,
-              "p99_ns": 8026000,
-              "max_ns": 10184125
+              "min_ns": 1499542,
+              "median_ns": 2133958,
+              "p90_ns": 3426209,
+              "p99_ns": 4248375,
+              "max_ns": 4450500
             },
             "routes": {
               "smart_read_unchanged": 300
-            }
+            },
+            "pass_medians_ns": [
+              2191417,
+              1820708,
+              3342166,
+              2080250,
+              2045542
+            ]
           },
           {
             "id": "server.repeat_changed.<300",
@@ -3394,15 +3503,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2276083,
-              "median_ns": 3542416,
-              "p90_ns": 5298875,
-              "p99_ns": 8969875,
-              "max_ns": 9533583
+              "min_ns": 2247708,
+              "median_ns": 3985250,
+              "p90_ns": 6373583,
+              "p99_ns": 7127083,
+              "max_ns": 7397042
             },
             "routes": {
               "smart_read_delta": 300
-            }
+            },
+            "pass_medians_ns": [
+              2709416,
+              2548291,
+              6274416,
+              4180166,
+              4032833
+            ]
           },
           {
             "id": "server.repeat_unchanged.300-999",
@@ -3411,15 +3527,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3487250,
-              "median_ns": 5345791,
-              "p90_ns": 6272042,
-              "p99_ns": 11929625,
-              "max_ns": 14150958
+              "min_ns": 3231042,
+              "median_ns": 3947083,
+              "p90_ns": 5647459,
+              "p99_ns": 12321417,
+              "max_ns": 19631042
             },
             "routes": {
               "smart_read_unchanged": 300
-            }
+            },
+            "pass_medians_ns": [
+              3849041,
+              3902250,
+              5647459,
+              3731167,
+              4048000
+            ]
           },
           {
             "id": "server.repeat_changed.300-999",
@@ -3428,15 +3551,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3790250,
-              "median_ns": 6461250,
-              "p90_ns": 8614250,
-              "p99_ns": 13311667,
-              "max_ns": 16537166
+              "min_ns": 3894542,
+              "median_ns": 7368625,
+              "p90_ns": 9901792,
+              "p99_ns": 11386291,
+              "max_ns": 31154083
             },
             "routes": {
               "smart_read_delta": 300
-            }
+            },
+            "pass_medians_ns": [
+              6509292,
+              7779875,
+              4412208,
+              7227000,
+              9885583
+            ]
           },
           {
             "id": "server.repeat_unchanged.1000-2999",
@@ -3445,15 +3575,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 6814041,
-              "median_ns": 8845584,
-              "p90_ns": 11588833,
-              "p99_ns": 12206250,
-              "max_ns": 15482958
+              "min_ns": 6325084,
+              "median_ns": 6633875,
+              "p90_ns": 7721125,
+              "p99_ns": 9469417,
+              "max_ns": 15351917
             },
             "routes": {
               "smart_read_unchanged": 300
-            }
+            },
+            "pass_medians_ns": [
+              6547375,
+              6601125,
+              6503583,
+              6930375,
+              7585666
+            ]
           },
           {
             "id": "server.repeat_changed.1000-2999",
@@ -3462,45 +3599,62 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 8670458,
-              "median_ns": 13202250,
-              "p90_ns": 14956375,
-              "p99_ns": 17594041,
-              "max_ns": 21434917
+              "min_ns": 7914708,
+              "median_ns": 9536167,
+              "p90_ns": 14258875,
+              "p99_ns": 14996833,
+              "max_ns": 17379667
             },
             "routes": {
               "smart_read_delta": 300
-            }
+            },
+            "pass_medians_ns": [
+              9431750,
+              9531125,
+              8889250,
+              10245000,
+              14230625
+            ]
           }
         ],
         "derived": [
           {
             "id": "hook.intercept_pass.spawn_minus_floor",
             "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
-            "median_ns": 232500
+            "median_ns": 66458
           },
           {
             "id": "hook.intercept_block.spawn_minus_floor",
             "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
-            "median_ns": 49750
+            "median_ns": 12167
           },
           {
             "id": "hook.meter_read.spawn_minus_floor",
             "what": "median(hook.meter_read.spawn) - median(hook.floor)",
-            "median_ns": 44134125
+            "median_ns": 27357166
           },
           {
             "id": "hook.meter_bash.spawn_minus_floor",
             "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
-            "median_ns": 37828625
+            "median_ns": 26760541
+          },
+          {
+            "id": "hook.per_call_identity.spawn_minus_floor",
+            "what": "median(hook.per_call_identity) - median(hook.floor)",
+            "median_ns": null
+          },
+          {
+            "id": "hook.per_call_identity.server_claim",
+            "what": "median(server.identity.placed) - median(server.identity.unplaced)",
+            "median_ns": null
           }
         ]
       },
       {
-        "label": "current",
+        "label": "pre-8855fe4",
         "reported_version": "1.7.0",
-        "load_before": "load average 6.33 7.12 9.78 (1, 5, 15 min)",
-        "load_after": "load average 4.35 6.07 8.98 (1, 5, 15 min)",
+        "load_before": "load average 7.43 11.61 17.81 (1, 5, 15 min)",
+        "load_after": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
         "series": [
           {
             "id": "hook.floor",
@@ -3509,13 +3663,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2531041,
-              "median_ns": 3464375,
-              "p90_ns": 4178500,
-              "p99_ns": 5587500,
-              "max_ns": 8761750
+              "min_ns": 2027000,
+              "median_ns": 2325583,
+              "p90_ns": 2455917,
+              "p99_ns": 2569375,
+              "max_ns": 2627625
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2119084,
+              2326292,
+              2281500,
+              2348958,
+              2414625
+            ]
           },
           {
             "id": "hook.intercept_pass.spawn",
@@ -3524,13 +3685,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2539625,
-              "median_ns": 3418083,
-              "p90_ns": 4660916,
-              "p99_ns": 5144958,
-              "max_ns": 5904500
+              "min_ns": 2053375,
+              "median_ns": 2310250,
+              "p90_ns": 2618208,
+              "p99_ns": 2817291,
+              "max_ns": 2852459
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2171292,
+              2373125,
+              2148458,
+              2385041,
+              2614584
+            ]
           },
           {
             "id": "hook.intercept_block.spawn",
@@ -3539,13 +3707,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3942709,
-              "median_ns": 5492000,
-              "p90_ns": 7137917,
-              "p99_ns": 8627000,
-              "max_ns": 9266333
+              "min_ns": 3244250,
+              "median_ns": 3786750,
+              "p90_ns": 4178042,
+              "p99_ns": 5024292,
+              "max_ns": 13827625
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              3532125,
+              3864500,
+              3395834,
+              3817333,
+              4132417
+            ]
           },
           {
             "id": "hook.meter_read.spawn",
@@ -3554,13 +3729,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 32845292,
-              "median_ns": 46942084,
-              "p90_ns": 57183542,
-              "p99_ns": 79418833,
-              "max_ns": 80660500
+              "min_ns": 28755667,
+              "median_ns": 29532417,
+              "p90_ns": 30247542,
+              "p99_ns": 32791667,
+              "max_ns": 34587500
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              29461500,
+              29476083,
+              29511583,
+              29571500,
+              29660166
+            ]
           },
           {
             "id": "hook.meter_bash.spawn",
@@ -3569,13 +3751,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 31710750,
-              "median_ns": 45133167,
-              "p90_ns": 79305709,
-              "p99_ns": 99319375,
-              "max_ns": 124035000
+              "min_ns": 27874417,
+              "median_ns": 28763250,
+              "p90_ns": 29829584,
+              "p99_ns": 31758292,
+              "max_ns": 34885250
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              29677959,
+              28763333,
+              28704500,
+              28578208,
+              28675208
+            ]
           },
           {
             "id": "hook.intercept_pass.inproc",
@@ -3584,13 +3773,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 39375,
-              "median_ns": 54791,
-              "p90_ns": 77709,
-              "p99_ns": 102750,
-              "max_ns": 137083
+              "min_ns": 22875,
+              "median_ns": 46750,
+              "p90_ns": 68584,
+              "p99_ns": 80750,
+              "max_ns": 96250
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              65791,
+              67125,
+              27916,
+              31750,
+              46750
+            ]
           },
           {
             "id": "hook.intercept_block.inproc",
@@ -3599,13 +3795,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1222917,
-              "median_ns": 1844417,
-              "p90_ns": 3715708,
-              "p99_ns": 13641708,
-              "max_ns": 18006125
+              "min_ns": 814375,
+              "median_ns": 1920292,
+              "p90_ns": 2860000,
+              "p99_ns": 4337875,
+              "max_ns": 4457583
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2774542,
+              2764125,
+              1664166,
+              1328958,
+              1588250
+            ]
           },
           {
             "id": "hook.meter_read.inproc",
@@ -3614,13 +3817,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2649083,
-              "median_ns": 3524708,
-              "p90_ns": 3938750,
-              "p99_ns": 4610709,
-              "max_ns": 5730583
+              "min_ns": 2244458,
+              "median_ns": 2744375,
+              "p90_ns": 4155750,
+              "p99_ns": 4498542,
+              "max_ns": 5403375
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              4016084,
+              4064458,
+              2673834,
+              2369166,
+              2648750
+            ]
           },
           {
             "id": "hook.meter_bash.inproc",
@@ -3629,21 +3839,29 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1645791,
-              "median_ns": 2610583,
-              "p90_ns": 3703583,
-              "p99_ns": 5025958,
-              "max_ns": 10119958
+              "min_ns": 2111541,
+              "median_ns": 3106083,
+              "p90_ns": 4778250,
+              "p99_ns": 9969125,
+              "max_ns": 15613417
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              4417375,
+              4516875,
+              2363541,
+              2864208,
+              2422875
+            ]
           },
           {
             "id": "hook.per_call_identity",
-            "what": "per-call identity hook overhead (PreToolUse on a Lumen MCP tool), spawn",
+            "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
             "subject": null,
-            "status": "n/a at 5bf97e3fb88c: this build has no identity hook (`hook` accepts: meter, intercept)",
+            "status": "n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 8855fe4c2ed8)",
             "lat": null,
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": []
           },
           {
             "id": "server.start",
@@ -3652,13 +3870,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2251500,
-              "median_ns": 3101958,
-              "p90_ns": 4294167,
-              "p99_ns": 7740041,
-              "max_ns": 8426209
+              "min_ns": 1918916,
+              "median_ns": 2312083,
+              "p90_ns": 2910083,
+              "p99_ns": 3203084,
+              "max_ns": 3563208
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              2811833,
+              2794291,
+              2269750,
+              2198417,
+              2214750
+            ]
           },
           {
             "id": "server.ping",
@@ -3667,13 +3892,20 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 8959,
-              "median_ns": 12625,
-              "p90_ns": 18250,
-              "p99_ns": 23792,
-              "max_ns": 27458
+              "min_ns": 7125,
+              "median_ns": 10833,
+              "p90_ns": 12667,
+              "p99_ns": 14833,
+              "max_ns": 18958
             },
-            "routes": {}
+            "routes": {},
+            "pass_medians_ns": [
+              11708,
+              11750,
+              10875,
+              10500,
+              10375
+            ]
           },
           {
             "id": "server.smart_read.<300",
@@ -3682,15 +3914,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 585792,
-              "median_ns": 812375,
-              "p90_ns": 1115333,
-              "p99_ns": 1336500,
-              "max_ns": 1427042
+              "min_ns": 506500,
+              "median_ns": 586792,
+              "p90_ns": 762791,
+              "p99_ns": 824041,
+              "max_ns": 832042
             },
             "routes": {
               "smart_read": 300
-            }
+            },
+            "pass_medians_ns": [
+              651709,
+              740208,
+              586792,
+              542417,
+              522000
+            ]
           },
           {
             "id": "server.recall_file.<300",
@@ -3699,15 +3938,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 624792,
-              "median_ns": 932708,
-              "p90_ns": 1169500,
-              "p99_ns": 2580000,
-              "max_ns": 6805875
+              "min_ns": 509917,
+              "median_ns": 650834,
+              "p90_ns": 847500,
+              "p99_ns": 945709,
+              "max_ns": 981500
             },
             "routes": {
               "recall_file": 300
-            }
+            },
+            "pass_medians_ns": [
+              671583,
+              843833,
+              662375,
+              627166,
+              589500
+            ]
           },
           {
             "id": "server.smart_read.300-999",
@@ -3716,15 +3962,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2438916,
-              "median_ns": 3424666,
-              "p90_ns": 3934667,
-              "p99_ns": 6340959,
-              "max_ns": 7364500
+              "min_ns": 1985292,
+              "median_ns": 2098292,
+              "p90_ns": 2228750,
+              "p99_ns": 2480000,
+              "max_ns": 2661750
             },
             "routes": {
               "smart_read": 300
-            }
+            },
+            "pass_medians_ns": [
+              2140500,
+              2079000,
+              2094125,
+              2112209,
+              2040833
+            ]
           },
           {
             "id": "server.recall_file.300-999",
@@ -3733,15 +3986,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2330125,
-              "median_ns": 3284750,
-              "p90_ns": 3725333,
-              "p99_ns": 3912000,
-              "max_ns": 3982000
+              "min_ns": 1927709,
+              "median_ns": 2039500,
+              "p90_ns": 2366292,
+              "p99_ns": 3162583,
+              "max_ns": 5179708
             },
             "routes": {
               "recall_file": 300
-            }
+            },
+            "pass_medians_ns": [
+              2339583,
+              2025208,
+              2026875,
+              2036583,
+              2016792
+            ]
           },
           {
             "id": "server.smart_read.1000-2999",
@@ -3750,15 +4010,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 5952250,
-              "median_ns": 8590125,
-              "p90_ns": 9891667,
-              "p99_ns": 13086750,
-              "max_ns": 17983291
+              "min_ns": 4891583,
+              "median_ns": 5050791,
+              "p90_ns": 5415167,
+              "p99_ns": 6832959,
+              "max_ns": 7671500
             },
             "routes": {
               "smart_read": 300
-            }
+            },
+            "pass_medians_ns": [
+              5261125,
+              5050791,
+              4977333,
+              5062000,
+              4981833
+            ]
           },
           {
             "id": "server.recall_file.1000-2999",
@@ -3767,15 +4034,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 6221625,
-              "median_ns": 8290250,
-              "p90_ns": 9417125,
-              "p99_ns": 11238375,
-              "max_ns": 12181333
+              "min_ns": 4820708,
+              "median_ns": 4943916,
+              "p90_ns": 5139250,
+              "p99_ns": 5628792,
+              "max_ns": 5983708
             },
             "routes": {
               "recall_file": 300
-            }
+            },
+            "pass_medians_ns": [
+              5068750,
+              4912292,
+              4911958,
+              4952750,
+              4919375
+            ]
           },
           {
             "id": "server.repeat_unchanged.<300",
@@ -3784,15 +4058,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1959666,
-              "median_ns": 2452667,
-              "p90_ns": 3580750,
-              "p99_ns": 4905958,
-              "max_ns": 9943834
+              "min_ns": 1670000,
+              "median_ns": 2160208,
+              "p90_ns": 4086500,
+              "p99_ns": 4950000,
+              "max_ns": 14329833
             },
             "routes": {
               "smart_read_unchanged": 300
-            }
+            },
+            "pass_medians_ns": [
+              2109833,
+              2007125,
+              2391458,
+              4057500,
+              2061958
+            ]
           },
           {
             "id": "server.repeat_changed.<300",
@@ -3801,15 +4082,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2556083,
-              "median_ns": 3331542,
-              "p90_ns": 5602459,
-              "p99_ns": 7032709,
-              "max_ns": 8264792
+              "min_ns": 2866708,
+              "median_ns": 3768333,
+              "p90_ns": 6293667,
+              "p99_ns": 7205334,
+              "max_ns": 7492500
             },
             "routes": {
               "smart_read_delta": 300
-            }
+            },
+            "pass_medians_ns": [
+              3289416,
+              3735125,
+              4265042,
+              6193250,
+              3288375
+            ]
           },
           {
             "id": "server.repeat_unchanged.300-999",
@@ -3818,15 +4106,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 4083166,
-              "median_ns": 5370209,
-              "p90_ns": 6655416,
-              "p99_ns": 9588000,
-              "max_ns": 50614917
+              "min_ns": 3476750,
+              "median_ns": 3954292,
+              "p90_ns": 4770584,
+              "p99_ns": 7420834,
+              "max_ns": 25064709
             },
             "routes": {
               "smart_read_unchanged": 300
-            }
+            },
+            "pass_medians_ns": [
+              3770583,
+              3804167,
+              4033125,
+              4700791,
+              3944291
+            ]
           },
           {
             "id": "server.repeat_changed.300-999",
@@ -3835,15 +4130,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3838000,
-              "median_ns": 6899167,
-              "p90_ns": 8282500,
-              "p99_ns": 12216125,
-              "max_ns": 14905833
+              "min_ns": 4168875,
+              "median_ns": 6706875,
+              "p90_ns": 10443458,
+              "p99_ns": 11311083,
+              "max_ns": 12187500
             },
             "routes": {
               "smart_read_delta": 300
-            }
+            },
+            "pass_medians_ns": [
+              6442584,
+              6430750,
+              6691916,
+              9268041,
+              10192208
+            ]
           },
           {
             "id": "server.repeat_unchanged.1000-2999",
@@ -3852,15 +4154,22 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 6393291,
-              "median_ns": 10916667,
-              "p90_ns": 16808083,
-              "p99_ns": 21297542,
-              "max_ns": 26973333
+              "min_ns": 6354375,
+              "median_ns": 6775959,
+              "p90_ns": 7625250,
+              "p99_ns": 7941833,
+              "max_ns": 17012292
             },
             "routes": {
               "smart_read_unchanged": 300
-            }
+            },
+            "pass_medians_ns": [
+              6677375,
+              6498417,
+              6626459,
+              7443000,
+              7467250
+            ]
           },
           {
             "id": "server.repeat_changed.1000-2999",
@@ -3869,37 +4178,54 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 8802667,
-              "median_ns": 14062083,
-              "p90_ns": 21724084,
-              "p99_ns": 26287042,
-              "max_ns": 35182125
+              "min_ns": 8171208,
+              "median_ns": 9739333,
+              "p90_ns": 14728292,
+              "p99_ns": 15626333,
+              "max_ns": 25901084
             },
             "routes": {
               "smart_read_delta": 300
-            }
+            },
+            "pass_medians_ns": [
+              9488791,
+              9445833,
+              9071042,
+              14551166,
+              14183458
+            ]
           }
         ],
         "derived": [
           {
             "id": "hook.intercept_pass.spawn_minus_floor",
             "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
-            "median_ns": -46292
+            "median_ns": -15333
           },
           {
             "id": "hook.intercept_block.spawn_minus_floor",
             "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
-            "median_ns": 2027625
+            "median_ns": 1461167
           },
           {
             "id": "hook.meter_read.spawn_minus_floor",
             "what": "median(hook.meter_read.spawn) - median(hook.floor)",
-            "median_ns": 43477709
+            "median_ns": 27206834
           },
           {
             "id": "hook.meter_bash.spawn_minus_floor",
             "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
-            "median_ns": 41668792
+            "median_ns": 26437667
+          },
+          {
+            "id": "hook.per_call_identity.spawn_minus_floor",
+            "what": "median(hook.per_call_identity) - median(hook.floor)",
+            "median_ns": null
+          },
+          {
+            "id": "hook.per_call_identity.server_claim",
+            "what": "median(server.identity.placed) - median(server.identity.unplaced)",
+            "median_ns": null
           }
         ]
       }
@@ -3939,9 +4265,9 @@
     "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
     "host_triple": "aarch64-apple-darwin",
     "rustflags": null,
-    "started_utc": "2026-10-12T01:06:45Z",
-    "load_at_start": "load average 5.71 7.15 9.97 (1, 5, 15 min)",
-    "load_at_end": "load average 4.35 6.07 8.98 (1, 5, 15 min)",
+    "started_utc": "2026-10-12T04:06:58Z",
+    "load_at_start": "load average 8.50 12.24 18.25 (1, 5, 15 min)",
+    "load_at_end": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
     "probe_errors": []
   }
 }
