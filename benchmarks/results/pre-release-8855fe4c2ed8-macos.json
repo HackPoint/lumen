@@ -1,0 +1,4273 @@
+{
+  "schema": 1,
+  "label": "pre-release-8855fe4c2ed8",
+  "pre_release": true,
+  "tokenizer": {
+    "name": "cl100k_base",
+    "implementation": "lumen_core::tokenizer::count_tokens, the function the meter uses",
+    "is_proxy_for_claude": true,
+    "caveat": "cl100k_base is not Claude's tokenizer. Counts compare modes with one another; they are not a bill and not the number of tokens Claude would charge.",
+    "counted": "the reply text of a tool call. The JSON-RPC envelope and `_meta` are not counted, exactly as the meter does not count them.",
+    "line_endings": "files are read byte for byte from the git object database; no line-ending conversion happens anywhere"
+  },
+  "corpus": [
+    {
+      "name": "lumen",
+      "url": "https://github.com/HackPoint/lumen",
+      "license": "MIT",
+      "sha": "3b951e93dbe55e46dc0e15951666b303110861e7",
+      "note": "this repository (Rust, plus the app's TypeScript), main before the benchmarks landed",
+      "fingerprint": "af5b4e4b39109fd8ba053bd3a0464d8aeb2dbc5af11eab6bdad46a55d5829f91",
+      "candidate_files": 96,
+      "measured_files": 96,
+      "skipped_files": 0,
+      "files_by_bucket": {
+        "1000-2999": 11,
+        "300-999": 31,
+        "3000+": 1,
+        "<300": 53
+      }
+    },
+    {
+      "name": "react-hook-form",
+      "url": "https://github.com/react-hook-form/react-hook-form",
+      "license": "MIT",
+      "sha": "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4",
+      "note": "TypeScript and TSX, tag v7.90.0",
+      "fingerprint": "8105ee5fee8b500cc2e26e969df4a885b6a00a61ce32dc348e4a458c9f3a729b",
+      "candidate_files": 413,
+      "measured_files": 413,
+      "skipped_files": 0,
+      "files_by_bucket": {
+        "1000-2999": 14,
+        "300-999": 39,
+        "3000+": 3,
+        "<300": 357
+      }
+    },
+    {
+      "name": "pytest",
+      "url": "https://github.com/pytest-dev/pytest",
+      "license": "MIT",
+      "sha": "cf470ec0bf7eb89cd97dd56df4859eae5db46447",
+      "note": "Python, tag 9.1.1",
+      "fingerprint": "76119b91edaf3e4227f8ee12cbe5e75e5877e7cc774ee1ce36f9b7eca6ae491e",
+      "candidate_files": 270,
+      "measured_files": 270,
+      "skipped_files": 0,
+      "files_by_bucket": {
+        "1000-2999": 36,
+        "300-999": 46,
+        "3000+": 3,
+        "<300": 185
+      }
+    }
+  ],
+  "builds": [
+    {
+      "label": "v1.7.0",
+      "role": "baseline",
+      "sha": "5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94",
+      "dirty": false,
+      "profile": "release",
+      "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
+      "source": "git archive of 5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94",
+      "identity": "env",
+      "identity_note": "CLAUDE_CODE_SESSION_ID, read once when the server starts",
+      "reported_version": "1.7.0",
+      "tokens": {
+        "digest": "2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7",
+        "files": 779,
+        "aggregates": {
+          "all": {
+            "files": 779,
+            "full": {
+              "n": 779,
+              "median": 478,
+              "p90": 7359
+            },
+            "outline": {
+              "returned": {
+                "n": 779,
+                "median": 155,
+                "p90": 516
+              },
+              "saved_median": 312,
+              "modelled_usd_median": 0.01209,
+              "routes": {
+                "ranked_no_defs": 19,
+                "smart_read": 582,
+                "would_inflate": 178
+              }
+            },
+            "recall": {
+              "returned": {
+                "n": 469,
+                "median": 138,
+                "p90": 332
+              },
+              "saved_median": 540,
+              "modelled_usd_median": 0.020925,
+              "routes": {
+                "recall_file": 426,
+                "would_inflate": 43
+              }
+            },
+            "stub": {
+              "returned": {
+                "n": 779,
+                "median": 30,
+                "p90": 30
+              },
+              "saved_median": 448,
+              "modelled_usd_median": 0.01736,
+              "routes": {
+                "ranked_no_defs/unchanged": 19,
+                "smart_read_unchanged/unchanged": 719,
+                "would_inflate/unchanged_not_smaller": 41
+              }
+            },
+            "delta": {
+              "returned": {
+                "n": 433,
+                "median": 44,
+                "p90": 56
+              },
+              "saved_median": 811,
+              "modelled_usd_median": 0.031426,
+              "routes": {
+                "smart_read/no_base": 1,
+                "smart_read_delta/delta": 389,
+                "would_inflate/no_base": 43
+              }
+            }
+          },
+          "by_bucket": [
+            {
+              "bucket": "<300",
+              "language": null,
+              "stat": {
+                "files": 595,
+                "full": {
+                  "n": 595,
+                  "median": 277,
+                  "p90": 1360
+                },
+                "outline": {
+                  "returned": {
+                    "n": 595,
+                    "median": 137,
+                    "p90": 244
+                  },
+                  "saved_median": 124,
+                  "modelled_usd_median": 0.004805,
+                  "routes": {
+                    "ranked_no_defs": 19,
+                    "smart_read": 398,
+                    "would_inflate": 178
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 334,
+                    "median": 97,
+                    "p90": 246
+                  },
+                  "saved_median": 249,
+                  "modelled_usd_median": 0.009649,
+                  "routes": {
+                    "recall_file": 291,
+                    "would_inflate": 43
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 595,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 247,
+                  "modelled_usd_median": 0.009571,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 19,
+                    "smart_read_unchanged/unchanged": 535,
+                    "would_inflate/unchanged_not_smaller": 41
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 300,
+                    "median": 43,
+                    "p90": 96
+                  },
+                  "saved_median": 371,
+                  "modelled_usd_median": 0.014376,
+                  "routes": {
+                    "smart_read/no_base": 1,
+                    "smart_read_delta/delta": 256,
+                    "would_inflate/no_base": 43
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": null,
+              "stat": {
+                "files": 116,
+                "full": {
+                  "n": 116,
+                  "median": 3947,
+                  "p90": 7359
+                },
+                "outline": {
+                  "returned": {
+                    "n": 116,
+                    "median": 307,
+                    "p90": 694
+                  },
+                  "saved_median": 3577,
+                  "modelled_usd_median": 0.138609,
+                  "routes": {
+                    "smart_read": 116
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 76,
+                    "median": 228,
+                    "p90": 431
+                  },
+                  "saved_median": 3704,
+                  "modelled_usd_median": 0.14353,
+                  "routes": {
+                    "recall_file": 76
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 116,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3917,
+                  "modelled_usd_median": 0.151784,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 116
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 74,
+                    "median": 44,
+                    "p90": 51
+                  },
+                  "saved_median": 3952,
+                  "modelled_usd_median": 0.15314,
+                  "routes": {
+                    "smart_read_delta/delta": 74
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": null,
+              "stat": {
+                "files": 61,
+                "full": {
+                  "n": 61,
+                  "median": 12609,
+                  "p90": 18363
+                },
+                "outline": {
+                  "returned": {
+                    "n": 61,
+                    "median": 767,
+                    "p90": 1249
+                  },
+                  "saved_median": 11733,
+                  "modelled_usd_median": 0.454654,
+                  "routes": {
+                    "smart_read": 61
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 53,
+                    "median": 284,
+                    "p90": 400
+                  },
+                  "saved_median": 12591,
+                  "modelled_usd_median": 0.487901,
+                  "routes": {
+                    "recall_file": 53
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 61,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 12579,
+                  "modelled_usd_median": 0.487436,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 61
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 53,
+                    "median": 46,
+                    "p90": 50
+                  },
+                  "saved_median": 12791,
+                  "modelled_usd_median": 0.495651,
+                  "routes": {
+                    "smart_read_delta/delta": 53
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": null,
+              "stat": {
+                "files": 7,
+                "full": {
+                  "n": 7,
+                  "median": 28012,
+                  "p90": 43185
+                },
+                "outline": {
+                  "returned": {
+                    "n": 7,
+                    "median": 1198,
+                    "p90": 1734
+                  },
+                  "saved_median": 26462,
+                  "modelled_usd_median": 1.025403,
+                  "routes": {
+                    "smart_read": 7
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 6,
+                    "median": 219,
+                    "p90": 479
+                  },
+                  "saved_median": 27736,
+                  "modelled_usd_median": 1.07477,
+                  "routes": {
+                    "recall_file": 6
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 7,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 27982,
+                  "modelled_usd_median": 1.084303,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 7
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 6,
+                    "median": 47,
+                    "p90": 54
+                  },
+                  "saved_median": 27965,
+                  "modelled_usd_median": 1.083644,
+                  "routes": {
+                    "smart_read_delta/delta": 6
+                  }
+                }
+              }
+            }
+          ],
+          "by_language": [
+            {
+              "bucket": null,
+              "language": "rust",
+              "stat": {
+                "files": 58,
+                "full": {
+                  "n": 58,
+                  "median": 3809,
+                  "p90": 17615
+                },
+                "outline": {
+                  "returned": {
+                    "n": 58,
+                    "median": 320,
+                    "p90": 838
+                  },
+                  "saved_median": 3466,
+                  "modelled_usd_median": 0.134308,
+                  "routes": {
+                    "smart_read": 55,
+                    "would_inflate": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 57,
+                    "median": 234,
+                    "p90": 370
+                  },
+                  "saved_median": 3704,
+                  "modelled_usd_median": 0.14353,
+                  "routes": {
+                    "recall_file": 55,
+                    "would_inflate": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 58,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3779,
+                  "modelled_usd_median": 0.146436,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 57,
+                    "would_inflate/unchanged_not_smaller": 1
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 57,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 4019,
+                  "modelled_usd_median": 0.155736,
+                  "routes": {
+                    "smart_read_delta/delta": 54,
+                    "would_inflate/no_base": 3
+                  }
+                }
+              }
+            },
+            {
+              "bucket": null,
+              "language": "python",
+              "stat": {
+                "files": 274,
+                "full": {
+                  "n": 274,
+                  "median": 655,
+                  "p90": 10796
+                },
+                "outline": {
+                  "returned": {
+                    "n": 274,
+                    "median": 195,
+                    "p90": 864
+                  },
+                  "saved_median": 411,
+                  "modelled_usd_median": 0.015926,
+                  "routes": {
+                    "ranked_no_defs": 18,
+                    "smart_read": 167,
+                    "would_inflate": 89
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 223,
+                    "median": 184,
+                    "p90": 361
+                  },
+                  "saved_median": 997,
+                  "modelled_usd_median": 0.038634,
+                  "routes": {
+                    "recall_file": 183,
+                    "would_inflate": 40
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 274,
+                    "median": 30,
+                    "p90": 40
+                  },
+                  "saved_median": 625,
+                  "modelled_usd_median": 0.024219,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 18,
+                    "smart_read_unchanged/unchanged": 237,
+                    "would_inflate/unchanged_not_smaller": 19
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 188,
+                    "median": 45,
+                    "p90": 96
+                  },
+                  "saved_median": 1698,
+                  "modelled_usd_median": 0.065798,
+                  "routes": {
+                    "smart_read_delta/delta": 159,
+                    "would_inflate/no_base": 29
+                  }
+                }
+              }
+            },
+            {
+              "bucket": null,
+              "language": "typescript",
+              "stat": {
+                "files": 270,
+                "full": {
+                  "n": 270,
+                  "median": 277,
+                  "p90": 1995
+                },
+                "outline": {
+                  "returned": {
+                    "n": 270,
+                    "median": 119,
+                    "p90": 208
+                  },
+                  "saved_median": 118,
+                  "modelled_usd_median": 0.004573,
+                  "routes": {
+                    "ranked_no_defs": 1,
+                    "smart_read": 190,
+                    "would_inflate": 79
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 59,
+                    "median": 86,
+                    "p90": 172
+                  },
+                  "saved_median": 216,
+                  "modelled_usd_median": 0.00837,
+                  "routes": {
+                    "recall_file": 58,
+                    "would_inflate": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 270,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 247,
+                  "modelled_usd_median": 0.009571,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 1,
+                    "smart_read_unchanged/unchanged": 248,
+                    "would_inflate/unchanged_not_smaller": 21
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 58,
+                    "median": 44,
+                    "p90": 142
+                  },
+                  "saved_median": 339,
+                  "modelled_usd_median": 0.013136,
+                  "routes": {
+                    "smart_read_delta/delta": 49,
+                    "would_inflate/no_base": 9
+                  }
+                }
+              }
+            },
+            {
+              "bucket": null,
+              "language": "tsx",
+              "stat": {
+                "files": 177,
+                "full": {
+                  "n": 177,
+                  "median": 461,
+                  "p90": 4787
+                },
+                "outline": {
+                  "returned": {
+                    "n": 177,
+                    "median": 164,
+                    "p90": 245
+                  },
+                  "saved_median": 277,
+                  "modelled_usd_median": 0.010734,
+                  "routes": {
+                    "smart_read": 170,
+                    "would_inflate": 7
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 130,
+                    "median": 80,
+                    "p90": 228
+                  },
+                  "saved_median": 272,
+                  "modelled_usd_median": 0.01054,
+                  "routes": {
+                    "recall_file": 130
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 177,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 431,
+                  "modelled_usd_median": 0.016701,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 177
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 130,
+                    "median": 43,
+                    "p90": 44
+                  },
+                  "saved_median": 347,
+                  "modelled_usd_median": 0.013446,
+                  "routes": {
+                    "smart_read/no_base": 1,
+                    "smart_read_delta/delta": 127,
+                    "would_inflate/no_base": 2
+                  }
+                }
+              }
+            }
+          ],
+          "by_bucket_language": [
+            {
+              "bucket": "<300",
+              "language": "rust",
+              "stat": {
+                "files": 23,
+                "full": {
+                  "n": 23,
+                  "median": 1169,
+                  "p90": 2383
+                },
+                "outline": {
+                  "returned": {
+                    "n": 23,
+                    "median": 225,
+                    "p90": 323
+                  },
+                  "saved_median": 944,
+                  "modelled_usd_median": 0.03658,
+                  "routes": {
+                    "smart_read": 20,
+                    "would_inflate": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 22,
+                    "median": 185,
+                    "p90": 288
+                  },
+                  "saved_median": 927,
+                  "modelled_usd_median": 0.035921,
+                  "routes": {
+                    "recall_file": 20,
+                    "would_inflate": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 23,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 1139,
+                  "modelled_usd_median": 0.044136,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 22,
+                    "would_inflate/unchanged_not_smaller": 1
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 22,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 1114,
+                  "modelled_usd_median": 0.043168,
+                  "routes": {
+                    "smart_read_delta/delta": 19,
+                    "would_inflate/no_base": 3
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "<300",
+              "language": "python",
+              "stat": {
+                "files": 188,
+                "full": {
+                  "n": 188,
+                  "median": 102,
+                  "p90": 1614
+                },
+                "outline": {
+                  "returned": {
+                    "n": 188,
+                    "median": 116,
+                    "p90": 322
+                  },
+                  "saved_median": -25,
+                  "modelled_usd_median": -0.000969,
+                  "routes": {
+                    "ranked_no_defs": 18,
+                    "smart_read": 81,
+                    "would_inflate": 89
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 137,
+                    "median": 114,
+                    "p90": 254
+                  },
+                  "saved_median": 131,
+                  "modelled_usd_median": 0.005076,
+                  "routes": {
+                    "recall_file": 97,
+                    "would_inflate": 40
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 188,
+                    "median": 30,
+                    "p90": 48
+                  },
+                  "saved_median": 65,
+                  "modelled_usd_median": 0.002519,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 18,
+                    "smart_read_unchanged/unchanged": 151,
+                    "would_inflate/unchanged_not_smaller": 19
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 104,
+                    "median": 45,
+                    "p90": 117
+                  },
+                  "saved_median": 523,
+                  "modelled_usd_median": 0.020266,
+                  "routes": {
+                    "smart_read_delta/delta": 75,
+                    "would_inflate/no_base": 29
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "<300",
+              "language": "typescript",
+              "stat": {
+                "files": 247,
+                "full": {
+                  "n": 247,
+                  "median": 218,
+                  "p90": 1330
+                },
+                "outline": {
+                  "returned": {
+                    "n": 247,
+                    "median": 116,
+                    "p90": 194
+                  },
+                  "saved_median": 85,
+                  "modelled_usd_median": 0.003294,
+                  "routes": {
+                    "ranked_no_defs": 1,
+                    "smart_read": 167,
+                    "would_inflate": 79
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 56,
+                    "median": 85,
+                    "p90": 172
+                  },
+                  "saved_median": 196,
+                  "modelled_usd_median": 0.007595,
+                  "routes": {
+                    "recall_file": 55,
+                    "would_inflate": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 247,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 188,
+                  "modelled_usd_median": 0.007285,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 1,
+                    "smart_read_unchanged/unchanged": 225,
+                    "would_inflate/unchanged_not_smaller": 21
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 55,
+                    "median": 44,
+                    "p90": 142
+                  },
+                  "saved_median": 279,
+                  "modelled_usd_median": 0.010811,
+                  "routes": {
+                    "smart_read_delta/delta": 46,
+                    "would_inflate/no_base": 9
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "<300",
+              "language": "tsx",
+              "stat": {
+                "files": 137,
+                "full": {
+                  "n": 137,
+                  "median": 377,
+                  "p90": 1022
+                },
+                "outline": {
+                  "returned": {
+                    "n": 137,
+                    "median": 159,
+                    "p90": 216
+                  },
+                  "saved_median": 205,
+                  "modelled_usd_median": 0.007944,
+                  "routes": {
+                    "smart_read": 130,
+                    "would_inflate": 7
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 119,
+                    "median": 80,
+                    "p90": 230
+                  },
+                  "saved_median": 255,
+                  "modelled_usd_median": 0.009881,
+                  "routes": {
+                    "recall_file": 119
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 137,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 347,
+                  "modelled_usd_median": 0.013446,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 137
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 119,
+                    "median": 42,
+                    "p90": 44
+                  },
+                  "saved_median": 335,
+                  "modelled_usd_median": 0.012981,
+                  "routes": {
+                    "smart_read/no_base": 1,
+                    "smart_read_delta/delta": 116,
+                    "would_inflate/no_base": 2
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "rust",
+              "stat": {
+                "files": 23,
+                "full": {
+                  "n": 23,
+                  "median": 5104,
+                  "p90": 8202
+                },
+                "outline": {
+                  "returned": {
+                    "n": 23,
+                    "median": 365,
+                    "p90": 661
+                  },
+                  "saved_median": 4573,
+                  "modelled_usd_median": 0.177204,
+                  "routes": {
+                    "smart_read": 23
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 23,
+                    "median": 227,
+                    "p90": 431
+                  },
+                  "saved_median": 4748,
+                  "modelled_usd_median": 0.183985,
+                  "routes": {
+                    "recall_file": 23
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 23,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 5074,
+                  "modelled_usd_median": 0.196618,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 23
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 23,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 5051,
+                  "modelled_usd_median": 0.195726,
+                  "routes": {
+                    "smart_read_delta/delta": 23
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "python",
+              "stat": {
+                "files": 47,
+                "full": {
+                  "n": 47,
+                  "median": 3800,
+                  "p90": 5815
+                },
+                "outline": {
+                  "returned": {
+                    "n": 47,
+                    "median": 501,
+                    "p90": 782
+                  },
+                  "saved_median": 3334,
+                  "modelled_usd_median": 0.129192,
+                  "routes": {
+                    "smart_read": 47
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 47,
+                    "median": 236,
+                    "p90": 516
+                  },
+                  "saved_median": 3440,
+                  "modelled_usd_median": 0.1333,
+                  "routes": {
+                    "recall_file": 47
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 47,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3770,
+                  "modelled_usd_median": 0.146088,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 47
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 45,
+                    "median": 45,
+                    "p90": 48
+                  },
+                  "saved_median": 3864,
+                  "modelled_usd_median": 0.14973,
+                  "routes": {
+                    "smart_read_delta/delta": 45
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "typescript",
+              "stat": {
+                "files": 21,
+                "full": {
+                  "n": 21,
+                  "median": 3790,
+                  "p90": 7535
+                },
+                "outline": {
+                  "returned": {
+                    "n": 21,
+                    "median": 177,
+                    "p90": 404
+                  },
+                  "saved_median": 3548,
+                  "modelled_usd_median": 0.137485,
+                  "routes": {
+                    "smart_read": 21
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 2,
+                    "median": 72,
+                    "p90": 170
+                  },
+                  "saved_median": 3851,
+                  "modelled_usd_median": 0.149226,
+                  "routes": {
+                    "recall_file": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 21,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3760,
+                  "modelled_usd_median": 0.1457,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 21
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 2,
+                    "median": 43,
+                    "p90": 44
+                  },
+                  "saved_median": 3879,
+                  "modelled_usd_median": 0.150311,
+                  "routes": {
+                    "smart_read_delta/delta": 2
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "tsx",
+              "stat": {
+                "files": 25,
+                "full": {
+                  "n": 25,
+                  "median": 3914,
+                  "p90": 4787
+                },
+                "outline": {
+                  "returned": {
+                    "n": 25,
+                    "median": 205,
+                    "p90": 259
+                  },
+                  "saved_median": 3709,
+                  "modelled_usd_median": 0.143724,
+                  "routes": {
+                    "smart_read": 25
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 4,
+                    "median": 89,
+                    "p90": 314
+                  },
+                  "saved_median": 2650,
+                  "modelled_usd_median": 0.102688,
+                  "routes": {
+                    "recall_file": 4
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 25,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3884,
+                  "modelled_usd_median": 0.150505,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 25
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 4,
+                    "median": 43,
+                    "p90": 44
+                  },
+                  "saved_median": 2696,
+                  "modelled_usd_median": 0.10447,
+                  "routes": {
+                    "smart_read_delta/delta": 4
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "rust",
+              "stat": {
+                "files": 11,
+                "full": {
+                  "n": 11,
+                  "median": 14167,
+                  "p90": 23501
+                },
+                "outline": {
+                  "returned": {
+                    "n": 11,
+                    "median": 817,
+                    "p90": 1616
+                  },
+                  "saved_median": 13402,
+                  "modelled_usd_median": 0.519328,
+                  "routes": {
+                    "smart_read": 11
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 11,
+                    "median": 275,
+                    "p90": 382
+                  },
+                  "saved_median": 13910,
+                  "modelled_usd_median": 0.539013,
+                  "routes": {
+                    "recall_file": 11
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 11,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 14137,
+                  "modelled_usd_median": 0.547809,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 11
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 11,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 14122,
+                  "modelled_usd_median": 0.547228,
+                  "routes": {
+                    "smart_read_delta/delta": 11
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "python",
+              "stat": {
+                "files": 36,
+                "full": {
+                  "n": 36,
+                  "median": 12381,
+                  "p90": 18363
+                },
+                "outline": {
+                  "returned": {
+                    "n": 36,
+                    "median": 922,
+                    "p90": 1296
+                  },
+                  "saved_median": 11670,
+                  "modelled_usd_median": 0.452213,
+                  "routes": {
+                    "smart_read": 36
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 36,
+                    "median": 300,
+                    "p90": 428
+                  },
+                  "saved_median": 12032,
+                  "modelled_usd_median": 0.46624,
+                  "routes": {
+                    "recall_file": 36
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 36,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 12351,
+                  "modelled_usd_median": 0.478601,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 36
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 36,
+                    "median": 47,
+                    "p90": 50
+                  },
+                  "saved_median": 12331,
+                  "modelled_usd_median": 0.477826,
+                  "routes": {
+                    "smart_read_delta/delta": 36
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "typescript",
+              "stat": {
+                "files": 2,
+                "full": {
+                  "n": 2,
+                  "median": 8431,
+                  "p90": 15478
+                },
+                "outline": {
+                  "returned": {
+                    "n": 2,
+                    "median": 879,
+                    "p90": 1112
+                  },
+                  "saved_median": 7319,
+                  "modelled_usd_median": 0.283611,
+                  "routes": {
+                    "smart_read": 2
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 1,
+                    "median": 149,
+                    "p90": 149
+                  },
+                  "saved_median": 15329,
+                  "modelled_usd_median": 0.593999,
+                  "routes": {
+                    "recall_file": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 2,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 8401,
+                  "modelled_usd_median": 0.325539,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 2
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 1,
+                    "median": 47,
+                    "p90": 47
+                  },
+                  "saved_median": 15431,
+                  "modelled_usd_median": 0.597951,
+                  "routes": {
+                    "smart_read_delta/delta": 1
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "tsx",
+              "stat": {
+                "files": 12,
+                "full": {
+                  "n": 12,
+                  "median": 10412,
+                  "p90": 13070
+                },
+                "outline": {
+                  "returned": {
+                    "n": 12,
+                    "median": 249,
+                    "p90": 275
+                  },
+                  "saved_median": 10149,
+                  "modelled_usd_median": 0.393274,
+                  "routes": {
+                    "smart_read": 12
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 5,
+                    "median": 137,
+                    "p90": 176
+                  },
+                  "saved_median": 9386,
+                  "modelled_usd_median": 0.363708,
+                  "routes": {
+                    "recall_file": 5
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 12,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 10382,
+                  "modelled_usd_median": 0.402303,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 12
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 5,
+                    "median": 43,
+                    "p90": 45
+                  },
+                  "saved_median": 9516,
+                  "modelled_usd_median": 0.368745,
+                  "routes": {
+                    "smart_read_delta/delta": 5
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": "rust",
+              "stat": {
+                "files": 1,
+                "full": {
+                  "n": 1,
+                  "median": 43185,
+                  "p90": 43185
+                },
+                "outline": {
+                  "returned": {
+                    "n": 1,
+                    "median": 1734,
+                    "p90": 1734
+                  },
+                  "saved_median": 41451,
+                  "modelled_usd_median": 1.606226,
+                  "routes": {
+                    "smart_read": 1
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 1,
+                    "median": 219,
+                    "p90": 219
+                  },
+                  "saved_median": 42966,
+                  "modelled_usd_median": 1.664933,
+                  "routes": {
+                    "recall_file": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 1,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 43155,
+                  "modelled_usd_median": 1.672256,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 1
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 1,
+                    "median": 48,
+                    "p90": 48
+                  },
+                  "saved_median": 43137,
+                  "modelled_usd_median": 1.671559,
+                  "routes": {
+                    "smart_read_delta/delta": 1
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": "python",
+              "stat": {
+                "files": 3,
+                "full": {
+                  "n": 3,
+                  "median": 28012,
+                  "p90": 37505
+                },
+                "outline": {
+                  "returned": {
+                    "n": 3,
+                    "median": 1255,
+                    "p90": 1550
+                  },
+                  "saved_median": 26462,
+                  "modelled_usd_median": 1.025403,
+                  "routes": {
+                    "smart_read": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 3,
+                    "median": 362,
+                    "p90": 479
+                  },
+                  "saved_median": 27736,
+                  "modelled_usd_median": 1.07477,
+                  "routes": {
+                    "recall_file": 3
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 3,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 27982,
+                  "modelled_usd_median": 1.084303,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 3
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 3,
+                    "median": 52,
+                    "p90": 54
+                  },
+                  "saved_median": 27965,
+                  "modelled_usd_median": 1.083644,
+                  "routes": {
+                    "smart_read_delta/delta": 3
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": "tsx",
+              "stat": {
+                "files": 3,
+                "full": {
+                  "n": 3,
+                  "median": 21030,
+                  "p90": 33321
+                },
+                "outline": {
+                  "returned": {
+                    "n": 3,
+                    "median": 246,
+                    "p90": 284
+                  },
+                  "saved_median": 20789,
+                  "modelled_usd_median": 0.805574,
+                  "routes": {
+                    "smart_read": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 2,
+                    "median": 135,
+                    "p90": 137
+                  },
+                  "saved_median": 20895,
+                  "modelled_usd_median": 0.809681,
+                  "routes": {
+                    "recall_file": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 3,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 21000,
+                  "modelled_usd_median": 0.81375,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 3
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 2,
+                    "median": 43,
+                    "p90": 43
+                  },
+                  "saved_median": 20987,
+                  "modelled_usd_median": 0.813246,
+                  "routes": {
+                    "smart_read_delta/delta": 2
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "pre-8855fe4",
+      "role": "candidate",
+      "sha": "8855fe4c2ed896d91abd5ef410f5815e0538e655",
+      "dirty": false,
+      "profile": "release",
+      "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
+      "source": "the checkout this harness was run from, built in its own target directory",
+      "identity": "env",
+      "identity_note": "CLAUDE_CODE_SESSION_ID, read once when the server starts",
+      "reported_version": "1.7.0",
+      "tokens": {
+        "digest": "2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7",
+        "files": 779,
+        "aggregates": {
+          "all": {
+            "files": 779,
+            "full": {
+              "n": 779,
+              "median": 478,
+              "p90": 7359
+            },
+            "outline": {
+              "returned": {
+                "n": 779,
+                "median": 155,
+                "p90": 516
+              },
+              "saved_median": 312,
+              "modelled_usd_median": 0.01209,
+              "routes": {
+                "ranked_no_defs": 19,
+                "smart_read": 582,
+                "would_inflate": 178
+              }
+            },
+            "recall": {
+              "returned": {
+                "n": 469,
+                "median": 138,
+                "p90": 332
+              },
+              "saved_median": 540,
+              "modelled_usd_median": 0.020925,
+              "routes": {
+                "recall_file": 426,
+                "would_inflate": 43
+              }
+            },
+            "stub": {
+              "returned": {
+                "n": 779,
+                "median": 30,
+                "p90": 30
+              },
+              "saved_median": 448,
+              "modelled_usd_median": 0.01736,
+              "routes": {
+                "ranked_no_defs/unchanged": 19,
+                "smart_read_unchanged/unchanged": 719,
+                "would_inflate/unchanged_not_smaller": 41
+              }
+            },
+            "delta": {
+              "returned": {
+                "n": 433,
+                "median": 44,
+                "p90": 56
+              },
+              "saved_median": 811,
+              "modelled_usd_median": 0.031426,
+              "routes": {
+                "smart_read/no_base": 1,
+                "smart_read_delta/delta": 389,
+                "would_inflate/no_base": 43
+              }
+            }
+          },
+          "by_bucket": [
+            {
+              "bucket": "<300",
+              "language": null,
+              "stat": {
+                "files": 595,
+                "full": {
+                  "n": 595,
+                  "median": 277,
+                  "p90": 1360
+                },
+                "outline": {
+                  "returned": {
+                    "n": 595,
+                    "median": 137,
+                    "p90": 244
+                  },
+                  "saved_median": 124,
+                  "modelled_usd_median": 0.004805,
+                  "routes": {
+                    "ranked_no_defs": 19,
+                    "smart_read": 398,
+                    "would_inflate": 178
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 334,
+                    "median": 97,
+                    "p90": 246
+                  },
+                  "saved_median": 249,
+                  "modelled_usd_median": 0.009649,
+                  "routes": {
+                    "recall_file": 291,
+                    "would_inflate": 43
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 595,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 247,
+                  "modelled_usd_median": 0.009571,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 19,
+                    "smart_read_unchanged/unchanged": 535,
+                    "would_inflate/unchanged_not_smaller": 41
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 300,
+                    "median": 43,
+                    "p90": 96
+                  },
+                  "saved_median": 371,
+                  "modelled_usd_median": 0.014376,
+                  "routes": {
+                    "smart_read/no_base": 1,
+                    "smart_read_delta/delta": 256,
+                    "would_inflate/no_base": 43
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": null,
+              "stat": {
+                "files": 116,
+                "full": {
+                  "n": 116,
+                  "median": 3947,
+                  "p90": 7359
+                },
+                "outline": {
+                  "returned": {
+                    "n": 116,
+                    "median": 307,
+                    "p90": 694
+                  },
+                  "saved_median": 3577,
+                  "modelled_usd_median": 0.138609,
+                  "routes": {
+                    "smart_read": 116
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 76,
+                    "median": 228,
+                    "p90": 431
+                  },
+                  "saved_median": 3704,
+                  "modelled_usd_median": 0.14353,
+                  "routes": {
+                    "recall_file": 76
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 116,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3917,
+                  "modelled_usd_median": 0.151784,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 116
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 74,
+                    "median": 44,
+                    "p90": 51
+                  },
+                  "saved_median": 3952,
+                  "modelled_usd_median": 0.15314,
+                  "routes": {
+                    "smart_read_delta/delta": 74
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": null,
+              "stat": {
+                "files": 61,
+                "full": {
+                  "n": 61,
+                  "median": 12609,
+                  "p90": 18363
+                },
+                "outline": {
+                  "returned": {
+                    "n": 61,
+                    "median": 767,
+                    "p90": 1249
+                  },
+                  "saved_median": 11733,
+                  "modelled_usd_median": 0.454654,
+                  "routes": {
+                    "smart_read": 61
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 53,
+                    "median": 284,
+                    "p90": 400
+                  },
+                  "saved_median": 12591,
+                  "modelled_usd_median": 0.487901,
+                  "routes": {
+                    "recall_file": 53
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 61,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 12579,
+                  "modelled_usd_median": 0.487436,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 61
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 53,
+                    "median": 46,
+                    "p90": 50
+                  },
+                  "saved_median": 12791,
+                  "modelled_usd_median": 0.495651,
+                  "routes": {
+                    "smart_read_delta/delta": 53
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": null,
+              "stat": {
+                "files": 7,
+                "full": {
+                  "n": 7,
+                  "median": 28012,
+                  "p90": 43185
+                },
+                "outline": {
+                  "returned": {
+                    "n": 7,
+                    "median": 1198,
+                    "p90": 1734
+                  },
+                  "saved_median": 26462,
+                  "modelled_usd_median": 1.025403,
+                  "routes": {
+                    "smart_read": 7
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 6,
+                    "median": 219,
+                    "p90": 479
+                  },
+                  "saved_median": 27736,
+                  "modelled_usd_median": 1.07477,
+                  "routes": {
+                    "recall_file": 6
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 7,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 27982,
+                  "modelled_usd_median": 1.084303,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 7
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 6,
+                    "median": 47,
+                    "p90": 54
+                  },
+                  "saved_median": 27965,
+                  "modelled_usd_median": 1.083644,
+                  "routes": {
+                    "smart_read_delta/delta": 6
+                  }
+                }
+              }
+            }
+          ],
+          "by_language": [
+            {
+              "bucket": null,
+              "language": "rust",
+              "stat": {
+                "files": 58,
+                "full": {
+                  "n": 58,
+                  "median": 3809,
+                  "p90": 17615
+                },
+                "outline": {
+                  "returned": {
+                    "n": 58,
+                    "median": 320,
+                    "p90": 838
+                  },
+                  "saved_median": 3466,
+                  "modelled_usd_median": 0.134308,
+                  "routes": {
+                    "smart_read": 55,
+                    "would_inflate": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 57,
+                    "median": 234,
+                    "p90": 370
+                  },
+                  "saved_median": 3704,
+                  "modelled_usd_median": 0.14353,
+                  "routes": {
+                    "recall_file": 55,
+                    "would_inflate": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 58,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3779,
+                  "modelled_usd_median": 0.146436,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 57,
+                    "would_inflate/unchanged_not_smaller": 1
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 57,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 4019,
+                  "modelled_usd_median": 0.155736,
+                  "routes": {
+                    "smart_read_delta/delta": 54,
+                    "would_inflate/no_base": 3
+                  }
+                }
+              }
+            },
+            {
+              "bucket": null,
+              "language": "python",
+              "stat": {
+                "files": 274,
+                "full": {
+                  "n": 274,
+                  "median": 655,
+                  "p90": 10796
+                },
+                "outline": {
+                  "returned": {
+                    "n": 274,
+                    "median": 195,
+                    "p90": 864
+                  },
+                  "saved_median": 411,
+                  "modelled_usd_median": 0.015926,
+                  "routes": {
+                    "ranked_no_defs": 18,
+                    "smart_read": 167,
+                    "would_inflate": 89
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 223,
+                    "median": 184,
+                    "p90": 361
+                  },
+                  "saved_median": 997,
+                  "modelled_usd_median": 0.038634,
+                  "routes": {
+                    "recall_file": 183,
+                    "would_inflate": 40
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 274,
+                    "median": 30,
+                    "p90": 40
+                  },
+                  "saved_median": 625,
+                  "modelled_usd_median": 0.024219,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 18,
+                    "smart_read_unchanged/unchanged": 237,
+                    "would_inflate/unchanged_not_smaller": 19
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 188,
+                    "median": 45,
+                    "p90": 96
+                  },
+                  "saved_median": 1698,
+                  "modelled_usd_median": 0.065798,
+                  "routes": {
+                    "smart_read_delta/delta": 159,
+                    "would_inflate/no_base": 29
+                  }
+                }
+              }
+            },
+            {
+              "bucket": null,
+              "language": "typescript",
+              "stat": {
+                "files": 270,
+                "full": {
+                  "n": 270,
+                  "median": 277,
+                  "p90": 1995
+                },
+                "outline": {
+                  "returned": {
+                    "n": 270,
+                    "median": 119,
+                    "p90": 208
+                  },
+                  "saved_median": 118,
+                  "modelled_usd_median": 0.004573,
+                  "routes": {
+                    "ranked_no_defs": 1,
+                    "smart_read": 190,
+                    "would_inflate": 79
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 59,
+                    "median": 86,
+                    "p90": 172
+                  },
+                  "saved_median": 216,
+                  "modelled_usd_median": 0.00837,
+                  "routes": {
+                    "recall_file": 58,
+                    "would_inflate": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 270,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 247,
+                  "modelled_usd_median": 0.009571,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 1,
+                    "smart_read_unchanged/unchanged": 248,
+                    "would_inflate/unchanged_not_smaller": 21
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 58,
+                    "median": 44,
+                    "p90": 142
+                  },
+                  "saved_median": 339,
+                  "modelled_usd_median": 0.013136,
+                  "routes": {
+                    "smart_read_delta/delta": 49,
+                    "would_inflate/no_base": 9
+                  }
+                }
+              }
+            },
+            {
+              "bucket": null,
+              "language": "tsx",
+              "stat": {
+                "files": 177,
+                "full": {
+                  "n": 177,
+                  "median": 461,
+                  "p90": 4787
+                },
+                "outline": {
+                  "returned": {
+                    "n": 177,
+                    "median": 164,
+                    "p90": 245
+                  },
+                  "saved_median": 277,
+                  "modelled_usd_median": 0.010734,
+                  "routes": {
+                    "smart_read": 170,
+                    "would_inflate": 7
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 130,
+                    "median": 80,
+                    "p90": 228
+                  },
+                  "saved_median": 272,
+                  "modelled_usd_median": 0.01054,
+                  "routes": {
+                    "recall_file": 130
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 177,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 431,
+                  "modelled_usd_median": 0.016701,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 177
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 130,
+                    "median": 43,
+                    "p90": 44
+                  },
+                  "saved_median": 347,
+                  "modelled_usd_median": 0.013446,
+                  "routes": {
+                    "smart_read/no_base": 1,
+                    "smart_read_delta/delta": 127,
+                    "would_inflate/no_base": 2
+                  }
+                }
+              }
+            }
+          ],
+          "by_bucket_language": [
+            {
+              "bucket": "<300",
+              "language": "rust",
+              "stat": {
+                "files": 23,
+                "full": {
+                  "n": 23,
+                  "median": 1169,
+                  "p90": 2383
+                },
+                "outline": {
+                  "returned": {
+                    "n": 23,
+                    "median": 225,
+                    "p90": 323
+                  },
+                  "saved_median": 944,
+                  "modelled_usd_median": 0.03658,
+                  "routes": {
+                    "smart_read": 20,
+                    "would_inflate": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 22,
+                    "median": 185,
+                    "p90": 288
+                  },
+                  "saved_median": 927,
+                  "modelled_usd_median": 0.035921,
+                  "routes": {
+                    "recall_file": 20,
+                    "would_inflate": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 23,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 1139,
+                  "modelled_usd_median": 0.044136,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 22,
+                    "would_inflate/unchanged_not_smaller": 1
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 22,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 1114,
+                  "modelled_usd_median": 0.043168,
+                  "routes": {
+                    "smart_read_delta/delta": 19,
+                    "would_inflate/no_base": 3
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "<300",
+              "language": "python",
+              "stat": {
+                "files": 188,
+                "full": {
+                  "n": 188,
+                  "median": 102,
+                  "p90": 1614
+                },
+                "outline": {
+                  "returned": {
+                    "n": 188,
+                    "median": 116,
+                    "p90": 322
+                  },
+                  "saved_median": -25,
+                  "modelled_usd_median": -0.000969,
+                  "routes": {
+                    "ranked_no_defs": 18,
+                    "smart_read": 81,
+                    "would_inflate": 89
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 137,
+                    "median": 114,
+                    "p90": 254
+                  },
+                  "saved_median": 131,
+                  "modelled_usd_median": 0.005076,
+                  "routes": {
+                    "recall_file": 97,
+                    "would_inflate": 40
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 188,
+                    "median": 30,
+                    "p90": 48
+                  },
+                  "saved_median": 65,
+                  "modelled_usd_median": 0.002519,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 18,
+                    "smart_read_unchanged/unchanged": 151,
+                    "would_inflate/unchanged_not_smaller": 19
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 104,
+                    "median": 45,
+                    "p90": 117
+                  },
+                  "saved_median": 523,
+                  "modelled_usd_median": 0.020266,
+                  "routes": {
+                    "smart_read_delta/delta": 75,
+                    "would_inflate/no_base": 29
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "<300",
+              "language": "typescript",
+              "stat": {
+                "files": 247,
+                "full": {
+                  "n": 247,
+                  "median": 218,
+                  "p90": 1330
+                },
+                "outline": {
+                  "returned": {
+                    "n": 247,
+                    "median": 116,
+                    "p90": 194
+                  },
+                  "saved_median": 85,
+                  "modelled_usd_median": 0.003294,
+                  "routes": {
+                    "ranked_no_defs": 1,
+                    "smart_read": 167,
+                    "would_inflate": 79
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 56,
+                    "median": 85,
+                    "p90": 172
+                  },
+                  "saved_median": 196,
+                  "modelled_usd_median": 0.007595,
+                  "routes": {
+                    "recall_file": 55,
+                    "would_inflate": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 247,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 188,
+                  "modelled_usd_median": 0.007285,
+                  "routes": {
+                    "ranked_no_defs/unchanged": 1,
+                    "smart_read_unchanged/unchanged": 225,
+                    "would_inflate/unchanged_not_smaller": 21
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 55,
+                    "median": 44,
+                    "p90": 142
+                  },
+                  "saved_median": 279,
+                  "modelled_usd_median": 0.010811,
+                  "routes": {
+                    "smart_read_delta/delta": 46,
+                    "would_inflate/no_base": 9
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "<300",
+              "language": "tsx",
+              "stat": {
+                "files": 137,
+                "full": {
+                  "n": 137,
+                  "median": 377,
+                  "p90": 1022
+                },
+                "outline": {
+                  "returned": {
+                    "n": 137,
+                    "median": 159,
+                    "p90": 216
+                  },
+                  "saved_median": 205,
+                  "modelled_usd_median": 0.007944,
+                  "routes": {
+                    "smart_read": 130,
+                    "would_inflate": 7
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 119,
+                    "median": 80,
+                    "p90": 230
+                  },
+                  "saved_median": 255,
+                  "modelled_usd_median": 0.009881,
+                  "routes": {
+                    "recall_file": 119
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 137,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 347,
+                  "modelled_usd_median": 0.013446,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 137
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 119,
+                    "median": 42,
+                    "p90": 44
+                  },
+                  "saved_median": 335,
+                  "modelled_usd_median": 0.012981,
+                  "routes": {
+                    "smart_read/no_base": 1,
+                    "smart_read_delta/delta": 116,
+                    "would_inflate/no_base": 2
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "rust",
+              "stat": {
+                "files": 23,
+                "full": {
+                  "n": 23,
+                  "median": 5104,
+                  "p90": 8202
+                },
+                "outline": {
+                  "returned": {
+                    "n": 23,
+                    "median": 365,
+                    "p90": 661
+                  },
+                  "saved_median": 4573,
+                  "modelled_usd_median": 0.177204,
+                  "routes": {
+                    "smart_read": 23
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 23,
+                    "median": 227,
+                    "p90": 431
+                  },
+                  "saved_median": 4748,
+                  "modelled_usd_median": 0.183985,
+                  "routes": {
+                    "recall_file": 23
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 23,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 5074,
+                  "modelled_usd_median": 0.196618,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 23
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 23,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 5051,
+                  "modelled_usd_median": 0.195726,
+                  "routes": {
+                    "smart_read_delta/delta": 23
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "python",
+              "stat": {
+                "files": 47,
+                "full": {
+                  "n": 47,
+                  "median": 3800,
+                  "p90": 5815
+                },
+                "outline": {
+                  "returned": {
+                    "n": 47,
+                    "median": 501,
+                    "p90": 782
+                  },
+                  "saved_median": 3334,
+                  "modelled_usd_median": 0.129192,
+                  "routes": {
+                    "smart_read": 47
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 47,
+                    "median": 236,
+                    "p90": 516
+                  },
+                  "saved_median": 3440,
+                  "modelled_usd_median": 0.1333,
+                  "routes": {
+                    "recall_file": 47
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 47,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3770,
+                  "modelled_usd_median": 0.146088,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 47
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 45,
+                    "median": 45,
+                    "p90": 48
+                  },
+                  "saved_median": 3864,
+                  "modelled_usd_median": 0.14973,
+                  "routes": {
+                    "smart_read_delta/delta": 45
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "typescript",
+              "stat": {
+                "files": 21,
+                "full": {
+                  "n": 21,
+                  "median": 3790,
+                  "p90": 7535
+                },
+                "outline": {
+                  "returned": {
+                    "n": 21,
+                    "median": 177,
+                    "p90": 404
+                  },
+                  "saved_median": 3548,
+                  "modelled_usd_median": 0.137485,
+                  "routes": {
+                    "smart_read": 21
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 2,
+                    "median": 72,
+                    "p90": 170
+                  },
+                  "saved_median": 3851,
+                  "modelled_usd_median": 0.149226,
+                  "routes": {
+                    "recall_file": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 21,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3760,
+                  "modelled_usd_median": 0.1457,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 21
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 2,
+                    "median": 43,
+                    "p90": 44
+                  },
+                  "saved_median": 3879,
+                  "modelled_usd_median": 0.150311,
+                  "routes": {
+                    "smart_read_delta/delta": 2
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "300-999",
+              "language": "tsx",
+              "stat": {
+                "files": 25,
+                "full": {
+                  "n": 25,
+                  "median": 3914,
+                  "p90": 4787
+                },
+                "outline": {
+                  "returned": {
+                    "n": 25,
+                    "median": 205,
+                    "p90": 259
+                  },
+                  "saved_median": 3709,
+                  "modelled_usd_median": 0.143724,
+                  "routes": {
+                    "smart_read": 25
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 4,
+                    "median": 89,
+                    "p90": 314
+                  },
+                  "saved_median": 2650,
+                  "modelled_usd_median": 0.102688,
+                  "routes": {
+                    "recall_file": 4
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 25,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 3884,
+                  "modelled_usd_median": 0.150505,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 25
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 4,
+                    "median": 43,
+                    "p90": 44
+                  },
+                  "saved_median": 2696,
+                  "modelled_usd_median": 0.10447,
+                  "routes": {
+                    "smart_read_delta/delta": 4
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "rust",
+              "stat": {
+                "files": 11,
+                "full": {
+                  "n": 11,
+                  "median": 14167,
+                  "p90": 23501
+                },
+                "outline": {
+                  "returned": {
+                    "n": 11,
+                    "median": 817,
+                    "p90": 1616
+                  },
+                  "saved_median": 13402,
+                  "modelled_usd_median": 0.519328,
+                  "routes": {
+                    "smart_read": 11
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 11,
+                    "median": 275,
+                    "p90": 382
+                  },
+                  "saved_median": 13910,
+                  "modelled_usd_median": 0.539013,
+                  "routes": {
+                    "recall_file": 11
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 11,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 14137,
+                  "modelled_usd_median": 0.547809,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 11
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 11,
+                    "median": 44,
+                    "p90": 55
+                  },
+                  "saved_median": 14122,
+                  "modelled_usd_median": 0.547228,
+                  "routes": {
+                    "smart_read_delta/delta": 11
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "python",
+              "stat": {
+                "files": 36,
+                "full": {
+                  "n": 36,
+                  "median": 12381,
+                  "p90": 18363
+                },
+                "outline": {
+                  "returned": {
+                    "n": 36,
+                    "median": 922,
+                    "p90": 1296
+                  },
+                  "saved_median": 11670,
+                  "modelled_usd_median": 0.452213,
+                  "routes": {
+                    "smart_read": 36
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 36,
+                    "median": 300,
+                    "p90": 428
+                  },
+                  "saved_median": 12032,
+                  "modelled_usd_median": 0.46624,
+                  "routes": {
+                    "recall_file": 36
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 36,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 12351,
+                  "modelled_usd_median": 0.478601,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 36
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 36,
+                    "median": 47,
+                    "p90": 50
+                  },
+                  "saved_median": 12331,
+                  "modelled_usd_median": 0.477826,
+                  "routes": {
+                    "smart_read_delta/delta": 36
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "typescript",
+              "stat": {
+                "files": 2,
+                "full": {
+                  "n": 2,
+                  "median": 8431,
+                  "p90": 15478
+                },
+                "outline": {
+                  "returned": {
+                    "n": 2,
+                    "median": 879,
+                    "p90": 1112
+                  },
+                  "saved_median": 7319,
+                  "modelled_usd_median": 0.283611,
+                  "routes": {
+                    "smart_read": 2
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 1,
+                    "median": 149,
+                    "p90": 149
+                  },
+                  "saved_median": 15329,
+                  "modelled_usd_median": 0.593999,
+                  "routes": {
+                    "recall_file": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 2,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 8401,
+                  "modelled_usd_median": 0.325539,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 2
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 1,
+                    "median": 47,
+                    "p90": 47
+                  },
+                  "saved_median": 15431,
+                  "modelled_usd_median": 0.597951,
+                  "routes": {
+                    "smart_read_delta/delta": 1
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "1000-2999",
+              "language": "tsx",
+              "stat": {
+                "files": 12,
+                "full": {
+                  "n": 12,
+                  "median": 10412,
+                  "p90": 13070
+                },
+                "outline": {
+                  "returned": {
+                    "n": 12,
+                    "median": 249,
+                    "p90": 275
+                  },
+                  "saved_median": 10149,
+                  "modelled_usd_median": 0.393274,
+                  "routes": {
+                    "smart_read": 12
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 5,
+                    "median": 137,
+                    "p90": 176
+                  },
+                  "saved_median": 9386,
+                  "modelled_usd_median": 0.363708,
+                  "routes": {
+                    "recall_file": 5
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 12,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 10382,
+                  "modelled_usd_median": 0.402303,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 12
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 5,
+                    "median": 43,
+                    "p90": 45
+                  },
+                  "saved_median": 9516,
+                  "modelled_usd_median": 0.368745,
+                  "routes": {
+                    "smart_read_delta/delta": 5
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": "rust",
+              "stat": {
+                "files": 1,
+                "full": {
+                  "n": 1,
+                  "median": 43185,
+                  "p90": 43185
+                },
+                "outline": {
+                  "returned": {
+                    "n": 1,
+                    "median": 1734,
+                    "p90": 1734
+                  },
+                  "saved_median": 41451,
+                  "modelled_usd_median": 1.606226,
+                  "routes": {
+                    "smart_read": 1
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 1,
+                    "median": 219,
+                    "p90": 219
+                  },
+                  "saved_median": 42966,
+                  "modelled_usd_median": 1.664933,
+                  "routes": {
+                    "recall_file": 1
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 1,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 43155,
+                  "modelled_usd_median": 1.672256,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 1
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 1,
+                    "median": 48,
+                    "p90": 48
+                  },
+                  "saved_median": 43137,
+                  "modelled_usd_median": 1.671559,
+                  "routes": {
+                    "smart_read_delta/delta": 1
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": "python",
+              "stat": {
+                "files": 3,
+                "full": {
+                  "n": 3,
+                  "median": 28012,
+                  "p90": 37505
+                },
+                "outline": {
+                  "returned": {
+                    "n": 3,
+                    "median": 1255,
+                    "p90": 1550
+                  },
+                  "saved_median": 26462,
+                  "modelled_usd_median": 1.025403,
+                  "routes": {
+                    "smart_read": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 3,
+                    "median": 362,
+                    "p90": 479
+                  },
+                  "saved_median": 27736,
+                  "modelled_usd_median": 1.07477,
+                  "routes": {
+                    "recall_file": 3
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 3,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 27982,
+                  "modelled_usd_median": 1.084303,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 3
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 3,
+                    "median": 52,
+                    "p90": 54
+                  },
+                  "saved_median": 27965,
+                  "modelled_usd_median": 1.083644,
+                  "routes": {
+                    "smart_read_delta/delta": 3
+                  }
+                }
+              }
+            },
+            {
+              "bucket": "3000+",
+              "language": "tsx",
+              "stat": {
+                "files": 3,
+                "full": {
+                  "n": 3,
+                  "median": 21030,
+                  "p90": 33321
+                },
+                "outline": {
+                  "returned": {
+                    "n": 3,
+                    "median": 246,
+                    "p90": 284
+                  },
+                  "saved_median": 20789,
+                  "modelled_usd_median": 0.805574,
+                  "routes": {
+                    "smart_read": 3
+                  }
+                },
+                "recall": {
+                  "returned": {
+                    "n": 2,
+                    "median": 135,
+                    "p90": 137
+                  },
+                  "saved_median": 20895,
+                  "modelled_usd_median": 0.809681,
+                  "routes": {
+                    "recall_file": 2
+                  }
+                },
+                "stub": {
+                  "returned": {
+                    "n": 3,
+                    "median": 30,
+                    "p90": 30
+                  },
+                  "saved_median": 21000,
+                  "modelled_usd_median": 0.81375,
+                  "routes": {
+                    "smart_read_unchanged/unchanged": 3
+                  }
+                },
+                "delta": {
+                  "returned": {
+                    "n": 2,
+                    "median": 43,
+                    "p90": 43
+                  },
+                  "saved_median": 20987,
+                  "modelled_usd_median": 0.813246,
+                  "routes": {
+                    "smart_read_delta/delta": 2
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "latency": {
+    "runs": 200,
+    "passes": 5,
+    "runs_per_pass": 40,
+    "warmup_runs": 20,
+    "minimum_runs": 100,
+    "clock": "std::time::Instant, a monotonic clock, nanosecond resolution",
+    "warmup_note": "per series per pass, run the same way as the recorded runs, so caches, page tables and the ledger file are warm; hook spawns are warm-start, not first launch after boot",
+    "percentile_method": "nearest-rank: the percentile p of n runs is the run at rank ceil(p x n / 100) of the sorted runs, fastest first, with no interpolation. With n = 200 the median is run 100 (of the two middle runs of an even count, the faster), p90 is run 180, and p99 is run 198, which leaves the slowest 2 runs above it.",
+    "samples_note": "not written. Each series carries `pass_medians_ns`, the median of each pass on its own, in pass order: how far they sit from one another is how much the machine moved while the run was going on.",
+    "subjects": [
+      {
+        "bucket": "<300",
+        "rel": "crates/lumen-core/tests/ranked_coverage.rs",
+        "lines": 122,
+        "bytes": 3754,
+        "recall_item": "walk"
+      },
+      {
+        "bucket": "300-999",
+        "rel": "crates/lumen-mcp/tests/protocol.rs",
+        "lines": 532,
+        "bytes": 17672,
+        "recall_item": "initialize_returns_a_well_formed_jsonrpc_response"
+      },
+      {
+        "bucket": "1000-2999",
+        "rel": "crates/lumen-core/tests/silent_fallbacks.rs",
+        "lines": 1472,
+        "bytes": 52110,
+        "recall_item": "rust_statement"
+      }
+    ],
+    "builds": [
+      {
+        "label": "v1.7.0",
+        "reported_version": "1.7.0",
+        "load_before": "load average 7.43 11.61 17.81 (1, 5, 15 min)",
+        "load_after": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
+        "series": [
+          {
+            "id": "hook.floor",
+            "what": "process floor: spawn, stdin, exit, for a hook subcommand that does no work",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1994167,
+              "median_ns": 2257875,
+              "p90_ns": 2876042,
+              "p99_ns": 3263292,
+              "max_ns": 3596958
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2181916,
+              2281541,
+              2273750,
+              2866666,
+              2092334
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.spawn",
+            "what": "PreToolUse Read of a file under the 300-line threshold: not intercepted (exit 0)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2040250,
+              "median_ns": 2324333,
+              "p90_ns": 2607250,
+              "p99_ns": 2897500,
+              "max_ns": 18913292
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2153917,
+              2355875,
+              2355125,
+              2559542,
+              2154333
+            ]
+          },
+          {
+            "id": "hook.intercept_block.spawn",
+            "what": "PreToolUse Read of a file over the threshold, first Read of the session: blocked (exit 2)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2011750,
+              "median_ns": 2270042,
+              "p90_ns": 2452958,
+              "p99_ns": 3070833,
+              "max_ns": 4717500
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2120209,
+              2315375,
+              2313625,
+              2419125,
+              2118708
+            ]
+          },
+          {
+            "id": "hook.meter_read.spawn",
+            "what": "PostToolUse Read: count the file's tokens, write one ledger row (exit 0)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 28986666,
+              "median_ns": 29615041,
+              "p90_ns": 30263125,
+              "p99_ns": 34807875,
+              "max_ns": 37666250
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              29481125,
+              29586708,
+              29775708,
+              29739125,
+              29491667
+            ]
+          },
+          {
+            "id": "hook.meter_bash.spawn",
+            "what": "PostToolUse Bash: count the output's tokens, write one ledger row (exit 0); output is the first 40 lines of the subject",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 28055042,
+              "median_ns": 29018416,
+              "p90_ns": 29983417,
+              "p99_ns": 31423042,
+              "max_ns": 38618667
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              29673333,
+              28685417,
+              28611959,
+              29135416,
+              28949208
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.inproc",
+            "what": "run_with, warm: PreToolUse Read under the threshold",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.intercept_block.inproc",
+            "what": "run_with, warm: PreToolUse Read over the threshold, blocked",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.meter_read.inproc",
+            "what": "run_with, warm: PostToolUse Read, one ledger row",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.meter_bash.inproc",
+            "what": "run_with, warm: PostToolUse Bash, one ledger row",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.per_call_identity",
+            "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
+            "subject": null,
+            "status": "n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 5d1ec0408ad2)",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "server.start",
+            "what": "spawn lumen-mcp and answer `initialize`",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1772791,
+              "median_ns": 2025042,
+              "p90_ns": 2291792,
+              "p99_ns": 2565417,
+              "max_ns": 2711084
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2025042,
+              2244292,
+              1924792,
+              2148917,
+              1907292
+            ]
+          },
+          {
+            "id": "server.ping",
+            "what": "JSON-RPC round trip with no work: the floor under every server series",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 7125,
+              "median_ns": 11833,
+              "p90_ns": 13500,
+              "p99_ns": 17375,
+              "max_ns": 20583
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              11125,
+              11917,
+              12417,
+              11333,
+              11042
+            ]
+          },
+          {
+            "id": "server.smart_read.<300",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 486000,
+              "median_ns": 517709,
+              "p90_ns": 561042,
+              "p99_ns": 643792,
+              "max_ns": 723583
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              509000,
+              560333,
+              510375,
+              518417,
+              516375
+            ]
+          },
+          {
+            "id": "server.recall_file.<300",
+            "what": "recall_file for one item (`walk`)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 503334,
+              "median_ns": 610667,
+              "p90_ns": 772041,
+              "p99_ns": 979917,
+              "max_ns": 1131625
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              689000,
+              713542,
+              528291,
+              603792,
+              610667
+            ]
+          },
+          {
+            "id": "server.smart_read.300-999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1997500,
+              "median_ns": 2091375,
+              "p90_ns": 2267000,
+              "p99_ns": 2403708,
+              "max_ns": 2534209
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2156709,
+              2215542,
+              2039583,
+              2043416,
+              2071750
+            ]
+          },
+          {
+            "id": "server.recall_file.300-999",
+            "what": "recall_file for one item (`initialize_returns_a_well_formed_jsonrpc_response`)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1909625,
+              "median_ns": 1976333,
+              "p90_ns": 2036791,
+              "p99_ns": 2130167,
+              "max_ns": 2512333
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              1959875,
+              2001000,
+              1971958,
+              1964000,
+              1989750
+            ]
+          },
+          {
+            "id": "server.smart_read.1000-2999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 4855041,
+              "median_ns": 4989709,
+              "p90_ns": 5110000,
+              "p99_ns": 5575625,
+              "max_ns": 5969625
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              4989375,
+              4973083,
+              4993916,
+              4962917,
+              5018875
+            ]
+          },
+          {
+            "id": "server.recall_file.1000-2999",
+            "what": "recall_file for one item (`rust_statement`)",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 4797541,
+              "median_ns": 4920209,
+              "p90_ns": 5073375,
+              "p99_ns": 5297875,
+              "max_ns": 5435750
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              4895916,
+              4947875,
+              4976625,
+              4904333,
+              4884333
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.<300",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1499542,
+              "median_ns": 2133958,
+              "p90_ns": 3426209,
+              "p99_ns": 4248375,
+              "max_ns": 4450500
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              2191417,
+              1820708,
+              3342166,
+              2080250,
+              2045542
+            ]
+          },
+          {
+            "id": "server.repeat_changed.<300",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2247708,
+              "median_ns": 3985250,
+              "p90_ns": 6373583,
+              "p99_ns": 7127083,
+              "max_ns": 7397042
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              2709416,
+              2548291,
+              6274416,
+              4180166,
+              4032833
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.300-999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3231042,
+              "median_ns": 3947083,
+              "p90_ns": 5647459,
+              "p99_ns": 12321417,
+              "max_ns": 19631042
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              3849041,
+              3902250,
+              5647459,
+              3731167,
+              4048000
+            ]
+          },
+          {
+            "id": "server.repeat_changed.300-999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3894542,
+              "median_ns": 7368625,
+              "p90_ns": 9901792,
+              "p99_ns": 11386291,
+              "max_ns": 31154083
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              6509292,
+              7779875,
+              4412208,
+              7227000,
+              9885583
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.1000-2999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6325084,
+              "median_ns": 6633875,
+              "p90_ns": 7721125,
+              "p99_ns": 9469417,
+              "max_ns": 15351917
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              6547375,
+              6601125,
+              6503583,
+              6930375,
+              7585666
+            ]
+          },
+          {
+            "id": "server.repeat_changed.1000-2999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 7914708,
+              "median_ns": 9536167,
+              "p90_ns": 14258875,
+              "p99_ns": 14996833,
+              "max_ns": 17379667
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              9431750,
+              9531125,
+              8889250,
+              10245000,
+              14230625
+            ]
+          }
+        ],
+        "derived": [
+          {
+            "id": "hook.intercept_pass.spawn_minus_floor",
+            "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
+            "median_ns": 66458
+          },
+          {
+            "id": "hook.intercept_block.spawn_minus_floor",
+            "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
+            "median_ns": 12167
+          },
+          {
+            "id": "hook.meter_read.spawn_minus_floor",
+            "what": "median(hook.meter_read.spawn) - median(hook.floor)",
+            "median_ns": 27357166
+          },
+          {
+            "id": "hook.meter_bash.spawn_minus_floor",
+            "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
+            "median_ns": 26760541
+          },
+          {
+            "id": "hook.per_call_identity.spawn_minus_floor",
+            "what": "median(hook.per_call_identity) - median(hook.floor)",
+            "median_ns": null
+          },
+          {
+            "id": "hook.per_call_identity.server_claim",
+            "what": "median(server.identity.placed) - median(server.identity.unplaced)",
+            "median_ns": null
+          }
+        ]
+      },
+      {
+        "label": "pre-8855fe4",
+        "reported_version": "1.7.0",
+        "load_before": "load average 7.43 11.61 17.81 (1, 5, 15 min)",
+        "load_after": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
+        "series": [
+          {
+            "id": "hook.floor",
+            "what": "process floor: spawn, stdin, exit, for a hook subcommand that does no work",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2027000,
+              "median_ns": 2325583,
+              "p90_ns": 2455917,
+              "p99_ns": 2569375,
+              "max_ns": 2627625
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2119084,
+              2326292,
+              2281500,
+              2348958,
+              2414625
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.spawn",
+            "what": "PreToolUse Read of a file under the 300-line threshold: not intercepted (exit 0)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2053375,
+              "median_ns": 2310250,
+              "p90_ns": 2618208,
+              "p99_ns": 2817291,
+              "max_ns": 2852459
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2171292,
+              2373125,
+              2148458,
+              2385041,
+              2614584
+            ]
+          },
+          {
+            "id": "hook.intercept_block.spawn",
+            "what": "PreToolUse Read of a file over the threshold, first Read of the session: blocked (exit 2)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3244250,
+              "median_ns": 3786750,
+              "p90_ns": 4178042,
+              "p99_ns": 5024292,
+              "max_ns": 13827625
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              3532125,
+              3864500,
+              3395834,
+              3817333,
+              4132417
+            ]
+          },
+          {
+            "id": "hook.meter_read.spawn",
+            "what": "PostToolUse Read: count the file's tokens, write one ledger row (exit 0)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 28755667,
+              "median_ns": 29532417,
+              "p90_ns": 30247542,
+              "p99_ns": 32791667,
+              "max_ns": 34587500
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              29461500,
+              29476083,
+              29511583,
+              29571500,
+              29660166
+            ]
+          },
+          {
+            "id": "hook.meter_bash.spawn",
+            "what": "PostToolUse Bash: count the output's tokens, write one ledger row (exit 0); output is the first 40 lines of the subject",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 27874417,
+              "median_ns": 28763250,
+              "p90_ns": 29829584,
+              "p99_ns": 31758292,
+              "max_ns": 34885250
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              29677959,
+              28763333,
+              28704500,
+              28578208,
+              28675208
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.inproc",
+            "what": "run_with, warm: PreToolUse Read under the threshold",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 22875,
+              "median_ns": 46750,
+              "p90_ns": 68584,
+              "p99_ns": 80750,
+              "max_ns": 96250
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              65791,
+              67125,
+              27916,
+              31750,
+              46750
+            ]
+          },
+          {
+            "id": "hook.intercept_block.inproc",
+            "what": "run_with, warm: PreToolUse Read over the threshold, blocked",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 814375,
+              "median_ns": 1920292,
+              "p90_ns": 2860000,
+              "p99_ns": 4337875,
+              "max_ns": 4457583
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2774542,
+              2764125,
+              1664166,
+              1328958,
+              1588250
+            ]
+          },
+          {
+            "id": "hook.meter_read.inproc",
+            "what": "run_with, warm: PostToolUse Read, one ledger row",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2244458,
+              "median_ns": 2744375,
+              "p90_ns": 4155750,
+              "p99_ns": 4498542,
+              "max_ns": 5403375
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              4016084,
+              4064458,
+              2673834,
+              2369166,
+              2648750
+            ]
+          },
+          {
+            "id": "hook.meter_bash.inproc",
+            "what": "run_with, warm: PostToolUse Bash, one ledger row",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2111541,
+              "median_ns": 3106083,
+              "p90_ns": 4778250,
+              "p99_ns": 9969125,
+              "max_ns": 15613417
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              4417375,
+              4516875,
+              2363541,
+              2864208,
+              2422875
+            ]
+          },
+          {
+            "id": "hook.per_call_identity",
+            "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
+            "subject": null,
+            "status": "n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 8855fe4c2ed8)",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "server.start",
+            "what": "spawn lumen-mcp and answer `initialize`",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1918916,
+              "median_ns": 2312083,
+              "p90_ns": 2910083,
+              "p99_ns": 3203084,
+              "max_ns": 3563208
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2811833,
+              2794291,
+              2269750,
+              2198417,
+              2214750
+            ]
+          },
+          {
+            "id": "server.ping",
+            "what": "JSON-RPC round trip with no work: the floor under every server series",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 7125,
+              "median_ns": 10833,
+              "p90_ns": 12667,
+              "p99_ns": 14833,
+              "max_ns": 18958
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              11708,
+              11750,
+              10875,
+              10500,
+              10375
+            ]
+          },
+          {
+            "id": "server.smart_read.<300",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 506500,
+              "median_ns": 586792,
+              "p90_ns": 762791,
+              "p99_ns": 824041,
+              "max_ns": 832042
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              651709,
+              740208,
+              586792,
+              542417,
+              522000
+            ]
+          },
+          {
+            "id": "server.recall_file.<300",
+            "what": "recall_file for one item (`walk`)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 509917,
+              "median_ns": 650834,
+              "p90_ns": 847500,
+              "p99_ns": 945709,
+              "max_ns": 981500
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              671583,
+              843833,
+              662375,
+              627166,
+              589500
+            ]
+          },
+          {
+            "id": "server.smart_read.300-999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1985292,
+              "median_ns": 2098292,
+              "p90_ns": 2228750,
+              "p99_ns": 2480000,
+              "max_ns": 2661750
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2140500,
+              2079000,
+              2094125,
+              2112209,
+              2040833
+            ]
+          },
+          {
+            "id": "server.recall_file.300-999",
+            "what": "recall_file for one item (`initialize_returns_a_well_formed_jsonrpc_response`)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1927709,
+              "median_ns": 2039500,
+              "p90_ns": 2366292,
+              "p99_ns": 3162583,
+              "max_ns": 5179708
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              2339583,
+              2025208,
+              2026875,
+              2036583,
+              2016792
+            ]
+          },
+          {
+            "id": "server.smart_read.1000-2999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 4891583,
+              "median_ns": 5050791,
+              "p90_ns": 5415167,
+              "p99_ns": 6832959,
+              "max_ns": 7671500
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              5261125,
+              5050791,
+              4977333,
+              5062000,
+              4981833
+            ]
+          },
+          {
+            "id": "server.recall_file.1000-2999",
+            "what": "recall_file for one item (`rust_statement`)",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 4820708,
+              "median_ns": 4943916,
+              "p90_ns": 5139250,
+              "p99_ns": 5628792,
+              "max_ns": 5983708
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              5068750,
+              4912292,
+              4911958,
+              4952750,
+              4919375
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.<300",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1670000,
+              "median_ns": 2160208,
+              "p90_ns": 4086500,
+              "p99_ns": 4950000,
+              "max_ns": 14329833
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              2109833,
+              2007125,
+              2391458,
+              4057500,
+              2061958
+            ]
+          },
+          {
+            "id": "server.repeat_changed.<300",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2866708,
+              "median_ns": 3768333,
+              "p90_ns": 6293667,
+              "p99_ns": 7205334,
+              "max_ns": 7492500
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              3289416,
+              3735125,
+              4265042,
+              6193250,
+              3288375
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.300-999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3476750,
+              "median_ns": 3954292,
+              "p90_ns": 4770584,
+              "p99_ns": 7420834,
+              "max_ns": 25064709
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              3770583,
+              3804167,
+              4033125,
+              4700791,
+              3944291
+            ]
+          },
+          {
+            "id": "server.repeat_changed.300-999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 4168875,
+              "median_ns": 6706875,
+              "p90_ns": 10443458,
+              "p99_ns": 11311083,
+              "max_ns": 12187500
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              6442584,
+              6430750,
+              6691916,
+              9268041,
+              10192208
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.1000-2999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6354375,
+              "median_ns": 6775959,
+              "p90_ns": 7625250,
+              "p99_ns": 7941833,
+              "max_ns": 17012292
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              6677375,
+              6498417,
+              6626459,
+              7443000,
+              7467250
+            ]
+          },
+          {
+            "id": "server.repeat_changed.1000-2999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 8171208,
+              "median_ns": 9739333,
+              "p90_ns": 14728292,
+              "p99_ns": 15626333,
+              "max_ns": 25901084
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              9488791,
+              9445833,
+              9071042,
+              14551166,
+              14183458
+            ]
+          }
+        ],
+        "derived": [
+          {
+            "id": "hook.intercept_pass.spawn_minus_floor",
+            "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
+            "median_ns": -15333
+          },
+          {
+            "id": "hook.intercept_block.spawn_minus_floor",
+            "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
+            "median_ns": 1461167
+          },
+          {
+            "id": "hook.meter_read.spawn_minus_floor",
+            "what": "median(hook.meter_read.spawn) - median(hook.floor)",
+            "median_ns": 27206834
+          },
+          {
+            "id": "hook.meter_bash.spawn_minus_floor",
+            "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
+            "median_ns": 26437667
+          },
+          {
+            "id": "hook.per_call_identity.spawn_minus_floor",
+            "what": "median(hook.per_call_identity) - median(hook.floor)",
+            "median_ns": null
+          },
+          {
+            "id": "hook.per_call_identity.server_claim",
+            "what": "median(server.identity.placed) - median(server.identity.unplaced)",
+            "median_ns": null
+          }
+        ]
+      }
+    ]
+  },
+  "model": {
+    "status": "modelled",
+    "source": "crates/lumen-core/src/econ.rs (Econ::default) and crates/lumen-core/src/rates.rs",
+    "rates_usd_per_million_tokens": {
+      "input": 5.0,
+      "output": 25.0,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "rates_note": "rates.rs labels these Sonnet 3.5 / 3.7 / 4 pricing. The harness does not check them against a current price list; they are the model's inputs, not a quote.",
+    "context_tokens": 362965.0,
+    "output_tokens": 1085.0,
+    "rounds_remaining": 65.0,
+    "inputs_source": "measured_defaults: means over 19,161 main-agent turns of the Lumen author's own sessions (econ.rs); another user's profile differs",
+    "formula": "value of one saved token = (cache_write + cache_read x rounds_remaining) / 1e6 dollars; one intercepted Read costs one extra round = (context x cache_read + output x output_rate) / 1e6 dollars; a dollar figure below is the median saved tokens of a call x the value of one token",
+    "value_per_token_usd": 0.00003875,
+    "extra_round_cost_usd": 0.2086075,
+    "s_min_tokens": 5383.0
+  },
+  "environment": {
+    "os": "macos",
+    "arch": "aarch64",
+    "os_version": "macOS 26.6.2 (25G83)",
+    "kernel": "25.6.0",
+    "cpu_model": "Apple M4",
+    "cpu_logical_cores": 10,
+    "cpu_physical_cores": 10,
+    "cpu_core_layout": "4 performance + 6 efficiency",
+    "ram_bytes": 25769803776,
+    "power": "Now drawing from 'AC Power'",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "host_triple": "aarch64-apple-darwin",
+    "rustflags": null,
+    "started_utc": "2026-10-12T04:06:58Z",
+    "load_at_start": "load average 8.50 12.24 18.25 (1, 5, 15 min)",
+    "load_at_end": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
+    "probe_errors": []
+  }
+}

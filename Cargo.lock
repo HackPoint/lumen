@@ -2783,6 +2783,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-bench"
+version = "0.1.0"
+dependencies = [
+ "lumen-core",
+ "lumen-mcp",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+]
+
+[[package]]
 name = "lumen-cli"
 version = "1.7.0"
 dependencies = [
