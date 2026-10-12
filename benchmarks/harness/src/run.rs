@@ -258,7 +258,9 @@ pub fn execute(plan: &Plan) -> Res<Output> {
     })
 }
 
-/// Write `<label>-<os>.json`, `<label>-tokens.tsv` and `<label>-summary.md` into `out`.
+/// Write `<label>-<os>.json`, `<label>-<os>-summary.md` and `<label>-tokens.tsv` into `out`. The
+/// summary carries latency, which is the OS's, so it is named for it: two runners' results can sit
+/// in one directory. The token table is the same on every OS.
 pub fn write_outputs(out: &Path, o: &Output) -> Res<Vec<PathBuf>> {
     std::fs::create_dir_all(out).ctx(&format!("create {}", out.display()))?;
     let label = &o.results.label;
@@ -267,7 +269,7 @@ pub fn write_outputs(out: &Path, o: &Output) -> Res<Vec<PathBuf>> {
     json.push('\n');
     let mut written = vec![json_path.clone()];
     std::fs::write(&json_path, json).ctx(&format!("write {}", json_path.display()))?;
-    let summary_path = out.join(format!("{label}-summary.md"));
+    let summary_path = out.join(format!("{label}-{}-summary.md", o.results.environment.os));
     std::fs::write(&summary_path, &o.summary).ctx(&format!("write {}", summary_path.display()))?;
     written.push(summary_path);
     if let Some(tsv) = &o.tsv {

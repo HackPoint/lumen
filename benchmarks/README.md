@@ -6,6 +6,7 @@ and the checkout you run it from. Everything is reproduced by one command.
 
 ```sh
 benchmarks/run.sh                 # macOS / Linux: tokens and latency, v1.7.0 against this checkout
+benchmarks/run.sh compare benchmarks/results/<label>-<os>.json   # latency again, against a committed run
 benchmarks\run.ps1 --latency-only # Windows (PowerShell)
 cargo run --release --locked -p lumen-bench -- --help
 ```
@@ -30,13 +31,15 @@ builds, which is the longest part.
 | file | content |
 |---|---|
 | `results/<label>-<os>.json` | everything, machine-readable, stable key order, with an `environment` block |
-| `results/<label>-summary.md` | the tables a person reads |
+| `results/<label>-<os>-summary.md` | the tables a person reads |
 | `results/<label>-tokens.tsv` | one row per file and build: every token figure, deterministic |
 
 `--label` names them. A label of the form `MAJOR.MINOR.PATCH` is a release result; anything else
-(the default is `current-main`) is stamped **pre-release** in the JSON (`"pre_release": true`) and
-at the top of the summary. The files committed here under `current-main-*` are a measurement of
-main before 1.8.0 and are not a 1.8.0 result.
+is stamped **pre-release** in the JSON (`"pre_release": true`) and at the top of the summary. The
+default label is `pre-release-<12 characters of the commit that was built>`, and the candidate
+build is labelled `pre-<7 characters>` in the tables, so a result always says which commit it is a
+measurement of and never calls it "main" (main moves; the commit does not). The files committed
+here are a measurement of one commit before 1.8.0 and are not a 1.8.0 result.
 
 ## MEASURED and MODELLED
 
@@ -142,21 +145,48 @@ agree exactly when those digests are equal**, and two builds give the same token
 when their digests are equal. Everything else in the results (the `environment` block, the
 latency figures, timestamps) varies.
 
-### How repeat-read identity works today
+### How repeat-read identity works, and what the harness does about it
 
-The repeat-read store is in memory, keyed by (session, request). The session is
-`CLAUDE_CODE_SESSION_ID`, read once from the server's environment when it is spawned and fixed
-for its life. The harness therefore gives every server it starts its own session id, set in one
-function, `set_session_identity` in `benchmarks/harness/src/driver.rs`. If identity moves to a
-live id handed over by a hook before each call, that is the only function to adapt (its doc
-comment says how), and the "per-call identity hook overhead" latency slot (below) then gets a
-figure. A stub does not replace the stored base; a delta does.
+The repeat-read store is in memory, keyed by (session, request). How a build learns the session
+differs, so the harness does not assume it: before measuring, it **runs each build and asks**
+(`driver::probe_identity`). It sends `hook intercept` a PreToolUse payload for
+`mcp__lumen__smart_read` with a `tool_use_id` and a `session_id`, and looks for a record the build
+left beside its ledger. No record: the build reads its session from `CLAUDE_CODE_SESSION_ID` when it
+is spawned (v1.7.0 and today's main), and the harness gives every server it starts its own id
+(`Identity::Env`, set in `Server::start`). A record: the build identifies each call from a record
+written by the PreToolUse hook (the design of PR #45, `lumen_call_<tool_use_id>.json` beside the
+ledger), and the harness plays Claude Code's part exactly: before every placed tool call it runs
+the real `hook intercept` with a fresh `tool_use_id`, then sends the call with
+`_meta["claudecode/toolUseId"]` set to that same id, so the server claims the record
+(`Identity::Hook`). The probe is of behaviour, not of usage text: a build whose `--help` mentions
+the hook but which records nothing is an Env build, and a build that records is a Hook build
+whatever it prints. Which one each build was is in the JSON (`builds[].identity`) and in the
+Builds table of the summary.
+
+Two slots exist for the hook design, and both say what they are:
+
+- `hook.per_call_identity`: the cost of the hook that records the identity: spawn `hook intercept`
+  with that payload, wait for exit 0, require the record. For a build that records nothing, the
+  slot says `n/a — this build records no per-call identity` and names the commit asked.
+- `server.identity.placed` / `server.identity.unplaced`: the server's side of it, the cost of a
+  `smart_read` with a record to claim against one with none (the unplaced call gets the full
+  answer and remembers nothing), so the difference is the claim. Only Hook builds have them.
+
+Both feed `hook.per_call_identity.spawn_minus_floor` and `.server_claim` in the derived figures.
+A stub does not replace the stored base; a delta does.
 
 ## Method: latency
 
 Each series is at least 100 recorded runs (default 200; `--runs N`), timed with
 `std::time::Instant` (monotonic). Reported: median, p90, p99, min, max, in the JSON in
-nanoseconds. A server that has not answered in two minutes stops the run.
+nanoseconds, plus the median of each pass on its own (`pass_medians_ns`, how much the machine
+moved during the run). The percentiles are **nearest-rank**: of n sorted samples, the p-th
+percentile is sample number ceil(p x n / 100), counting from 1, with no interpolation; the median
+of an even n is the lower of the two middle samples. With the default 200 runs that makes the
+median sample 100, the p90 sample 180 and the p99 sample 198, so the p99 is the third-slowest run
+and one stray slow run does not move it. The raw samples are not written (a few hundred KB per
+run); the five pass medians per series are. A server that has not answered in two minutes stops
+the run.
 
 The recorded runs are not taken in one block. The run is 5 passes over every series of both
 builds; in each pass the builds take turns (the order flips every pass), and each series first
@@ -178,12 +208,14 @@ therefore made in the same minutes, under the same conditions.
 | `server.smart_read.<bucket>`, `server.recall_file.<bucket>` | request written to reply line received |
 | `server.repeat_unchanged.<bucket>` | `smart_read`, repeat reads on, file unchanged: the stub |
 | `server.repeat_changed.<bucket>` | the same after one item changed: the delta (the file alternates between two contents, writes untimed) |
-| `hook.per_call_identity` | placeholder for task T1's PreToolUse hook on Lumen MCP tools: `n/a at <sha>` while the code path does not exist |
+| `hook.per_call_identity` | the PreToolUse hook that records which session a Lumen MCP call is from: `hook intercept` on an `mcp__lumen__*` payload, record required. `n/a — this build records no per-call identity` for a build that does not |
+| `server.identity.placed`, `server.identity.unplaced` | Hook-identity builds only: `smart_read` with a record to claim, and without one |
 
 Process-spawn cost is separated from in-process cost: `*.spawn` includes the operating system
 starting a process, `*.inproc` does not, and the summary also prints `spawn - floor`, which is
-what the hook itself adds for a build whose hook cannot be called in-process (the baseline: the
-harness links only the candidate's hook code, so `*.inproc` is `n/a` for v1.7.0). Every hook run
+what the hook itself adds for a build whose hook cannot be called in-process (the harness links
+only this checkout's hook code, so `*.inproc` exists only for a build made from the checkout, and
+is `n/a` for v1.7.0 and for any `--candidate-bin`). Every hook run
 uses a fresh session id (the intercept keeps a once-per-session marker) and its exit code is
 asserted; the ledger row counts are checked afterwards, so a series cannot time a call that did
 not do its work. Server series use the ledger's routes the same way: a series whose calls took a
@@ -215,9 +247,33 @@ calls and one in-process hook. In the other pairs whole families moved together,
 That is the sign that the machine changed between the runs (power and thermal state, the
 operating system's security scans, other builds), not the code. A longer warm-up did not help;
 pooling over passes (above) did. So: compare two latency runs only when their `hook.floor` and
-`server.ping` medians agree, take them on the same machine at similar recorded load, do not
-compare a laptop with a CI runner, and on a machine that is quiet end to end expect the
-better of these figures.
+`server.ping` medians agree, take them on the same machine at similar recorded load, and do not
+compare a laptop with a CI runner. No claim is made here about how closely a re-run on a quiet
+machine would agree: it has not been measured, and the table above is the only evidence.
+
+### Comparing a fresh run with a committed one
+
+```sh
+benchmarks/run.sh compare benchmarks/results/<label>-<os>.json
+```
+
+measures the latency series again (the committed run's `--runs` and `--warmup`, the same builds
+and subjects, on the Lumen corpus alone) and prints, per series, the median now against the
+committed one:
+
+- the **ratio** now / committed;
+- the **floor-normalized ratio**: each median divided by its own run's floor first (`hook.floor`
+  for the hooks and `server.start`, `server.ping` for the other server series), so a machine that
+  is uniformly faster or slower drops out. The floors and the in-process hooks have no floor of
+  their own kind and are compared as measured only;
+- how many series are **within 20% both ways** (ratio 0.80 to 1.20), as measured and normalized;
+- whether the **machine matches**: `hook.floor` and `server.ping` each within 15% of the committed
+  run's, in every build. It says so in words, and when it does not it tells the reader to use the
+  normalized ratios and not to read a raw difference as a difference in the code.
+
+The load average at the start and end of each run is printed alongside. Series are matched by
+build role and id, so a candidate built from a different commit is still compared with the
+committed candidate; the output says both commits.
 
 ## Reading a result
 
@@ -227,8 +283,11 @@ better of these figures.
 - **Builds**: `builds[]` records the label, commit, profile, and the version the binary reports
   for itself. Both builds are made by the harness from source with the same toolchain: v1.7.0 is
   `git archive`d from commit `5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94` into the cache and built
-  there; the candidate is built from the checkout. The repository has no `[profile.release]`, so
-  both are cargo's default release profile, and the JSON says so.
+  there; the candidate is built from the checkout, or is a prebuilt binary given with
+  `--candidate-bin PATH --candidate-sha <40 characters>` (the checkout is then not built; the
+  result records the file's name, never where it is, and the commit is the caller's word). The
+  repository has no `[profile.release]`, so both are cargo's default release profile, and the JSON
+  says so.
 - **Machine**: the `environment` block holds the OS and version, CPU model, logical and physical
   cores, RAM, power source, rustc and cargo versions, start time and load. A probe that fails is
   recorded as `null` with the reason in `probe_errors`, never as a default.
@@ -260,5 +319,10 @@ file), and say whether it ran on mains or battery. Do not quote a latency figure
 ## The workflow
 
 `.github/workflows/benchmarks.yml` is `workflow_dispatch` only (no push or pull-request trigger,
-not a required check). It runs `--latency-only` on `ubuntu-latest` and `windows-latest` and
-uploads each `results` directory as an artifact. It commits nothing back.
+not a required check). It runs `--latency-only` on `ubuntu-latest` and `windows-latest`, uploads
+each `results` directory as an artifact, and commits the result files (`<label>-<os>.json` and
+`<label>-<os>-summary.md`) to a **new branch** `bench-results/<os>-<run id>`, as HackPoint, with
+`permissions: contents: write` for that one push. It never pushes to `main` or to the branch it
+was dispatched from, and a push made with the workflow's own token starts no other workflow, so
+nothing loops. Nothing is merged: the owner opens a pull request from that branch if the numbers
+are worth keeping. The label defaults to `pre-release-<12 characters of the commit>`.

@@ -343,7 +343,7 @@ fn the_documents_are_written_under_the_label_and_the_os() {
         names,
         [
             format!("smoke-{os}.json"),
-            "smoke-summary.md".to_string(),
+            format!("smoke-{os}-summary.md"),
             "smoke-tokens.tsv".to_string()
         ]
     );
