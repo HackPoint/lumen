@@ -552,7 +552,9 @@ pub fn handle_initialize() -> Value {
 pub fn handle_tools_list() -> Value {
     let mut list = base_tools_list();
     // Advertised only when repeat reads are on, so the list the model sees is byte-identical
-    // with them off. `fresh` is still honoured either way.
+    // with them off. `fresh` is still honoured either way. Every session with repeat reads on
+    // pays for each byte of this, twice (two tools), so it says no more than what the flag does:
+    // the answer that sends the model here already spells out `fresh=true`.
     if repeat_read::mode() != lumen_core::ranked::Mode::Off
         && let Some(tools) = list["tools"].as_array_mut()
     {
@@ -560,8 +562,7 @@ pub fn handle_tools_list() -> Value {
             if matches!(t["name"].as_str(), Some("smart_read" | "recall_file")) {
                 t["inputSchema"]["properties"]["fresh"] = json!({
                     "type": "boolean",
-                    "default": false,
-                    "description": "Set true to get the full result. Use it when an earlier answer said it refers to a previous read and that read is not in your context."
+                    "description": "Full result, not an unchanged/delta answer."
                 });
             }
         }

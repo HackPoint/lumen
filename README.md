@@ -747,11 +747,17 @@ Claude Code already dedups it. It was an opt-in flag in 1.7.0 (`LUMEN_REPEAT_REA
   restart. `lumen doctor` prints the path it is using and the state.
 
 With it off every read is answered as it always was, nothing is remembered, and the `fresh`
-option is not advertised. A value that cannot be told is never guessed at: an unrecognised
-`LUMEN_REPEAT_READS`, or a settings file that is not valid JSON, is not a boolean or cannot be
-read, turns repeat reads **off** (every answer in full), is recorded as a `repeat_reads_config`
-fault (the app's fault count and `lumen report` pick it up), and `lumen doctor` names it and
-says what to fix.
+option is not advertised. Switching from off to on in the middle of a session leaves the
+client's cached tool list without `fresh` until the next session; that is harmless, because the
+stub text names `fresh=true` and the server honours it whether or not it was advertised.
+
+A value that cannot be told is never guessed at: an unrecognised `LUMEN_REPEAT_READS`, or a
+settings file that is not valid JSON, is not a boolean or cannot be read, turns repeat reads
+**off** (every answer in full), is recorded as a `repeat_reads_config` fault (the app's fault
+count and `lumen report` pick it up), and `lumen doctor` names it and says what to fix. Write
+the file as UTF-8 **without a byte-order mark**: a BOM, UTF-16 or an empty file is rejected as
+corrupt, which is off plus the fault. A mistyped key (`repeat_read`) is only an unknown key: it
+is ignored and repeat reads stay **on**, so check the state `lumen doctor` prints after editing.
 
 | `LUMEN_REPEAT_READS` | behaviour |
 |---|---|

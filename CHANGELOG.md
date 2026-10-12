@@ -35,11 +35,12 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
   experiment, by the environment variable only. With it off the answers are byte-identical to
   1.7.0's off, nothing is remembered, and `fresh` is not advertised.
 - **A switch that cannot be read is off, and says so.** An unrecognised `LUMEN_REPEAT_READS`, or a
-  settings file that is not valid JSON, not an object, has a `repeat_reads` that is not a boolean,
-  or cannot be read, answers every read in full (it does not fall back to the other source) and
-  is recorded as a `repeat_reads_config` fault, at most one row every five minutes, with one line
-  on the server's stderr. `lumen doctor` names the value or file and what to write instead.
-  Previously an unrecognised value was silently the same as unset.
+  settings file that is not valid JSON (a byte-order mark, UTF-16 and an empty file included), not
+  an object, has a `repeat_reads` that is not a boolean, or cannot be read, answers every read in
+  full (it does not fall back to the other source) and is recorded as a `repeat_reads_config`
+  fault, at most one row every five minutes, with one line on the server's stderr. `lumen doctor`
+  names the value or file and what to write instead. Previously an unrecognised value was
+  silently the same as unset. A mistyped key in the file is just an unknown key: ignored, on.
 - **Identity or base uncertain: the full result**, as in #32 below. Nothing about the default
   changes that.
 - **Upgrade, by install.** The new behaviour needs the PreToolUse hooks of #32 (below), which 1.7.0
@@ -58,7 +59,11 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
   file's path.
 - **Cost.** A two-read scenario (the `repeat_reads` fixture, an unchanged file read twice):
   1.7.0 as shipped (default off) sends the outline twice, the second read 743 tokens; now the
-  second read is 30 tokens (two reads: 1,486 tokens, now 773; the first read is the same bytes either way). The `optimizer_bench` baselines are untouched.
+  second read is 30 tokens (two reads: 1,486 tokens, now 773; the first read is the same bytes
+  either way). Offering `fresh` on `smart_read` and `recall_file` adds 174 bytes to the tool
+  list a session loads (about 43 tokens at 4 bytes a token, an estimate), and nothing with
+  repeat reads off; on the fixture one repeat read saves 713 tokens. The `optimizer_bench`
+  baselines are untouched.
 
 ### Repeat reads follow the conversation, not the process (#32)
 

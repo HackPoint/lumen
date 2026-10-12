@@ -262,6 +262,48 @@ fn a_two_read_scenario_costs_less_by_default_than_with_the_switch_off() {
     );
 }
 
+/// What offering `fresh` costs: every session that has repeat reads on pays for it on two
+/// tools, used or not. Pinned so that a longer description is a decision and not a drift.
+#[test]
+fn offering_fresh_adds_a_few_tokens_to_the_tool_list_and_only_when_on() {
+    let rig = rig();
+    let list = |env: &[(&str, &str)]| {
+        let mut s = rig.start(env);
+        let v = s.rpc("tools/list", serde_json::json!({}));
+        s.end();
+        v["result"].clone()
+    };
+    let on = list(&[]);
+    let off = list(&[("LUMEN_REPEAT_READS", "off")]);
+    let (on_bytes, off_bytes) = (on.to_string().len(), off.to_string().len());
+    eprintln!(
+        "tools/list: off {off_bytes} B, on {on_bytes} B, +{} B (/4 = {}, an estimate)",
+        on_bytes - off_bytes,
+        (on_bytes - off_bytes) / 4
+    );
+    assert!(!off.to_string().contains("fresh"), "off offers nothing");
+    for tool in on["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        let fresh = &tool["inputSchema"]["properties"]["fresh"];
+        if matches!(name, "smart_read" | "recall_file") {
+            assert_eq!(fresh["type"], "boolean", "{name}");
+            let what = fresh["description"].as_str().unwrap();
+            assert!(what.contains("Full result"), "{name}: {what}");
+            assert!(
+                fresh.get("default").is_none(),
+                "{name}: false is already the default"
+            );
+        } else {
+            assert!(fresh.is_null(), "{name} takes no fresh option");
+        }
+    }
+    assert!(
+        on_bytes - off_bytes <= 200,
+        "fresh now adds {} B to every session's tool list; it is paid whether or not it is used",
+        on_bytes - off_bytes
+    );
+}
+
 /// The file edited in one function, so a repeat of it is a delta and not a rewrite.
 fn edited(before: &str) -> String {
     before.replacen(

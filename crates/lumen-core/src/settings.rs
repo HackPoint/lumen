@@ -70,7 +70,8 @@ impl Problem {
             ),
             Problem::File(why) => format!(
                 "{} cannot be used ({why}): repeat reads are off, every read is in full. \
-                 Fix or delete the file, or switch the setting again in the app.",
+                 Fix or delete the file (deleting it gives the default, on), or set \
+                 {REPEAT_READS_ENV} to on or off, which takes precedence over the file.",
                 file.display()
             ),
         }
@@ -367,10 +368,66 @@ mod tests {
 
     #[test]
     fn a_file_with_other_keys_only_says_nothing_about_repeat_reads() {
-        let r = resolve(None, &text(r#"{"something_else":1}"#));
+        // A mistyped key is an unknown key: ignored, and the default, on, stands. The README
+        // says so and tells the reader to check what `lumen doctor` resolved.
+        for body in [
+            r#"{"something_else":1}"#,
+            r#"{"repeat_read":false}"#,
+            r#"{"Repeat_Reads":false}"#,
+            "{}",
+        ] {
+            let r = resolve(None, &text(body));
+            assert_eq!(
+                (r.mode, r.source, r.problem),
+                (Mode::On, Source::Default, None),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_utf16_or_an_empty_file_is_corrupt_not_a_setting() {
+        // What the README promises: UTF-8 without a BOM. The ways an editor gets that wrong
+        // are rejected as corrupt (off, with a fault), never guessed at and never read as on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let json = "{\"repeat_reads\":true}";
+        let utf16: Vec<u8> = format!("\u{feff}{json}")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        for (what, bytes) in [
+            ("utf-8 with a BOM", format!("\u{feff}{json}").into_bytes()),
+            ("utf-16", utf16),
+            ("empty", Vec::new()),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let r = resolve(None, &read_file(&path));
+            assert_eq!(r.mode, Mode::Off, "{what}");
+            assert!(matches!(r.problem, Some(Problem::File(_))), "{what}: {r:?}");
+        }
+        std::fs::write(&path, json).unwrap();
         assert_eq!(
-            (r.mode, r.source, r.problem),
-            (Mode::On, Source::Default, None)
+            resolve(None, &read_file(&path)).mode,
+            Mode::On,
+            "the same JSON as plain UTF-8 is read"
+        );
+    }
+
+    #[test]
+    fn a_file_problem_offers_only_remedies_that_exist_today() {
+        let file = Path::new("/data/lumen_settings.json");
+        let said = Problem::File("not JSON: x".into()).describe(file);
+        assert!(said.contains("/data/lumen_settings.json"), "{said}");
+        assert!(said.contains("delete the file"), "{said}");
+        assert!(said.contains(REPEAT_READS_ENV), "{said}");
+        // There is no switch in the app to go back to: do not send anyone looking for one.
+        assert!(!said.contains("in the app"), "{said}");
+        assert!(
+            !Problem::Env("x".into())
+                .describe(file)
+                .contains("in the app"),
+            "the same for the environment variable's message"
         );
     }
 

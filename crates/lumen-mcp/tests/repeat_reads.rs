@@ -529,7 +529,7 @@ fn fresh_always_returns_the_full_outline_and_is_recorded() {
 }
 
 #[test]
-fn fresh_is_honoured_and_counted_with_the_flag_off() {
+fn fresh_is_honoured_and_recorded_when_repeat_reads_are_turned_off() {
     let rig = rig();
     let f = rig.file("a.rs", &source(40, 6));
     let mut s = rig.start(&[("LUMEN_REPEAT_READS", "off")]);
