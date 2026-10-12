@@ -2,6 +2,7 @@
 //! checkout). Both are built here, from source, with the same toolchain and the same cargo
 //! profile, so a difference between them is a difference in the code.
 
+use crate::driver::Identity;
 use crate::util::{Ctx, Res, run_text};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,8 +22,14 @@ pub struct Build {
     pub profile: &'static str,
     /// Whether the repository tunes the profile, from its own Cargo.toml.
     pub profile_note: String,
-    /// How the source was obtained.
+    /// How the source was obtained. Never a path: see [`prebuilt`].
     pub source: String,
+    /// How the binary learns whose call it is serving. A constructor cannot know: it is set by
+    /// [`crate::driver::probe_identity`] at the start of a run, and is `Env` until then.
+    pub identity: Identity,
+    /// Whether the in-process hook series (which call this checkout's `lumen_mcp::hook` library)
+    /// describe this binary: only when it was built from the checkout.
+    pub inproc: bool,
 }
 
 fn exe(name: &str) -> String {
@@ -85,6 +92,12 @@ fn cargo_build(root: &Path, target_dir: &Path, release: bool) -> Res<PathBuf> {
     Ok(bin)
 }
 
+/// The candidate's label in a result: `pre-` and the first seven characters of the commit that was
+/// built, so a result never says "main" or "current" about a commit that has since moved.
+pub fn pre_release_label(sha: &str) -> String {
+    format!("pre-{}", &sha[..sha.len().min(7)])
+}
+
 /// The candidate: the checkout at `repo`, built in `repo/target`.
 pub fn candidate(repo: &Path, release: bool, allow_dirty: bool) -> Res<Build> {
     let sha = run_text(git(repo).args(["rev-parse", "HEAD"]))?
@@ -110,7 +123,7 @@ pub fn candidate(repo: &Path, release: bool, allow_dirty: bool) -> Res<Build> {
     }
     let bin = cargo_build(repo, &repo.join("target"), release)?;
     Ok(Build {
-        label: "current".to_string(),
+        label: pre_release_label(&sha),
         role: "candidate",
         sha,
         dirty,
@@ -121,6 +134,8 @@ pub fn candidate(repo: &Path, release: bool, allow_dirty: bool) -> Res<Build> {
         // directory it was made in.
         source: "the checkout this harness was run from, built in its own target directory"
             .to_string(),
+        identity: Identity::Env,
+        inproc: true,
     })
 }
 
@@ -187,14 +202,29 @@ pub fn baseline(repo: &Path, cache: &Path, label: &str, sha: &str) -> Res<Build>
         profile: "release",
         profile_note: profile_note(&src)?,
         source: format!("git archive of {sha}"),
+        identity: Identity::Env,
+        inproc: false,
     })
 }
 
 /// A prebuilt binary, for a reviewer who has one: its provenance is whatever they say it is.
+///
+/// The record names the file (not where it is) and the commit the caller says it was built from,
+/// which must be a full SHA: a result file is committed and read elsewhere, and a path says whose
+/// home directory it was made in.
 pub fn prebuilt(label: &str, role: &'static str, sha: &str, bin: &Path) -> Res<Build> {
     if !bin.is_file() {
         return Err(format!("{} is not a file", bin.display()));
     }
+    if !is_full_sha(sha) {
+        return Err(format!(
+            "the {role} binary {} needs the full 40-character commit SHA it was built from, got {sha:?}",
+            bin.display()
+        ));
+    }
+    let name = bin
+        .file_name()
+        .map_or_else(|| "lumen-mcp".into(), |n| n.to_string_lossy());
     Ok(Build {
         label: label.to_string(),
         role,
@@ -203,7 +233,9 @@ pub fn prebuilt(label: &str, role: &'static str, sha: &str, bin: &Path) -> Res<B
         bin: bin.to_path_buf(),
         profile: "release",
         profile_note: "release, as supplied by --candidate-bin / --baseline-bin".to_string(),
-        source: format!("prebuilt binary {}", bin.display()),
+        source: format!("prebuilt binary `{name}`, supplied by the caller"),
+        identity: Identity::Env,
+        inproc: false,
     })
 }
 
@@ -217,5 +249,30 @@ mod tests {
         assert!(!is_full_sha("5d1ec04"));
         assert!(!is_full_sha("v1.7.0"));
         assert!(!is_full_sha("zd1ec0408ad25edcbae43cf1a6ecbc0ddba47c94"));
+    }
+
+    #[test]
+    fn a_prebuilt_build_records_its_file_name_and_never_where_the_file_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("lumen-mcp");
+        std::fs::write(&bin, b"x").unwrap();
+        let sha = "dd565a9f0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e";
+        let b = prebuilt("current", "candidate", sha, &bin).unwrap();
+        let where_it_is = dir.path().to_string_lossy().into_owned();
+        assert!(b.source.contains("lumen-mcp"), "{}", b.source);
+        assert!(!b.source.contains(&where_it_is), "{}", b.source);
+        assert!(!b.profile_note.contains(&where_it_is));
+        assert_eq!(b.sha, sha);
+        // The commit is the caller's word and must be a whole one.
+        assert!(prebuilt("current", "candidate", "dd565a9", &bin).is_err());
+    }
+
+    #[test]
+    fn the_candidate_is_labelled_by_the_commit_that_was_built() {
+        assert_eq!(
+            pre_release_label("5bf97e3b0a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"),
+            "pre-5bf97e3"
+        );
+        assert_eq!(pre_release_label("abc"), "pre-abc");
     }
 }

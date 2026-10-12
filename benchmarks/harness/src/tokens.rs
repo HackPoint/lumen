@@ -19,8 +19,9 @@
 //! of the file and of the reply text, and against the row the server wrote to its ledger. A
 //! disagreement stops the run: a benchmark that quietly takes one of two numbers is not one.
 
+use crate::builds::Build;
 use crate::corpus::{BUCKETS, Corpus, LANGS, SourceFile, bucket_of};
-use crate::driver::{Isolation, LedgerRow, Reply, Server, ledger_rows};
+use crate::driver::{Identity, Isolation, LedgerRow, Reply, Server, ledger_rows};
 use crate::edit::{self, Edit, Rep};
 use crate::stats::{Dist, dist};
 use crate::util::{Ctx, Res, sha256_hex};
@@ -131,13 +132,15 @@ struct Off {
 /// Repeat reads off: the outline and the recall as shipped.
 fn off_pass(
     bin: &Path,
+    identity: Identity,
     c: &Corpus,
     prep: &[Prepared],
     work: &Path,
     tag: &str,
 ) -> Res<(Vec<Off>, String)> {
     let iso = Isolation::create(&work.join(format!("off-{}", c.name)))?;
-    let mut s = Server::start(bin, &c.root, &iso, &format!("bench-off-{}", c.name), false)?;
+    let session = format!("bench-off-{}", c.name);
+    let mut s = Server::start(bin, &c.root, &iso, &session, false, identity)?;
     let version = s.version.clone();
     let mut replies: Vec<(Reply, Option<Reply>)> = Vec::with_capacity(prep.len());
     for (i, p) in prep.iter().enumerate() {
@@ -207,6 +210,7 @@ struct On {
 /// of the edited file. Runs on a private copy of the files so the corpus cache is never edited.
 fn on_pass(
     bin: &Path,
+    identity: Identity,
     c: &Corpus,
     prep: &[Prepared],
     off: &[Off],
@@ -222,7 +226,14 @@ fn on_pass(
         std::fs::write(&dest, p.src.as_bytes()).ctx(&format!("write {}", dest.display()))?;
     }
     let iso = Isolation::create(&base)?;
-    let mut s = Server::start(bin, &scratch, &iso, &format!("bench-on-{}", c.name), true)?;
+    let mut s = Server::start(
+        bin,
+        &scratch,
+        &iso,
+        &format!("bench-on-{}", c.name),
+        true,
+        identity,
+    )?;
     let mut replies: Vec<(Reply, Reply, Option<Reply>)> = Vec::with_capacity(prep.len());
     for (i, p) in prep.iter().enumerate() {
         let first = s.smart_read(&p.file.rel)?;
@@ -312,16 +323,16 @@ fn on_pass(
 }
 
 /// Measure one build on one corpus. Returns the per-file results and the version the build says
-/// it is.
+/// it is. `work` is the build's own scratch directory.
 pub fn measure(
-    bin: &Path,
+    build: &Build,
     c: &Corpus,
     prep: &[Prepared],
     work: &Path,
-    tag: &str,
 ) -> Res<(Vec<FileResult>, String)> {
-    let (off, version) = off_pass(bin, c, prep, work, tag)?;
-    let on = on_pass(bin, c, prep, &off, work, tag)?;
+    let (bin, identity, tag) = (build.bin.as_path(), build.identity, build.label.as_str());
+    let (off, version) = off_pass(bin, identity, c, prep, work, tag)?;
+    let on = on_pass(bin, identity, c, prep, &off, work, tag)?;
     let mut out = Vec::with_capacity(prep.len());
     for ((p, o), n) in prep.iter().zip(off).zip(on) {
         let (recall, recall_route) = match o.recall {

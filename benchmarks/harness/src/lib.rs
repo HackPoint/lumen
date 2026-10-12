@@ -7,6 +7,7 @@
 //! Tauri bundle.
 
 pub mod builds;
+pub mod compare;
 pub mod corpus;
 pub mod driver;
 pub mod edit;

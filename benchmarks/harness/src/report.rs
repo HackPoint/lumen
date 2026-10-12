@@ -73,6 +73,11 @@ pub struct BuildInfo {
     pub profile: String,
     pub profile_note: String,
     pub source: String,
+    /// How the build learns whose call it is serving: `env` (a session id read when the server
+    /// starts) or `hook` (a record per call, written by the PreToolUse hook). Found by running the
+    /// build, not by reading its usage text.
+    pub identity: String,
+    pub identity_note: String,
     pub reported_version: String,
     pub tokens: Option<TokensSection>,
 }
@@ -88,6 +93,10 @@ pub struct LatencySection {
     pub minimum_runs: usize,
     pub clock: String,
     pub warmup_note: String,
+    /// How p90 and p99 are computed.
+    pub percentile_method: String,
+    /// What is kept of the individual runs.
+    pub samples_note: String,
     pub subjects: Vec<Subject>,
     pub builds: Vec<BuildLatency>,
 }
@@ -209,6 +218,8 @@ pub fn build_info(b: &Build, version: &str, tokens: Option<TokensSection>) -> Bu
         profile: b.profile.to_string(),
         profile_note: b.profile_note.clone(),
         source: b.source.clone(),
+        identity: b.identity.label().to_string(),
+        identity_note: b.identity.describe().to_string(),
         reported_version: version.to_string(),
         tokens,
     }
@@ -511,6 +522,108 @@ fn opt<T: std::fmt::Display>(v: &Option<T>) -> String {
     v.as_ref().map_or("unknown".to_string(), |v| v.to_string())
 }
 
+/// How p90 and p99 are computed, with what that means for `n` recorded runs.
+pub fn percentile_note(n: usize) -> String {
+    let rank = |p: usize| (p * n).div_ceil(100).max(1);
+    format!(
+        "nearest-rank: the percentile p of n runs is the run at rank ceil(p x n / 100) of the \
+         sorted runs, fastest first, with no interpolation. With n = {n} the median is run {} \
+         (of the two middle runs of an even count, the faster), p90 is run {}, and p99 is run {}, \
+         which leaves the slowest {} runs above it.",
+        rank(50),
+        rank(90),
+        rank(99),
+        n.saturating_sub(rank(99))
+    )
+}
+
+/// What is kept of the individual runs: their pass medians, not the runs.
+pub const SAMPLES_NOTE: &str = "not written. Each series carries `pass_medians_ns`, the median \
+    of each pass on its own, in pass order: how far they sit from one another is how much the \
+    machine moved while the run was going on.";
+
+/// Of the series with a figure, how many had the median of every pass within 20% of the pooled
+/// median. `(within, total)`.
+fn pass_stability(sec: &LatencySection) -> (usize, usize) {
+    let (mut within, mut total) = (0, 0);
+    for b in &sec.builds {
+        for x in &b.series {
+            let Some(l) = &x.lat else { continue };
+            if x.pass_medians_ns.is_empty() {
+                continue;
+            }
+            total += 1;
+            let m = l.median_ns as f64;
+            if x.pass_medians_ns
+                .iter()
+                .all(|&p| (0.8..=1.2).contains(&(p as f64 / m)))
+            {
+                within += 1;
+            }
+        }
+    }
+    (within, total)
+}
+
+/// A hook that got slower between the baseline and the candidate, when it did, with the cause the
+/// code gives. Built from this run's own medians, so it says nothing when the run shows nothing.
+fn intercept_block_note(r: &Results, sec: &LatencySection) -> Option<String> {
+    const ID: &str = "hook.intercept_block.spawn";
+    let role_of = |label: &str| {
+        r.builds
+            .iter()
+            .find(|b| b.label == label)
+            .map(|b| b.role.as_str())
+    };
+    let med = |b: &BuildLatency, id: &str| {
+        b.series
+            .iter()
+            .find(|x| x.id == id)
+            .and_then(|x| x.lat.as_ref())
+            .map(|l| l.median_ns)
+    };
+    let base = sec
+        .builds
+        .iter()
+        .find(|b| role_of(&b.label) == Some("baseline"))?;
+    let cand = sec
+        .builds
+        .iter()
+        .find(|b| role_of(&b.label) == Some("candidate"))?;
+    let (b, c) = (med(base, ID)?, med(cand, ID)?);
+    if c - b < 500_000 || (c as f64) < b as f64 * 1.1 {
+        return None;
+    }
+    let pass = match (
+        med(base, "hook.intercept_pass.spawn"),
+        med(cand, "hook.intercept_pass.spawn"),
+    ) {
+        (Some(pb), Some(pc)) => format!(
+            " The hook that lets a Read through (`hook.intercept_pass.spawn`) is {} on {} and {} \
+             on {}, so the extra time is in the blocking path, not in starting the process.",
+            fmt_ns(pc),
+            cand.label,
+            fmt_ns(pb),
+            base.label
+        ),
+        _ => String::new(),
+    };
+    Some(format!(
+        "`{ID}` is {} slower on {} than on {} ({} against {}, medians as measured on this \
+         machine in this run). Reading the code, the cause is the lookup #42 (the `recall_file` \
+         redirect) added: on every blocked first Read of a file the hook now asks the ledger, \
+         with a read-only query (`meter::lumen_answered`), whether Lumen already answered for \
+         that file, before it decides what to tell the model; {} makes no such lookup. It is a \
+         cost of that redirect, not noise.{pass}",
+        fmt_ns(c - b),
+        cand.label,
+        base.label,
+        fmt_ns(c),
+        fmt_ns(b),
+        base.label
+    ))
+}
+
 pub fn summary(r: &Results) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "# Lumen benchmarks: {}\n", r.label);
@@ -536,16 +649,17 @@ pub fn summary(r: &Results) -> String {
         r.tokenizer.name, r.model.source, r.tokenizer.name, r.tokenizer.caveat
     );
 
-    s.push_str("## Builds\n\n| label | role | commit | profile | reports version |\n|---|---|---|---|---|\n");
+    s.push_str("## Builds\n\n| label | role | commit | profile | per-call identity | reports version |\n|---|---|---|---|---|---|\n");
     for b in &r.builds {
         let _ = writeln!(
             s,
-            "| {} | {} | `{}`{} | {} | {} |",
+            "| {} | {} | `{}`{} | {} | {} | {} |",
             b.label,
             b.role,
             b.sha,
             if b.dirty { " (dirty tree)" } else { "" },
             b.profile_note,
+            b.identity_note,
             b.reported_version
         );
     }
@@ -648,11 +762,21 @@ pub fn summary(r: &Results) -> String {
     }
 
     if let Some(l) = &r.latency {
+        let (stable, of) = pass_stability(l);
         let _ = write!(
             s,
             "\n## Latency (MEASURED)\n\n{} recorded runs per series: {} passes of {}, pooled. In each pass the builds take turns (the order flips every pass), and each series first has {} warm-up runs that are discarded ({}). Clock: {}. \
-             Release builds, built here. Medians vary with the machine and its load; a re-run on a similar, quiet machine is expected to land within about 20%.\n\n",
-            l.runs, l.passes, l.runs_per_pass, l.warmup_runs, l.warmup_note, l.clock
+             Release builds, built here. Medians vary with the machine and its load, and this document makes no claim about how closely another run will land. What this run shows about itself: in {stable} of {of} series, the median of every one of the {} passes is within 20% of the series' pooled median (per-pass medians are in the JSON). `benchmarks/run.sh compare <this file>` re-measures on another machine and prints, per series, the ratio to this run, the same ratio after dividing by the process floor, how many series are within 20%, and whether that machine looks like this one.\n\n\
+             Percentiles are {} Raw samples: {}\n\n",
+            l.runs,
+            l.passes,
+            l.runs_per_pass,
+            l.warmup_runs,
+            l.warmup_note,
+            l.clock,
+            l.passes,
+            l.percentile_method,
+            l.samples_note
         );
         s.push_str("Subjects (corpus files the series run on):\n\n| bucket | file | lines | bytes | recall item |\n|---|---|---:|---:|---|\n");
         for x in &l.subjects {
@@ -662,7 +786,7 @@ pub fn summary(r: &Results) -> String {
                 x.bucket, x.rel, x.lines, x.bytes, x.recall_item
             );
         }
-        s.push_str("\n### Hooks, as the harness sees them: process spawn to exit\n\nThe whole hook as Claude Code runs it. `hook.floor` is a hook invocation that does no work, so it is the cost of the process itself; the work is what each row adds to it.\n\n");
+        s.push_str("\n### Hooks, as the harness sees them: process spawn to exit\n\nThe whole hook as Claude Code runs it. `hook.floor` is a hook invocation that does no work, so it is the cost of the process itself; the work is what each row adds to it. `hook.per_call_identity` is the PreToolUse hook on a call of one of Lumen's own MCP tools, which records who is calling; a build either has it (the series is timed) or does not (the slot says `n/a`, and why). Which one is decided by running the build, not by reading its usage text.\n\n");
         s.push_str(&latency_table(
             l,
             &[
@@ -674,7 +798,10 @@ pub fn summary(r: &Results) -> String {
                 "hook.per_call_identity",
             ],
         ));
-        s.push_str("\n### Hooks, work only: `hook::run_with` called in-process, warm (candidate only)\n\nNo process start, a warm tokenizer. A fresh hook process pays tokenizer start-up that these calls do not, which is part of the spawn figures above.\n\n");
+        if let Some(note) = intercept_block_note(r, l) {
+            let _ = write!(s, "\nNote: {note}\n");
+        }
+        s.push_str("\n### Hooks, work only: `hook::run_with` called in-process, warm (only for a build made from this checkout)\n\nNo process start, a warm tokenizer. A fresh hook process pays tokenizer start-up that these calls do not, which is part of the spawn figures above.\n\n");
         s.push_str(&latency_table(
             l,
             &[
@@ -708,7 +835,7 @@ pub fn summary(r: &Results) -> String {
                 s.push('\n');
             }
         }
-        s.push_str("\n### Server calls, round trip as a client sees it\n\nFrom just before the request is written to the arrival of the reply line. `server.ping` is the round trip with no work; the ledger row is written after the reply and is not in the interval.\n\n");
+        s.push_str("\n### Server calls, round trip as a client sees it\n\nFrom just before the request is written to the arrival of the reply line. `server.ping` is the round trip with no work; the ledger row is written after the reply and is not in the interval. For a build with per-call identity every call in these series also carries the hook's record and `_meta` id, so the server's claim of it is inside the interval; `server.identity.placed` against `server.identity.unplaced` (the same call with no record and no id) isolates that claim. Only a build with per-call identity has those two series.\n\n");
         s.push_str(&latency_table(l, &["server."]));
         let u = unusual_statuses(l);
         if !u.is_empty() {
@@ -785,5 +912,107 @@ mod tests {
             m.s_min_tokens
                 .is_some_and(|s| (5_000.0..6_000.0).contains(&s))
         );
+    }
+
+    #[test]
+    fn percentiles_say_they_are_nearest_rank_and_what_that_means_for_n() {
+        let t = percentile_note(200);
+        assert!(t.starts_with("nearest-rank"), "{t}");
+        assert!(t.contains("median is run 100"), "{t}");
+        assert!(t.contains("p90 is run 180"), "{t}");
+        assert!(t.contains("p99 is run 198"), "{t}");
+        assert!(t.contains("slowest 2 runs"), "{t}");
+        // A small n does not make a rank of zero.
+        assert!(percentile_note(1).contains("median is run 1"));
+    }
+
+    fn lat_series(id: &str, ns: i64, passes: &[i64]) -> Series {
+        Series {
+            id: id.to_string(),
+            what: String::new(),
+            subject: None,
+            status: "measured".to_string(),
+            lat: crate::stats::lat(&[ns]),
+            routes: BTreeMap::new(),
+            pass_medians_ns: passes.to_vec(),
+            raw: vec![],
+        }
+    }
+
+    fn two_builds(base_block: i64, cand_block: i64) -> Results {
+        let info = |label: &str, role: &str| BuildInfo {
+            label: label.to_string(),
+            role: role.to_string(),
+            sha: "0".repeat(40),
+            dirty: false,
+            profile: "release".to_string(),
+            profile_note: String::new(),
+            source: String::new(),
+            identity: "env".to_string(),
+            identity_note: String::new(),
+            reported_version: String::new(),
+            tokens: None,
+        };
+        let lb = |label: &str, block: i64| BuildLatency {
+            label: label.to_string(),
+            reported_version: String::new(),
+            load_before: String::new(),
+            load_after: String::new(),
+            series: vec![
+                lat_series("hook.intercept_pass.spawn", 3_000_000, &[3_000_000]),
+                lat_series("hook.intercept_block.spawn", block, &[block, block * 2]),
+            ],
+            derived: vec![],
+        };
+        Results {
+            schema: SCHEMA,
+            label: "x".to_string(),
+            pre_release: true,
+            tokenizer: tokenizer_info(),
+            corpus: vec![],
+            builds: vec![info("v1.7.0", "baseline"), info("pre", "candidate")],
+            latency: Some(LatencySection {
+                runs: 1,
+                passes: 2,
+                runs_per_pass: 1,
+                warmup_runs: 0,
+                minimum_runs: 1,
+                clock: String::new(),
+                warmup_note: String::new(),
+                percentile_method: String::new(),
+                samples_note: String::new(),
+                subjects: vec![],
+                builds: vec![lb("v1.7.0", base_block), lb("pre", cand_block)],
+            }),
+            model: model(),
+            environment: crate::env::probe(),
+        }
+    }
+
+    #[test]
+    fn a_hook_that_got_slower_is_called_out_from_the_run_s_own_medians() {
+        let r = two_builds(3_400_000, 5_500_000);
+        let sec = r.latency.as_ref().unwrap();
+        let note = intercept_block_note(&r, sec).expect("2.1 ms slower is a finding");
+        assert!(note.contains("2.10 ms slower on pre than on v1.7.0"), "{note}");
+        assert!(note.contains("5.50 ms against 3.40 ms"), "{note}");
+        assert!(note.contains("#42"), "{note}");
+        assert!(note.contains("lumen_answered"), "{note}");
+        // Same speed, or faster: nothing to say.
+        let same = two_builds(3_400_000, 3_450_000);
+        assert!(intercept_block_note(&same, same.latency.as_ref().unwrap()).is_none());
+        let faster = two_builds(5_500_000, 3_400_000);
+        assert!(intercept_block_note(&faster, faster.latency.as_ref().unwrap()).is_none());
+    }
+
+    #[test]
+    fn the_pass_spread_is_counted_not_promised() {
+        // The block series has a pass at twice the pooled median: outside 20%. The pass series
+        // has one pass at its median.
+        let r = two_builds(3_400_000, 5_500_000);
+        let (within, total) = pass_stability(r.latency.as_ref().unwrap());
+        assert_eq!((within, total), (2, 4));
+        // The old sentence is gone from the generated summary.
+        assert!(!summary(&r).contains("expected to land within"));
     }
 }

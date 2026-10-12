@@ -6,11 +6,12 @@
 
 use crate::builds::Build;
 use crate::corpus::Corpus;
+use crate::driver::probe_identity;
 use crate::env;
-use crate::latency::{self, LatencyConfig, MIN_RUNS};
+use crate::latency::{self, BuildLatency, LatencyConfig, MIN_RUNS, Subject};
 use crate::report::{
-    BuildInfo, CorpusInfo, LatencySection, Results, SCHEMA, TokensSection, build_info, corpus_info,
-    is_release_label, model, summary, tokenizer_info,
+    BuildInfo, CorpusInfo, LatencySection, Results, SAMPLES_NOTE, SCHEMA, TokensSection,
+    build_info, corpus_info, is_release_label, model, percentile_note, summary, tokenizer_info,
 };
 use crate::tokens::{self, FileResult, Prepared, TSV_HEADER};
 use crate::util::{Ctx, Res};
@@ -44,7 +45,7 @@ fn token_pass(
     let mut files = Vec::new();
     let mut version: Option<String> = None;
     for (c, prep) in corpora.iter().zip(prepared) {
-        let (f, v) = tokens::measure(&build.bin, c, prep, &work.join(&build.label), &build.label)?;
+        let (f, v) = tokens::measure(build, c, prep, &work.join(&build.label))?;
         match &version {
             Some(seen) if *seen != v => {
                 return Err(format!(
@@ -82,6 +83,65 @@ fn require_first_read_is_the_outline(build: &Build, files: &[FileResult]) -> Res
     }
 }
 
+/// Scratch space starts empty: a ledger left by an earlier run would be counted as this run's rows.
+fn fresh_scratch(work: &Path) -> Res<()> {
+    if work.exists() {
+        std::fs::remove_dir_all(work).ctx(&format!("clear the scratch {}", work.display()))?;
+    }
+    std::fs::create_dir_all(work).ctx(&format!("create {}", work.display()))
+}
+
+/// Each build with the way it learns whose call it is, found by running it (see
+/// `driver::probe_identity`): what a build does is asked of the build, not read from its usage
+/// text.
+pub fn probe_builds(builds: &[Build], work: &Path) -> Res<Vec<Build>> {
+    let mut probed: Vec<Build> = Vec::with_capacity(builds.len());
+    for b in builds {
+        let mut b = b.clone();
+        b.identity = probe_identity(&b.bin, &work.join(format!("probe-{}", b.label)))?;
+        eprintln!(
+            "lumen-bench: {}: per-call identity by {}",
+            b.label,
+            b.identity.label()
+        );
+        probed.push(b);
+    }
+    Ok(probed)
+}
+
+/// The latency series alone, for `compare`: the same builds, subjects and passes as a recorded
+/// run, and nothing written. The plan's `tokens` and `label` are not used.
+pub fn latency_only(plan: &Plan) -> Res<(Vec<Subject>, Vec<BuildLatency>)> {
+    let cfg = plan.latency.ok_or("no latency configuration")?;
+    let first = plan.corpora.first().ok_or("no corpus to measure")?;
+    if plan.builds.is_empty() {
+        return Err("no build to measure".to_string());
+    }
+    fresh_scratch(&plan.work)?;
+    let probed = probe_builds(&plan.builds, &plan.work)?;
+    let prepared = tokens::prepare(first)?;
+    let subjects = latency::pick_subjects(&first.root, &prepared);
+    if subjects.is_empty() {
+        return Err(format!(
+            "{}: no Rust file with a named item and an edit to time on",
+            first.name
+        ));
+    }
+    let (passes, per_pass) = latency::plan_passes(&cfg);
+    eprintln!(
+        "lumen-bench: latency, {} builds, {passes} passes of {per_pass} runs",
+        probed.len()
+    );
+    let builds = latency::measure_builds(&probed, &subjects, &cfg, &plan.work)?;
+    if let Err(e) = std::fs::remove_dir_all(&plan.work) {
+        eprintln!(
+            "lumen-bench: could not remove the scratch {}: {e}",
+            plan.work.display()
+        );
+    }
+    Ok((subjects, builds))
+}
+
 pub fn execute(plan: &Plan) -> Res<Output> {
     if plan.builds.is_empty() {
         return Err("no build to measure".to_string());
@@ -89,15 +149,12 @@ pub fn execute(plan: &Plan) -> Res<Output> {
     if plan.corpora.is_empty() {
         return Err("no corpus to measure".to_string());
     }
-    // Scratch space starts empty: a ledger left by an earlier run would be counted as this
-    // run's rows.
-    if plan.work.exists() {
-        std::fs::remove_dir_all(&plan.work)
-            .ctx(&format!("clear the scratch {}", plan.work.display()))?;
-    }
-    std::fs::create_dir_all(&plan.work).ctx(&format!("create {}", plan.work.display()))?;
+    fresh_scratch(&plan.work)?;
     let mut environment = env::probe();
 
+    // What each build does about per-call identity, found by asking it (see
+    // `driver::probe_identity`): the token and latency passes feed a build the identity it reads.
+    let probed = probe_builds(&plan.builds, &plan.work)?;
     let prepared: Vec<Vec<Prepared>> = plan
         .corpora
         .iter()
@@ -108,7 +165,7 @@ pub fn execute(plan: &Plan) -> Res<Output> {
     let mut tsv = String::from(TSV_HEADER);
     let mut infos: Vec<BuildInfo> = Vec::new();
     let mut versions: Vec<String> = Vec::new();
-    for build in &plan.builds {
+    for build in &probed {
         if plan.tokens {
             let (files, version) = token_pass(build, &plan.corpora, &prepared, &plan.work)?;
             require_first_read_is_the_outline(build, &files)?;
@@ -141,9 +198,9 @@ pub fn execute(plan: &Plan) -> Res<Output> {
             let (passes, per_pass) = latency::plan_passes(&cfg);
             eprintln!(
                 "lumen-bench: latency, {} builds, {passes} passes of {per_pass} runs",
-                plan.builds.len()
+                probed.len()
             );
-            let builds = latency::measure_builds(&plan.builds, &subjects, &cfg, &plan.work)?;
+            let builds = latency::measure_builds(&probed, &subjects, &cfg, &plan.work)?;
             for (info, l) in infos.iter_mut().zip(&builds) {
                 if !plan.tokens {
                     info.reported_version.clone_from(&l.reported_version);
@@ -165,6 +222,8 @@ pub fn execute(plan: &Plan) -> Res<Output> {
                               caches, page tables and the ledger file are warm; hook spawns are \
                               warm-start, not first launch after boot"
                     .to_string(),
+                percentile_method: percentile_note(passes * per_pass),
+                samples_note: SAMPLES_NOTE.to_string(),
                 subjects,
                 builds,
             })

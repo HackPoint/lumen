@@ -2,7 +2,10 @@
 //!
 //! Every figure is a monotonic-clock (`std::time::Instant`) interval, summarised as median, p90
 //! and p99 over at least [`MIN_RUNS`] recorded runs, after `warmup` runs that are executed the
-//! same way and discarded. Each series says exactly what its interval contains.
+//! same way and discarded. Each series says exactly what its interval contains. The percentiles
+//! are nearest-rank (`stats::percentile`): the sample at rank `ceil(p * n / 100)` of the sorted
+//! samples, no interpolation. With the default 200 runs the p99 is therefore the third slowest
+//! sample and the median is the 100th, the lower of the two middle values.
 //!
 //! The run is [`PASSES`] passes over every series of every build, the builds taking turns, and the
 //! samples of the passes are pooled: a burst of other work on a machine that is not idle is then
@@ -17,8 +20,11 @@
 //! * **floor**: the same, for a hook invocation that does no work (an unknown subcommand, which
 //!   prints the usage line and exits 1). Process start and stdin only. `spawn - floor` is the
 //!   work plus what a cold process pays for it (the tokenizer is built on every spawn).
-//! * **in-process**: `lumen_mcp::hook::run_with` called directly, warm. Candidate only: the
-//!   harness links the candidate's library, not the baseline's.
+//! * **in-process**: `lumen_mcp::hook::run_with` called directly, warm. Only for a build made from
+//!   this checkout: the harness links the checkout's library, not another build's.
+//! * **identity**: `hook.per_call_identity`, the hook that records who is calling a Lumen tool,
+//!   for a build that does (found by behaviour, see `driver::probe_identity`), and the server's
+//!   claim of that record (`server.identity.*`). A build that does not has an `n/a` slot.
 //!
 //! Server calls are timed as a client sees them: from just before the request is written to the
 //! pipe to the arrival of the reply line. The server answers first and writes its ledger row
@@ -31,7 +37,10 @@
 
 use crate::builds::Build;
 use crate::corpus::{BUCKETS, Lang, bucket_of};
-use crate::driver::{Isolation, Server, isolate, ledger_rows, ledger_tool_count};
+use crate::driver::{
+    Identity, Isolation, Server, isolate, ledger_rows, ledger_tool_count, lumen_call_payload,
+    records_for,
+};
 use crate::stats::{Lat, lat};
 use crate::tokens::Prepared;
 use crate::util::{Ctx, Res};
@@ -64,6 +73,10 @@ pub struct Series {
     pub lat: Option<Lat>,
     /// Server series: how the server routed each call, from its own ledger.
     pub routes: BTreeMap<String, usize>,
+    /// The median of each pass on its own, in pass order: how much the machine moved during the
+    /// run. The raw samples are not written (a few hundred KB of numbers); these are.
+    #[serde(default)]
+    pub pass_medians_ns: Vec<i64>,
     /// The recorded intervals, nanoseconds, kept to pool the passes. Not written to the results.
     #[serde(skip)]
     pub raw: Vec<i64>,
@@ -78,6 +91,7 @@ impl Series {
             status: "measured".to_string(),
             lat: Some(lat(ns).ok_or_else(|| format!("{id}: no samples"))?),
             routes: BTreeMap::new(),
+            pass_medians_ns: Vec::new(),
             raw: ns.to_vec(),
         })
     }
@@ -94,6 +108,7 @@ impl Series {
             status,
             lat: None,
             routes: BTreeMap::new(),
+            pass_medians_ns: Vec::new(),
             raw: Vec::new(),
         }
     }
@@ -357,81 +372,54 @@ struct InProc<'a> {
     kind: Kind,
 }
 
-/// Subcommands named in the usage line `lumen-mcp hook <a|b> ...`.
-pub fn hook_subcommands(usage: &str) -> Vec<String> {
-    let Some(open) = usage.find('<') else {
-        return Vec::new();
-    };
-    let Some(len) = usage[open..].find('>') else {
-        return Vec::new();
-    };
-    usage[open + 1..open + len]
-        .split('|')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
+const IDENTITY_ID: &str = "hook.per_call_identity";
+const IDENTITY_WHAT: &str = "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit";
 
-/// The slot for the per-call identity hook (a PreToolUse hook on Lumen's MCP tools that hands the
-/// server a live session id). A build with no such hook gets `n/a at <sha>`. A build whose `hook`
-/// usage line names a subcommand other than `meter` and `intercept` is timed on a generic
-/// PreToolUse payload for `mcp__lumen__smart_read`; if that hook wants a different payload, adapt
-/// the `payload` below: this is the one place.
-fn identity_slot(build: &Build, iso: &Isolation, cfg: &LatencyConfig) -> Res<Series> {
-    const ID: &str = "hook.per_call_identity";
-    const WHAT: &str = "per-call identity hook overhead (PreToolUse on a Lumen MCP tool), spawn";
-    let out = Command::new(&build.bin)
-        .args(["hook", "no-such-subcommand"])
-        .stdin(Stdio::null())
-        .output()
-        .ctx("ask the hook for its usage line")?;
-    let usage = String::from_utf8_lossy(&out.stderr).into_owned();
-    let extra: Vec<String> = hook_subcommands(&usage)
-        .into_iter()
-        .filter(|s| s != "meter" && s != "intercept")
-        .collect();
-    let Some(name) = extra.first() else {
+/// The slot for the per-call identity hook, by what the build does ([`Build::identity`], found by
+/// `driver::probe_identity`): a build that records identity when `hook intercept` is given a
+/// PreToolUse payload for one of Lumen's tools gets a timed series, any other says so.
+///
+/// Each timed run is one fresh `tool_use_id` and session; afterwards (untimed) the record must be
+/// there, and it is removed, which is what the server does when it claims it: the directory holds
+/// at most the one record, so the hook's prune pass reads the same few entries it would in a
+/// session. An exit other than 0 or a missing record stops the run: the series would not be
+/// measuring the path it names.
+fn identity_series(build: &Build, iso: &Isolation, cfg: &LatencyConfig) -> Res<Series> {
+    if build.identity != Identity::Hook {
         return Ok(Series::with_status(
-            ID,
-            WHAT,
+            IDENTITY_ID,
+            IDENTITY_WHAT,
             format!(
-                "n/a at {}: this build has no identity hook (`hook` accepts: {})",
-                &build.sha[..12],
-                hook_subcommands(&usage).join(", ")
-            ),
-        ));
-    };
-    let payload = |i: usize| -> Vec<u8> {
-        json!({
-            "session_id": format!("bench-identity-{i}"), "transcript_path": "/dev/null",
-            "cwd": "/", "permission_mode": "default", "hook_event_name": "PreToolUse",
-            "tool_name": "mcp__lumen__smart_read",
-            "tool_input": {"path": "x.rs"}, "tool_use_id": "toolu_bench"
-        })
-        .to_string()
-        .into_bytes()
-    };
-    let mut cmd = hook_cmd(&build.bin, iso, &[name.as_str()]);
-    let (code, _) = time_spawn(&mut cmd, &payload(0))?;
-    if code != 0 {
-        return Ok(Series::with_status(
-            ID,
-            WHAT,
-            format!(
-                "present at {} as `hook {name}`, but it exited {code} on the generic payload; \
-                 adapt latency::identity_slot",
+                "n/a — this build records no per-call identity (a PreToolUse payload for \
+                 mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the \
+                 ledger; commit {})",
                 &build.sha[..12]
             ),
         ));
     }
+    let mut cmd = hook_cmd(&build.bin, iso, &["intercept"]);
     let ns = sample(cfg, |i| {
-        let (code, d) = time_spawn(&mut cmd, &payload(i))?;
+        let id = format!("toolu_bench_identity_{i}");
+        let payload = lumen_call_payload(&format!("bench-{}-identity-{i}", build.label), &id);
+        let (code, d) = time_spawn(&mut cmd, &payload)?;
         if code != 0 {
-            return Err(format!("{ID}: exit {code} on run {i}"));
+            return Err(format!(
+                "{IDENTITY_ID}: the hook exited {code}, expected 0 (run {i})"
+            ));
+        }
+        let found = records_for(iso, &id);
+        if found.is_empty() {
+            return Err(format!(
+                "{IDENTITY_ID}: the hook left no record for {id} (run {i}); this series would \
+                 not be measuring the path it names"
+            ));
+        }
+        for f in found {
+            std::fs::remove_file(&f).ctx(&format!("remove the record {}", f.display()))?;
         }
         Ok(d)
     })?;
-    Series::measured(ID, WHAT, None, &ns)
+    Series::measured(IDENTITY_ID, IDENTITY_WHAT, None, &ns)
 }
 
 fn hooks(
@@ -592,7 +580,7 @@ fn hooks(
             out.push(Series::na(
                 j.id,
                 j.what,
-                "the harness links the candidate's hook library only; the baseline's comparable figure is spawn minus floor",
+                "the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
             ));
         }
     } else {
@@ -630,7 +618,7 @@ fn hooks(
         }
     }
 
-    out.push(identity_slot(build, &spawn_iso, cfg)?);
+    out.push(identity_series(build, &spawn_iso, cfg)?);
     Ok(())
 }
 
@@ -713,6 +701,7 @@ fn servers(
             &start_iso,
             &format!("bench-start-{i}"),
             false,
+            build.identity,
         )?;
         let d = t0.elapsed();
         s.finish()?;
@@ -729,7 +718,14 @@ fn servers(
 
     // Repeat reads off: the shipped default.
     let iso = Isolation::create(&work.join("srv-plain"))?;
-    let mut s = Server::start(&build.bin, &scratch, &iso, "bench-lat-plain", false)?;
+    let mut s = Server::start(
+        &build.bin,
+        &scratch,
+        &iso,
+        "bench-lat-plain",
+        false,
+        build.identity,
+    )?;
     let version = s.version.clone();
     let mut parts = Vec::new();
     let ns = sample(cfg, |_| {
@@ -778,7 +774,14 @@ fn servers(
     let scratch2 = work.join("srv-files-repeat");
     put_files(&scratch2, subjects)?;
     let iso2 = Isolation::create(&work.join("srv-repeat"))?;
-    let mut s = Server::start(&build.bin, &scratch2, &iso2, "bench-lat-repeat", true)?;
+    let mut s = Server::start(
+        &build.bin,
+        &scratch2,
+        &iso2,
+        "bench-lat-repeat",
+        true,
+        build.identity,
+    )?;
     let mut parts = Vec::new();
     for sub in subjects {
         let rel = sub.rel.as_str();
@@ -827,7 +830,106 @@ fn servers(
     }
     s.finish()?;
     settle(parts, &iso2.db, out)?;
+
+    claim_series(build, subjects, cfg, work, &scratch, out)?;
     Ok(version)
+}
+
+pub const CLAIM_PLACED_ID: &str = "server.identity.placed";
+pub const CLAIM_UNPLACED_ID: &str = "server.identity.unplaced";
+
+/// The server's side of live identity, for a build that has it: `smart_read` of the same file on
+/// the same server, once with the hook's record in place and the `_meta` id that names it (the
+/// server finds the record, reads it and removes it), once with neither (the server finds nothing
+/// to claim). The calls alternate, and which goes first alternates too, so a drift in the machine
+/// lands on both. Repeat reads are off, so both answer the same outline and the difference between
+/// the two medians is the claim. Not emitted for a build without live identity.
+fn claim_series(
+    build: &Build,
+    subjects: &[Subject],
+    cfg: &LatencyConfig,
+    work: &Path,
+    scratch: &Path,
+    out: &mut Vec<Series>,
+) -> Res<()> {
+    if build.identity != Identity::Hook {
+        return Ok(());
+    }
+    let Some(m) = subjects.iter().find(|s| s.bucket == BUCKETS[1].name) else {
+        return Ok(());
+    };
+    let iso = Isolation::create(&work.join("srv-identity"))?;
+    let mut s = Server::start(
+        &build.bin,
+        scratch,
+        &iso,
+        "bench-lat-identity",
+        false,
+        build.identity,
+    )?;
+    let rel = m.rel.as_str();
+    let mut placed = Vec::with_capacity(cfg.runs);
+    let mut unplaced = Vec::with_capacity(cfg.runs);
+    for i in 0..cfg.warmup + cfg.runs {
+        for step in 0..2 {
+            let is_placed = (i + step) % 2 == 0;
+            let d = timed_call(&mut s, |s| {
+                (if is_placed {
+                    s.smart_read(rel)
+                } else {
+                    s.smart_read_unplaced(rel)
+                })
+                .map(|_| ())
+            })?;
+            if i >= cfg.warmup {
+                let ns = d.as_nanos() as i64;
+                if is_placed {
+                    placed.push(ns);
+                } else {
+                    unplaced.push(ns);
+                }
+            }
+        }
+    }
+    s.finish()?;
+    let rows = ledger_rows(&iso.db)?;
+    let n = cfg.warmup + cfg.runs;
+    if rows.len() != 2 * n {
+        return Err(format!(
+            "{} server calls but {} ledger rows: a call went unmetered",
+            2 * n,
+            rows.len()
+        ));
+    }
+    let mut routes = BTreeMap::new();
+    for r in &rows {
+        *routes.entry(r.routed_via.clone()).or_insert(0usize) += 1;
+    }
+    let all_expected = routes.len() == 1 && routes.contains_key("smart_read");
+    for (id, what, ns, calls) in [
+        (
+            CLAIM_PLACED_ID,
+            "smart_read, repeat reads off, with the hook's record in place and the _meta id that names it: the server claims it",
+            placed,
+            n,
+        ),
+        (
+            CLAIM_UNPLACED_ID,
+            "smart_read, repeat reads off, with no record and no _meta id: nothing to claim",
+            unplaced,
+            n,
+        ),
+    ] {
+        let mut series = Series::measured(id, what, Some(m.label()), &ns)?;
+        if all_expected {
+            series.routes.insert("smart_read".to_string(), calls);
+        } else {
+            series.status = "measured, mixed routes: expected every call to be smart_read, see routes (both series together)".to_string();
+            series.routes = routes.clone();
+        }
+        out.push(series);
+    }
+    Ok(())
 }
 
 fn derive(series: &[Series]) -> Vec<Derived> {
@@ -839,7 +941,7 @@ fn derive(series: &[Series]) -> Vec<Derived> {
             .map(|l| l.median_ns)
     };
     let floor = med(FLOOR_ID);
-    [
+    let mut out: Vec<Derived> = [
         "intercept_pass",
         "intercept_block",
         "meter_read",
@@ -854,7 +956,23 @@ fn derive(series: &[Series]) -> Vec<Derived> {
             what: format!("median({id}) - median({FLOOR_ID})"),
         }
     })
-    .collect()
+    .collect();
+    // Live identity, when the build has it (otherwise there is nothing to subtract). The floor's
+    // payload is the medium subject's, a few KB; the identity hook's is a few hundred bytes, so
+    // the first figure slightly understates what the hook adds over a bare process.
+    out.push(Derived {
+        id: format!("{IDENTITY_ID}.spawn_minus_floor"),
+        what: format!("median({IDENTITY_ID}) - median({FLOOR_ID})"),
+        median_ns: med(IDENTITY_ID).zip(floor).map(|(a, f)| a - f),
+    });
+    out.push(Derived {
+        id: format!("{IDENTITY_ID}.server_claim"),
+        what: format!("median({CLAIM_PLACED_ID}) - median({CLAIM_UNPLACED_ID})"),
+        median_ns: med(CLAIM_PLACED_ID)
+            .zip(med(CLAIM_UNPLACED_ID))
+            .map(|(a, b)| a - b),
+    });
+    out
 }
 
 /// The load, as text; a probe that fails says so instead of leaving a blank.
@@ -878,10 +996,20 @@ pub fn plan_passes(cfg: &LatencyConfig) -> (usize, usize) {
     (passes, cfg.runs.div_ceil(passes))
 }
 
-/// Pool one build's passes into one set of series, in the first pass's order.
+/// The median of one pass of one series, when it has samples.
+fn pass_median(raw: &[i64]) -> Option<i64> {
+    lat(raw).map(|l| l.median_ns)
+}
+
+/// Pool one build's passes into one set of series, in the first pass's order. The median of each
+/// pass is kept beside the pooled figures: how far one pass sits from another says how much the
+/// machine moved while the run was going on.
 fn merge_passes(passes: Vec<Vec<Series>>) -> Res<Vec<Series>> {
     let mut it = passes.into_iter();
     let mut out = it.next().ok_or("no latency passes")?;
+    for s in &mut out {
+        s.pass_medians_ns = pass_median(&s.raw).into_iter().collect();
+    }
     for pass in it {
         if pass.len() != out.len() {
             return Err(format!(
@@ -897,6 +1025,7 @@ fn merge_passes(passes: Vec<Vec<Series>>) -> Res<Vec<Series>> {
                     o.id, s.id
                 ));
             }
+            o.pass_medians_ns.extend(pass_median(&s.raw));
             o.raw.extend_from_slice(&s.raw);
             for (route, n) in s.routes {
                 *o.routes.entry(route).or_insert(0) += n;
@@ -916,8 +1045,8 @@ fn merge_passes(passes: Vec<Vec<Series>>) -> Res<Vec<Series>> {
 
 /// All latency series for every build, pooled over [`PASSES`] passes in which the builds take
 /// turns (the order flips every pass), so a drift in the machine's state falls on both builds
-/// alike. `cfg.warmup` is per series per pass. Only the candidate's hooks are run in-process: the
-/// harness links the candidate's library.
+/// alike. `cfg.warmup` is per series per pass. A build's hooks are run in-process only when it
+/// was built from this checkout ([`Build::inproc`]): the harness links the checkout's library.
 pub fn measure_builds(
     builds: &[Build],
     subjects: &[Subject],
@@ -951,7 +1080,7 @@ pub fn measure_builds(
                 subjects,
                 &pass_cfg,
                 &w,
-                build.role == "candidate",
+                build.inproc,
                 &mut series,
             )?;
             let version = servers(build, subjects, &pass_cfg, &w, &mut series)?;
@@ -986,26 +1115,22 @@ pub fn measure_builds(
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_usage_line_names_the_hook_subcommands() {
-        let u = "usage: lumen-mcp hook <meter|intercept> [--writer NAME] < payload.json";
-        assert_eq!(hook_subcommands(u), vec!["meter", "intercept"]);
-        let t = "usage: lumen-mcp hook <meter|intercept|identity> [--writer NAME] < payload.json";
-        assert_eq!(hook_subcommands(t), vec!["meter", "intercept", "identity"]);
-        assert!(hook_subcommands("no brackets here").is_empty());
-    }
-
-    #[test]
-    fn the_derived_figure_is_spawn_minus_floor() {
-        let mk = |id: &str, ns: i64| Series {
+    fn series(id: &str, ns: i64) -> Series {
+        Series {
             id: id.to_string(),
             what: String::new(),
             subject: None,
             status: "measured".to_string(),
             lat: lat(&[ns]),
             routes: BTreeMap::new(),
+            pass_medians_ns: vec![],
             raw: vec![ns],
-        };
+        }
+    }
+
+    #[test]
+    fn the_derived_figure_is_spawn_minus_floor() {
+        let mk = series;
         let d = derive(&[mk(FLOOR_ID, 1_000), mk("hook.meter_read.spawn", 3_500)]);
         let m = d
             .iter()
@@ -1017,6 +1142,55 @@ mod tests {
             .find(|d| d.id == "hook.meter_bash.spawn_minus_floor")
             .unwrap();
         assert_eq!(none.median_ns, None);
+    }
+
+    #[test]
+    fn the_identity_figures_exist_for_every_build_and_are_empty_without_the_hook() {
+        let find = |d: &[Derived], id: &str| d.iter().find(|d| d.id == id).unwrap().median_ns;
+        // A build with no identity hook: the entries are there, without a figure.
+        let d = derive(&[series(FLOOR_ID, 1_000)]);
+        assert_eq!(find(&d, "hook.per_call_identity.spawn_minus_floor"), None);
+        assert_eq!(find(&d, "hook.per_call_identity.server_claim"), None);
+        // A build with it: the hook minus the floor, and the claimed call minus the unclaimed one.
+        let d = derive(&[
+            series(FLOOR_ID, 1_000),
+            series(IDENTITY_ID, 4_000),
+            series(CLAIM_PLACED_ID, 700),
+            series(CLAIM_UNPLACED_ID, 500),
+        ]);
+        assert_eq!(
+            find(&d, "hook.per_call_identity.spawn_minus_floor"),
+            Some(3_000)
+        );
+        assert_eq!(find(&d, "hook.per_call_identity.server_claim"), Some(200));
+    }
+
+    #[test]
+    fn a_build_that_records_no_identity_gets_an_n_a_slot_that_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let iso = Isolation::create(tmp.path()).unwrap();
+        let cfg = LatencyConfig { runs: 1, warmup: 0 };
+        let build = Build {
+            label: "old".to_string(),
+            role: "baseline",
+            sha: "5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94".to_string(),
+            dirty: false,
+            bin: PathBuf::from("does-not-exist"),
+            profile: "release",
+            profile_note: String::new(),
+            source: String::new(),
+            identity: Identity::Env,
+            inproc: false,
+        };
+        let s = identity_series(&build, &iso, &cfg).unwrap();
+        assert!(s.lat.is_none());
+        assert!(
+            s.status
+                .starts_with("n/a — this build records no per-call identity"),
+            "{}",
+            s.status
+        );
+        assert!(s.status.contains("5d1ec0408ad2"), "{}", s.status);
     }
 
     #[test]
@@ -1049,8 +1223,11 @@ mod tests {
         assert_eq!(l.max_ns, 60);
         assert_eq!(ping.status, "measured, mixed routes: x");
         assert_eq!(ping.routes["smart_read"], 5);
+        // The median of each pass is kept in pass order, beside the pooled figures.
+        assert_eq!(ping.pass_medians_ns, vec![20, 50]);
         // A series with no figure stays without one.
         assert!(merged[1].lat.is_none());
+        assert!(merged[1].pass_medians_ns.is_empty());
         assert!(merged[1].status.starts_with("n/a"));
         // Passes that do not line up are an error, not a quiet truncation.
         let ragged = vec![pass(&[1], "measured", 1), vec![]];
