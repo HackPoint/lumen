@@ -3,6 +3,12 @@
         <header class="home__head">
             <lumen-firefly class="home__logo" mode="logo" state="full"></lumen-firefly>
             <p class="brand__tag">Context &amp; cost for Claude Code</p>
+            <!-- The build's version, from the Tauri runtime. One text node, so the line reads the
+                 same to a screen reader and to a script as it does on screen. Absent until known:
+                 a placeholder would be a version the user did not install. -->
+            @if (version(); as v) {
+                <p class="home__version">Lumen {{ v }}</p>
+            }
         </header>
 
         <!-- Shown only when something actually failed. A banner on a healthy launch would
@@ -159,6 +165,16 @@
             </label>
 
             <p class="limits__hint">0 disables a spend alert. Resets to defaults on restart.</p>
+        </section>
+
+        <!-- Lumen has no separate settings window: this is where the settings are, and so where
+             a build is identified when someone files a report. -->
+        <section class="about" aria-labelledby="about-title">
+            <h2 id="about-title" class="about__title">About</h2>
+            <dl class="about__list">
+                <dt class="about__term">Version</dt>
+                <dd class="about__version">{{ aboutVersion() }}</dd>
+            </dl>
         </section>
     </div>
 </main>
