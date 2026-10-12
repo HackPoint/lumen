@@ -1617,7 +1617,7 @@ fn the_scan_reads_every_production_file_of_the_app() {
 }
 
 #[test]
-fn startup_uses_no_question_mark_and_one_expect() {
+fn startup_has_no_unhandled_question_mark_and_one_expect() {
     let (_, files) = real();
     let r = startup(&files, &EXEMPT);
     println!(
