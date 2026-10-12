@@ -239,12 +239,12 @@
                 <!-- The settings file, not what the server will do: a LUMEN_REPEAT_READS in an MCP config outranks it, unseen. -->
                 @if (rr.setting(); as st) {
                     @if (st.problem; as why) {
-                        <p class="repeat-card__state repeat-card__state--problem">
+                        <p class="repeat-card__problem">
                             Repeat reads are off now: the settings file {{ st.file }} could not be read
                             ({{ why }}). The Repeat reads switch on the Context tab rewrites it.
                         </p>
                     } @else if (!st.on) {
-                        <p class="repeat-card__state">
+                        <p>
                             Repeat reads are off now: the settings file says off, so every read returns its full result.
                         </p>
                     }
@@ -255,7 +255,7 @@
                         </p>
                     }
                 } @else if (rr.readError()) {
-                    <p class="repeat-card__state repeat-card__state--problem">
+                    <p class="repeat-card__problem">
                         The repeat reads setting could not be read, so nothing is said here about its current
                         state. The Context tab shows why.
                     </p>
@@ -269,12 +269,12 @@
                         those answers are counted here.
                     </p>
                 } @else {
-                    <p class="repeat-card__lead">
+                    <p>
                         Answered so far, for files Claude had already read in the same conversation.
                     </p>
                     <dl class="repeat-card__rows">
                         <div class="repeat-card__row">
-                            <dt class="repeat-card__name">
+                            <dt>
                                 Unchanged answers served
                             </dt>
                             <dd class="repeat-card__val">
@@ -285,7 +285,7 @@
                             </dd>
                         </div>
                         <div class="repeat-card__row">
-                            <dt class="repeat-card__name">
+                            <dt>
                                 Edits served as a delta
                             </dt>
                             <dd class="repeat-card__val">
@@ -296,7 +296,7 @@
                             </dd>
                         </div>
                         <div class="repeat-card__row">
-                            <dt class="repeat-card__name">
+                            <dt>
                                 Tokens not re-sent
                             </dt>
                             <dd class="repeat-card__val">
@@ -316,7 +316,7 @@
                             </dd>
                         </div>
                         <div class="repeat-card__row">
-                            <dt class="repeat-card__name">
+                            <dt>
                                 Full result asked for again (fresh=true)
                             </dt>
                             <dd class="repeat-card__val">

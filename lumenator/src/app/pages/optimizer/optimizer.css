@@ -485,7 +485,7 @@
     font-size: 0.64rem;
 }
 
-.repeat-card__state--problem {
+.repeat-card__problem {
     color: var(--lumen-warn);
 }
 
