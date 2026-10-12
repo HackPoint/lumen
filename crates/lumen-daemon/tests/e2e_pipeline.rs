@@ -55,6 +55,8 @@ struct Fixture {
     _home: TempDir,
     _dbdir: TempDir,
     db: std::path::PathBuf,
+    /// Where the daemon spools the faults it records.
+    spool: std::path::PathBuf,
     projects: std::path::PathBuf,
     ws_url: String,
     _daemon: Daemon,
@@ -74,9 +76,16 @@ fn free_port() -> u16 {
 /// $HOME/.claude/projects, so pointing HOME at a tempdir keeps it away from the
 /// developer's real transcripts.
 async fn start_daemon() -> Fixture {
+    start_daemon_with(|_| {}).await
+}
+
+/// [`start_daemon`], with `seed` run on the projects directory first: what it puts there is
+/// found by the daemon's startup pass, and never arrives as a watcher event.
+async fn start_daemon_with(seed: impl FnOnce(&std::path::Path)) -> Fixture {
     let home = TempDir::new().expect("home tempdir");
     let dbdir = TempDir::new().expect("db tempdir");
     let db = dbdir.path().join("e2e.db");
+    let spool = dbdir.path().join("faults.jsonl");
     // See the note in the MCP harness: a forgotten LUMEN_DB now resolves to the
     // user's real metering database, so the redirection is asserted, not assumed.
     assert!(
@@ -85,6 +94,7 @@ async fn start_daemon() -> Fixture {
     );
     let projects = home.path().join(".claude/projects/test-project");
     std::fs::create_dir_all(&projects).expect("create projects dir");
+    seed(&projects);
 
     // A private port. Using the default 9999 would silently connect to a daemon
     // the developer already has running — which is exactly what happened the
@@ -100,6 +110,7 @@ async fn start_daemon() -> Fixture {
         // timed out. The explicit override is platform-independent.
         .env("LUMEN_PROJECTS_DIR", home.path().join(".claude/projects"))
         .env("LUMEN_DB", &db)
+        .env("LUMEN_FAULT_SPOOL", &spool)
         .env("LUMEN_WS_ADDR", &addr)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -123,6 +134,7 @@ async fn start_daemon() -> Fixture {
         _home: home,
         _dbdir: dbdir,
         db,
+        spool,
         projects,
         ws_url: format!("ws://{addr}"),
         _daemon: Daemon(child),
@@ -149,6 +161,11 @@ fn turn_count(db: &std::path::Path) -> i64 {
     };
     conn.query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
         .unwrap_or(0)
+}
+
+/// The faults the daemon has spooled, in the order it recorded them.
+fn spooled_faults(spool: &std::path::Path) -> Vec<lumen_core::faults::FaultRecord> {
+    lumen_core::faults::peek_spool_at(spool).expect("read the fault spool")
 }
 
 // Each test gets its own HOME, its own DB and its own WS port, so they are safe
@@ -521,4 +538,143 @@ async fn a_snapshot_labels_the_session_with_its_project() {
         "got {session}"
     );
     assert_eq!(session["fill"], 1_000);
+}
+
+// ── a transcript that is gone when the daemon opens it ───────────────────────
+
+#[tokio::test]
+async fn a_transcript_deleted_before_the_daemon_reads_it_is_not_a_fault() {
+    let fx = start_daemon().await;
+    let db = fx.db.clone();
+    let spool = fx.spool.clone();
+
+    let gone = fx.projects.join("gone.jsonl");
+    append(
+        &gone,
+        &[transcript_line(
+            "gone-1",
+            "sess-g",
+            "2026-01-01T10:00:00Z",
+            (1, 1, 1, 1),
+        )],
+    );
+    wait_until("the turn", || turn_count(&db) == 1).await;
+
+    // The watcher reports the deletion, and the daemon opens a path that is no longer there.
+    std::fs::remove_file(&gone).unwrap();
+    // Watcher events are handled in order, so the fault on this directory is filed after
+    // whatever the deletion produced. The daemon records one fault per variant a minute, so
+    // the first one spooled says which of the two it was.
+    std::fs::create_dir(fx.projects.join("unreadable.jsonl")).unwrap();
+    wait_until("the unreadable directory to be reported", || {
+        !spooled_faults(&spool).is_empty()
+    })
+    .await;
+
+    let faults = spooled_faults(&spool);
+    assert!(
+        faults[0]
+            .path
+            .as_deref()
+            .is_some_and(|p| p.ends_with("unreadable.jsonl")),
+        "a transcript deleted before it was read was filed as a fault: {faults:#?}"
+    );
+
+    // The deletion left the daemon ingesting.
+    append(
+        &fx.projects.join("next.jsonl"),
+        &[transcript_line(
+            "gone-2",
+            "sess-g",
+            "2026-01-01T10:05:00Z",
+            (1, 1, 1, 1),
+        )],
+    );
+    wait_until("a transcript written after the deletion", || {
+        turn_count(&db) == 2
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_transcript_the_daemon_cannot_read_is_still_filed_as_a_fault() {
+    // Only a missing file is excused. Any other reason the daemon cannot read a transcript is
+    // what the fault report is for.
+    let fx = start_daemon().await;
+    let db = fx.db.clone();
+    let spool = fx.spool.clone();
+
+    // A turn first, so the daemon is past its startup pass before the directory appears.
+    append(
+        &fx.projects.join("first.jsonl"),
+        &[transcript_line(
+            "first-1",
+            "sess-f",
+            "2026-01-01T10:00:00Z",
+            (1, 1, 1, 1),
+        )],
+    );
+    wait_until("the turn", || turn_count(&db) == 1).await;
+
+    // A directory with a transcript's name: refused at open on Windows, at read elsewhere,
+    // and skipped by the poll, so only the watcher reports it.
+    std::fs::create_dir(fx.projects.join("unreadable.jsonl")).unwrap();
+    wait_until("the unreadable directory to be reported", || {
+        !spooled_faults(&spool).is_empty()
+    })
+    .await;
+
+    let faults = spooled_faults(&spool);
+    let first = &faults[0];
+    assert_eq!(
+        (first.kind.as_str(), first.variant.as_str()),
+        ("ingest_failed", "notify"),
+        "{faults:#?}"
+    );
+    assert!(
+        first
+            .path
+            .as_deref()
+            .is_some_and(|p| p.ends_with("unreadable.jsonl")),
+        "{faults:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_listed_transcript_that_is_gone_when_opened_is_not_a_fault() {
+    // A dangling symlink is listed by the daemon's directory walk and then fails to open the
+    // way a deleted file does, on every pass that walks it: the startup pass and the poll.
+    // `tail.jsonl` points outside the watched tree, so what is appended to it is found only by
+    // the poll. The second turn can only be found by a later pass than the first, so a whole
+    // pass, `gone.jsonl` included, has run by the time it lands.
+    let outside = TempDir::new().unwrap();
+    let target = outside.path().join("transcript.log");
+    std::fs::File::create(&target).unwrap();
+    let fx = start_daemon_with(|projects| {
+        std::os::unix::fs::symlink(&target, projects.join("tail.jsonl")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("missing"), projects.join("gone.jsonl"))
+            .unwrap();
+    })
+    .await;
+    let db = fx.db.clone();
+
+    for i in 1..=2 {
+        append(
+            &target,
+            &[transcript_line(
+                &format!("poll-{i}"),
+                "sess-poll",
+                "2026-01-01T10:00:00Z",
+                (1, 1, 1, 1),
+            )],
+        );
+        wait_until(&format!("{i} turns"), || turn_count(&db) == i).await;
+    }
+
+    let faults = spooled_faults(&fx.spool);
+    assert!(
+        faults.is_empty(),
+        "a transcript that was gone when the daemon opened it was filed as a fault: {faults:#?}"
+    );
 }
