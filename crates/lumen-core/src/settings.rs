@@ -227,7 +227,12 @@ pub fn surface(problem: &Problem, file: &Path, min_interval: std::time::Duration
     }
 }
 
-/// Write the persisted setting for a ledger at `db`: the Settings toggle's write.
+/// Write the persisted setting for a ledger at `db`.
+///
+/// Nothing in the app calls this yet: there is no toggle, so today the file is edited by hand
+/// or `LUMEN_REPEAT_READS` is set (the README and `lumen doctor` say so). It is the writer a
+/// toggle would use, kept beside the reader so the two agree on the format, and the tests
+/// round-trip it.
 ///
 /// Atomic (written beside, renamed into place) so a reader never sees half a file, and
 /// private to this user. Other keys in a valid existing file are kept. A file that cannot be
