@@ -222,10 +222,10 @@ fn names(text: &str, marker: &str) -> Vec<String> {
 }
 
 #[test]
-fn flag_off_changes_nothing_and_advertises_nothing() {
+fn off_changes_nothing_and_advertises_nothing() {
     let rig = rig();
     let f = rig.file("a.rs", &source(40, 6));
-    let mut s = rig.start(&[]);
+    let mut s = rig.start(&[("LUMEN_REPEAT_READS", "off")]);
     let a = s.read(&f);
     let b = s.read(&f);
     assert_eq!(a.text, b.text, "a repeat is answered exactly as the first");
@@ -241,10 +241,13 @@ fn flag_off_changes_nothing_and_advertises_nothing() {
     );
 
     let on = rig
-        .start(ON)
+        .start(&[])
         .rpc("tools/list", serde_json::json!({}))
         .to_string();
-    assert!(on.contains("fresh"));
+    assert!(
+        on.contains("fresh"),
+        "and on, which is the default, offers it"
+    );
 }
 
 #[test]
@@ -526,10 +529,10 @@ fn fresh_always_returns_the_full_outline_and_is_recorded() {
 }
 
 #[test]
-fn fresh_is_honoured_and_counted_with_the_flag_off() {
+fn fresh_is_honoured_and_recorded_when_repeat_reads_are_turned_off() {
     let rig = rig();
     let f = rig.file("a.rs", &source(40, 6));
-    let mut s = rig.start(&[]);
+    let mut s = rig.start(&[("LUMEN_REPEAT_READS", "off")]);
     let a = s.fresh(&f);
     assert!(a.text.contains("— outline"));
     s.end();
@@ -668,7 +671,8 @@ fn a_repeat_costs_no_more_time_than_a_first_read() {
         s.end();
         (e, last.unwrap())
     };
-    let (off, _) = time(&[]);
+    // Off is asked for: with nothing set repeat reads are on, and this compares the two.
+    let (off, _) = time(&[("LUMEN_REPEAT_READS", "off")]);
     let (on, last) = time(ON);
     assert!(last.text.starts_with("Unchanged since"));
     eprintln!("{n} reads of a 400-function file: off {off:?}, on {on:?}");

@@ -12,6 +12,7 @@ pub mod record;
 pub mod repeat;
 pub mod report;
 pub mod schema;
+pub mod settings;
 pub mod structure;
 pub mod tokenizer;
 pub mod update;

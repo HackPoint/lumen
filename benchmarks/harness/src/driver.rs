@@ -227,9 +227,14 @@ impl Server {
         if identity == Identity::Env {
             cmd.env("CLAUDE_CODE_SESSION_ID", session);
         }
-        if repeat_reads {
-            cmd.env("LUMEN_REPEAT_READS", "on");
-        }
+        // Always said, never left to the build's own default: from 1.8.0 on repeat reads are on
+        // unless turned off, so an arm that calls itself "repeat reads off" has to ask for it.
+        // Every older build reads "off" as it reads an unset variable (1.7.0: anything
+        // unrecognised is off), so the arm means the same thing on every build compared.
+        cmd.env(
+            "LUMEN_REPEAT_READS",
+            if repeat_reads { "on" } else { "off" },
+        );
         cmd.current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -294,6 +294,7 @@ pub const FAULT_KINDS: &[&str] = &[
     "reporter_degraded",
     "ws_restart",
     "identity_unrecorded",
+    "repeat_reads_config",
     "ranked_decline",
 ];
 
@@ -301,7 +302,7 @@ pub const FAULT_KINDS: &[&str] = &[
 const UNCLASSIFIED: &str = "Unclassified fault. See the table below.";
 
 /// Where a kind this build does not know sorts: after every known one.
-const CATCH_ALL_PRIORITY: u8 = 8;
+const CATCH_ALL_PRIORITY: u8 = 9;
 
 /// Sort order for the table and for picking the headline. A fired fail-open guard
 /// outranks everything: it means the routing contract broke in the field.
@@ -322,7 +323,10 @@ fn kind_priority(kind: &str) -> u8 {
         // Costs the calls it touches their saving and their attribution, and nothing else:
         // they are answered in full. Above a ranked decline, which is not a failure.
         "identity_unrecorded" => 6,
-        "ranked_decline" => 7,
+        // The repeat-reads switch could not be read, so they are off. Costs only their saving
+        // and the user was not told by anything else; above a ranked decline for that reason.
+        "repeat_reads_config" => 7,
+        "ranked_decline" => 8,
         _ => CATCH_ALL_PRIORITY,
     }
 }
@@ -362,6 +366,12 @@ fn impact(kind: &str) -> &'static str {
              was answered in full and its ledger row has no session. Nothing is wrong with the \
              answer; repeat reads save nothing on these calls and the rows cannot be tied to a \
              conversation."
+        }
+        "repeat_reads_config" => {
+            "The repeat-reads switch could not be read (an unrecognised LUMEN_REPEAT_READS, or \
+             a lumen_settings.json that is corrupt or unreadable), so repeat reads were turned \
+             off and every read was answered in full. Nothing is wrong with the answers; the \
+             saving on repeats is lost until the value or the file is fixed."
         }
         "ranked_decline" => {
             "The ranked outline refused and fell back to the legacy outline. Not a failure \
@@ -562,6 +572,10 @@ fn headline(top: &Group, version: &str) -> String {
         "identity_unrecorded" => format!(
             "identity hook could not record {}× ({}) — those calls were answered in full",
             top.count, top.variant
+        ),
+        "repeat_reads_config" => format!(
+            "the repeat-reads setting could not be read ({}) — repeat reads are off",
+            top.variant
         ),
         "reporter_degraded" => "this report is incomplete".to_string(),
         other => format!("{} ×{}", humanize(other), top.count),
