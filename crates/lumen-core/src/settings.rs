@@ -102,8 +102,7 @@ pub enum FileState {
     Unreadable(String),
 }
 
-/// Read the settings file at `path`: a regular file of at most [`MAX_FILE_BYTES`], or the reason
-/// it cannot be used. It is never read past the cap, and a pipe or device is not opened.
+/// The text of the regular file at `path`, read to [`MAX_FILE_BYTES`], or why it cannot be used.
 pub fn read_file(path: &Path) -> FileState {
     let opened = std::fs::metadata(path).and_then(|m| {
         if m.is_file() {
@@ -629,6 +628,12 @@ mod tests {
         );
         let short = parse_file(&text(r#"{"repeat_reads":"yes"}"#)).unwrap_err();
         assert_eq!(short, format!("{prefix}\"yes\""));
+    }
+
+    #[test]
+    fn an_echo_keeps_64_characters_and_cuts_the_65th() {
+        assert_eq!(bounded(&"é".repeat(64)), "é".repeat(64));
+        assert_eq!(bounded(&"é".repeat(65)), format!("{}…", "é".repeat(64)));
     }
 
     #[test]
