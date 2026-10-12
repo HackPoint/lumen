@@ -13,6 +13,13 @@
 // model; any other status is a non-blocking error. So the meter always exits 0 and
 // the intercept exits 2 only when it has decided to block.
 //
+// The intercept also runs in front of Lumen's own tools (smart_read, recall_file,
+// compress_logs), where it blocks nothing: it writes a small record, named by the call's
+// tool_use_id, saying which conversation (and which subagent) made the call. The MCP
+// request carries only that id, so this is the one place the server can learn whose call
+// it is, and with it whether the model still holds what an earlier result sent. A call
+// with no record is answered in full.
+//
 // Every way a hook can lose an event leaves a fault in the spool and a line on
 // stderr. Neither hook creates directories: a missing data directory means Lumen is
 // not installed where the hook was told it is, and creating one would hide that.
@@ -20,7 +27,9 @@
 use lumen_core::{
     coverage::{DEFAULT_LINE_THRESHOLD, INTERCEPTED_SOURCE_EXTS, LOG_EXTS, ext_of},
     faults::{self, FaultRecord},
+    identity,
     meter::{self, HookReadEvent, METER_WRITE_FAILED},
+    repeat,
     tokenizer::count_tokens,
 };
 use serde_json::Value;
@@ -150,6 +159,9 @@ struct Run<'a> {
     /// What losing this event means, for the stderr line.
     consequence: &'static str,
     session: Option<String>,
+    /// The subagent the event belongs to; `None` for the main agent. A subagent shares its
+    /// parent's `session_id` and has a context of its own.
+    agent: Option<String>,
     out: Outcome,
 }
 
@@ -168,6 +180,7 @@ impl<'a> Run<'a> {
             kind,
             consequence,
             session: None,
+            agent: None,
             out: Outcome::default(),
         }
     }
@@ -281,6 +294,7 @@ fn meter(input: &[u8], env: &Env, writer: &str) -> Outcome {
     run.session = str_at(&d, "/session_id")
         .map(str::to_string)
         .or_else(|| env.get("CLAUDE_CODE_SESSION_ID"));
+    run.agent = str_at(&d, "/agent_id").map(str::to_string);
     let Some(tool) = str_at(&d, "/tool_name") else {
         run.bad_payload("the hook payload has no tool_name".to_string());
         return run.out;
@@ -330,6 +344,7 @@ fn meter_read(run: &mut Run, d: &Value, channel: &str, writer: &str) {
         Err(_) => (0, "unsupported"),
     };
     let session = run.session.clone();
+    let agent = run.agent.clone();
     run.insert(&HookReadEvent {
         tool: "Read",
         path: &shown,
@@ -339,6 +354,7 @@ fn meter_read(run: &mut Run, d: &Value, channel: &str, writer: &str) {
         routed_via: "builtin_read",
         channel,
         session_id: session.as_deref(),
+        agent_id: agent.as_deref(),
         file_mtime: crate::file_mtime(&shown),
         req_key: Some(&shown),
         writer_hook: writer,
@@ -371,6 +387,7 @@ fn meter_bash(run: &mut Run, d: &Value, channel: &str, writer: &str) {
     }
     let label = cmd_label(str_at(d, "/tool_input/command").unwrap_or(""));
     let session = run.session.clone();
+    let agent = run.agent.clone();
     run.insert(&HookReadEvent {
         tool: "Bash",
         path: &label,
@@ -380,6 +397,7 @@ fn meter_bash(run: &mut Run, d: &Value, channel: &str, writer: &str) {
         routed_via: "bash_output",
         channel,
         session_id: session.as_deref(),
+        agent_id: agent.as_deref(),
         file_mtime: None,
         req_key: None,
         writer_hook: writer,
@@ -403,10 +421,26 @@ pub fn cmd_label(command: &str) -> String {
     words.join(" ").chars().take(60).collect()
 }
 
-// ── intercept (PreToolUse on Read) ───────────────────────────────────────────
+// ── intercept (PreToolUse on Read, and on Lumen's own tools) ─────────────────
+
+/// Fault kind for a Lumen tool call whose conversation the hook could not record: the server
+/// then has nobody to attribute it to and answers it in full.
+pub const IDENTITY_UNRECORDED: &str = "identity_unrecorded";
 
 fn intercept(input: &[u8], env: &Env) -> Outcome {
     let mut run = Run::intercept(env);
+    // Silent here: a payload that is not JSON is reported below, once, if this is the Read
+    // intercept; a switched-off intercept stays quiet as it always was.
+    let parsed = serde_json::from_slice::<Value>(input)
+        .ok()
+        .filter(Value::is_object);
+    // Whose call a Lumen tool call is has nothing to do with the Read redirect, so
+    // `LUMEN_HOOK_ENABLED=0` does not reach it: the repeat-read gate would then have to guess.
+    if let Some(d) = &parsed
+        && let Some(tool) = str_at(d, "/tool_name").filter(|t| identity::is_lumen_tool(t))
+    {
+        return record_identity(env, d, tool);
+    }
     if env.get("LUMEN_HOOK_ENABLED").as_deref() == Some("0") {
         return run.out;
     }
@@ -423,10 +457,11 @@ fn intercept(input: &[u8], env: &Env) -> Outcome {
             }
         },
     };
-    let Some(d) = run.payload(input) else {
+    let Some(d) = parsed.or_else(|| run.payload(input)) else {
         return run.out;
     };
     run.session = str_at(&d, "/session_id").map(str::to_string);
+    run.agent = str_at(&d, "/agent_id").map(str::to_string);
     if str_at(&d, "/tool_name") != Some("Read") {
         return run.out;
     }
@@ -479,10 +514,9 @@ fn intercept(input: &[u8], env: &Env) -> Outcome {
     // strand a model. The valve still exists for the case it was written for. With no
     // successful smart_read or recall_file recorded for the path (tools down, denied, or
     // never called) the retry is released exactly as before.
-    let marker = env.state_dir.join(format!(
-        "lumen_intercept_{}",
-        session_key(run.session.as_deref())
-    ));
+    let marker = env
+        .state_dir
+        .join(marker_name(run.session.as_deref(), run.agent.as_deref()));
     // No marker yet is no text. An unreadable one fails the append below, which fails open.
     let text = std::fs::read_to_string(&marker).ok();
     let has_line = |want: &str| {
@@ -492,7 +526,7 @@ fn intercept(input: &[u8], env: &Env) -> Outcome {
     let seen = has_line(&shown);
     let pointed_line = format!("{POINTED_PREFIX}{shown}");
     let pointed = has_line(&pointed_line);
-    let served = !is_log && lumen_served(env, run.session.as_deref(), &shown);
+    let served = !is_log && lumen_served(env, run.session.as_deref(), run.agent.as_deref(), &shown);
     if seen && (pointed || !served) {
         let detail = served.then(|| AFTER_LUMEN_READ.to_string());
         run.fault("retry_escape_valve", Some(&shown), Some(lines), detail);
@@ -541,15 +575,86 @@ const POINTED_PREFIX: &str = "after-lumen-read\t";
 /// intended use.
 const AFTER_LUMEN_READ: &str = "after_lumen_read";
 
-/// Whether smart_read or recall_file already answered for `path` in this session. The hook
-/// cannot see the server; the ledger the server writes is the only place that records that
-/// a call worked. Fails open: no session, no ledger, or an unreadable one answer "no", and
-/// the valve releases the retry as it always did. See [`meter::lumen_answered`].
-fn lumen_served(env: &Env, session: Option<&str>, path: &str) -> bool {
+/// Whether smart_read or recall_file already answered for `path` in this context: the session's,
+/// or, for a subagent, its own (it does not hold what its parent read). The hook cannot see the
+/// server; the ledger the server writes is the only place that records that a call worked. Fails
+/// open: no session, no ledger, or an unreadable one answer "no", and the valve releases the
+/// retry as it always did. See [`meter::lumen_answered`].
+fn lumen_served(env: &Env, session: Option<&str>, agent: Option<&str>, path: &str) -> bool {
     let (Some(session), Some(db)) = (session, env.db_path()) else {
         return false;
     };
-    meter::lumen_answered(&db, session, path)
+    meter::lumen_answered(&db, session, agent, path)
+}
+
+/// The intercept marker's file name. The main agent's is `lumen_intercept_<session>`; a
+/// subagent has a context of its own, so it has a marker of its own beside it. `.` cannot
+/// occur in either key, so no two contexts share a name.
+fn marker_name(session: Option<&str>, agent: Option<&str>) -> String {
+    match agent {
+        Some(a) => format!(
+            "lumen_intercept_{}.{}",
+            session_key(session),
+            session_key(Some(a))
+        ),
+        None => format!("lumen_intercept_{}", session_key(session)),
+    }
+}
+
+/// A Lumen tool call is about to be made: leave the conversation it belongs to where the server
+/// will find it, keyed by the call's `tool_use_id`. The tool request itself carries only that id.
+///
+/// Exits 0 whatever happens: a record that is not written costs the call its repeat-read
+/// treatment (the server answers an unidentified call in full) and nothing else. It is said on
+/// stderr and in the spool, and no directory is created to make the write succeed.
+fn record_identity(env: &Env, d: &Value, tool: &str) -> Outcome {
+    let mut run = Run::new(
+        env,
+        IDENTITY_UNRECORDED,
+        "this call will be answered in full",
+    );
+    run.session = str_at(d, "/session_id").map(str::to_string);
+    run.agent = str_at(d, "/agent_id").map(str::to_string);
+    let Some(db) = env.db_path() else {
+        run.say(format!(
+            "lumen: no database path resolved (LUMEN_DB unset, no home directory); {}",
+            run.consequence
+        ));
+        run.fault("no_db_path", None, None, None);
+        return run.out;
+    };
+    let dir = identity::record_dir(&db);
+    let call_id = str_at(d, "/tool_use_id").unwrap_or("");
+    let now = repeat::now_ms();
+    let written = match run.session.clone() {
+        Some(session) => {
+            let who = identity::Identity {
+                session,
+                agent: run.agent.clone(),
+            };
+            identity::write(dir, tool, call_id, &who, now)
+        }
+        None => Err(identity::WriteError::Invalid("the session_id is missing")),
+    };
+    if let Err(e) = written {
+        let variant = match e {
+            identity::WriteError::Invalid(_) => "unusable_ids",
+            identity::WriteError::Io(_) => "record_unwritable",
+        };
+        run.say(format!(
+            "lumen: cannot record who is calling {tool} in {} ({e}); {}",
+            dir.display(),
+            run.consequence
+        ));
+        run.fault(variant, None, None, Some(e.to_string()));
+        return run.out;
+    }
+    // The hook fires before the permission prompt, so a call that is then refused leaves its
+    // record behind. Clearing the old ones here is what keeps the directory bounded.
+    for (path, e) in identity::prune(dir, now).failed {
+        run.say(format!("lumen: cannot remove {}: {e}", path.display()));
+    }
+    run.out
 }
 
 /// The marker file's name component: the session id reduced to `[A-Za-z0-9_-]`.
@@ -1132,5 +1237,216 @@ mod tests {
         assert!(out.stderr.is_empty(), "{out:?}");
         assert_eq!(spool_lines(&spool).len(), 1);
         assert!(!db.exists(), "an empty output was recorded");
+    }
+
+    fn lumen_call_payload(tool: &str, session: &str, agent: Option<&str>, id: &str) -> Vec<u8> {
+        let mut p = serde_json::json!({
+            "session_id": session,
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": {"path": "/x/a.rs"},
+            "tool_use_id": id,
+        });
+        if let Some(a) = agent {
+            p["agent_id"] = a.into();
+            p["agent_type"] = "general-purpose".into();
+        }
+        serde_json::to_vec(&p).unwrap()
+    }
+
+    fn claim(dir: &Path, tool: &str, id: &str) -> identity::Lookup {
+        identity::claim(dir, tool, Some(id), repeat::now_ms())
+    }
+
+    #[test]
+    fn a_lumen_tool_call_leaves_its_conversation_under_its_tool_use_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let var = ledger_env(tmp.path());
+        for tool in identity::MATCHERS
+            .into_iter()
+            .chain(identity::PLUGIN_MATCHERS)
+        {
+            let short = identity::short_name(tool).unwrap();
+            let out = hook(
+                "intercept",
+                &lumen_call_payload(tool, "s-1", None, &format!("toolu_{short}")),
+                &var,
+                tmp.path(),
+            );
+            assert_eq!((out.exit, out.stderr.is_empty()), (0, true), "{out:?}");
+            match claim(tmp.path(), short, &format!("toolu_{short}")) {
+                identity::Lookup::Known(who) => {
+                    assert_eq!((who.session.as_str(), who.agent), ("s-1", None));
+                }
+                other => panic!("{tool}: {other:?}"),
+            }
+        }
+        assert!(spool_lines(&tmp.path().join("faults.jsonl")).is_empty());
+    }
+
+    #[test]
+    fn a_subagents_call_carries_its_agent_id_beside_the_shared_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let var = ledger_env(tmp.path());
+        let p = lumen_call_payload("mcp__lumen__smart_read", "s-1", Some("agent-a"), "toolu_1");
+        assert_eq!(hook("intercept", &p, &var, tmp.path()).exit, 0);
+        match claim(tmp.path(), "smart_read", "toolu_1") {
+            identity::Lookup::Known(who) => {
+                assert_eq!(who.owner(), "s-1\0agent-a");
+                assert_eq!(who.agent.as_deref(), Some("agent-a"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn switching_the_read_intercept_off_leaves_the_identity_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("lumen.db");
+        let spool = tmp.path().join("faults.jsonl");
+        let var = vars(&[
+            ("LUMEN_DB", db.to_str().unwrap()),
+            ("LUMEN_FAULT_SPOOL", spool.to_str().unwrap()),
+            ("LUMEN_HOOK_ENABLED", "0"),
+        ]);
+        let p = lumen_call_payload("mcp__lumen__recall_file", "s-1", None, "toolu_1");
+        assert_eq!(hook("intercept", &p, &var, tmp.path()).exit, 0);
+        assert!(matches!(
+            claim(tmp.path(), "recall_file", "toolu_1"),
+            identity::Lookup::Known(_)
+        ));
+        // And the Read redirect is still off.
+        let file = big_rs(tmp.path(), 400);
+        let read = hook("intercept", &read_payload(&file, "s-1"), &var, tmp.path());
+        assert_eq!((read.exit, read.stderr.is_empty()), (0, true), "{read:?}");
+    }
+
+    #[test]
+    fn tools_that_are_not_lumens_are_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let var = ledger_env(tmp.path());
+        for tool in [
+            "Bash",
+            "mcp__other__smart_read",
+            "mcp__lumen__ping",
+            "smart_read",
+        ] {
+            let p = lumen_call_payload(tool, "s-1", None, "toolu_1");
+            let out = hook("intercept", &p, &var, tmp.path());
+            assert_eq!(
+                (out.exit, out.stderr.is_empty()),
+                (0, true),
+                "{tool}: {out:?}"
+            );
+        }
+        assert!(
+            !identity::record_path(tmp.path(), "toolu_1").exists(),
+            "a record was written for a tool that is not Lumen's"
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_is_said_and_recorded_and_the_call_goes_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("faults.jsonl");
+        // The ledger's directory is not there, and the hook does not make it.
+        let db = tmp.path().join("gone").join("lumen.db");
+        let var = vars(&[
+            ("LUMEN_DB", db.to_str().unwrap()),
+            ("LUMEN_FAULT_SPOOL", spool.to_str().unwrap()),
+        ]);
+        let p = lumen_call_payload("mcp__lumen__smart_read", "s-1", None, "toolu_1");
+        let out = hook("intercept", &p, &var, tmp.path());
+        assert_eq!(out.exit, 0, "{out:?}");
+        assert!(out.stderr[0].contains("answered in full"), "{out:?}");
+        let faults = spool_lines(&spool);
+        assert_eq!(faults[0]["kind"], IDENTITY_UNRECORDED, "{faults:?}");
+        assert_eq!(faults[0]["variant"], "record_unwritable");
+        assert_eq!(faults[0]["session_id"], "s-1");
+        assert!(!db.parent().unwrap().exists(), "the hook made a directory");
+    }
+
+    #[test]
+    fn a_payload_that_cannot_name_its_call_or_conversation_is_a_fault_not_a_guess() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("faults.jsonl");
+        let var = ledger_env(tmp.path());
+        let no_id = br#"{"session_id":"s-1","tool_name":"mcp__lumen__smart_read"}"#;
+        let no_session = br#"{"tool_name":"mcp__lumen__smart_read","tool_use_id":"toolu_1"}"#;
+        let bad_id =
+            br#"{"session_id":"s-1","tool_name":"mcp__lumen__smart_read","tool_use_id":"../x"}"#;
+        for payload in [&no_id[..], &no_session[..], &bad_id[..]] {
+            let out = hook("intercept", payload, &var, tmp.path());
+            assert_eq!(out.exit, 0, "{out:?}");
+            assert!(out.stderr[0].starts_with("lumen:"), "{out:?}");
+        }
+        let faults = spool_lines(&spool);
+        assert_eq!(faults.len(), 3, "{faults:?}");
+        assert!(
+            faults
+                .iter()
+                .all(|f| f["kind"] == IDENTITY_UNRECORDED && f["variant"] == "unusable_ids"),
+            "{faults:?}"
+        );
+        let written = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with("lumen_call_"));
+        assert!(!written, "a record was written for an id that is no id");
+    }
+
+    #[test]
+    fn a_payload_that_is_not_json_is_still_a_fault_for_the_read_intercept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let var = ledger_env(tmp.path());
+        let out = hook("intercept", b"not json", &var, tmp.path());
+        assert_eq!(out.exit, 0);
+        assert!(out.stderr[0].contains("not JSON"), "{out:?}");
+        let faults = spool_lines(&tmp.path().join("faults.jsonl"));
+        assert_eq!(faults[0]["variant"], "bad_payload");
+    }
+
+    #[test]
+    fn each_context_has_its_own_intercept_marker() {
+        assert_eq!(marker_name(Some("s-1"), None), "lumen_intercept_s-1");
+        assert_eq!(
+            marker_name(Some("s-1"), Some("a1")),
+            "lumen_intercept_s-1.a1"
+        );
+        assert_ne!(
+            marker_name(Some("s-1"), Some("a1")),
+            marker_name(Some("s-1"), Some("a2"))
+        );
+        // A session id that spells out a subagent's name is not that subagent's marker.
+        assert_ne!(
+            marker_name(Some("s-1_a1"), None),
+            marker_name(Some("s-1"), Some("a1"))
+        );
+        assert_eq!(marker_name(None, None), "lumen_intercept_nosession");
+    }
+
+    #[test]
+    fn a_subagent_is_redirected_once_in_its_own_right() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = big_rs(tmp.path(), 400);
+        let var = ledger_env(tmp.path());
+        let read = |agent: Option<&str>| {
+            let mut p: Value = serde_json::from_slice(&read_payload(&file, "s-1")).unwrap();
+            if let Some(a) = agent {
+                p["agent_id"] = a.into();
+            }
+            hook(
+                "intercept",
+                &serde_json::to_vec(&p).unwrap(),
+                &var,
+                tmp.path(),
+            )
+            .exit
+        };
+        assert_eq!(read(None), 2);
+        // The subagent was never told about Lumen, whatever its parent was told.
+        assert_eq!(read(Some("agent-a")), 2);
+        assert_eq!(read(Some("agent-a")), 0);
+        assert_eq!(read(None), 0);
     }
 }

@@ -8,6 +8,7 @@
 
 use lumen_core::{
     compress::compress_logs,
+    identity::{self, Identity, Lookup, Why},
     meter::{detect_channel, insert_read_event},
     ranked,
     structure::{CodeItem, detect_lang, outline},
@@ -80,12 +81,14 @@ pub struct MeterRow {
     pub saved_tokens: i64,
     pub routed_via: String,
     pub tool_name: String,
-    /// Claude Code's session id, from CLAUDE_CODE_SESSION_ID. Claude Code exports it
-    /// to the MCP server it spawns, and because stdio servers are per-session the
-    /// value is stable and correct for the whole process lifetime. Without it a read
-    /// cannot be tied to the turn that caused it — second-precision timestamps are
-    /// ambiguous when several sessions run at once.
+    /// The conversation that made the call, from the PreToolUse hook's record for it (see
+    /// `lumen_core::identity`). `None` when the call could not be placed: this process outlives
+    /// `/clear`, so the `CLAUDE_CODE_SESSION_ID` it started with names a conversation that may be
+    /// over, and a row stamped with it would belong to nobody. A NULL says so.
     pub session_id: Option<String>,
+    /// The subagent that made the call, `None` for the main agent and for a call that could
+    /// not be placed. A subagent shares its parent's session id and has a context of its own.
+    pub agent_id: Option<String>,
     /// File modification time at read time, so a re-read of an unchanged file is
     /// distinguishable from a re-read after an edit.
     pub file_mtime: Option<i64>,
@@ -102,6 +105,10 @@ impl MeterRow {
     /// Write this row to the metering DB. Resolves the channel at call time so
     /// it reflects the live environment.
     pub fn record(&self) {
+        let meta = lumen_core::meter::RankedMeta {
+            agent_id: self.agent_id.clone(),
+            ..self.ranked.clone()
+        };
         insert_read_event(
             &self.path,
             self.lines,
@@ -114,7 +121,7 @@ impl MeterRow {
             self.session_id.as_deref(),
             self.file_mtime,
             self.req_key.as_deref(),
-            &self.ranked,
+            &meta,
         );
     }
 }
@@ -193,14 +200,99 @@ pub fn ok_result(text: String, full_tokens: usize, returned_tokens: usize) -> Va
     })
 }
 
-/// Build a metered success outcome: the JSON-RPC result plus the `read_events`
-/// row it earned.
-#[allow(clippy::too_many_arguments)]
-/// The session Claude Code told us about, if it did.
+// ── whose call is it ─────────────────────────────────────────────────────────
+
+thread_local! {
+    /// Who is asking, for the length of one `tools/call`. The server answers one request at a
+    /// time; a thread-local keeps in-process tests on different threads from seeing each other's.
+    static CALLER: std::cell::RefCell<Option<Identity>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The conversation making the call being answered, `None` when it could not be placed.
+pub(crate) fn caller() -> Option<Identity> {
+    CALLER.with(|c| c.borrow().clone())
+}
+
 fn session_id() -> Option<String> {
-    std::env::var("CLAUDE_CODE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    caller().map(|i| i.session)
+}
+
+fn agent_id() -> Option<String> {
+    caller().and_then(|i| i.agent)
+}
+
+/// Holds the caller for one call and lets go of it after.
+struct Caller;
+
+impl Caller {
+    fn enter(lookup: Lookup) -> Caller {
+        let who = match lookup {
+            Lookup::Known(who) => Some(who),
+            Lookup::Unknown(why) => {
+                say_unplaced(why);
+                None
+            }
+        };
+        // Before anything is looked up: what was delivered to another conversation is not
+        // held by this one, and a call that cannot be placed may be from either.
+        repeat_read::enter(who.as_ref().map(|i| i.session.as_str()));
+        CALLER.with(|c| *c.borrow_mut() = who);
+        Caller
+    }
+}
+
+impl Drop for Caller {
+    fn drop(&mut self) {
+        CALLER.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// Say on stderr that a call could not be placed. A missing record is what every install without
+/// the hook produces on every call, so it is said once; anything else is a fault in the hook or
+/// its directory and is said each time.
+fn say_unplaced(why: Why) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if matches!(why, Why::NoRecord | Why::NoCallId)
+        && SAID.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    eprintln!(
+        "lumen: a call could not be placed in a conversation ({why}); answering in full. \
+         Repeat reads need the Lumen PreToolUse hook: `lumen doctor` says whether it is registered."
+    );
+}
+
+/// Find the hook's record for this call and take it.
+fn identify(tool: &str, params: &Value) -> Lookup {
+    let call_id = params
+        .get("_meta")
+        .and_then(|m| m.get("claudecode/toolUseId"))
+        .and_then(Value::as_str);
+    if call_id.is_none() {
+        return Lookup::Unknown(Why::NoCallId);
+    }
+    let Some(db) = lumen_core::meter::db_path() else {
+        return Lookup::Unknown(Why::NoRecord);
+    };
+    identity::claim(
+        identity::record_dir(&db),
+        tool,
+        call_id,
+        lumen_core::repeat::now_ms(),
+    )
+}
+
+/// Remove the identity records nobody claimed. Called once as the server starts, so what a
+/// denied permission prompt left behind does not outlive the process that could have claimed it.
+pub fn prune_identity_records() {
+    let Some(db) = lumen_core::meter::db_path() else {
+        return;
+    };
+    let pruned = identity::prune(identity::record_dir(&db), lumen_core::repeat::now_ms());
+    for (path, e) in pruned.failed {
+        eprintln!("lumen: cannot remove {}: {e}", path.display());
+    }
 }
 
 /// Modification time of `path` in unix seconds, or None when it is not a real file
@@ -322,6 +414,7 @@ fn inflated_fallback(
                 .to_string(),
             tool_name: tool_name.to_string(),
             session_id: session_id(),
+            agent_id: agent_id(),
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
             ranked: lumen_core::meter::RankedMeta::default(),
@@ -356,6 +449,7 @@ fn undescribable_fallback(
             routed_via: lumen_core::ranked::Decline::NoDefs.route().to_string(),
             tool_name: "mcp__lumen__smart_read".to_string(),
             session_id: session_id(),
+            agent_id: agent_id(),
             file_mtime: file_mtime(path),
             req_key: Some(path.to_string()),
             ranked: lumen_core::meter::RankedMeta::default(),
@@ -425,6 +519,7 @@ fn metered_with(
             routed_via: routed_via.to_string(),
             tool_name: tool_name.to_string(),
             session_id: session_id(),
+            agent_id: agent_id(),
             file_mtime: file_mtime(path),
             req_key: req_key.or_else(|| Some(path.to_string())),
             ranked,
@@ -1258,6 +1353,11 @@ pub fn handle_tools_call(params: Option<Value>) -> Outcome {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    // Who is asking, before anything that depends on it. `lumen_ping` reads nothing and is
+    // placed in no conversation.
+    let _caller = matches!(name, "smart_read" | "recall_file" | "compress_logs")
+        .then(|| Caller::enter(identify(name, &params)));
 
     match name {
         "lumen_ping" => tool_ping(&args),

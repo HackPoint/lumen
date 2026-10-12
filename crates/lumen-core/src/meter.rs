@@ -148,25 +148,61 @@ pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
     )
 }
 
-/// Whether `smart_read` or `recall_file` already answered for `path` in `session`.
+/// How long a row of unknown identity vouches for a path in [`lumen_answered`], in seconds.
+pub const UNATTRIBUTED_WINDOW_SECS: i64 = 3600;
+
+/// Whether `smart_read` or `recall_file` already answered for `path` in this context: the
+/// session, and inside a subagent which one (`agent`, `None` for the main agent).
 ///
 /// For the intercept hook, which cannot see the server and has only the ledger to go on:
 /// a row is written when a call worked. Declined calls carry routes of their own
 /// (`would_inflate`, `ranked_*`) and do not count, nor does a built-in Read of the path.
 ///
+/// A subagent has a context of its own, so what the main agent was served does not count
+/// for it, nor the reverse. A row of known identity for another session or agent matches
+/// nobody else, which is what keeps a `/clear` correct.
+///
+/// A row of unknown identity (no session) also counts, for the same path and only within
+/// [`UNATTRIBUTED_WINDOW_SECS`]. It exists only because identity could not be established, as
+/// on an install whose settings.json predates the hook that names the conversation; it cannot
+/// be assigned to one, and matching it is no worse than before that hook existed, when the
+/// row was matched by an environment variable that a `/clear` left stale. A wrong match costs
+/// one redirect to recall_file, after which the valve releases the retry. The repeat-read gate
+/// does not share this: there an unknown identity gets the full result.
+///
 /// Fails open in every direction, because the caller uses a yes to withhold a Read: no
-/// ledger, one that is locked, corrupt or lacks the table, a path spelled differently, all
-/// answer `false`. Read-only, so nothing is created, migrated or written; a writer holding
-/// the ledger delays this by at most 250 ms.
-pub fn lumen_answered(db: &std::path::Path, session: &str, path: &str) -> bool {
+/// ledger, one that is locked, corrupt or lacks the table or the `agent_id` column, a path
+/// spelled differently, all answer `false`. Read-only, so nothing is created, migrated or
+/// written; a writer holding the ledger delays this by at most 250 ms.
+pub fn lumen_answered(
+    db: &std::path::Path,
+    session: &str,
+    agent: Option<&str>,
+    path: &str,
+) -> bool {
+    use rusqlite::OptionalExtension;
     let Ok(conn) = open_read_only(db) else {
         return false;
     };
     let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    let mine = conn
+        .query_row(
+            "SELECT 1 FROM read_events WHERE session_id = ?1 AND agent_id IS ?2 AND path = ?3 \
+             AND routed_via IN ('smart_read', 'recall_file') LIMIT 1",
+            params![session, agent, path],
+            |_| Ok(()),
+        )
+        .optional();
+    match mine {
+        Ok(Some(())) => return true,
+        Ok(None) => {}
+        Err(_) => return false,
+    }
     conn.query_row(
-        "SELECT 1 FROM read_events WHERE session_id = ?1 AND path = ?2 \
-         AND routed_via IN ('smart_read', 'recall_file') LIMIT 1",
-        params![session, path],
+        "SELECT 1 FROM read_events WHERE session_id IS NULL AND path = ?1 \
+         AND routed_via IN ('smart_read', 'recall_file') \
+         AND datetime(ts) >= datetime('now', ?2) LIMIT 1",
+        params![path, format!("-{UNATTRIBUTED_WINDOW_SECS} seconds")],
         |_| Ok(()),
     )
     .is_ok()
@@ -237,6 +273,10 @@ pub struct RankedMeta {
     /// writer already threads through. `None` while the flag is off.
     pub repeat_arm: Option<String>,
     pub repeat_plan: Option<String>,
+    /// 1.8.0: the subagent that made the call, `None` for the main agent. Carried here for the
+    /// same reason: it is the struct every writer already threads through, and a subagent shares
+    /// its parent's `session_id`, so the row needs both to say whose context it is about.
+    pub agent_id: Option<String>,
 }
 
 /// Thirteen parameters, and the alternative is worse.
@@ -367,9 +407,9 @@ pub fn insert_read_event_at(
          saved_tokens,routed_via,channel,session_id,file_mtime,req_key,\
          writer_hook,token_source,budget,s_min,econ_context,econ_rounds,econ_output,\
          econ_source,k_selected,n_total,coeff_version,target_outline,\
-         repeat_arm,repeat_plan) \
+         repeat_arm,repeat_plan,agent_id) \
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'lumen-mcp','measured',\
-                ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+                ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         params![
             now_iso(),
             tool_name,
@@ -395,6 +435,7 @@ pub fn insert_read_event_at(
             meta.target_outline,
             meta.repeat_arm.as_deref(),
             meta.repeat_plan.as_deref(),
+            meta.agent_id.as_deref(),
         ],
     )
     .map_err(WriteError::at("insert"))?;
@@ -416,6 +457,8 @@ pub struct HookReadEvent<'a> {
     pub routed_via: &'a str,
     pub channel: &'a str,
     pub session_id: Option<&'a str>,
+    /// The subagent that ran the call, `None` for the main agent.
+    pub agent_id: Option<&'a str>,
     pub file_mtime: Option<i64>,
     pub req_key: Option<&'a str>,
     /// Which hook wrote the row. Two installs live at once were indistinguishable
@@ -436,7 +479,7 @@ pub fn insert_hook_event_at(db: &std::path::Path, ev: &HookReadEvent) -> Result<
     conn.execute(
         "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,\
          saved_tokens,routed_via,channel,session_id,file_mtime,req_key,writer_hook,\
-         token_source) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11,?12,?13)",
+         token_source,agent_id) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             now_iso(),
             ev.tool,
@@ -451,6 +494,7 @@ pub fn insert_hook_event_at(db: &std::path::Path, ev: &HookReadEvent) -> Result<
             ev.req_key,
             ev.writer_hook,
             ev.token_source,
+            ev.agent_id,
         ],
     )
     .map_err(WriteError::at("insert"))?;
@@ -533,38 +577,196 @@ mod tests {
     fn lumen_answered_counts_only_a_working_route_for_this_session_and_path() {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("lumen.db");
-        let put = |session: &str, path: &str, route: &str| {
-            insert_read_event_at(
-                &db,
-                path,
-                Some(400),
-                300,
-                4000,
-                3700,
-                route,
-                "cli",
-                "t",
-                Some(session),
-                None,
-                None,
-                &RankedMeta::default(),
-            )
-            .unwrap();
-        };
-        assert!(!lumen_answered(&db, "s", "/a.rs"), "no ledger yet");
+        let put = |session: &str, path: &str, route: &str| put_for(&db, session, None, path, route);
+        assert!(!lumen_answered(&db, "s", None, "/a.rs"), "no ledger yet");
         assert!(!db.exists(), "asking created a ledger");
 
         put("s", "/a.rs", "would_inflate");
         put("s", "/a.rs", "builtin_read");
         put("s", "/b.rs", "smart_read");
         put("t", "/a.rs", "smart_read");
-        assert!(!lumen_answered(&db, "s", "/a.rs"));
+        assert!(!lumen_answered(&db, "s", None, "/a.rs"));
 
         put("s", "/a.rs", "recall_file");
-        assert!(lumen_answered(&db, "s", "/a.rs"));
-        assert!(lumen_answered(&db, "s", "/b.rs"));
-        assert!(lumen_answered(&db, "t", "/a.rs"));
-        assert!(!lumen_answered(&db, "u", "/a.rs"));
+        assert!(lumen_answered(&db, "s", None, "/a.rs"));
+        assert!(lumen_answered(&db, "s", None, "/b.rs"));
+        assert!(lumen_answered(&db, "t", None, "/a.rs"));
+        assert!(!lumen_answered(&db, "u", None, "/a.rs"));
+    }
+
+    fn put_for(db: &std::path::Path, session: &str, agent: Option<&str>, path: &str, route: &str) {
+        insert_read_event_at(
+            db,
+            path,
+            Some(400),
+            300,
+            4000,
+            3700,
+            route,
+            "cli",
+            "t",
+            Some(session),
+            None,
+            None,
+            &RankedMeta {
+                agent_id: agent.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lumen_answered_keeps_a_subagent_and_the_main_agent_apart() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_for(&db, "s", None, "/main.rs", "smart_read");
+        put_for(&db, "s", Some("a1"), "/sub.rs", "recall_file");
+
+        assert!(lumen_answered(&db, "s", None, "/main.rs"));
+        assert!(!lumen_answered(&db, "s", Some("a1"), "/main.rs"));
+        assert!(lumen_answered(&db, "s", Some("a1"), "/sub.rs"));
+        assert!(!lumen_answered(&db, "s", None, "/sub.rs"));
+        assert!(!lumen_answered(&db, "s", Some("a2"), "/sub.rs"));
+    }
+
+    /// A Lumen-tool row of unknown identity: what an install whose settings.json predates the
+    /// hook that names the conversation writes.
+    fn put_unknown(db: &std::path::Path, path: &str, route: &str) {
+        insert_read_event_at(
+            db,
+            path,
+            Some(400),
+            300,
+            4000,
+            3700,
+            route,
+            "cli",
+            "t",
+            None,
+            None,
+            None,
+            &RankedMeta::default(),
+        )
+        .unwrap();
+    }
+
+    fn age_rows(db: &std::path::Path, path: &str, ts: &str) {
+        Connection::open(db)
+            .unwrap()
+            .execute(
+                "UPDATE read_events SET ts = ?1 WHERE path = ?2",
+                params![ts, path],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_recent_row_of_unknown_identity_vouches_for_its_path_to_any_context() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_unknown(&db, "/a.rs", "smart_read");
+        put_unknown(&db, "/b.rs", "recall_file");
+        assert!(lumen_answered(&db, "s", None, "/a.rs"));
+        assert!(lumen_answered(&db, "any-other", None, "/b.rs"));
+        assert!(
+            lumen_answered(&db, "s", Some("a1"), "/a.rs"),
+            "an unknown row cannot be told apart from a subagent's"
+        );
+    }
+
+    #[test]
+    fn a_row_of_unknown_identity_for_another_path_or_a_declined_route_does_not_vouch() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_unknown(&db, "/a.rs", "smart_read");
+        put_unknown(&db, "/b.rs", "would_inflate");
+        put_unknown(&db, "/b.rs", "builtin_read");
+        assert!(!lumen_answered(&db, "s", None, "/other.rs"));
+        assert!(!lumen_answered(&db, "s", None, "/b.rs"));
+    }
+
+    #[test]
+    fn a_row_of_unknown_identity_older_than_the_window_does_not_vouch() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_unknown(&db, "/old.rs", "smart_read");
+        put_unknown(&db, "/new.rs", "smart_read");
+        age_rows(&db, "/old.rs", "2020-01-01T00:00:00Z");
+        assert!(!lumen_answered(&db, "s", None, "/old.rs"));
+        assert!(lumen_answered(&db, "s", None, "/new.rs"));
+
+        // Just inside and just outside the window.
+        let ago = |secs: i64| {
+            Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+                    params![format!("-{secs} seconds")],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        age_rows(&db, "/new.rs", &ago(UNATTRIBUTED_WINDOW_SECS - 60));
+        assert!(lumen_answered(&db, "s", None, "/new.rs"));
+        age_rows(&db, "/new.rs", &ago(UNATTRIBUTED_WINDOW_SECS + 60));
+        assert!(!lumen_answered(&db, "s", None, "/new.rs"));
+    }
+
+    #[test]
+    fn a_row_of_known_identity_never_vouches_for_another_context_whatever_its_age() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_for(&db, "before-clear", None, "/a.rs", "smart_read");
+        put_for(&db, "other", Some("a1"), "/b.rs", "recall_file");
+        put_unknown(&db, "/c.rs", "smart_read");
+        assert!(!lumen_answered(&db, "after-clear", None, "/a.rs"));
+        assert!(!lumen_answered(&db, "after-clear", None, "/b.rs"));
+        assert!(!lumen_answered(&db, "other", None, "/b.rs"));
+        // The unknown row for /c.rs does not leak into a known row's path, nor the reverse.
+        assert!(!lumen_answered(&db, "after-clear", None, "/a.rs"));
+        assert!(lumen_answered(&db, "before-clear", None, "/a.rs"));
+    }
+
+    #[test]
+    fn lumen_answered_is_false_on_a_ledger_that_predates_agent_id() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_for(&db, "s", None, "/a.rs", "smart_read");
+        let conn = connect_db(&db).unwrap();
+        conn.execute("ALTER TABLE read_events DROP COLUMN agent_id", [])
+            .unwrap();
+        drop(conn);
+        assert!(
+            !lumen_answered(&db, "s", None, "/a.rs"),
+            "a read-only ask cannot migrate, so it cannot vouch"
+        );
+    }
+
+    #[test]
+    fn a_1_7_0_ledger_gains_agent_id_when_the_server_opens_it_and_keeps_its_rows() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        put_for(&db, "s", None, "/a.rs", "smart_read");
+        let conn = connect_db(&db).unwrap();
+        conn.execute("ALTER TABLE read_events DROP COLUMN agent_id", [])
+            .unwrap();
+        drop(conn);
+
+        // The server's own open is what migrates it.
+        put_for(&db, "s", Some("a1"), "/b.rs", "recall_file");
+        let conn = open_read_only(&db).unwrap();
+        let agents: Vec<Option<String>> = conn
+            .prepare("SELECT agent_id FROM read_events ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(agents, [None, Some("a1".to_string())]);
+        drop(conn);
+        assert!(lumen_answered(&db, "s", Some("a1"), "/b.rs"));
+        assert!(lumen_answered(&db, "s", None, "/a.rs"));
     }
 
     #[test]
@@ -1006,6 +1208,7 @@ mod tests {
             routed_via: "builtin_read",
             channel: "vscode",
             session_id: Some("sess-9"),
+            agent_id: None,
             file_mtime: Some(1_767_000_000),
             req_key: Some("/src/lib.rs"),
             writer_hook: "lumen_meter.sh",

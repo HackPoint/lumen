@@ -56,6 +56,7 @@ fn main() {
         "lumen-mcp v{} starting (stdio transport)",
         lumen_mcp::SERVER_VERSION
     );
+    lumen_mcp::prune_identity_records();
 
     for line in io::stdin().lock().lines() {
         let line = match line {
