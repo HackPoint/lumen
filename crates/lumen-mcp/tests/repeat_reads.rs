@@ -222,10 +222,10 @@ fn names(text: &str, marker: &str) -> Vec<String> {
 }
 
 #[test]
-fn flag_off_changes_nothing_and_advertises_nothing() {
+fn off_changes_nothing_and_advertises_nothing() {
     let rig = rig();
     let f = rig.file("a.rs", &source(40, 6));
-    let mut s = rig.start(&[]);
+    let mut s = rig.start(&[("LUMEN_REPEAT_READS", "off")]);
     let a = s.read(&f);
     let b = s.read(&f);
     assert_eq!(a.text, b.text, "a repeat is answered exactly as the first");
@@ -241,10 +241,13 @@ fn flag_off_changes_nothing_and_advertises_nothing() {
     );
 
     let on = rig
-        .start(ON)
+        .start(&[])
         .rpc("tools/list", serde_json::json!({}))
         .to_string();
-    assert!(on.contains("fresh"));
+    assert!(
+        on.contains("fresh"),
+        "and on, which is the default, offers it"
+    );
 }
 
 #[test]
