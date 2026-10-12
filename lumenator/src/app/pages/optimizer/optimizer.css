@@ -451,3 +451,110 @@
     text-align: left;
     color: var(--lumen-text-dim);
 }
+
+/* ── repeat reads: counted apart from the totals above ── */
+.repeat-card {
+    width: 100%;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    padding: 0.75rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.repeat-card__title {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.repeat-card__state,
+.repeat-card__none,
+.repeat-card__lead {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--lumen-text);
+    /* A settings file path or an OS error is long and arbitrary; it wraps rather than widening the window. */
+    overflow-wrap: anywhere;
+}
+
+.repeat-card__none {
+    color: var(--lumen-text-dim);
+}
+
+.repeat-card__state--problem {
+    color: var(--lumen-warn);
+}
+
+.repeat-card__note {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.64rem;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+    overflow-wrap: anywhere;
+}
+
+.repeat-card__rows {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+/* Name and figure on one line, what the figure is counted against under them. */
+.repeat-card__row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    column-gap: 0.75rem;
+    row-gap: 0.12rem;
+}
+
+.repeat-card__name {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.75rem;
+    color: var(--lumen-text);
+}
+
+.repeat-card__val {
+    margin: 0;
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.84rem;
+    color: var(--lumen-text);
+    text-align: right;
+    white-space: nowrap;
+}
+
+.repeat-card__what {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.64rem;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+}
+
+/* Amber left rule, the same device .hero__warn uses: it qualifies the figures, it is not a fault. */
+.repeat-card__unidentified {
+    margin: 0;
+    padding-left: 0.5rem;
+    border-left: 2px solid color-mix(in srgb, var(--lumen-warn) 60%, transparent);
+    font-family: var(--lumen-font-sans);
+    font-size: 0.68rem;
+    line-height: 1.4;
+    color: var(--lumen-text-dim);
+}
+
+.repeat-card__link {
+    color: var(--lumen-brand);
+}

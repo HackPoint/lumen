@@ -225,5 +225,126 @@
             </div>
         }
 
+        <!-- ── Repeat reads: counted apart from every total above ──
+             Never worded as a saving: the tokens are counted against the whole file, and a read
+             with repeat reads off returns the smaller outline. No card from a backend older than 1.8.0. -->
+        @if (repeatCard(); as c) {
+            <section class="repeat-card" aria-label="Repeat reads">
+                <h2 class="repeat-card__title">
+                    Repeat reads
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'A file Claude reads again in the same conversation. Lumen can answer with a short note that the file is unchanged, or with only what an edit changed. Counted apart from the totals above.'">ⓘ</button>
+                </h2>
+
+                <!-- The settings file, not what the server will do: a LUMEN_REPEAT_READS in an MCP config outranks it, unseen. -->
+                @if (rr.setting(); as st) {
+                    @if (st.problem; as why) {
+                        <p class="repeat-card__state repeat-card__state--problem">
+                            Repeat reads are off now: the settings file {{ st.file }} could not be read
+                            ({{ why }}). The Repeat reads switch on the Context tab rewrites it.
+                        </p>
+                    } @else if (!st.on) {
+                        <p class="repeat-card__state">
+                            Repeat reads are off now: the settings file says off, so every read returns its full result.
+                        </p>
+                    }
+                    @if (st.problem || !st.on) {
+                        <p class="repeat-card__note">
+                            A LUMEN_REPEAT_READS value in a Claude Code MCP config takes priority over the
+                            settings file, and this window cannot see it.
+                        </p>
+                    }
+                } @else if (rr.readError()) {
+                    <p class="repeat-card__state repeat-card__state--problem">
+                        The repeat reads setting could not be read, so nothing is said here about its current
+                        state. The Context tab shows why.
+                    </p>
+                }
+
+                @if (c.served === 0) {
+                    <p class="repeat-card__none">
+                        No repeat read has been answered short yet.
+                        A repeat read is a file Claude reads again in the same conversation; Lumen can answer it
+                        with a short note that the file is unchanged, or with only what an edit changed, and
+                        those answers are counted here.
+                    </p>
+                } @else {
+                    <p class="repeat-card__lead">
+                        Answered so far, for files Claude had already read in the same conversation.
+                    </p>
+                    <dl class="repeat-card__rows">
+                        <div class="repeat-card__row">
+                            <dt class="repeat-card__name">
+                                Unchanged answers served
+                            </dt>
+                            <dd class="repeat-card__val">
+                                {{ fmtTokens(c.unchangedServed) }}
+                            </dd>
+                            <dd class="repeat-card__what">
+                                A short note instead of the whole result.
+                            </dd>
+                        </div>
+                        <div class="repeat-card__row">
+                            <dt class="repeat-card__name">
+                                Edits served as a delta
+                            </dt>
+                            <dd class="repeat-card__val">
+                                {{ fmtTokens(c.deltasServed) }}
+                            </dd>
+                            <dd class="repeat-card__what">
+                                Only what the edit changed.
+                            </dd>
+                        </div>
+                        <div class="repeat-card__row">
+                            <dt class="repeat-card__name">
+                                Tokens not re-sent
+                            </dt>
+                            <dd class="repeat-card__val">
+                                {{ c.measuredAnswers === 0 ? '—' : fmtTokens(c.tokensNotResent) }}
+                            </dd>
+                            <dd class="repeat-card__what">
+                                @if (c.measuredAnswers === 0) {
+                                    None of these answers has a measured token count, so no figure is claimed.
+                                } @else {
+                                    Counted against reading the whole file again, not against the outline Lumen
+                                    sends with repeat reads off.
+                                    @if (c.measuredAnswers < c.served) {
+                                        Covers the {{ fmtTokens(c.measuredAnswers) }} of {{ fmtTokens(c.served) }}
+                                        answers whose token count was measured.
+                                    }
+                                }
+                            </dd>
+                        </div>
+                        <div class="repeat-card__row">
+                            <dt class="repeat-card__name">
+                                Full result asked for again (fresh=true)
+                            </dt>
+                            <dd class="repeat-card__val">
+                                {{ fmtTokens(c.freshRequests) }} of {{ fmtTokens(c.asked) }}
+                            </dd>
+                            <dd class="repeat-card__what">
+                                {{ fmtTokens(c.asked) }} = {{ fmtTokens(c.unchangedServed) }} unchanged
+                                + {{ fmtTokens(c.deltasServed) }} deltas + {{ fmtTokens(c.freshRequests) }} asked again.
+                            </dd>
+                        </div>
+                    </dl>
+                    <p class="repeat-card__note">
+                        Counted apart from the totals above: these answers are in none of the token totals,
+                        the by-tool and by-channel breakdowns, or the net value.
+                    </p>
+                }
+
+                @if (c.unidentifiedReads > 0) {
+                    <p class="repeat-card__unidentified">
+                        {{ fmtTokens(c.unidentifiedReads) }} read{{ c.unidentifiedReads === 1 ? '' : 's' }} got a
+                        full result because Lumen could not tell which conversation
+                        {{ c.unidentifiedReads === 1 ? 'it' : 'they' }} came from.
+                        <a class="repeat-card__link" routerLink="/setup">Open Setup</a>
+                        to run it again, then restart Claude Code.
+                    </p>
+                }
+            </section>
+        }
+
     </div>
 </main>
