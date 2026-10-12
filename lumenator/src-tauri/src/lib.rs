@@ -1751,4 +1751,65 @@ mod tests {
                    invoke<Array<Foo<Bar>>>('d'); invoke<T>(NAME); invoke<T>(`e`); invoke";
         assert_eq!(invoked_commands(src), ["a", "b", "c", "d"]);
     }
+
+    /// The keys of the object a source passes after the command's name: `invoke<T>('x', { on })`.
+    fn invoke_arg_keys(src: &str, command: &str) -> Vec<String> {
+        let literal = format!("'{command}'");
+        let at = src
+            .find(&literal)
+            .unwrap_or_else(|| panic!("the window no longer invokes {command}"))
+            + literal.len();
+        let Some(object) = src[at..]
+            .trim_start()
+            .strip_prefix(',')
+            .and_then(|rest| rest.trim_start().strip_prefix('{'))
+        else {
+            return Vec::new();
+        };
+        object[..object.find('}').expect("the object's end")]
+            .split(',')
+            .map(|entry| entry.split(':').next().unwrap_or_default().trim())
+            .filter(|key| !key.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    /// The parameter names of `fn <command>(..)` in this file.
+    fn command_params(command: &str) -> Vec<String> {
+        let src = include_str!("lib.rs");
+        let head = format!("fn {command}(");
+        let from = src
+            .find(&head)
+            .unwrap_or_else(|| panic!("{command} is not defined here"))
+            + head.len();
+        src[from..from + src[from..].find(')').expect("the parameter list's end")]
+            .split(',')
+            .filter_map(|param| param.split(':').next())
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn the_arguments_the_window_sends_are_the_ones_each_command_takes() {
+        let bridge = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app/tauri-bridge.ts"),
+        )
+        .unwrap();
+        for command in ["get_repeat_reads_setting", "set_repeat_reads_setting"] {
+            assert_eq!(
+                invoke_arg_keys(&bridge, command),
+                command_params(command),
+                "{command}: the window sends keys the handler does not take"
+            );
+        }
+    }
+
+    #[test]
+    fn the_argument_scan_reads_each_way_a_key_is_written() {
+        let src = "invoke<T>('a'); invoke<T>('b', { on }); invoke<T>(\n 'c',\n { enabled: on, other }\n);";
+        assert!(invoke_arg_keys(src, "a").is_empty());
+        assert_eq!(invoke_arg_keys(src, "b"), ["on"]);
+        assert_eq!(invoke_arg_keys(src, "c"), ["enabled", "other"]);
+    }
 }

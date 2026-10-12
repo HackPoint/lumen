@@ -1287,6 +1287,8 @@ async fn served_answers_are_in_none_of_the_totals_above_them() {
 
     let rows = [
         served("smart_read_unchanged", MEAS, (30, 1000, 970)),
+        served("recall_file_unchanged", MEAS, (30, 500, 470)),
+        served("smart_read_delta", MEAS, (120, 1500, 1380)),
         served("recall_file_delta", MEAS, (90, 800, 710)),
     ];
     ledger(&pool, &rows).await;
@@ -1304,7 +1306,10 @@ async fn served_answers_are_in_none_of_the_totals_above_them() {
     assert_eq!(after.net_value_usd, before.net_value_usd);
     assert_eq!(after.gross_value_usd, before.gross_value_usd);
     assert_eq!(after.round_cost_usd, before.round_cost_usd);
-    assert_eq!(after.repeat_reads, reads(1, 1, 970 + 710, 2, 0, 0));
+    assert_eq!(
+        after.repeat_reads,
+        reads(2, 2, 970 + 470 + 1380 + 710, 4, 0, 0)
+    );
 }
 
 /// Every kind of row the ledger can hold, in one, with each figure asserted exactly.
