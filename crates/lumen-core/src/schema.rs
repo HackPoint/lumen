@@ -23,6 +23,14 @@ pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Open the ledger at `url` as a pool and bring it up to date: what the daemon runs before it
+/// serves anything and what the app runs before it reads.
+pub async fn open_pool(url: &str) -> Result<sqlx::SqlitePool, sqlx::Error> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new().connect(url).await?;
+    init_schema(&pool).await?;
+    Ok(pool)
+}
+
 /// Additive migrations run after DDL to upgrade existing DBs.
 /// Each statement is idempotent (errors for "duplicate column" are swallowed by the caller).
 pub const MIGRATIONS: &[&str] = &[
