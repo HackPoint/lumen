@@ -892,7 +892,10 @@ fn merge_passes(passes: Vec<Vec<Series>>) -> Res<Vec<Series>> {
         }
         for (o, s) in out.iter_mut().zip(pass) {
             if o.id != s.id {
-                return Err(format!("latency series out of order: {} and {}", o.id, s.id));
+                return Err(format!(
+                    "latency series out of order: {} and {}",
+                    o.id, s.id
+                ));
             }
             o.raw.extend_from_slice(&s.raw);
             for (route, n) in s.routes {

@@ -717,7 +717,9 @@ pub fn summary(r: &Results) -> String {
                 "\nNotes on series that are not plain measurements:\n\n{u}"
             );
         }
-        s.push_str("\nLoad on the machine around the whole latency run (every build, every pass):\n\n");
+        s.push_str(
+            "\nLoad on the machine around the whole latency run (every build, every pass):\n\n",
+        );
         if let Some(b) = l.builds.first() {
             let _ = writeln!(s, "- before: {}; after: {}", b.load_before, b.load_after);
         }

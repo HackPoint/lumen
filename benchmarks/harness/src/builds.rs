@@ -117,7 +117,10 @@ pub fn candidate(repo: &Path, release: bool, allow_dirty: bool) -> Res<Build> {
         bin,
         profile: if release { "release" } else { "debug" },
         profile_note: profile_note(repo)?,
-        source: format!("the checkout at {}", repo.display()),
+        // No path: a result file is committed and read elsewhere, and a path says whose home
+        // directory it was made in.
+        source: "the checkout this harness was run from, built in its own target directory"
+            .to_string(),
     })
 }
 
