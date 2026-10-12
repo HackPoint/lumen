@@ -229,6 +229,11 @@ mod tests {
         let took = started.elapsed();
         assert!(is_busy_rusqlite(&out.unwrap_err()));
         assert!(calls.get() >= 3, "tried {} times in 120 ms", calls.get());
+        assert!(
+            calls.get() <= 30,
+            "tried {} times in 120 ms: the pauses are gone",
+            calls.get()
+        );
         assert!(took >= Duration::from_millis(120), "gave up after {took:?}");
         assert!(took < Duration::from_secs(5), "kept going for {took:?}");
     }
@@ -283,6 +288,11 @@ mod tests {
         let took = started.elapsed();
         assert!(is_busy(&out.unwrap_err()));
         assert!(calls.get() >= 3, "tried {} times in 120 ms", calls.get());
+        assert!(
+            calls.get() <= 30,
+            "tried {} times in 120 ms: the pauses are gone",
+            calls.get()
+        );
         assert!(took >= Duration::from_millis(120), "gave up after {took:?}");
         assert!(took < Duration::from_secs(5), "kept going for {took:?}");
     }

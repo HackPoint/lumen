@@ -99,6 +99,31 @@ async fn backfilled_in(pool: &sqlx::SqlitePool) -> bool {
     marked == 1
 }
 
+const AGENT_ID: &str =
+    "SELECT COUNT(*) FROM pragma_table_info('read_events') WHERE name = 'agent_id'";
+
+/// A ledger in WAL one column short, so the migration that adds the column has to run.
+fn ledger_missing_a_column(dir: &Path) -> PathBuf {
+    let path = wal_ledger(dir);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE read_events DROP COLUMN agent_id")
+        .unwrap();
+    assert!(!has_agent_id(&conn));
+    path
+}
+
+fn has_agent_id(conn: &Connection) -> bool {
+    conn.query_row(AGENT_ID, [], |r| r.get::<_, i64>(0)).unwrap() == 1
+}
+
+async fn has_agent_id_in(pool: &sqlx::SqlitePool) -> bool {
+    sqlx::query_scalar::<_, i64>(AGENT_ID)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        == 1
+}
+
 #[test]
 fn the_rusqlite_open_waits_for_a_writer_instead_of_failing_busy() {
     let dir = tempfile::tempdir().unwrap();
@@ -136,6 +161,41 @@ fn the_rusqlite_open_gives_up_busy_once_the_budget_is_spent() {
 
     let conn = meter::connect_db(&path).expect("nothing is left half-done");
     assert_eq!(journal_mode(&conn), "wal");
+    assert!(backfilled(&conn));
+}
+
+#[test]
+fn the_rusqlite_open_does_not_count_a_migration_the_ledger_was_busy_for_as_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = ledger_missing_a_column(dir.path());
+    let writer = Writer::hold(&path, Duration::from_secs(60));
+
+    let err = meter::connect_db(&path)
+        .expect_err("a migration that could not run is not one that already had");
+    writer.release();
+
+    assert!(busy::is_busy_rusqlite(&err), "{err}");
+
+    let conn = meter::connect_db(&path).expect("the next open finishes the job");
+    assert!(has_agent_id(&conn));
+}
+
+#[test]
+fn the_rusqlite_open_goes_on_without_a_backfill_the_ledger_stays_busy_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = wal_ledger(dir.path());
+    let writer = Writer::hold(&path, Duration::from_secs(60));
+
+    let conn = meter::connect_db(&path)
+        .expect("the schema is whole, and the next open does the backfill");
+    assert!(
+        !backfilled(&conn),
+        "the writer held the ledger throughout, so the backfill cannot have run"
+    );
+    writer.release();
+    drop(conn);
+
+    let conn = meter::connect_db(&path).expect("the next open");
     assert!(backfilled(&conn));
 }
 
@@ -201,9 +261,9 @@ async fn impatient_pool(path: &Path) -> sqlx::SqlitePool {
 }
 
 #[tokio::test]
-async fn a_migration_the_ledger_was_busy_for_is_applied_not_skipped() {
+async fn a_column_the_ledger_was_busy_to_add_is_added_not_skipped() {
     let dir = tempfile::tempdir().unwrap();
-    let path = wal_ledger(dir.path());
+    let path = ledger_missing_a_column(dir.path());
     let pool = impatient_pool(&path).await;
     let writer = Writer::hold(&path, Duration::from_millis(400));
 
@@ -211,15 +271,15 @@ async fn a_migration_the_ledger_was_busy_for_is_applied_not_skipped() {
     writer.release();
 
     assert!(
-        backfilled_in(&pool).await,
-        "the backfill was refused while the writer held the ledger and never ran again"
+        has_agent_id_in(&pool).await,
+        "the migration was refused while the writer held the ledger and never ran again"
     );
 }
 
 #[tokio::test]
 async fn a_ledger_that_stays_busy_is_an_error_not_an_already_applied_migration() {
     let dir = tempfile::tempdir().unwrap();
-    let path = wal_ledger(dir.path());
+    let path = ledger_missing_a_column(dir.path());
     let pool = impatient_pool(&path).await;
     let writer = Writer::hold(&path, Duration::from_secs(60));
 
@@ -243,5 +303,41 @@ async fn a_ledger_that_stays_busy_is_an_error_not_an_already_applied_migration()
     schema::init_schema(&pool)
         .await
         .expect("the next open finishes the job");
+    assert!(has_agent_id_in(&pool).await);
+}
+
+#[tokio::test]
+async fn a_backfill_the_ledger_was_busy_for_is_run_again_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = wal_ledger(dir.path());
+    let pool = impatient_pool(&path).await;
+    let writer = Writer::hold(&path, Duration::from_millis(400));
+
+    schema::init_schema(&pool).await.expect("init_schema");
+    writer.release();
+
+    assert!(
+        backfilled_in(&pool).await,
+        "the backfill was refused while the writer held the ledger and never ran again"
+    );
+}
+
+#[tokio::test]
+async fn a_backfill_the_ledger_stays_busy_for_does_not_fail_the_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = wal_ledger(dir.path());
+    let pool = impatient_pool(&path).await;
+    let writer = Writer::hold(&path, Duration::from_secs(60));
+
+    schema::init_schema(&pool)
+        .await
+        .expect("the schema is whole, and the next open does the backfill");
+    assert!(
+        !backfilled_in(&pool).await,
+        "the writer held the ledger throughout, so the backfill cannot have run"
+    );
+    writer.release();
+
+    schema::init_schema(&pool).await.expect("the next open");
     assert!(backfilled_in(&pool).await);
 }
