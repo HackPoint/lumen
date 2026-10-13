@@ -123,13 +123,22 @@ function cachedSnapshot$(bridge: TauriBridge): Observable<DaemonMsg> {
 /** Fold counter for `SessionState.seq`. Module-scoped: one reducer per service. */
 let seq = 0;
 
-/** The key a model's tokens at one speed are kept under in `SessionState.byModel`. */
-function rateKey(model: string | null | undefined, speed: string | null | undefined): string {
-  return `${model ?? ''}\u0000${speed ?? ''}`;
+/**
+ * The key a model's tokens at one speed in one region are kept under in `SessionState.byModel`.
+ * An empty speed or region is kept apart from an unrecorded one: '' has no price, while a turn
+ * that recorded nothing is priced as a floor, so the two summed together would price one as the
+ * other.
+ */
+function rateKey(
+    model: string | null | undefined,
+    speed: string | null | undefined,
+    geo: string | null | undefined,
+): string {
+  return JSON.stringify([model ?? '', speed ?? null, geo ?? null]);
 }
 
 /**
- * A snapshot session's tokens by model and speed. Without a split the sums go under no model,
+ * A snapshot session's tokens by model, speed and region. Without a split the sums go under no model,
  * which has no price: the session's latest model need not be the one that consumed them.
  */
 function snapshotModels(s: SnapshotSession): Record<string, ModelTokens> {
@@ -137,6 +146,7 @@ function snapshotModels(s: SnapshotSession): Record<string, ModelTokens> {
     ? s.by_model.map((m) => ({
         model: m.model,
         speed: m.speed ?? null,
+        inferenceGeo: m.inference_geo ?? null,
         input: m.input,
         output: m.output,
         cacheRead: m.cache_read,
@@ -149,16 +159,16 @@ function snapshotModels(s: SnapshotSession): Record<string, ModelTokens> {
         cacheWrite: s.cache_write, cacheWriteUnknown: s.cache_write,
       }];
   const out: Record<string, ModelTokens> = {};
-  for (const row of rows) out[rateKey(row.model, row.speed)] = row;
+  for (const row of rows) out[rateKey(row.model, row.speed, row.inferenceGeo)] = row;
   return out;
 }
 
 /**
- * `byModel` with one turn's tokens added to its model and speed, as a new object. A turn whose
- * cache write recorded no split by duration adds all of it as of unknown duration.
+ * `byModel` with one turn's tokens added to its model, speed and region, as a new object. A turn
+ * whose cache write recorded no split by duration adds all of it as of unknown duration.
  */
 function addTurn(byModel: Record<string, ModelTokens>, t: Turn): Record<string, ModelTokens> {
-  const key = rateKey(t.model || null, t.speed);
+  const key = rateKey(t.model || null, t.speed, t.inference_geo);
   const prev = byModel[key];
   const oneHour = t.cache_creation_1h_input_tokens;
   const known = oneHour !== null && oneHour !== undefined;
@@ -167,6 +177,7 @@ function addTurn(byModel: Record<string, ModelTokens>, t: Turn): Record<string, 
     [key]: {
       model: t.model || null,
       speed: t.speed ?? null,
+      inferenceGeo: t.inference_geo ?? null,
       input: (prev?.input ?? 0) + t.input_tokens,
       output: (prev?.output ?? 0) + t.output_tokens,
       cacheRead: (prev?.cacheRead ?? 0) + t.cache_read_input_tokens,
@@ -327,7 +338,7 @@ export class SessionService {
   // ─────────────────────────────────────────────────────────────────────────
   // D4 — Cost signals derived from existing queries; no new DB calls.
   //
-  // Each model's tokens at that model's prices and speed, from the table `lumen_prices`
+  // Each model's tokens at that model's prices, speed and region, from the table `lumen_prices`
   // serves. The frontend has no price of its own: until the table arrives, or for a model it
   // does not price, there is no dollar figure, and a figure that is not the whole says so.
   // ─────────────────────────────────────────────────────────────────────────

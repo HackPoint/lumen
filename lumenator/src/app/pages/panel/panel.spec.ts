@@ -393,12 +393,13 @@ describe('Panel', () => {
     fixture.detectChanges();
   }
 
+  /** A live turn, routed globally unless a test says otherwise. */
   function liveTurn(t: Record<string, unknown>): void {
     bridge.emit('daemon', JSON.stringify({
       type: 'event',
       turn: {
         session_id: 's1', input_tokens: 0, output_tokens: 0,
-        cache_read_input_tokens: 0, cache_creation_input_tokens: 0, ...t,
+        cache_read_input_tokens: 0, cache_creation_input_tokens: 0, inference_geo: 'global', ...t,
       },
     }));
     fixture.detectChanges();
@@ -458,5 +459,26 @@ describe('Panel', () => {
     await pricedPanel();
     liveTurn({ model: 'claude-opus-4-8', output_tokens: 1_000_000, cache_creation_1h_input_tokens: 0 });
     expect(tiles()[0]).toEqual({ value: '$25.00', tag: 'at least' });
+  });
+
+  it('prices a US-only turn at 1.1 times', async () => {
+    await pricedPanel();
+    liveTurn({
+      model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'us', output_tokens: 1_000_000,
+      cache_creation_1h_input_tokens: 0,
+    });
+    expect(tiles()[0]).toEqual({ value: '$27.50', tag: '' });
+  });
+
+  it("marks the real transcript's turn a floor: Claude Code wrote no region for it", async () => {
+    // The fixture turn in lumen-core as Claude Code wrote it: its 1-hour split, standard speed,
+    // and inference_geo "not_available". $0.0599 at global rates, $0.0659 if it ran US-only.
+    await pricedPanel();
+    liveTurn({
+      model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'not_available',
+      input_tokens: 3_197, output_tokens: 303, cache_read_input_tokens: 16_685,
+      cache_creation_input_tokens: 2_799, cache_creation_1h_input_tokens: 2_799,
+    });
+    expect(tiles()[0]).toEqual({ value: '$0.06', tag: 'at least' });
   });
 });

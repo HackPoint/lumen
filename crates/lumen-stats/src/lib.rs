@@ -116,7 +116,7 @@ impl TokenAgg {
     }
 }
 
-/// One model's share of a [`TokenAgg`], at one speed.
+/// One model's share of a [`TokenAgg`], at one speed in one region.
 #[derive(Serialize, Default, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelAgg {
@@ -127,6 +127,11 @@ pub struct ModelAgg {
     /// ingested before 1.9.0: on a model with fast mode, those are priced at the standard rate
     /// as a floor.
     pub speed: Option<String>,
+    /// `usage.inference_geo`, "us", "global" or "not_available". US-only inference costs more
+    /// on the 4.6 and later models; null for turns that did not record it, every one ingested
+    /// before 1.9.0, and on those models those and "not_available" ones are priced at the
+    /// global rate as a floor.
+    pub inference_geo: Option<String>,
     pub turns: i64,
     pub input: i64,
     pub output: i64,
@@ -139,7 +144,8 @@ pub struct ModelAgg {
     pub cache_write_unknown: i64,
 }
 
-/// Per-model, per-speed sums over the turns `where_clause` selects (pass "" for all of them).
+/// Per-model, per-speed, per-region sums over the turns `where_clause` selects (pass "" for all
+/// of them).
 /// The `&'static str` bound is what makes the `AssertSqlSafe` below sound: no runtime value
 /// can reach the clause, so no user input is interpolated.
 async fn model_aggs(
@@ -147,7 +153,7 @@ async fn model_aggs(
     where_clause: &'static str,
 ) -> Result<Vec<ModelAgg>, String> {
     let sql = format!(
-        "SELECT model, speed,
+        "SELECT model, speed, inference_geo,
                 COUNT(*),
                 COALESCE(SUM(input_tokens),0),
                 COALESCE(SUM(output_tokens),0),
@@ -158,11 +164,12 @@ async fn model_aggs(
                 COALESCE(SUM(CASE WHEN cache_1h IS NULL
                                   THEN cache_creation_input_tokens ELSE 0 END),0)
          FROM turns {where_clause}
-         GROUP BY model, speed
-         ORDER BY model, speed"
+         GROUP BY model, speed, inference_geo
+         ORDER BY model, speed, inference_geo"
     );
     #[allow(clippy::type_complexity)]
     let rows: Vec<(
+        Option<String>,
         Option<String>,
         Option<String>,
         i64,
@@ -179,10 +186,22 @@ async fn model_aggs(
     Ok(rows
         .into_iter()
         .map(
-            |(model, speed, turns, input, output, cache_read, cache_write, w_1h, w_unknown)| {
+            |(
+                model,
+                speed,
+                inference_geo,
+                turns,
+                input,
+                output,
+                cache_read,
+                cache_write,
+                w_1h,
+                w_unknown,
+            )| {
                 ModelAgg {
                     model,
                     speed,
+                    inference_geo,
                     turns,
                     input,
                     output,

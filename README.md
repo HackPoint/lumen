@@ -360,9 +360,16 @@ could not be priced or was priced low, is tagged **at least** (in `lumen dash` i
 - A spend alert fires on a floor that is over its limit. When a floor is under the limit,
   whether the limit was crossed is unknown, and the Alert Thresholds section on Settings
   says so.
-- These are the first-party API's global-routing prices. Lumen does not record a turn's
-  inference region, so a turn run with US-only inference (1.1 times on the 4.6 and later
-  models) is priced at the global rate. It cannot see batch discounts, your negotiated
+- US-only inference is priced at its own rate: each turn records where it ran
+  (`usage.inference_geo`), and a turn that ran US-only (`"us"`) on Claude Opus 4.6, Sonnet 4.6
+  or any later model costs 1.1 times every price, input, output, cache writes and cache reads,
+  fast mode's included. One routed globally (`"global"`) costs the list price, and so does every
+  turn of an older model, which cannot run US-only. A turn that recorded no region, every one
+  ingested before 1.9.0, is priced at the global rate on the 4.6 and later models, and the
+  figure is a floor. So is one that recorded `"not_available"`, which Claude Code writes when it
+  has no region to report: Anthropic's pricing pages do not say which rate such a turn paid,
+  and a request that names no region runs in the workspace's default one, which can be the US.
+- These are the first-party API's prices. Lumen cannot see batch discounts, your negotiated
   pricing or credits.
 
 #### Cost breakdown (output / fresh input / cache read / cache write)

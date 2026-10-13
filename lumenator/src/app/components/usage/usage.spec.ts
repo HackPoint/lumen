@@ -19,11 +19,14 @@ describe('Usage', () => {
     return { byModel: [row(model, a)], ...a };
   }
 
-  /** One model's share at standard speed, every write's duration recorded: an exact figure. */
+  /**
+   * One model's share at standard speed, routed globally, every write's duration recorded: an
+   * exact figure.
+   */
   function row(model: string | null, over: Partial<ModelAgg> = {}): ModelAgg {
     return {
-      model, speed: 'standard', turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-      cacheWrite1h: 0, cacheWriteUnknown: 0, ...over,
+      model, speed: 'standard', inferenceGeo: 'global', turns: 0, input: 0, output: 0,
+      cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, cacheWriteUnknown: 0, ...over,
     };
   }
 

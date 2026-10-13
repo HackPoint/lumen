@@ -13,17 +13,21 @@ function prices([input, output, cacheWrite5m, cacheWrite1h, cacheRead]: Usd): Mo
   return { input, output, cacheWrite5m, cacheWrite1h, cacheRead };
 }
 
+/** What the backend sends as US-only inference's multiplier on a 4.6-or-later model. */
+const US_ONLY = 1.1;
+
 /**
  * One row of the table `lumen_prices` serves: `[input, output, 5-minute write, 1-hour write,
  * cache read]` in USD per million tokens, at standard speed and, for a model with fast mode, in
- * it.
+ * it, and what US-only inference multiplies them by (null on a model older than 4.6).
  */
-export function priceRow(model: string, standard: Usd, fast?: Usd): PriceRow {
+export function priceRow(model: string, standard: Usd, fast?: Usd, usOnly: number | null = US_ONLY): PriceRow {
   return {
     provider: 'anthropic',
     model,
     prices: prices(standard),
     fast: fast ? prices(fast) : null,
+    usOnly,
     note: '',
     source: 'https://platform.claude.com/docs/en/about-claude/pricing',
   };
@@ -41,7 +45,7 @@ export const PRICE_TABLE: PriceTable = {
     priceRow('claude-opus-5-5', [4, 20, 5, 8, 0.2], [8, 40, 10, 16, 0.4]),
     priceRow('claude-sonnet-4-6', [3, 15, 3.75, 6, 0.3]),
     priceRow('claude-sonnet-5-5', [2, 10, 2.5, 4, 0.1]),
-    priceRow('claude-haiku-4-5', [1, 5, 1.25, 2, 0.1]),
+    priceRow('claude-haiku-4-5', [1, 5, 1.25, 2, 0.1], undefined, null),
     { ...priceRow('claude-haiku-5-5', [0, 0, 0, 0, 0]), prices: null, note: 'Priced by prompt length.' },
   ],
 };

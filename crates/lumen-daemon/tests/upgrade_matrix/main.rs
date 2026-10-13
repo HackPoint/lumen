@@ -289,6 +289,63 @@ async fn a_ledger_opened_by_1_8_0_after_the_upgrade_has_sessions_back_empty_unti
     }
 }
 
+/// The turn 1.8.0's daemon writes, its INSERT as it was at the tag. It names its columns, so the
+/// ones this build added take their default.
+const TURN_INSERT_1_8_0: &str = "INSERT OR IGNORE INTO turns
+             (message_id, session_id, ts, model,
+              input_tokens, output_tokens,
+              cache_read_input_tokens, cache_creation_input_tokens, source_file,
+              is_subagent)
+             VALUES (?,?,?,?,?,?,?,?,?,?)";
+
+/// A daemon still on 1.8.0 can ingest into the ledger after this build has upgraded it. Its turn
+/// lands, with no speed and no region, NULL: unknown, which is what pricing reads it as. Nothing
+/// is filled in when this build opens the ledger again.
+#[tokio::test]
+async fn a_turn_1_8_0_writes_after_the_upgrade_has_no_speed_or_region() {
+    for opener in [Opener::Daemon, Opener::Gui, Opener::Rusqlite] {
+        let what = format!("1.8.0 writing after an upgrade via {opener:?}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = place(dir.path(), "ledger.db", &Fixture::V1_8_0.build().await);
+        opener
+            .open(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: the upgrade failed: {e}"));
+
+        Release::V1_8_0.open(&db).await;
+        let mut conn = snapshot::connect(&db).await;
+        sqlx::query(TURN_INSERT_1_8_0)
+            .bind("msg-from-1.8.0")
+            .bind("s-1.8.0")
+            .bind("2026-10-13T12:00:00Z")
+            .bind("claude-opus-4-8")
+            .bind(1_i64)
+            .bind(2_i64)
+            .bind(3_i64)
+            .bind(4_i64)
+            .bind("f.jsonl")
+            .bind(0_i64)
+            .execute(&mut conn)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: 1.8.0's insert failed: {e}"));
+        drop(conn);
+
+        opener
+            .open(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: the open after 1.8.0 failed: {e}"));
+        let snap = take(&db).await;
+        let row = snap.tables["turns"]
+            .rows
+            .iter()
+            .find(|r| r["message_id"] == "'msg-from-1.8.0'")
+            .unwrap_or_else(|| panic!("{what}: the turn did not land"));
+        assert_eq!(row["speed"], "NULL", "{what}");
+        assert_eq!(row["inference_geo"], "NULL", "{what}");
+        assert_eq!(integrity_check(&db).await, ["ok"], "{what}");
+    }
+}
+
 #[tokio::test]
 async fn every_fixture_table_holds_each_kind_of_row_an_upgrade_must_keep() {
     for fixture in releases::ALL {

@@ -219,6 +219,9 @@ struct TurnMsg {
     cache_creation_1h_input_tokens: Option<i64>,
     /// `usage.speed`, "standard" or "fast"; null when the transcript did not record it.
     speed: Option<String>,
+    /// `usage.inference_geo`, "us", "global" or "not_available"; null when the transcript did
+    /// not record it. US-only inference costs more on the 4.6 and later models.
+    inference_geo: Option<String>,
     /// True when this turn came from a subagent transcript. Consumers must keep
     /// its tokens in cost but exclude its cache_read from the context gauge.
     is_subagent: bool,
@@ -611,8 +614,8 @@ async fn ingest_from(
               input_tokens, output_tokens,
               cache_read_input_tokens, cache_creation_input_tokens,
               cache_5m, cache_1h, source_file,
-              is_subagent, speed)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              is_subagent, speed, inference_geo)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&rec.message.id)
         .bind(&rec.session_id)
@@ -627,6 +630,7 @@ async fn ingest_from(
         .bind(&fname)
         .bind(is_subagent as i64)
         .bind(&u.speed)
+        .bind(&u.inference_geo)
         .execute(pool)
         .await?;
 
@@ -664,6 +668,7 @@ async fn ingest_from(
                     cache_creation_input_tokens: u.cache_creation_input_tokens,
                     cache_creation_1h_input_tokens: cache_1h,
                     speed: u.speed.clone(),
+                    inference_geo: u.inference_geo.clone(),
                     is_subagent,
                     project: project.clone(),
                     rowid: res.last_insert_rowid(),
@@ -880,10 +885,10 @@ struct Snapshot {
 
 /// Read the snapshot in one transaction.
 ///
-/// Each session's sums come with their split by model and speed (`by_model`), which is what a
-/// client prices: a session can mix models, a subagent on a cheaper one. The session totals are
-/// the split added up, not a second query, so a turn that lands while the snapshot is read can
-/// never be in one and not the other.
+/// Each session's sums come with their split by model, speed and region (`by_model`), which is
+/// what a client prices: a session can mix models, a subagent on a cheaper one. The session
+/// totals are the split added up, not a second query, so a turn that lands while the snapshot is
+/// read can never be in one and not the other.
 async fn read_snapshot(pool: &SqlitePool) -> Result<Snapshot, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -934,6 +939,7 @@ async fn read_snapshot(pool: &SqlitePool) -> Result<Snapshot, sqlx::Error> {
             String,
             Option<String>,
             Option<String>,
+            Option<String>,
             i64,
             i64,
             i64,
@@ -942,14 +948,15 @@ async fn read_snapshot(pool: &SqlitePool) -> Result<Snapshot, sqlx::Error> {
             i64,
         ),
     >(
-        "SELECT session_id, model, speed,
+        "SELECT session_id, model, speed, inference_geo,
                 SUM(input_tokens), SUM(output_tokens),
                 SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
                 COALESCE(SUM(cache_1h),0),
                 -- A turn that recorded no split has a write of unknown duration, priced at
                 -- the 5-minute rate as a floor.
                 SUM(CASE WHEN cache_1h IS NULL THEN cache_creation_input_tokens ELSE 0 END)
-         FROM turns GROUP BY session_id, model, speed ORDER BY session_id, model, speed",
+         FROM turns GROUP BY session_id, model, speed, inference_geo
+         ORDER BY session_id, model, speed, inference_geo",
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -961,7 +968,7 @@ async fn read_snapshot(pool: &SqlitePool) -> Result<Snapshot, sqlx::Error> {
 
     let mut by_session: HashMap<String, (lumen_core::rates::Tokens, Vec<serde_json::Value>)> =
         HashMap::new();
-    for (session, model, speed, i, o, cr, cw, cw_1h, cw_unknown) in parts {
+    for (session, model, speed, geo, i, o, cr, cw, cw_1h, cw_unknown) in parts {
         let entry = by_session.entry(session).or_default();
         entry.0.add(&lumen_core::rates::Tokens {
             input: i,
@@ -972,7 +979,7 @@ async fn read_snapshot(pool: &SqlitePool) -> Result<Snapshot, sqlx::Error> {
             cache_write_unknown: cw_unknown,
         });
         entry.1.push(serde_json::json!({
-            "model": model, "speed": speed,
+            "model": model, "speed": speed, "inference_geo": geo,
             "input": i, "output": o,
             "cache_read": cr, "cache_write": cw,
             "cache_write_1h": cw_1h, "cache_write_unknown": cw_unknown
@@ -1812,6 +1819,7 @@ mod ws_tests {
             cache_creation_input_tokens: 44,
             cache_creation_1h_input_tokens: None,
             speed: None,
+            inference_geo: None,
             // Not in the ledger, so after any snapshot.
             rowid: i64::MAX,
             is_subagent: false,
@@ -1848,6 +1856,7 @@ mod ws_tests {
             cache_creation_input_tokens: 1,
             cache_creation_1h_input_tokens: None,
             speed: None,
+            inference_geo: None,
             // Not in the ledger, so after any snapshot.
             rowid: i64::MAX,
             is_subagent: false,
@@ -1879,6 +1888,7 @@ mod ws_tests {
                 cache_creation_input_tokens: 0,
                 cache_creation_1h_input_tokens: None,
                 speed: None,
+                inference_geo: None,
                 // Not in the ledger, so after any snapshot.
                 rowid: i64::MAX,
                 is_subagent: false,
@@ -1917,6 +1927,7 @@ mod ws_tests {
             cache_creation_input_tokens: 0,
             cache_creation_1h_input_tokens: None,
             speed: None,
+            inference_geo: None,
             // Not in the ledger, so after any snapshot.
             rowid: i64::MAX,
             is_subagent: false,
@@ -1977,19 +1988,21 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn the_snapshot_splits_each_sessions_sums_by_model_and_speed() {
-        // A session can mix models, a subagent on a cheaper one, and speeds, and its sums can
-        // only be priced per model and speed.
+    async fn the_snapshot_splits_each_sessions_sums_by_model_speed_and_region() {
+        // A session can mix models, a subagent on a cheaper one, speeds and regions, and its
+        // sums can only be priced per model, speed and region.
         let dir = TempDir::new().unwrap();
         let pool = pool_with_schema(&dir).await;
         add_turn(&pool, "m1", "s1", "2026-01-01T10:00:00Z", 1_000).await;
         add_turn(&pool, "m2", "s1", "2026-01-01T11:00:00Z", 2_000).await;
         sqlx::query(
             "INSERT INTO turns(message_id,session_id,ts,model,input_tokens,output_tokens,
-                               cache_read_input_tokens,cache_creation_input_tokens,cache_1h,speed)
+                               cache_read_input_tokens,cache_creation_input_tokens,cache_1h,speed,
+                               inference_geo)
              VALUES('h1','s1','2026-01-01T11:30:00Z','claude-haiku-4-5-20251001',1,2,3,40,30,
-                    'standard'),
-                   ('f1','s1','2026-01-01T11:40:00Z','claude-opus-4-8',0,7,0,0,0,'fast')",
+                    'standard',NULL),
+                   ('f1','s1','2026-01-01T11:40:00Z','claude-opus-4-8',0,7,0,0,0,'fast','global'),
+                   ('u1','s1','2026-01-01T11:50:00Z','claude-opus-4-8',0,5,0,0,0,'fast','us')",
         )
         .execute(&pool)
         .await
@@ -2000,55 +2013,71 @@ mod ws_tests {
         let snap = next_json(&mut ws).await;
         let session = &snap["sessions"][0];
         assert_eq!(session["input"], 21, "the totals still cover every model");
-        assert_eq!(session["output"], 49);
+        assert_eq!(session["output"], 54);
         assert_eq!(
             session["by_model"],
             serde_json::json!([
-                {"model": "claude-haiku-4-5-20251001", "speed": "standard", "input": 1,
-                 "output": 2, "cache_read": 3, "cache_write": 40, "cache_write_1h": 30,
-                 "cache_write_unknown": 0},
-                {"model": "claude-opus-4-8", "speed": "fast", "input": 0, "output": 7,
-                 "cache_read": 0, "cache_write": 0, "cache_write_1h": 0,
-                 "cache_write_unknown": 0},
-                // add_turn records neither a speed nor a duration split: both unknown.
-                {"model": "claude-sonnet-4", "speed": null, "input": 20, "output": 40,
-                 "cache_read": 3_000, "cache_write": 10, "cache_write_1h": 0,
-                 "cache_write_unknown": 10},
+                {"model": "claude-haiku-4-5-20251001", "speed": "standard",
+                 "inference_geo": null, "input": 1, "output": 2, "cache_read": 3,
+                 "cache_write": 40, "cache_write_1h": 30, "cache_write_unknown": 0},
+                {"model": "claude-opus-4-8", "speed": "fast", "inference_geo": "global",
+                 "input": 0, "output": 7, "cache_read": 0, "cache_write": 0,
+                 "cache_write_1h": 0, "cache_write_unknown": 0},
+                {"model": "claude-opus-4-8", "speed": "fast", "inference_geo": "us",
+                 "input": 0, "output": 5, "cache_read": 0, "cache_write": 0,
+                 "cache_write_1h": 0, "cache_write_unknown": 0},
+                // add_turn records no speed, region or duration split: all unknown.
+                {"model": "claude-sonnet-4", "speed": null, "inference_geo": null,
+                 "input": 20, "output": 40, "cache_read": 3_000, "cache_write": 10,
+                 "cache_write_1h": 0, "cache_write_unknown": 10},
             ])
         );
     }
 
     #[tokio::test]
-    async fn ingest_records_the_cache_writes_duration_and_speed_and_broadcasts_them() {
+    async fn ingest_records_the_cache_writes_duration_speed_and_region_and_broadcasts_them() {
         let dir = TempDir::new().unwrap();
         let pool = pool_with_schema(&dir).await;
         let (url, tx) = start(pool.clone()).await;
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let _ = next_json(&mut ws).await;
 
-        // The usage shape Claude Code writes: the write total, its split by duration, and the
-        // speed.
-        let split = r#"{"sessionId":"s-ttl","timestamp":"2026-01-01T12:00:00Z","message":{"id":"msg-ttl","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":9,"cache_read_input_tokens":50,"cache_creation_input_tokens":2799,"cache_creation":{"ephemeral_1h_input_tokens":2000,"ephemeral_5m_input_tokens":799},"speed":"fast"}}}"#;
+        // The usage shape Claude Code writes: the write total, its split by duration, the speed
+        // and the region.
+        let split = r#"{"sessionId":"s-ttl","timestamp":"2026-01-01T12:00:00Z","message":{"id":"msg-ttl","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":9,"cache_read_input_tokens":50,"cache_creation_input_tokens":2799,"cache_creation":{"ephemeral_1h_input_tokens":2000,"ephemeral_5m_input_tokens":799},"inference_geo":"us","speed":"fast"}}}"#;
         // An older line, with neither.
         let bare = r#"{"sessionId":"s-ttl","timestamp":"2026-01-01T12:01:00Z","message":{"id":"msg-bare","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":100}}}"#;
+        // What Claude Code writes when it has no region to report: kept as written, not as null.
+        let na = r#"{"sessionId":"s-ttl","timestamp":"2026-01-01T12:02:00Z","message":{"id":"msg-na","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"inference_geo":"not_available","speed":"standard"}}}"#;
         let jsonl = dir.path().join("session.jsonl");
-        std::fs::write(&jsonl, format!("{split}\n{bare}\n")).unwrap();
+        std::fs::write(&jsonl, format!("{split}\n{bare}\n{na}\n")).unwrap();
         ingest_from(&pool, &jsonl, 0, &tx, true).await.unwrap();
 
         let event = next_json(&mut ws).await;
         assert_eq!(event["turn"]["cache_creation_input_tokens"], 2799);
         assert_eq!(event["turn"]["cache_creation_1h_input_tokens"], 2000);
         assert_eq!(event["turn"]["speed"], "fast");
+        assert_eq!(event["turn"]["inference_geo"], "us");
         let event = next_json(&mut ws).await;
         assert!(
             event["turn"]["cache_creation_1h_input_tokens"].is_null(),
             "no recorded split: the duration of the whole write is unknown, not zero"
         );
         assert!(event["turn"]["speed"].is_null());
+        assert!(event["turn"]["inference_geo"].is_null());
+        let event = next_json(&mut ws).await;
+        assert_eq!(event["turn"]["inference_geo"], "not_available");
 
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT message_id, cache_5m, cache_1h, speed FROM turns ORDER BY message_id",
+        let rows: Vec<(
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT message_id, cache_5m, cache_1h, speed, inference_geo FROM turns
+             ORDER BY message_id",
         )
         .fetch_all(&pool)
         .await
@@ -2056,12 +2085,20 @@ mod ws_tests {
         assert_eq!(
             rows,
             vec![
-                ("msg-bare".to_string(), None, None, None),
+                ("msg-bare".to_string(), None, None, None, None),
+                (
+                    "msg-na".to_string(),
+                    None,
+                    None,
+                    Some("standard".to_string()),
+                    Some("not_available".to_string())
+                ),
                 (
                     "msg-ttl".to_string(),
                     Some(799),
                     Some(2000),
-                    Some("fast".to_string())
+                    Some("fast".to_string()),
+                    Some("us".to_string())
                 ),
             ],
             "what was not recorded is stored as unknown, not as zero or standard"

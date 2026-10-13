@@ -1,5 +1,5 @@
 /**
- * Dollar figures, priced per model and speed from the backend's table.
+ * Dollar figures, priced per model, speed and region from the backend's table.
  *
  * The prices come from `lumen_prices`, which serves `lumen_core::rates::PRICES`. Nothing here
  * holds a price of its own, and `crates/lumen-core/tests/frontend_prices.rs` fails if anything
@@ -8,7 +8,9 @@
  *
  * No figure is shown as more complete than it is. A model the table does not price adds no
  * dollars; a turn that recorded no speed, on a model whose fast mode costs more, is priced at
- * the standard rate; a cache write that recorded no duration is priced at the 5-minute rate.
+ * the standard rate; a turn whose region is not known, on a model where US-only inference costs
+ * more, is priced at the global rate; a cache write that recorded no duration is priced at the
+ * 5-minute rate.
  * A figure holding any of these is a floor, and {@link figureTag} says so and why. This is the
  * same reckoning as `lumen_core::rates::Priced::shortfalls`.
  */
@@ -36,6 +38,11 @@ export interface PriceRow {
     prices: ModelPrices | null;
     /** In fast mode, for a model that has one. */
     fast: ModelPrices | null;
+    /**
+     * What US-only inference multiplies every price above by, fast mode's included. Null on a
+     * model older than 4.6, which costs its prices wherever it ran.
+     */
+    usOnly: number | null;
     note: string;
     /** Where the provider publishes its prices. */
     source: string;
@@ -48,12 +55,17 @@ export interface PriceTable {
     models: PriceRow[];
 }
 
-/** Tokens of each kind, as one model consumed them at one speed. */
+/** Tokens of each kind, as one model consumed them at one speed in one region. */
 export interface ModelTokens {
     /** As the transcript recorded it, dated ids included. Null or empty when it recorded none. */
     model: string | null;
     /** `usage.speed`, 'standard' or 'fast'. Null or absent when the turn did not record it. */
     speed?: string | null;
+    /**
+     * `usage.inference_geo`: 'us', 'global', or 'not_available', which Claude Code writes when
+     * it has no region to report. Null or absent when the turn did not record it.
+     */
+    inferenceGeo?: string | null;
     input: number;
     output: number;
     cacheRead: number;
@@ -73,6 +85,8 @@ export interface Rate {
     prices: ModelPrices;
     /** The turn recorded no speed and the model has a fast mode, which costs more. */
     speedUnknown: boolean;
+    /** Where the turn ran is not known and US-only inference costs more on the model. */
+    geoUnknown: boolean;
 }
 
 /** Token counts by kind. */
@@ -93,12 +107,14 @@ export interface Priced {
     /** Cache reads valued at the input price less what they cost. Claude Code's doing, not Lumen's. */
     cacheSavings: number;
     pricedTokens: number;
-    /** Tokens of a model, or a speed, with no price. In no dollar figure. */
+    /** Tokens of a model, a speed or a region with no price. In no dollar figure. */
     unpriced: Kinds;
     /** Which models those are; '' for turns that recorded none. */
     unpricedModels: string[];
     /** Tokens priced at standard rates that recorded no speed, on models with a dearer fast mode. */
     speedUnknown: Kinds;
+    /** Tokens priced at global rates whose region is not known, on models with a dearer US-only. */
+    geoUnknown: Kinds;
     /** Cache writes priced at the 5-minute rate that recorded no duration. */
     durationUnknown: number;
     /** The price table had not loaded, so nothing could be priced. */
@@ -117,6 +133,16 @@ export interface FigureTag {
 }
 
 const PER_MILLION = 1_000_000;
+
+/** `usage.inference_geo` for a turn whose inference ran only in the US. */
+const GEO_US = 'us';
+/** `usage.inference_geo` for a turn routed globally, at the standard price. */
+const GEO_GLOBAL = 'global';
+/**
+ * What Claude Code writes in `usage.inference_geo` with no region to report. Which price it paid
+ * is not known: see `lumen_core::rates::GEO_NOT_AVAILABLE`.
+ */
+const GEO_NOT_AVAILABLE = 'not_available';
 
 /**
  * The id `model` is priced under: lowercased, with a context suffix such as `[1m]` and a
@@ -144,16 +170,35 @@ export function priceFor(table: PriceTable | null, model: string | null | undefi
     return rowFor(table, model)?.prices ?? null;
 }
 
+function times(p: ModelPrices, k: number): ModelPrices {
+    return {
+        input: p.input * k,
+        output: p.output * k,
+        cacheWrite5m: p.cacheWrite5m * k,
+        cacheWrite1h: p.cacheWrite1h * k,
+        cacheRead: p.cacheRead * k,
+    };
+}
+
+/** A region {@link rateFor} prices; any other has no price where regions are priced. */
+function knownGeo(geo: string): boolean {
+    return geo === GEO_US || geo === GEO_GLOBAL || geo === GEO_NOT_AVAILABLE;
+}
+
 /**
- * What a turn of `model` that ran at `speed` is priced at, or null when it cannot be priced.
- * The same rule as `lumen_core::rates::rate_for`: a recorded 'fast' takes the fast-mode prices
- * and has none on a model without them; an unrecorded speed takes the standard prices, flagged
- * where fast mode exists; a speed this build does not know has no price.
+ * What a turn of `model` that ran at `speed` in `geo` is priced at, or null when it cannot be
+ * priced. The same rule as `lumen_core::rates::rate_for`: a recorded 'fast' takes the fast-mode
+ * prices and has none on a model without them; an unrecorded speed takes the standard prices,
+ * flagged where fast mode exists; a speed this build does not know has no price. On a model that
+ * offers US-only inference, 'us' costs `usOnly` times those prices and 'global' the prices
+ * themselves; no region, or 'not_available', takes the global prices, flagged; a region this
+ * build does not know has no price. A model without it costs its prices wherever it ran.
  */
 export function rateFor(
     table: PriceTable | null,
     model: string | null | undefined,
     speed: string | null | undefined,
+    geo: string | null | undefined,
 ): Rate | null {
     const row = rowFor(table, model);
     if (row === null) return null;
@@ -169,7 +214,18 @@ export function rateFor(
     } else {
         prices = null;
     }
-    return prices === null ? null : { prices, speedUnknown };
+    if (prices === null) return null;
+    let geoUnknown = false;
+    if (row.usOnly !== null) {
+        if (geo === GEO_US) {
+            prices = times(prices, row.usOnly);
+        } else if (geo === null || geo === undefined || geo === GEO_NOT_AVAILABLE) {
+            geoUnknown = true;
+        } else if (geo !== GEO_GLOBAL) {
+            return null;
+        }
+    }
+    return { prices, speedUnknown, geoUnknown };
 }
 
 function usd(tokens: number, perMillion: number): number {
@@ -192,7 +248,7 @@ function kindsTotal(k: Kinds): number {
 }
 
 /**
- * Each row priced at its own model's rates and speed.
+ * Each row priced at its own model's rates, speed and region.
  *
  * With no table yet (`null`) nothing is priced, so a figure shows as absent until the prices
  * arrive rather than as zero.
@@ -209,18 +265,26 @@ export function price(rows: readonly ModelTokens[], table: PriceTable | null): P
         unpriced: noKinds(),
         unpricedModels: [],
         speedUnknown: noKinds(),
+        geoUnknown: noKinds(),
         durationUnknown: 0,
         noTable: table === null,
         hasFigure: true,
     };
     for (const row of rows) {
         const tokens = row.input + row.output + row.cacheRead + row.cacheWrite;
-        const rate = rateFor(table, row.model, row.speed);
+        const rate = rateFor(table, row.model, row.speed, row.inferenceGeo);
         if (rate === null) {
             if (tokens !== 0) {
                 addKinds(out.unpriced, row);
+                // Named as `lumen_core::rates::Spend::priced` names it: an empty speed or region
+                // is a value this build does not know, not an unrecorded one.
                 const model = row.model ?? '';
-                const name = row.speed && row.speed !== 'standard' ? `${model} at speed ${row.speed}` : model;
+                const speed = row.speed;
+                let name = speed !== null && speed !== undefined && speed !== 'standard'
+                    ? `${model} at speed ${speed}`
+                    : model;
+                const geo = row.inferenceGeo;
+                if (geo !== null && geo !== undefined && !knownGeo(geo)) name += ` in region ${geo}`;
                 if (!out.unpricedModels.includes(name)) out.unpricedModels.push(name);
             }
             continue;
@@ -235,6 +299,7 @@ export function price(rows: readonly ModelTokens[], table: PriceTable | null): P
         out.pricedTokens += tokens;
         out.durationUnknown += row.cacheWriteUnknown ?? row.cacheWrite - oneHour;
         if (rate.speedUnknown) addKinds(out.speedUnknown, row);
+        if (rate.geoUnknown) addKinds(out.geoUnknown, row);
     }
     out.total = out.input + out.output + out.cacheRead + out.cacheWrite;
     out.hasFigure = out.pricedTokens > 0 || kindsTotal(out.unpriced) === 0;
@@ -270,6 +335,10 @@ export function shortfalls(p: Priced, figure: Figure): string[] {
         out.push('Some turns did not record their speed and are priced at the standard rate; '
             + 'fast mode costs more.');
     }
+    if (inScope(p.geoUnknown, figure) > 0) {
+        out.push('Some turns did not record where they ran and are priced at the global rate; '
+            + 'US-only inference costs more.');
+    }
     if (p.durationUnknown > 0 && (figure === 'total' || figure === 'cacheWrite')) {
         out.push('Some cache writes did not record how long they were cached (turns before 1.9.0) '
             + 'and are priced at the 5-minute rate, the lower one.');
@@ -293,7 +362,7 @@ export function figureTag(p: Priced, figure: Figure): FigureTag | null {
 }
 
 /**
- * An aggregate's tokens by model and speed. A backend older than 1.9.0 sends no split, and its
+ * An aggregate's tokens by model, speed and region. A backend older than 1.9.0 sends no split, and its
  * sums then go under no model, which has no price.
  */
 export function aggTokens(agg: TokenAgg): ModelTokens[] {

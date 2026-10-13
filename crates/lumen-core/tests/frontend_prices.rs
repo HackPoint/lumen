@@ -12,7 +12,8 @@
 //!   - a price-named field set to a number other than zero (`input: 5`, `cacheWrite: 6.25`):
 //!     a per-million table;
 //!   - a number with a fraction equal to one the table prices at (6.25, 0.5, 3.75 …), which
-//!     ordinary code has no reason to write;
+//!     ordinary code has no reason to write, or to the multiplier US-only inference puts on
+//!     them (1.1), which the table sends as `usOnly`;
 //!   - two numbers in a row equal to a model's input and output price (`5, 25`, `3, 15`): a
 //!     positional table.
 //!
@@ -30,7 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lumen_core::rates::{PRICES, price_for, price_key};
+use lumen_core::rates::{PRICES, US_ONLY, price_for, price_key};
 
 fn workspace_root() -> Option<PathBuf> {
     let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -372,6 +373,16 @@ fn price_shapes(code: &str) -> Vec<(usize, String)> {
         if n.fractional && fractions.contains(&n.value) {
             out.push((n.at, format!("{} is a price the table holds", n.value)));
         }
+        // What US-only inference multiplies a price by, which the table sends as `usOnly`.
+        if n.fractional && n.value == US_ONLY {
+            out.push((
+                n.at,
+                format!(
+                    "{} is US-only inference's multiplier, which the table holds",
+                    n.value
+                ),
+            ));
+        }
         // An input and output price, side by side.
         if let Some(m) = nums.get(k + 1) {
             let between = code[n.end..m.at].trim();
@@ -427,6 +438,11 @@ fn the_shapes_are_recognised() {
         "a positional table"
     );
     assert!(shapes("x = 3.75;") == 1, "a bare price fraction");
+    assert_eq!(
+        shapes("const p = row.prices.input * 1.1;"),
+        1,
+        "US-only's multiplier"
+    );
     // What ordinary code writes is not a table.
     assert_eq!(
         shapes("const out = { input: 0, output: 0, cacheRead: 0 };"),

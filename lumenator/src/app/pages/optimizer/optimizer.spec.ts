@@ -25,7 +25,10 @@ describe('Optimizer', () => {
   /** An aggregate of one model's turns, Opus 4.8 unless a test names another. */
   function agg(over: Partial<TokenAgg> = {}, model = 'claude-opus-4-8'): TokenAgg {
     const a = { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, ...over };
-    return { byModel: [{ ...a, model, speed: 'standard', cacheWrite1h: 0, cacheWriteUnknown: 0 }], ...a };
+    return {
+      byModel: [{ ...a, model, speed: 'standard', inferenceGeo: 'global', cacheWrite1h: 0, cacheWriteUnknown: 0 }],
+      ...a,
+    };
   }
 
   function report(over: Partial<OptimizerReport> = {}): OptimizerReport {
@@ -175,8 +178,8 @@ describe('Optimizer', () => {
     const allTime: TokenAgg = {
       ...agg({ cacheRead: 2_000_000 }),
       byModel: [
-        { model: 'claude-opus-4-8', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
-        { model: 'claude-sonnet-5-5', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+        { model: 'claude-opus-4-8', speed: 'standard', inferenceGeo: 'global', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+        { model: 'claude-sonnet-5-5', speed: 'standard', inferenceGeo: 'global', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
       ],
     };
     const o = await build(report(), usage({ allTime }));
@@ -189,8 +192,8 @@ describe('Optimizer', () => {
     const allTime: TokenAgg = {
       ...agg({ cacheRead: 2_000_000 }),
       byModel: [
-        { model: 'claude-opus-4-8', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
-        { model: 'claude-haiku-5-5', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+        { model: 'claude-opus-4-8', speed: 'standard', inferenceGeo: 'global', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+        { model: 'claude-haiku-5-5', speed: 'standard', inferenceGeo: 'global', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
       ],
     };
     const o = await build(report(), usage({ allTime }));

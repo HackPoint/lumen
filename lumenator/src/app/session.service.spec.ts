@@ -77,7 +77,10 @@ describe('SessionService', () => {
     } as OptimizerReport;
   }
 
-  /** A daemon "event" frame for one turn. */
+  /**
+   * A daemon "event" frame for one turn, routed globally unless a test says otherwise: a turn
+   * whose region is not known is a floor on every model from 4.6 on, and has tests of its own.
+   */
   function turnFrame(over: Record<string, unknown> = {}): string {
     return JSON.stringify({
       type: 'event',
@@ -88,6 +91,7 @@ describe('SessionService', () => {
         output_tokens: 0,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        inference_geo: 'global',
         ...over,
       },
     });
@@ -543,6 +547,68 @@ describe('SessionService', () => {
     bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000 }));
     bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', speed: 'fast', output_tokens: 1_000_000 }));
     expect(s.costSession()).toBeCloseTo(25 + 50, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
+  });
+
+  it('keeps live turns apart by region and prices a US-only one at 1.1 times', async () => {
+    const s = build();
+    await settle();
+    const opus = { model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000 };
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: 'global' }));
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: 'us' }));
+    expect(s.costSession()).toBeCloseTo(25 + 27.5, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
+  });
+
+  it("marks a live turn whose region is not known a floor, as Claude Code's 'not_available' is", async () => {
+    const s = build();
+    await settle();
+    for (const inference_geo of ['not_available', null, undefined]) {
+      bridge.emit('daemon', turnFrame({
+        model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000, inference_geo,
+      }));
+    }
+    expect(s.costSession()).toBeCloseTo(3 * 25, 10);
+    expect(figureTag(s.sessionPriced(), 'total')?.why).toContain('did not record where they ran');
+  });
+
+  it('keeps a live turn with an empty region apart from one that recorded none', async () => {
+    // '' is a region this build does not know, and has no price; null is not known, and is
+    // priced at the global rate as a floor. Kept under one key, one would take the other's.
+    const s = build();
+    await settle();
+    const opus = { model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000 };
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: null }));
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: '' }));
+    const p = s.sessionPriced();
+    expect(p.output).toBeCloseTo(25, 10);
+    expect(p.unpricedModels).toEqual(['claude-opus-4-8 in region ']);
+    expect(p.geoUnknown.output).toBe(1_000_000);
+  });
+
+  it("keeps a snapshot's split by region", async () => {
+    const s = build();
+    await settle();
+    bridge.emit('daemon', JSON.stringify({
+      type: 'snapshot',
+      sessions: [{
+        session_id: 's1', fill: 5_000, peak_fill: 5_000, model: 'claude-opus-4-8',
+        input: 0, output: 2_000_000, cache_read: 0, cache_write: 0,
+        ts: '2026-01-01T10:00:00Z',
+        by_model: [
+          { model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'us', input: 0,
+            output: 1_000_000, cache_read: 0, cache_write: 0, cache_write_1h: 0 },
+          { model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'global', input: 0,
+            output: 1_000_000, cache_read: 0, cache_write: 0, cache_write_1h: 0 },
+        ],
+      }],
+    }));
+    expect(s.costSession()).toBeCloseTo(27.5 + 25, 10);
+    // A live US-only turn adds to the US-only share, not the global one.
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'us', output_tokens: 1_000_000,
+    }));
+    expect(s.costSession()).toBeCloseTo(2 * 27.5 + 25, 10);
     expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
   });
 

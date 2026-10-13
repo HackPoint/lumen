@@ -1393,6 +1393,13 @@ mod tests {
                 }
                 None => assert!(sent["fast"].is_null(), "{}", row.model),
             }
+            // What US-only inference multiplies the prices by, or null on a model without it.
+            assert_eq!(
+                sent["usOnly"],
+                serde_json::json!(row.us_only),
+                "{}",
+                row.model
+            );
         }
     }
 

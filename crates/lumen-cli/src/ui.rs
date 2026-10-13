@@ -438,10 +438,14 @@ mod tests {
         }
     }
 
-    /// One model's tokens at standard speed, every cache write's duration recorded.
+    const STD: Option<&str> = Some("standard");
+    const GLOBAL: Option<&str> = Some("global");
+
+    /// One model's tokens at standard speed, routed globally, every cache write's duration
+    /// recorded.
     fn spend(model: &str, t: Tokens) -> Spend {
         let mut s = Spend::default();
-        s.add(model, Some("standard"), t);
+        s.add(model, STD, GLOBAL, t);
         s
     }
 
@@ -699,7 +703,8 @@ mod tests {
         let mut session = spend("claude-opus-4-8", tokens(0, 1_000_000, 0, 0));
         session.add(
             "claude-haiku-4-5-20251001",
-            Some("standard"),
+            STD,
+            GLOBAL,
             tokens(0, 1_000_000, 0, 0),
         );
         let st = AppState {
@@ -714,7 +719,7 @@ mod tests {
     #[test]
     fn a_figure_that_leaves_a_model_out_says_it_is_a_floor_and_which() {
         let mut session = spend("claude-opus-4-8", tokens(0, 1_000_000, 0, 0));
-        session.add("<synthetic>", None, tokens(0, 5, 0, 0));
+        session.add("<synthetic>", None, None, tokens(0, 5, 0, 0));
         let st = AppState {
             session: Some(session),
             ..healthy_zeroed()
@@ -731,7 +736,8 @@ mod tests {
         let mut session = Spend::default();
         session.add(
             "claude-opus-4-8",
-            Some("standard"),
+            STD,
+            GLOBAL,
             Tokens::of_turn(3_197, 303, 16_685, 2_799, None),
         );
         let st = AppState {
@@ -751,7 +757,12 @@ mod tests {
     #[test]
     fn a_fast_turn_is_priced_at_the_fast_mode_rate() {
         let mut session = Spend::default();
-        session.add("claude-opus-4-8", Some("fast"), tokens(0, 1_000_000, 0, 0));
+        session.add(
+            "claude-opus-4-8",
+            Some("fast"),
+            GLOBAL,
+            tokens(0, 1_000_000, 0, 0),
+        );
         let st = AppState {
             session: Some(session),
             ..healthy_zeroed()
@@ -763,7 +774,7 @@ mod tests {
     #[test]
     fn a_turn_with_no_recorded_speed_on_a_model_with_fast_mode_is_a_floor() {
         let mut session = Spend::default();
-        session.add("claude-opus-4-8", None, tokens(0, 1_000_000, 0, 0));
+        session.add("claude-opus-4-8", None, GLOBAL, tokens(0, 1_000_000, 0, 0));
         let st = AppState {
             session: Some(session),
             ..healthy_zeroed()
@@ -771,6 +782,46 @@ mod tests {
         let out = text(&draw(&st, true, 100, 30));
         assert!(session_line(&out).contains("at least $25.0000"), "{out}");
         assert!(out.contains("speed not recorded"), "and says why:\n{out}");
+    }
+
+    #[test]
+    fn a_us_only_turn_is_priced_at_1_1_times() {
+        let mut session = Spend::default();
+        session.add(
+            "claude-opus-4-8",
+            STD,
+            Some("us"),
+            tokens(0, 1_000_000, 0, 0),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        assert!(session_line(&out).contains("$27.5000"), "{out}");
+        assert!(!out.contains("at least"), "{out}");
+    }
+
+    #[test]
+    fn a_turn_whose_region_is_not_known_is_a_floor() {
+        // The real transcript line: Opus 4.8, standard speed, inference_geo "not_available".
+        let mut session = Spend::default();
+        session.add(
+            "claude-opus-4-8",
+            STD,
+            Some("not_available"),
+            tokens(0, 1_000_000, 0, 0),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        assert!(session_line(&out).contains("at least $25.0000"), "{out}");
+        assert!(
+            out.contains("inference region not known"),
+            "and says why:\n{out}"
+        );
     }
 
     #[test]
@@ -800,7 +851,7 @@ mod tests {
     #[test]
     fn caching_savings_that_leave_a_model_out_are_a_floor() {
         let mut session = spend("claude-opus-4-8", tokens(0, 0, 1_000_000, 0));
-        session.add("<synthetic>", Some("standard"), tokens(0, 0, 10, 0));
+        session.add("<synthetic>", STD, GLOBAL, tokens(0, 0, 10, 0));
         let st = AppState {
             session: Some(session),
             ..healthy_zeroed()

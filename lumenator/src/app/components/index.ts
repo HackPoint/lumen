@@ -17,8 +17,9 @@ interface SessionState {
     recentOutput: number[]; // last N output_tokens for velocity
     totals: { input: number; output: number; cacheRead: number; cacheWrite: number };
     /**
-     * The same tokens by model and speed, keyed by both. A session can mix models, a subagent
-     * on a cheaper one, and speeds, so its cost is priced from these, never the totals.
+     * The same tokens by model, speed and region, keyed by all three. A session can mix models,
+     * a subagent on a cheaper one, speeds and regions, so its cost is priced from these, never
+     * the totals.
      */
     byModel: Record<string, ModelTokens>;
 }
@@ -42,6 +43,11 @@ interface Turn {
     cache_creation_1h_input_tokens?: number | null;
     /** `usage.speed`, 'standard' or 'fast'. Null or absent when not recorded. */
     speed?: string | null;
+    /**
+     * `usage.inference_geo`, 'us', 'global' or 'not_available'. Null or absent when not
+     * recorded.
+     */
+    inference_geo?: string | null;
     /** Subagent turns cost money but carry their own separate context, so they
      *  must not drive the fill gauge. Absent on older daemons. */
     is_subagent?: boolean;
@@ -81,10 +87,12 @@ interface SnapshotSession {
     by_model?: SnapshotModel[] | null;
 }
 
-/** One model's share of a snapshot session, at one speed. */
+/** One model's share of a snapshot session, at one speed in one region. */
 interface SnapshotModel {
     model: string | null;
     speed?: string | null;
+    /** Absent from a daemon older than this field: the region is then not known. */
+    inference_geo?: string | null;
     input: number;
     output: number;
     cache_read: number;
@@ -110,7 +118,7 @@ interface TokenAgg {
     byModel?: ModelAgg[];
 }
 
-/** One model's share of a {@link TokenAgg}, at one speed. */
+/** One model's share of a {@link TokenAgg}, at one speed in one region. */
 interface ModelAgg extends ModelTokens {
     turns: number;
 }

@@ -197,6 +197,15 @@ pub const MIGRATIONS: &[&str] = &[
     // before 1.9.0, and on a transcript that does not record it: unknown, which is the truth,
     // and a cost that holds such a turn on a model with fast mode is shown as a floor.
     "ALTER TABLE turns ADD COLUMN speed TEXT",
+    // ── 1.9.0: where a turn's inference ran ──────────────────────────────────
+    // usage.inference_geo as the transcript wrote it: "us", "global", or "not_available", which
+    // Claude Code writes when it has no region to report. US-only inference costs 1.1 times on
+    // the 4.6 and later models, so a turn is priced at the rate of the region it ran in. NULL on
+    // every turn ingested before 1.9.0, and on a transcript that does not record it: unknown, and
+    // a cost that holds such a turn, or a "not_available" one, on a model where US-only costs more
+    // is shown as a floor. A 1.8.0 build that writes to the ledger afterwards names its columns,
+    // so its turns get NULL here too.
+    "ALTER TABLE turns ADD COLUMN inference_geo TEXT",
 ];
 
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
@@ -236,7 +245,10 @@ CREATE TABLE IF NOT EXISTS turns (
     is_subagent                 INTEGER NOT NULL DEFAULT 0,
     -- 1.9.0: usage.speed, standard | fast | NULL when not recorded. Last, where the ALTER
     -- in MIGRATIONS puts it on an older ledger, so the two agree on column order.
-    speed                       TEXT
+    speed                       TEXT,
+    -- 1.9.0: usage.inference_geo, us | global | not_available | NULL when not recorded.
+    -- After speed, in the order the ALTERs in MIGRATIONS add them.
+    inference_geo               TEXT
 );
 
 CREATE TABLE IF NOT EXISTS calibration (
@@ -1084,10 +1096,10 @@ mod tests {
         assert_eq!(rendered_rows(&again), before);
     }
 
-    // ── 1.9.0: turns.speed ───────────────────────────────────────────────────
+    // ── 1.9.0: turns.speed and turns.inference_geo ───────────────────────────
 
     /// `turns` as every release through 1.8.0 created it, holding a turn. Hand-written: the
-    /// current DDL has the column.
+    /// current DDL has the columns.
     const TURNS_THROUGH_1_8_0: &str = "\
         CREATE TABLE turns ( \
             message_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ts TEXT NOT NULL, \
@@ -1100,8 +1112,18 @@ mod tests {
             cache_read_input_tokens, cache_creation_input_tokens) \
             VALUES ('m-1','s-1','2026-09-01T10:00:00Z','claude-opus-4-8',1,2,3,4);";
 
+    /// The turn 1.8.0's daemon writes, its INSERT verbatim: it names its columns, so a ledger
+    /// this build has upgraded takes it, and the columns it does not know are NULL.
+    const TURN_WRITTEN_BY_1_8_0: &str = "\
+        INSERT OR IGNORE INTO turns
+             (message_id, session_id, ts, model,
+              input_tokens, output_tokens,
+              cache_read_input_tokens, cache_creation_input_tokens, source_file,
+              is_subagent)
+             VALUES ('m-2','s-1','2026-09-01T11:00:00Z','claude-opus-4-8',5,6,7,8,'f.jsonl',0)";
+
     #[tokio::test]
-    async fn a_ledger_from_before_1_9_0_gains_turns_speed_unknown_on_every_old_turn() {
+    async fn a_ledger_from_before_1_9_0_gains_turns_speed_and_region_unknown_on_every_old_turn() {
         let dir = TempDir::new().unwrap();
         let pool = pool_in(&dir).await;
         sqlx::raw_sql(TURNS_THROUGH_1_8_0)
@@ -1110,33 +1132,38 @@ mod tests {
             .unwrap();
         init_schema(&pool).await.unwrap();
 
+        let cols = columns(&pool, "turns").await;
         assert_eq!(
-            columns(&pool, "turns").await.last().map(String::as_str),
-            Some("speed")
+            cols[cols.len() - 2..],
+            ["speed".to_string(), "inference_geo".to_string()]
         );
-        let (id, speed): (String, Option<String>) =
-            sqlx::query_as("SELECT message_id, speed FROM turns")
-                .fetch_one(&pool)
+        sqlx::raw_sql(TURN_WRITTEN_BY_1_8_0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows: Vec<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT message_id, speed, inference_geo FROM turns ORDER BY rowid")
+                .fetch_all(&pool)
                 .await
                 .unwrap();
         assert_eq!(
-            (id.as_str(), speed),
-            ("m-1", None),
-            "an old turn's speed is unknown"
+            rows,
+            [
+                ("m-1".to_string(), None, None),
+                ("m-2".to_string(), None, None)
+            ],
+            "an old turn's speed and region are unknown, and so are those of a turn 1.8.0 writes"
         );
 
-        // A fresh ledger declares it in the same place.
+        // A fresh ledger declares them in the same place.
         let fresh_dir = TempDir::new().unwrap();
         let fresh = pool_in(&fresh_dir).await;
         init_schema(&fresh).await.unwrap();
-        assert_eq!(
-            columns(&fresh, "turns").await,
-            columns(&pool, "turns").await
-        );
+        assert_eq!(columns(&fresh, "turns").await, cols);
     }
 
     #[test]
-    fn the_rusqlite_open_adds_turns_speed_too() {
+    fn the_rusqlite_open_adds_turns_speed_and_region_too() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("1_8_0.db");
         rusqlite::Connection::open(&path)
@@ -1144,13 +1171,14 @@ mod tests {
             .execute_batch(TURNS_THROUGH_1_8_0)
             .unwrap();
         let conn = crate::meter::connect_db(&path).unwrap();
-        let speed: Option<String> = conn
-            .query_row(
-                "SELECT speed FROM turns WHERE message_id = 'm-1'",
-                [],
-                |r| r.get(0),
-            )
+        conn.execute_batch(TURN_WRITTEN_BY_1_8_0).unwrap();
+        let rows: Vec<(Option<String>, Option<String>)> = conn
+            .prepare("SELECT speed, inference_geo FROM turns ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(speed, None);
+        assert_eq!(rows, [(None, None), (None, None)]);
     }
 }

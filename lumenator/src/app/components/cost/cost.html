@@ -5,7 +5,7 @@
             <div class="tile__label">
                 Session cost
                 <button class="info-btn" type="button"
-                        [lumenTooltip]="'Cost of the active session: each model\'s input, output and cache tokens at that model\'s published Anthropic price for the speed it ran at, at global-routing rates (Lumen does not record US-only inference, which costs 1.1 times). Marked at least when part of it could not be priced or was priced low.'">ⓘ</button>
+                        [lumenTooltip]="'Cost of the active session: each model\'s input, output and cache tokens at that model\'s published Anthropic price for the speed it ran at and where it ran, a US-only turn at the US-only price. Marked at least when part of it could not be priced or was priced low, such as a turn that did not record where it ran.'">ⓘ</button>
             </div>
             <div class="tile__value"
                  [class.tile__value--long]="isLong(money('total'))"

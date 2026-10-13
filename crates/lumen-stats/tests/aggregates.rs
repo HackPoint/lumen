@@ -459,6 +459,52 @@ async fn usage_splits_each_model_by_the_speed_it_ran_at() {
 }
 
 #[tokio::test]
+async fn usage_splits_each_model_by_the_region_it_ran_in() {
+    // US-only inference costs 1.1 times on the 4.6 and later models, so a US-only turn cannot be
+    // summed with a global one, nor a turn whose region is not known with either.
+    let (_d, pool) = fixture().await;
+    for (id, geo) in [
+        ("u", "'us'"),
+        ("g", "'global'"),
+        ("a", "'not_available'"),
+        ("n", "NULL"),
+    ] {
+        turn(
+            &pool,
+            id,
+            "s1",
+            "datetime('now')",
+            "claude-opus-4-8",
+            (0, 10, 0, 0),
+        )
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE turns SET speed = 'standard', inference_geo = {geo} WHERE message_id = '{id}'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let u = get_usage(&pool).await.unwrap();
+    let geos: Vec<(Option<&str>, i64)> = u
+        .all_time
+        .by_model
+        .iter()
+        .map(|m| (m.inference_geo.as_deref(), m.output))
+        .collect();
+    assert_eq!(
+        geos,
+        vec![
+            (None, 10),
+            (Some("global"), 10),
+            (Some("not_available"), 10),
+            (Some("us"), 10)
+        ]
+    );
+    assert_eq!(u.all_time.output, 40);
+}
+
+#[tokio::test]
 async fn usage_serializes_the_split_for_the_frontend() {
     // The wire names are load-bearing: the frontend reads byModel and cacheWrite1h.
     let (_d, pool) = fixture().await;
@@ -482,6 +528,11 @@ async fn usage_serializes_the_split_for_the_frontend() {
         "the fixture turn recorded no duration"
     );
     assert!(row["speed"].is_null(), "nor a speed");
+    assert!(row["inferenceGeo"].is_null(), "nor a region");
+    assert!(
+        row.as_object().unwrap().contains_key("inferenceGeo"),
+        "sent as null, not left out"
+    );
 }
 
 // ── get_usage: local-time calendar rollups ───────────────────────────────────

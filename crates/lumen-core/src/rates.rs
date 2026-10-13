@@ -75,25 +75,58 @@ pub fn resolve_window(model: &str, peak_fill: u64) -> u64 {
 // ── Prices ───────────────────────────────────────────────────────────────────
 //
 // Every dollar figure Lumen shows is priced here, at the list price of the model that
-// consumed the tokens and the speed it ran at. Until 1.9.0 there was one set of rates,
-// Opus-class, applied to every turn whatever its model, so a Sonnet 4.6 turn was priced at
-// 1.7 times what it cost and a Haiku 4.5 turn at five times.
+// consumed the tokens, the speed it ran at and where it ran. Until 1.9.0 there was one set of
+// rates, Opus-class, applied to every turn whatever its model, so a Sonnet 4.6 turn was priced
+// at 1.7 times what it cost and a Haiku 4.5 turn at five times.
 //
 // A figure is never shown as more complete than it is. Tokens of a model with no price are
 // left out and the figure says so; a turn whose speed was not recorded is priced at the
-// standard rate on a model whose fast mode costs more, and a cache write whose duration was
-// not recorded at the 5-minute rate, and a figure holding either is a floor and says so.
+// standard rate on a model whose fast mode costs more, a turn whose region is not known at the
+// global rate on a model where US-only inference costs more, and a cache write whose duration
+// was not recorded at the 5-minute rate, and a figure holding any of them is a floor and says
+// so.
 //
-// These are the first-party Claude API's prices: global routing, no batch discount. The
-// ledger does not record a turn's inference region, so a turn run with US-only inference
-// (1.1 times, on the 4.6 and later models) is priced at the global rate. Claude on Bedrock
-// and Vertex AI is priced by those platforms: a Bedrock id (`us.anthropic.…`) or a dated
-// Vertex id (`…@20251101`) is not in this table and gets no dollar figure, but Vertex sends
-// current models under their bare first-party ids, and those turns are priced here at
-// first-party rates.
+// These are the first-party Claude API's prices, with no batch discount. A turn that recorded
+// US-only inference (`usage.inference_geo` "us") costs [`US_ONLY`] times them on the models
+// that offer it, and one that recorded "global" costs them. Claude on Bedrock and Vertex AI
+// is priced by those platforms: a Bedrock id (`us.anthropic.…`) or a dated Vertex id
+// (`…@20251101`) is not in this table and gets no dollar figure, but Vertex sends current
+// models under their bare first-party ids, and those turns are priced here at first-party
+// rates.
 
 /// The day [`PRICES`] was last checked against [`Provider::source`].
 pub const PRICES_AS_OF: &str = "2026-10-13";
+
+/// What US-only inference multiplies every price of a model that offers it by: input, output,
+/// both cache writes and cache reads, on top of fast mode's prices too.
+///
+/// From [`Provider::source`], "Data residency pricing": "For Claude 4.6 and later models,
+/// specifying US-only inference through the `inference_geo` parameter incurs a 1.1x multiplier
+/// on all token pricing categories, including input tokens, output tokens, cache writes, and
+/// cache reads. … Global routing (the default) uses standard pricing." Its "Fast mode pricing"
+/// says the data residency multipliers apply on top of fast mode's. Checked on 2026-10-14, with
+/// <https://platform.claude.com/docs/en/manage-claude/data-residency>, which says the same and
+/// that the older models do not take the parameter and always cost the standard price.
+pub const US_ONLY: f64 = 1.1;
+
+/// `usage.inference_geo` for a turn whose inference ran only in the US. It costs [`US_ONLY`]
+/// times the price on a model whose [`PriceRow::us_only`] says so.
+pub const GEO_US: &str = "us";
+
+/// `usage.inference_geo` for a turn routed globally, at the standard price.
+pub const GEO_GLOBAL: &str = "global";
+
+/// What Claude Code writes in `usage.inference_geo` when it has no region to report: the real
+/// transcript line in this crate's `lib.rs` tests carries it.
+///
+/// Neither page above says which price such a turn paid. They define "us" and "global" only,
+/// and the Messages API reference types the field as "string or null" with no list of values
+/// (<https://platform.claude.com/docs/en/api/messages/create>). Nor does a request that sent no
+/// `inference_geo` mean global: the workspace's `default_inference_geo` applies, and a workspace
+/// that had opted out of global routing was migrated to "us". So it is priced as global, the
+/// lower of the two, and the figure holding it is a floor, the same as a turn that recorded
+/// nothing.
+pub const GEO_NOT_AVAILABLE: &str = "not_available";
 
 /// Who sets a model's price.
 ///
@@ -141,6 +174,10 @@ pub struct PriceRow {
     /// In fast mode, for a model that has one. None for every other model, and a turn
     /// recorded as fast on one of those has no price.
     pub fast: Option<Prices>,
+    /// What US-only inference multiplies this model's prices by, fast mode's included:
+    /// [`US_ONLY`] on the 4.6 and later models. None on an older one, which does not take
+    /// `inference_geo` and is billed at the standard price wherever it ran.
+    pub us_only: Option<f64>,
     /// Where on the provider's page the prices were read, or why there are none.
     pub note: &'static str,
 }
@@ -155,12 +192,15 @@ const fn usd([input, output, cache_write_5m, cache_write_1h, cache_read]: [f64; 
     }
 }
 
+// A row offers US-only inference unless it says it does not: every model from 4.6 on does, so
+// a new one added without thinking about it gets the premium rather than losing it.
 const fn priced(model: &'static str, standard: [f64; 5], note: &'static str) -> PriceRow {
     PriceRow {
         provider: Provider::Anthropic,
         model,
         prices: Some(usd(standard)),
         fast: None,
+        us_only: Some(US_ONLY),
         note,
     }
 }
@@ -171,6 +211,7 @@ const fn unpriced(model: &'static str, why: &'static str) -> PriceRow {
         model,
         prices: None,
         fast: None,
+        us_only: Some(US_ONLY),
         note: why,
     }
 }
@@ -179,6 +220,16 @@ impl PriceRow {
     const fn with_fast(self, fast: [f64; 5]) -> PriceRow {
         PriceRow {
             fast: Some(usd(fast)),
+            ..self
+        }
+    }
+
+    /// A model older than 4.6, which does not take `inference_geo`: "Requests with
+    /// `inference_geo` on Claude Opus 4.5, Claude Sonnet 4.5 (deprecated), Claude Haiku 4.5,
+    /// or earlier models return a 400 error" (the data residency page).
+    const fn without_inference_geo(self) -> PriceRow {
+        PriceRow {
+            us_only: None,
             ..self
         }
     }
@@ -197,6 +248,10 @@ impl PriceRow {
 /// cache prices in each `with_fast` are those multipliers on the fast input price: 1.25 and
 /// 2 times for the two writes, and the model's own cache-hit multiplier (0.05 on Opus 5.5,
 /// 0.1 on the others).
+///
+/// US-only inference: [`US_ONLY`] times every price, standard or fast, on every model from
+/// 4.6 on. The three older models the page lists, Opus 4.5, Sonnet 4.5 and Haiku 4.5, are
+/// `without_inference_geo`.
 pub const PRICES: &[PriceRow] = &[
     // Cache hits on Fable 5.1 and Mythos 5.1 are 0.025 times input, not the usual 0.1.
     priced(
@@ -254,7 +309,8 @@ pub const PRICES: &[PriceRow] = &[
         "claude-opus-4-5",
         [5.0, 25.0, 6.25, 10.0, 0.5],
         "Model pricing, row Claude Opus 4.5",
-    ),
+    )
+    .without_inference_geo(),
     // The page gives $0.10 for a Sonnet 5.5 cache hit (0.05 times its $2 input). A cached
     // copy of the model list elsewhere said $0.20; the page is the source and wins.
     priced(
@@ -277,7 +333,8 @@ pub const PRICES: &[PriceRow] = &[
         "claude-haiku-4-5",
         [1.0, 5.0, 1.25, 2.0, 0.1],
         "Model pricing, row Claude Haiku 4.5",
-    ),
+    )
+    .without_inference_geo(),
     unpriced(
         "claude-haiku-5-5",
         "Priced by prompt length: a request over 100,000 prompt tokens pays five times the \
@@ -289,7 +346,8 @@ pub const PRICES: &[PriceRow] = &[
         "The page lists $3 / $15, but long-context pricing is standard only from the 4.6 \
          models on, and the premium a Sonnet 4.5 request over 200,000 tokens paid is no \
          longer on it.",
-    ),
+    )
+    .without_inference_geo(),
 ];
 
 /// The id `model` is priced under: lowercased, with a context suffix such as `[1m]` and a
@@ -335,15 +393,25 @@ pub struct Rate {
     /// The turn recorded no speed and the model has a fast mode, which costs more. `prices`
     /// are the standard ones, so what they price is a floor.
     pub speed_unknown: bool,
+    /// Where the turn ran is not known and the model offers US-only inference, which costs
+    /// more. `prices` are the global ones, so what they price is a floor.
+    pub geo_unknown: bool,
 }
 
-/// What a turn of `model` that ran at `speed` (`usage.speed` as recorded, `None` when it was
-/// not) is priced at, or `None` when it cannot be priced.
+/// What a turn of `model` that ran at `speed` in `geo` (`usage.speed` and
+/// `usage.inference_geo` as recorded, `None` when they were not) is priced at, or `None` when
+/// it cannot be priced.
 ///
 /// A recorded `"fast"` takes the model's fast-mode prices, and has none on a model without
 /// them. An unrecorded speed takes the standard prices, flagged as a floor where fast mode
 /// exists. A speed this build does not know has no price: it may be a mode with a premium.
-pub fn rate_for(model: &str, speed: Option<&str>) -> Option<Rate> {
+///
+/// On a model that offers US-only inference, a recorded [`GEO_US`] costs [`US_ONLY`] times
+/// those prices and [`GEO_GLOBAL`] the prices themselves. No region, or
+/// [`GEO_NOT_AVAILABLE`], takes the global prices, flagged as a floor. A region this build
+/// does not know has no price, as an unknown speed has none. A model that does not offer it
+/// costs its prices wherever it ran.
+pub fn rate_for(model: &str, speed: Option<&str>, geo: Option<&str>) -> Option<Rate> {
     let row = row_for(model)?;
     let (prices, speed_unknown) = match speed {
         Some("standard") => (row.prices, false),
@@ -351,13 +419,27 @@ pub fn rate_for(model: &str, speed: Option<&str>) -> Option<Rate> {
         Some(_) => (None, false),
         None => (row.prices, row.fast.is_some()),
     };
+    let (multiplier, geo_unknown) = match (row.us_only, geo) {
+        (None, _) => (1.0, false),
+        (Some(us_only), Some(GEO_US)) => (us_only, false),
+        (Some(_), Some(GEO_GLOBAL)) => (1.0, false),
+        (Some(_), None | Some(GEO_NOT_AVAILABLE)) => (1.0, true),
+        (Some(_), Some(_)) => return None,
+    };
     prices.map(|prices| Rate {
-        prices,
+        prices: prices.times(multiplier),
         speed_unknown,
+        geo_unknown,
     })
 }
 
-/// Tokens of each kind, as one model consumed them at one speed.
+/// Whether `geo` is a value [`rate_for`] prices, so a turn with no price can be named for the
+/// region that has none.
+fn known_geo(geo: &str) -> bool {
+    [GEO_US, GEO_GLOBAL, GEO_NOT_AVAILABLE].contains(&geo)
+}
+
+/// Tokens of each kind, as one model consumed them at one speed in one region.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
     pub input: i64,
@@ -440,6 +522,17 @@ impl Cost {
 const PER_MILLION: f64 = 1_000_000.0;
 
 impl Prices {
+    /// Every price times `k`.
+    pub fn times(self, k: f64) -> Prices {
+        Prices {
+            input: self.input * k,
+            output: self.output * k,
+            cache_write_5m: self.cache_write_5m * k,
+            cache_write_1h: self.cache_write_1h * k,
+            cache_read: self.cache_read * k,
+        }
+    }
+
     /// What `t` cost at these prices.
     ///
     /// Cache writes the transcript recorded as 1-hour writes are priced at the 1-hour rate,
@@ -463,20 +556,24 @@ impl Prices {
     }
 }
 
-/// Tokens by the model that consumed them and the speed it ran at, so each part is priced at
-/// its own rate.
+/// Tokens by the model that consumed them, the speed it ran at and the region it ran in, so
+/// each part is priced at its own rate.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Spend {
-    by_rate: BTreeMap<(String, Option<String>), Tokens>,
+    by_rate: BTreeMap<(String, Option<String>, Option<String>), Tokens>,
 }
 
 impl Spend {
-    /// Count `t` against `model` at `speed` (as recorded; `None` when it was not). A model
-    /// with no price, an empty one included, is kept under its own id, so its tokens stay in
-    /// the totals that cannot be priced.
-    pub fn add(&mut self, model: &str, speed: Option<&str>, t: Tokens) {
+    /// Count `t` against `model` at `speed` in `geo` (as recorded; `None` when they were
+    /// not). A model with no price, an empty one included, is kept under its own id, so its
+    /// tokens stay in the totals that cannot be priced.
+    pub fn add(&mut self, model: &str, speed: Option<&str>, geo: Option<&str>, t: Tokens) {
         self.by_rate
-            .entry((model.to_string(), speed.map(str::to_string)))
+            .entry((
+                model.to_string(),
+                speed.map(str::to_string),
+                geo.map(str::to_string),
+            ))
             .or_default()
             .add(&t);
     }
@@ -490,11 +587,11 @@ impl Spend {
         all
     }
 
-    /// Each part priced at its own model's rates and speed.
+    /// Each part priced at its own model's rates, speed and region.
     pub fn priced(&self) -> Priced {
         let mut out = Priced::default();
-        for ((model, speed), t) in &self.by_rate {
-            match rate_for(model, speed.as_deref()) {
+        for ((model, speed, geo), t) in &self.by_rate {
+            match rate_for(model, speed.as_deref(), geo.as_deref()) {
                 Some(rate) => {
                     out.cost.add(&rate.prices.cost(t));
                     out.caching_savings += rate.prices.caching_savings(t.cache_read);
@@ -503,13 +600,19 @@ impl Spend {
                     if rate.speed_unknown {
                         out.speed_unknown.add(t);
                     }
+                    if rate.geo_unknown {
+                        out.geo_unknown.add(t);
+                    }
                 }
                 None if t.total() != 0 => {
                     out.unpriced.add(t);
-                    let name = match speed.as_deref() {
+                    let mut name = match speed.as_deref() {
                         None | Some("standard") => model.clone(),
                         Some(s) => format!("{model} at speed {s}"),
                     };
+                    if let Some(g) = geo.as_deref().filter(|g| !known_geo(g)) {
+                        name.push_str(&format!(" in region {g}"));
+                    }
                     if !out.unpriced_models.contains(&name) {
                         out.unpriced_models.push(name);
                     }
@@ -527,13 +630,16 @@ pub struct Priced {
     pub cost: Cost,
     pub caching_savings: f64,
     pub priced_tokens: i64,
-    /// Tokens of a model, or a speed, with no price, by kind. In no dollar figure.
+    /// Tokens of a model, a speed or a region with no price, by kind. In no dollar figure.
     pub unpriced: Tokens,
     /// Which models those are; '' for turns that recorded none.
     pub unpriced_models: Vec<String>,
     /// Tokens priced at standard rates whose speed was not recorded, on models whose fast
     /// mode costs more, by kind.
     pub speed_unknown: Tokens,
+    /// Tokens priced at global rates whose region is not known, on models where US-only
+    /// inference costs more, by kind.
+    pub geo_unknown: Tokens,
     /// Cache writes priced at the 5-minute rate whose duration was not recorded.
     pub duration_unknown: i64,
 }
@@ -559,6 +665,9 @@ pub enum Shortfall {
     /// Turns that recorded no speed, on a model whose fast mode costs more, were priced at
     /// the standard rate.
     SpeedUnknown,
+    /// Turns whose region is not known, on a model where US-only inference costs more, were
+    /// priced at the global rate.
+    GeoUnknown,
     /// Cache writes that recorded no duration were priced at the 5-minute rate.
     DurationUnknown,
 }
@@ -583,6 +692,10 @@ impl Shortfall {
             Shortfall::SpeedUnknown => {
                 "speed not recorded: priced at the standard rate, below fast mode's".into()
             }
+            Shortfall::GeoUnknown => format!(
+                "inference region not known: priced at the global rate, below US-only \
+                 inference's {US_ONLY} times"
+            ),
             Shortfall::DurationUnknown => {
                 "cache writes with no recorded duration: priced at the 5-minute rate".into()
             }
@@ -631,6 +744,9 @@ impl Priced {
         }
         if in_scope(&self.speed_unknown) > 0 {
             out.push(Shortfall::SpeedUnknown);
+        }
+        if in_scope(&self.geo_unknown) > 0 {
+            out.push(Shortfall::GeoUnknown);
         }
         if self.duration_unknown > 0 && matches!(figure, Figure::Total | Figure::CacheWrite) {
             out.push(Shortfall::DurationUnknown);
@@ -823,6 +939,10 @@ mod window_tests {
 #[cfg(test)]
 mod price_tests {
     use super::*;
+
+    const STD: Option<&str> = Some("standard");
+    const GLOBAL: Option<&str> = Some(GEO_GLOBAL);
+    const US: Option<&str> = Some(GEO_US);
 
     fn prices(input: f64, output: f64, w5m: f64, w1h: f64, read: f64) -> Prices {
         Prices {
@@ -1062,7 +1182,7 @@ mod price_tests {
 
     #[test]
     fn a_fast_turn_is_priced_at_the_fast_mode_rates() {
-        let fast = |m| rate_for(m, Some("fast")).map(|r| r.prices);
+        let fast = |m| rate_for(m, Some("fast"), GLOBAL).map(|r| r.prices);
         assert_eq!(
             fast("claude-opus-4-8"),
             Some(prices(10.0, 50.0, 12.5, 20.0, 1.0))
@@ -1084,41 +1204,113 @@ mod price_tests {
 
     #[test]
     fn an_unrecorded_speed_is_a_floor_only_where_fast_mode_exists() {
-        let opus = rate_for("claude-opus-4-8", None).expect("priced");
+        let opus = rate_for("claude-opus-4-8", None, GLOBAL).expect("priced");
         assert_eq!(opus.prices, opus_4());
         assert!(
             opus.speed_unknown,
             "fast mode costs more, so the standard price is a floor"
         );
-        let sonnet = rate_for("claude-sonnet-4-6", None).expect("priced");
+        let sonnet = rate_for("claude-sonnet-4-6", None, GLOBAL).expect("priced");
         assert!(
             !sonnet.speed_unknown,
             "no fast mode: the standard price is the price"
         );
-        let standard = rate_for("claude-opus-4-8", Some("standard")).expect("priced");
+        let standard = rate_for("claude-opus-4-8", STD, GLOBAL).expect("priced");
         assert!(!standard.speed_unknown);
     }
 
     #[test]
     fn a_speed_this_build_does_not_know_has_no_price() {
-        assert_eq!(rate_for("claude-opus-4-8", Some("turbo")), None);
-        assert_eq!(rate_for("<synthetic>", Some("standard")), None);
+        assert_eq!(rate_for("claude-opus-4-8", Some("turbo"), GLOBAL), None);
+        assert_eq!(rate_for("<synthetic>", STD, GLOBAL), None);
+    }
+
+    // ── US-only inference and the recorded region ────────────────────────────
+
+    #[test]
+    fn every_model_from_4_6_on_offers_us_only_inference_and_no_older_one_does() {
+        // The data residency page names the three older models in the table that reject
+        // inference_geo. Every other row is 4.6 or later, at 1.1 times.
+        assert_eq!(US_ONLY, 1.1);
+        for row in PRICES {
+            let older =
+                ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"].contains(&row.model);
+            let want = if older { None } else { Some(US_ONLY) };
+            assert_eq!(row.us_only, want, "{}", row.model);
+        }
+    }
+
+    #[test]
+    fn a_us_only_turn_costs_1_1_times_every_price_fast_modes_included() {
+        let us = |m, speed| rate_for(m, speed, US).expect("priced").prices;
+        let sonnet = us("claude-sonnet-4-6", STD);
+        for (got, want) in [
+            (sonnet.input, 3.3),
+            (sonnet.output, 16.5),
+            (sonnet.cache_write_5m, 4.125),
+            (sonnet.cache_write_1h, 6.6),
+            (sonnet.cache_read, 0.33),
+        ] {
+            assert!(close(got, want), "{sonnet:?}");
+        }
+        let fast = us("claude-opus-4-8", Some("fast"));
+        assert!(
+            close(fast.input, 11.0) && close(fast.output, 55.0),
+            "on top of fast mode's prices: {fast:?}"
+        );
+        let r = rate_for("claude-sonnet-4-6", STD, US).expect("priced");
+        assert!(!r.geo_unknown && !r.speed_unknown);
+    }
+
+    #[test]
+    fn a_global_turn_costs_the_price() {
+        let r = rate_for("claude-opus-4-8", STD, GLOBAL).expect("priced");
+        assert_eq!(r.prices, opus_4());
+        assert!(!r.geo_unknown);
+    }
+
+    #[test]
+    fn a_region_not_known_is_a_floor_at_the_global_price_where_us_only_costs_more() {
+        // No region, and the "not_available" Claude Code writes: either may have run US-only.
+        for geo in [None, Some(GEO_NOT_AVAILABLE)] {
+            let r = rate_for("claude-opus-4-8", STD, geo).expect("priced");
+            assert_eq!(r.prices, opus_4(), "{geo:?}");
+            assert!(r.geo_unknown, "{geo:?}");
+            // An older model costs its price wherever it ran.
+            let haiku = rate_for("claude-haiku-4-5-20251001", STD, geo).expect("priced");
+            assert!(!haiku.geo_unknown, "{geo:?}");
+        }
+        let haiku = rate_for("claude-haiku-4-5", STD, US).expect("priced");
+        assert_eq!(haiku.prices, price_for("claude-haiku-4-5").unwrap());
+    }
+
+    #[test]
+    fn a_region_this_build_does_not_know_has_no_price_where_regions_are_priced() {
+        assert_eq!(rate_for("claude-opus-4-8", STD, Some("eu")), None);
+        assert_eq!(rate_for("claude-opus-4-8", STD, Some("US")), None);
+        assert!(rate_for("claude-haiku-4-5", STD, Some("eu")).is_some());
     }
 
     // ── a spend across models ────────────────────────────────────────────────
 
-    const STD: Option<&str> = Some("standard");
-
     #[test]
     fn a_spend_prices_each_model_at_its_own_rate() {
         let mut s = Spend::default();
-        s.add("claude-opus-4-8", STD, tokens(0, 1_000_000, 0, 0));
+        s.add("claude-opus-4-8", STD, GLOBAL, tokens(0, 1_000_000, 0, 0));
+        // Haiku 4.5 does not take inference_geo, so a turn of it that recorded no region is
+        // priced in full; Sonnet 4.6 does, and recorded "global".
         s.add(
             "claude-haiku-4-5-20251001",
             None,
+            None,
             tokens(0, 1_000_000, 0, 0),
         );
-        s.add("claude-sonnet-4-6", None, tokens(0, 1_000_000, 0, 0));
+        s.add(
+            "claude-sonnet-4-6",
+            None,
+            GLOBAL,
+            tokens(0, 1_000_000, 0, 0),
+        );
         let p = s.priced();
         assert!(close(p.cost.output, 25.0 + 5.0 + 15.0), "{p:?}");
         assert!(!p.is_partial());
@@ -1133,17 +1325,97 @@ mod price_tests {
     #[test]
     fn a_spend_prices_a_fast_turn_at_fast_rates_beside_a_standard_one() {
         let mut s = Spend::default();
-        s.add("claude-opus-4-8", STD, tokens(0, 1_000_000, 0, 0));
-        s.add("claude-opus-4-8", Some("fast"), tokens(0, 1_000_000, 0, 0));
+        s.add("claude-opus-4-8", STD, GLOBAL, tokens(0, 1_000_000, 0, 0));
+        s.add(
+            "claude-opus-4-8",
+            Some("fast"),
+            GLOBAL,
+            tokens(0, 1_000_000, 0, 0),
+        );
         assert!(close(s.priced().cost.output, 25.0 + 50.0));
+    }
+
+    #[test]
+    fn a_spend_prices_a_us_only_turn_beside_a_global_one() {
+        let mut s = Spend::default();
+        s.add(
+            "claude-opus-4-8",
+            STD,
+            GLOBAL,
+            tokens(0, 1_000_000, 1_000_000, 0),
+        );
+        s.add(
+            "claude-opus-4-8",
+            STD,
+            US,
+            tokens(0, 1_000_000, 1_000_000, 0),
+        );
+        let p = s.priced();
+        assert!(close(p.cost.output, 25.0 + 27.5), "{p:?}");
+        assert!(close(p.cost.cache_read, 0.5 + 0.55), "{p:?}");
+        assert!(
+            close(p.caching_savings, 4.5 + 4.95),
+            "a US-only cache hit saved 1.1 times as much: {p:?}"
+        );
+        assert!(
+            !p.is_floor(Figure::Total),
+            "{:?}",
+            p.shortfalls(Figure::Total)
+        );
+    }
+
+    #[test]
+    fn a_region_not_known_makes_each_figure_in_its_scope_a_floor() {
+        let mut s = Spend::default();
+        s.add(
+            "claude-opus-4-8",
+            STD,
+            Some(GEO_NOT_AVAILABLE),
+            tokens(0, 100, 10, 0),
+        );
+        s.add("claude-haiku-4-5", STD, None, tokens(7, 0, 0, 0));
+        let p = s.priced();
+        assert_eq!(p.geo_unknown, tokens(0, 100, 10, 0), "not Haiku's input");
+        assert_eq!(p.shortfalls(Figure::Input), vec![]);
+        assert_eq!(p.shortfalls(Figure::Output), vec![Shortfall::GeoUnknown]);
+        assert_eq!(
+            p.shortfalls(Figure::CachingSavings),
+            vec![Shortfall::GeoUnknown],
+            "the saving is 1.1 times larger if the turn ran US-only"
+        );
+        assert_eq!(p.shortfalls(Figure::Total), vec![Shortfall::GeoUnknown]);
+    }
+
+    #[test]
+    fn a_turn_in_a_region_this_build_does_not_know_is_unpriced_and_named_so() {
+        let mut s = Spend::default();
+        s.add(
+            "claude-opus-4-8",
+            Some("fast"),
+            Some("eu"),
+            tokens(0, 10, 0, 0),
+        );
+        // Empty is a value too, not an unrecorded region: the frontend names it the same way.
+        s.add("claude-opus-4-8", STD, Some(""), tokens(0, 10, 0, 0));
+        s.add("claude-sonnet-4-6", Some("fast"), US, tokens(0, 10, 0, 0));
+        let p = s.priced();
+        assert!(!p.has_figure());
+        assert_eq!(
+            p.unpriced_models,
+            vec![
+                "claude-opus-4-8 at speed fast in region eu".to_string(),
+                "claude-opus-4-8 in region ".to_string(),
+                "claude-sonnet-4-6 at speed fast".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn an_unknown_model_adds_no_dollars_and_makes_the_total_partial() {
         let mut s = Spend::default();
-        s.add("claude-opus-4-8", STD, tokens(0, 1_000_000, 0, 0));
-        s.add("<synthetic>", STD, tokens(10, 20, 30, 40));
-        s.add("", None, tokens(1, 0, 0, 0));
+        s.add("claude-opus-4-8", STD, GLOBAL, tokens(0, 1_000_000, 0, 0));
+        s.add("<synthetic>", STD, GLOBAL, tokens(10, 20, 30, 40));
+        s.add("", None, None, tokens(1, 0, 0, 0));
         let p = s.priced();
         assert!(
             close(p.cost.total(), 25.0),
@@ -1167,7 +1439,12 @@ mod price_tests {
     #[test]
     fn a_fast_turn_on_a_model_with_no_fast_price_is_unpriced_and_named_so() {
         let mut s = Spend::default();
-        s.add("claude-sonnet-4-6", Some("fast"), tokens(0, 10, 0, 0));
+        s.add(
+            "claude-sonnet-4-6",
+            Some("fast"),
+            GLOBAL,
+            tokens(0, 10, 0, 0),
+        );
         let p = s.priced();
         assert!(!p.has_figure());
         assert_eq!(
@@ -1181,13 +1458,14 @@ mod price_tests {
         let mut s = Spend::default();
         // Opus output with no recorded speed, a cache write with no recorded duration on a
         // model without fast mode, and unpriced cache reads.
-        s.add("claude-opus-4-8", None, tokens(0, 100, 0, 0));
+        s.add("claude-opus-4-8", None, GLOBAL, tokens(0, 100, 0, 0));
         s.add(
             "claude-sonnet-4-6",
             STD,
+            GLOBAL,
             Tokens::of_turn(0, 0, 0, 1_000, None),
         );
-        s.add("<synthetic>", STD, tokens(0, 0, 50, 0));
+        s.add("<synthetic>", STD, GLOBAL, tokens(0, 0, 50, 0));
         let p = s.priced();
         assert_eq!(p.shortfalls(Figure::Input), vec![]);
         assert_eq!(p.shortfalls(Figure::Output), vec![Shortfall::SpeedUnknown]);
@@ -1224,6 +1502,7 @@ mod price_tests {
         split.add(
             "claude-opus-4-8",
             STD,
+            GLOBAL,
             Tokens::of_turn(input, output, read, write, Some(2_799)),
         );
         let p = split.priced();
@@ -1234,6 +1513,7 @@ mod price_tests {
         unsplit.add(
             "claude-opus-4-8",
             STD,
+            GLOBAL,
             Tokens::of_turn(input, output, read, write, None),
         );
         let p = unsplit.priced();
@@ -1256,7 +1536,7 @@ mod price_tests {
     #[test]
     fn a_spend_of_only_unknown_models_has_no_dollar_figure() {
         let mut s = Spend::default();
-        s.add("mystery-model", STD, tokens(100, 100, 0, 0));
+        s.add("mystery-model", STD, GLOBAL, tokens(100, 100, 0, 0));
         let p = s.priced();
         assert!(!p.has_figure());
         assert_eq!(p.cost.total(), 0.0);
@@ -1275,16 +1555,16 @@ mod price_tests {
     #[test]
     fn a_model_seen_with_no_tokens_does_not_make_a_total_partial() {
         let mut s = Spend::default();
-        s.add("<synthetic>", STD, Tokens::default());
+        s.add("<synthetic>", STD, GLOBAL, Tokens::default());
         assert!(!s.priced().is_partial());
     }
 
     #[test]
     fn spend_adds_up_per_model() {
         let mut s = Spend::default();
-        s.add("claude-opus-4-8", STD, tokens(1, 2, 3, 4));
-        s.add("claude-opus-4-8", STD, tokens(10, 20, 30, 40));
-        s.add("claude-sonnet-4-6", None, tokens(100, 0, 0, 0));
+        s.add("claude-opus-4-8", STD, GLOBAL, tokens(1, 2, 3, 4));
+        s.add("claude-opus-4-8", STD, GLOBAL, tokens(10, 20, 30, 40));
+        s.add("claude-sonnet-4-6", None, GLOBAL, tokens(100, 0, 0, 0));
         assert_eq!(s.tokens(), tokens(111, 22, 33, 44));
     }
 
@@ -1295,6 +1575,11 @@ mod price_tests {
             "no price for turns with no model, <synthetic>"
         );
         assert!(Shortfall::SpeedUnknown.describe().contains("standard rate"));
+        assert_eq!(
+            Shortfall::GeoUnknown.describe(),
+            "inference region not known: priced at the global rate, below US-only inference's \
+             1.1 times"
+        );
         assert!(
             Shortfall::DurationUnknown
                 .describe()

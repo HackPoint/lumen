@@ -234,7 +234,8 @@ describe('Settings', () => {
       bridge.emit('daemon', JSON.stringify({
         type: 'event',
         turn: {
-          session_id: 's1', model: 'claude-sonnet-4-6', speed: 'standard', input_tokens: 0,
+          session_id: 's1', model: 'claude-sonnet-4-6', speed: 'standard', inference_geo: 'global',
+          input_tokens: 0,
           output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
           cache_creation_1h_input_tokens: 0,
         },

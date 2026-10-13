@@ -45,6 +45,11 @@ pub struct Usage {
     /// before the API reported it.
     #[serde(default)]
     pub speed: Option<String>,
+    /// Where inference ran: "us" (US-only, a premium on the 4.6 and later models) or "global".
+    /// Claude Code writes "not_available" when it has none to report; absent from transcripts
+    /// written before the API reported it. See `rates::GEO_NOT_AVAILABLE`.
+    #[serde(default)]
+    pub inference_geo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +162,16 @@ mod tests {
         assert_eq!(u.output_tokens, 20);
         assert_eq!(u.cache_read_input_tokens, 500);
         assert_eq!(u.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
+    fn usage_without_speed_or_region_reads_them_as_not_recorded() {
+        let r: Record = serde_json::from_str(ASSISTANT_LINE).unwrap();
+        let u = r.message.usage.as_ref().unwrap();
+        assert_eq!(
+            (u.speed.as_deref(), u.inference_geo.as_deref()),
+            (None, None)
+        );
     }
 
     #[test]

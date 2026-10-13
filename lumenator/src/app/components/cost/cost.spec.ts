@@ -14,8 +14,8 @@ describe('Cost', () => {
   let fixture: ComponentFixture<Cost>;
 
   /**
-   * The panel for one model's tokens at standard speed, every write's duration recorded, so
-   * every figure is exact: Opus 4.8 unless a test names another.
+   * The panel for one model's tokens at standard speed, routed globally, every write's duration
+   * recorded, so every figure is exact: Opus 4.8 unless a test names another.
    */
   function build(over: Partial<CostTotals> = {}, model = 'claude-opus-4-8'): Cost {
     const totals: CostTotals = {
@@ -30,8 +30,8 @@ describe('Cost', () => {
 
   function row(model: string, t: Partial<ModelTokens>): ModelTokens {
     return {
-      model, speed: 'standard', input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-      cacheWrite1h: 0, cacheWriteUnknown: 0, ...t,
+      model, speed: 'standard', inferenceGeo: 'global', input: 0, output: 0, cacheRead: 0,
+      cacheWrite: 0, cacheWrite1h: 0, cacheWriteUnknown: 0, ...t,
     };
   }
 

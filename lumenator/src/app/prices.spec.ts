@@ -13,8 +13,8 @@ import keyCases from './price-key.cases.json';
 describe('prices', () => {
   function tokens(model: string | null, over: Partial<ModelTokens> = {}): ModelTokens {
     return {
-      model, speed: 'standard', input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-      cacheWrite1h: 0, cacheWriteUnknown: 0, ...over,
+      model, speed: 'standard', inferenceGeo: 'global', input: 0, output: 0, cacheRead: 0,
+      cacheWrite: 0, cacheWrite1h: 0, cacheWriteUnknown: 0, ...over,
     };
   }
 
@@ -45,20 +45,93 @@ describe('prices', () => {
   // ── speed ─────────────────────────────────────────────────────────────────
 
   it('prices a fast turn at the fast-mode rate, and has none for a model without one', () => {
-    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'fast')?.prices.output).toBe(50);
-    expect(rateFor(PRICE_TABLE, 'claude-sonnet-4-6', 'fast')).toBeNull();
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'fast', 'global')?.prices.output).toBe(50);
+    expect(rateFor(PRICE_TABLE, 'claude-sonnet-4-6', 'fast', 'global')).toBeNull();
   });
 
   it('prices an unrecorded speed at the standard rate, as a floor only where fast mode exists', () => {
-    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', null)).toEqual({
-      prices: PRICE_TABLE.models[0].prices!, speedUnknown: true,
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', null, 'global')).toEqual({
+      prices: PRICE_TABLE.models[0].prices!, speedUnknown: true, geoUnknown: false,
     });
-    expect(rateFor(PRICE_TABLE, 'claude-sonnet-4-6', undefined)?.speedUnknown).toBe(false);
-    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'standard')?.speedUnknown).toBe(false);
+    expect(rateFor(PRICE_TABLE, 'claude-sonnet-4-6', undefined, 'global')?.speedUnknown).toBe(false);
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'standard', 'global')?.speedUnknown).toBe(false);
   });
 
   it('has no price for a speed it does not know', () => {
-    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'turbo')).toBeNull();
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'turbo', 'global')).toBeNull();
+  });
+
+  // ── region ────────────────────────────────────────────────────────────────
+
+  it("prices a US-only turn at the row's multiplier on every price, fast mode's included", () => {
+    const sonnet = rateFor(PRICE_TABLE, 'claude-sonnet-4-6', 'standard', 'us')!;
+    expect(sonnet.geoUnknown).toBe(false);
+    expect(sonnet.prices.input).toBeCloseTo(3.3, 10);
+    expect(sonnet.prices.output).toBeCloseTo(16.5, 10);
+    expect(sonnet.prices.cacheWrite5m).toBeCloseTo(4.125, 10);
+    expect(sonnet.prices.cacheWrite1h).toBeCloseTo(6.6, 10);
+    expect(sonnet.prices.cacheRead).toBeCloseTo(0.33, 10);
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'fast', 'us')!.prices.output).toBeCloseTo(55, 10);
+  });
+
+  it('prices a global turn at the price', () => {
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'standard', 'global')).toEqual({
+      prices: PRICE_TABLE.models[0].prices!, speedUnknown: false, geoUnknown: false,
+    });
+  });
+
+  it('prices a region not known at the global rate, as a floor only where US-only costs more', () => {
+    for (const geo of [null, undefined, 'not_available']) {
+      expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'standard', geo)).toEqual({
+        prices: PRICE_TABLE.models[0].prices!, speedUnknown: false, geoUnknown: true,
+      });
+      // Haiku 4.5 does not take inference_geo: its price is its price wherever it ran.
+      expect(rateFor(PRICE_TABLE, 'claude-haiku-4-5', 'standard', geo)?.geoUnknown).toBe(false);
+    }
+    expect(rateFor(PRICE_TABLE, 'claude-haiku-4-5', 'standard', 'us')?.prices.output).toBe(5);
+  });
+
+  it('has no price for a region it does not know, where regions are priced', () => {
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'standard', 'eu')).toBeNull();
+    expect(rateFor(PRICE_TABLE, 'claude-haiku-4-5', 'standard', 'eu')).not.toBeNull();
+    const p = price([tokens('claude-opus-4-8', { inferenceGeo: 'eu', output: 1 })], PRICE_TABLE);
+    expect(p.unpricedModels).toEqual(['claude-opus-4-8 in region eu']);
+  });
+
+  it('keeps an empty region or speed apart from an unrecorded one: unpriced, named as Rust names it', () => {
+    // `lumen_core::rates::Spend::priced` names these "claude-opus-4-8 in region " and
+    // "claude-opus-4-8 at speed ": an empty value is a value this build does not know.
+    expect(rateFor(PRICE_TABLE, 'claude-opus-4-8', 'standard', '')).toBeNull();
+    const p = price([
+      tokens('claude-opus-4-8', { inferenceGeo: '', output: 1 }),
+      tokens('claude-opus-4-8', { speed: '', output: 1 }),
+    ], PRICE_TABLE);
+    expect(p.hasFigure).toBe(false);
+    expect(p.unpricedModels).toEqual(['claude-opus-4-8 in region ', 'claude-opus-4-8 at speed ']);
+  });
+
+  it('adds a US-only turn at 1.1 times beside a global one', () => {
+    const p = price([
+      tokens('claude-opus-4-8', { output: 1_000_000, cacheRead: 1_000_000 }),
+      tokens('claude-opus-4-8', { inferenceGeo: 'us', output: 1_000_000, cacheRead: 1_000_000 }),
+    ], PRICE_TABLE);
+    expect(p.output).toBeCloseTo(25 + 27.5, 10);
+    expect(p.cacheSavings).toBeCloseTo(4.5 + 4.95, 10);
+    expect(figureTag(p, 'total')).toBeNull();
+  });
+
+  it('makes every figure of a turn whose region is not known a floor, and says why', () => {
+    const p = price([
+      tokens('claude-opus-4-8', { inferenceGeo: 'not_available', output: 10, cacheRead: 10 }),
+      tokens('claude-haiku-4-5', { inferenceGeo: null, input: 10 }),
+    ], PRICE_TABLE);
+    expect(figureTag(p, 'output')).toEqual({
+      label: 'at least',
+      why: 'Some turns did not record where they ran and are priced at the global rate; '
+        + 'US-only inference costs more.',
+    });
+    expect(isFloor(p, 'savings')).toBe(true);
+    expect(isFloor(p, 'input')).toBe(false);
   });
 
   // ── pricing ───────────────────────────────────────────────────────────────

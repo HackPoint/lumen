@@ -19,11 +19,11 @@ pub struct AppState {
     /// windows open the gauge follows whichever is newest, so it has to say which.
     pub project: String,
     pub window: u64,
-    /// The session's tokens by model and speed, so each part is priced at its own rate.
+    /// The session's tokens by model, speed and region, so each part is priced at its own rate.
     /// None when they could not be read: shown as a dash, never as zero or as an earlier
     /// session's figure.
     pub session: Option<Spend>,
-    /// Today's tokens by model and speed, None when they could not be read.
+    /// Today's tokens by model, speed and region, None when they could not be read.
     pub today: Option<Spend>,
     pub saved_tokens: i64,
     pub full_tokens: i64,
@@ -70,13 +70,16 @@ struct Session {
     by_model: Option<Vec<ModelTokens>>,
 }
 
-/// One model's share of a snapshot session, at one speed.
+/// One model's share of a snapshot session, at one speed in one region.
 #[derive(Deserialize)]
 struct ModelTokens {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     speed: Option<String>,
+    /// Absent from a daemon that did not send it: the region is then not known.
+    #[serde(default)]
+    inference_geo: Option<String>,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -106,7 +109,7 @@ impl ModelTokens {
 }
 
 impl Session {
-    /// The session's tokens by model and speed. Without a split all of them go under no
+    /// The session's tokens by model, speed and region. Without a split all of them go under no
     /// model, which has no price: a session can mix models, so pricing the sums at the
     /// session's latest model would be a guess.
     fn spend(&self) -> Spend {
@@ -117,12 +120,14 @@ impl Session {
                     spend.add(
                         row.model.as_deref().unwrap_or(""),
                         row.speed.as_deref(),
+                        row.inference_geo.as_deref(),
                         row.tokens(),
                     );
                 }
             }
             None => spend.add(
                 "",
+                None,
                 None,
                 Tokens::of_turn(
                     self.input,
@@ -151,6 +156,9 @@ struct Turn {
     /// "standard" or "fast"; null or absent when not recorded.
     #[serde(default)]
     speed: Option<String>,
+    /// "us", "global" or "not_available"; null or absent when not recorded.
+    #[serde(default)]
+    inference_geo: Option<String>,
     /// Subagent turns cost money but carry their own context — see
     /// lumen_core::project. Absent on older daemons, defaulting to false.
     #[serde(default)]
@@ -255,6 +263,7 @@ fn apply_msg(text: &str, state: &Arc<Mutex<AppState>>) {
                     session.add(
                         &t.model,
                         t.speed.as_deref(),
+                        t.inference_geo.as_deref(),
                         Tokens::of_turn(
                             t.input_tokens,
                             t.output_tokens,
@@ -379,40 +388,46 @@ fn today_spend() -> Option<Spend> {
     spend_of(&conn, TODAY, []).ok()
 }
 
-/// The turns `where_clause` selects, summed by model and speed.
+/// The turns `where_clause` selects, summed by model, speed and region.
 fn spend_of(
     conn: &rusqlite::Connection,
     where_clause: &'static str,
     params: impl rusqlite::Params,
 ) -> rusqlite::Result<Spend> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT model, speed,
+        "SELECT model, speed, inference_geo,
                 COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                 COALESCE(SUM(cache_read_input_tokens),0),
                 COALESCE(SUM(cache_creation_input_tokens),0), COALESCE(SUM(cache_1h),0),
                 -- A turn that recorded no split has a write of unknown duration.
                 COALESCE(SUM(CASE WHEN cache_1h IS NULL
                                   THEN cache_creation_input_tokens ELSE 0 END),0)
-         FROM turns {where_clause} GROUP BY model, speed"
+         FROM turns {where_clause} GROUP BY model, speed, inference_geo"
     ))?;
     let rows = stmt.query_map(params, |r| {
         Ok((
             r.get::<_, Option<String>>(0)?,
             r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
             Tokens {
-                input: r.get(2)?,
-                output: r.get(3)?,
-                cache_read: r.get(4)?,
-                cache_write: r.get(5)?,
-                cache_write_1h: r.get(6)?,
-                cache_write_unknown: r.get(7)?,
+                input: r.get(3)?,
+                output: r.get(4)?,
+                cache_read: r.get(5)?,
+                cache_write: r.get(6)?,
+                cache_write_1h: r.get(7)?,
+                cache_write_unknown: r.get(8)?,
             },
         ))
     })?;
     let mut spend = Spend::default();
     for row in rows {
-        let (model, speed, tokens) = row?;
-        spend.add(model.as_deref().unwrap_or(""), speed.as_deref(), tokens);
+        let (model, speed, geo, tokens) = row?;
+        spend.add(
+            model.as_deref().unwrap_or(""),
+            speed.as_deref(),
+            geo.as_deref(),
+            tokens,
+        );
     }
     Ok(spend)
 }
@@ -624,9 +639,9 @@ mod tests {
             r#"{"type":"snapshot","sessions":[{"session_id":"s1","input":11,"output":22,
                "cache_read":33,"cache_write":44,"fill":5000,"ts":"2026-01-01T10:00:00Z",
                "by_model":[
-                 {"model":"claude-opus-4-8","speed":"standard","input":10,"output":20,
-                  "cache_read":30,"cache_write":40,"cache_write_1h":25,
-                  "cache_write_unknown":0},
+                 {"model":"claude-opus-4-8","speed":"standard","inference_geo":"us",
+                  "input":10,"output":20,"cache_read":30,"cache_write":40,
+                  "cache_write_1h":25,"cache_write_unknown":0},
                  {"model":"claude-haiku-4-5-20251001","speed":null,"input":1,"output":2,
                   "cache_read":3,"cache_write":4,"cache_write_1h":0,
                   "cache_write_unknown":4}]}]}"#,
@@ -637,6 +652,7 @@ mod tests {
         want.add(
             "claude-opus-4-8",
             Some("standard"),
+            Some("us"),
             Tokens {
                 input: 10,
                 output: 20,
@@ -648,6 +664,7 @@ mod tests {
         );
         want.add(
             "claude-haiku-4-5-20251001",
+            None,
             None,
             Tokens::of_turn(1, 2, 3, 4, None),
         );
@@ -683,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn an_event_counts_its_tokens_against_its_own_model_and_speed() {
+    fn an_event_counts_its_tokens_against_its_own_model_speed_and_region() {
         let st = connected();
         apply_msg(&event("claude-opus-4-8", 0, 1_000_000, 0, 0), &st);
         apply_msg(&subagent_event(0, 0, 0), &st);
@@ -698,7 +715,14 @@ mod tests {
             r#"{"type":"event","turn":{"model":"claude-opus-4-8","input_tokens":0,
                 "output_tokens":1000000,"cache_read_input_tokens":0,
                 "cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,
-                "speed":"fast"}}"#,
+                "speed":"fast","inference_geo":"global"}}"#,
+            &st,
+        );
+        apply_msg(
+            r#"{"type":"event","turn":{"model":"claude-opus-4-8","input_tokens":0,
+                "output_tokens":1000000,"cache_read_input_tokens":0,
+                "cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,
+                "speed":"fast","inference_geo":"us"}}"#,
             &st,
         );
         let s = st.lock().unwrap();
@@ -707,9 +731,10 @@ mod tests {
             "the subagent's model is not the session's"
         );
         let p = s.session.as_ref().expect("session spend").priced();
-        // $25 of Opus output at standard speed, $50 of it in fast mode, $5 of Haiku output,
-        // and Haiku's cache write: 100 at $1.25/M and 200 at $2/M.
-        let want = 25.0 + 50.0 + 5.0 + (100.0 * 1.25 + 200.0 * 2.0) / 1e6;
+        // $25 of Opus output at standard speed, $50 of it in fast mode and $55 of it in fast
+        // mode US-only, $5 of Haiku output, and Haiku's cache write: 100 at $1.25/M and 200 at
+        // $2/M.
+        let want = 25.0 + 50.0 + 55.0 + 5.0 + (100.0 * 1.25 + 200.0 * 2.0) / 1e6;
         assert!((p.cost.total() - want).abs() < 1e-9, "{p:?}");
     }
 
@@ -1217,6 +1242,117 @@ mod tests {
     }
 
     #[test]
+    fn poll_prices_each_speed_and_region_apart_and_keeps_what_was_not_recorded_a_floor() {
+        // What `lumen dash` reads with the daemon down. A turn ingested before 1.9.0 recorded
+        // neither its speed, its region nor its write's split: priced at the standard, global
+        // and 5-minute rates, and each makes the figure a floor. A fast turn costs the
+        // fast-mode price, and a US-only one 1.1 times the price. Three Sonnet turns at one
+        // speed differ only in region, so they are summed apart or priced wrong.
+        let (_d, path) = db_with(&[
+            (
+                "pre-1.9.0",
+                "s1",
+                "2026-01-01T10:00:00Z",
+                "claude-opus-4-8",
+                0,
+                1_000_000,
+                0,
+                2_000_000,
+            ),
+            (
+                "fast",
+                "s1",
+                "2026-01-01T11:00:00Z",
+                "claude-opus-4-8",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "us",
+                "s1",
+                "2026-01-01T12:00:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "global",
+                "s1",
+                "2026-01-01T12:10:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "not-available",
+                "s1",
+                "2026-01-01T12:20:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+        ]);
+        let conn = connect_db(&path).unwrap();
+        conn.execute_batch(
+            "UPDATE turns SET speed = 'fast', inference_geo = 'global', cache_1h = 0, \
+                              cache_5m = 0 WHERE message_id = 'fast'; \
+             UPDATE turns SET speed = 'standard', inference_geo = 'us', cache_1h = 0, \
+                              cache_5m = 0 WHERE message_id = 'us'; \
+             UPDATE turns SET speed = 'standard', inference_geo = 'global', cache_1h = 0, \
+                              cache_5m = 0 WHERE message_id = 'global'; \
+             UPDATE turns SET speed = 'standard', inference_geo = 'not_available', \
+                              cache_1h = 0, cache_5m = 0 WHERE message_id = 'not-available';",
+        )
+        .unwrap();
+        drop(conn);
+
+        let st = state();
+        poll_db_at(&path, &st);
+        let p = st
+            .lock()
+            .unwrap()
+            .session
+            .as_ref()
+            .expect("session spend")
+            .priced();
+        // $25 of standard output and 2M writes at $6.25/M, $50 of fast output, $15 of Sonnet
+        // output at 1.1 times, and $15 of it twice at the price: once routed globally, once
+        // with no region reported.
+        assert!(
+            (p.cost.total() - (25.0 + 12.5 + 50.0 + 16.5 + 15.0 + 15.0)).abs() < 1e-9,
+            "{p:?}"
+        );
+        assert_eq!(p.duration_unknown, 2_000_000, "{p:?}");
+        let pre_1_9_0 = Tokens::of_turn(0, 1_000_000, 0, 2_000_000, None);
+        assert_eq!(
+            p.speed_unknown, pre_1_9_0,
+            "the pre-1.9.0 turn, and only it, recorded no speed"
+        );
+        let mut no_region = pre_1_9_0;
+        no_region.add(&Tokens::of_turn(0, 1_000_000, 0, 0, Some(0)));
+        assert_eq!(
+            p.geo_unknown, no_region,
+            "the pre-1.9.0 turn and the not_available one, and only they, have no known region"
+        );
+        assert_eq!(
+            p.shortfalls(rates::Figure::Total),
+            vec![
+                rates::Shortfall::SpeedUnknown,
+                rates::Shortfall::GeoUnknown,
+                rates::Shortfall::DurationUnknown
+            ]
+        );
+    }
+
+    #[test]
     fn poll_shows_an_unreadable_sum_as_unknown_not_as_an_earlier_session() {
         // The sums query fails (a ledger missing a column it reads); the turn itself is read.
         let (_d, path) = db_with(&[(
@@ -1241,6 +1377,7 @@ mod tests {
             earlier.add(
                 "claude-opus-4-8",
                 Some("standard"),
+                Some("global"),
                 Tokens::of_turn(0, 999, 0, 0, Some(0)),
             );
             let mut s = st.lock().unwrap();
