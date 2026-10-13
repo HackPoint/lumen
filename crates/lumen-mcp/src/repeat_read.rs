@@ -68,6 +68,14 @@ pub fn enter(session: Option<&str>) {
     }
 }
 
+/// Forget everything remembered: a call that panicked may have remembered a reply nobody received.
+pub fn forget() {
+    let dropped = lock().enter(None);
+    if dropped > 0 {
+        eprintln!("lumen: {dropped} remembered read(s) dropped after a panic");
+    }
+}
+
 /// How often a problem with the setting is written to the fault spool. The check runs on every
 /// call; the row says it once in a while, so a broken file is visible without being a row per read.
 const PROBLEM_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
@@ -381,5 +389,33 @@ impl Ctx {
                 ..Default::default()
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forgetting_drops_what_was_remembered() {
+        let (owner, key) = ("a-conversation-only-this-test-uses", "recall_file\0forget");
+        {
+            // Checked while still holding the store: a call another test answers empties it.
+            let mut store = lock();
+            store.put(
+                owner,
+                key,
+                Base::Recall(RecallBase {
+                    when_ms: 0,
+                    text: [0; 20],
+                    pieces: vec![],
+                }),
+            );
+            assert!(store.get(owner, key).is_some());
+        }
+
+        forget();
+
+        assert!(lock().get(owner, key).is_none());
     }
 }

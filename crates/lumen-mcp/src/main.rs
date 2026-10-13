@@ -6,7 +6,7 @@
 // and writing the metering row) and nothing else. All request handling lives in
 // the `lumen_mcp` library, where it is unit-testable.
 
-use lumen_mcp::{ErrorResponse, Outcome, Payload, Request, Response, RpcError, dispatch};
+use lumen_mcp::{ErrorResponse, Outcome, Payload, Request, Response, RpcError, dispatch_guarded};
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
 
@@ -85,7 +85,7 @@ fn main() {
         };
 
         eprintln!("→ {} (id={})", req.method, id);
-        emit(id, dispatch(&req.method, req.params));
+        emit(id, dispatch_guarded(&req.method, req.params));
     }
 
     eprintln!("lumen-mcp exiting");
