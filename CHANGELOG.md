@@ -770,8 +770,8 @@ no count is passed over rather than taken for an empty file.
 
 The ledger has no notion of a project, so the report covers every project it holds, but its
 advice called a file's share of all of them its share of "everything this project has read",
-and its empty state spoke of "this project" too. Both now say what is measured. `Run.tsx`, which
-1.4.0's entry gave as this repository's heaviest file, has never been in this repository; those
+and its empty state spoke of "this project" too. Both now say what is measured. The file that
+1.4.0's entry gave as this repository's heaviest has never been in this repository; those
 figures were the whole ledger's.
 
 The report also reads the ledger three times rather than four. Release builds of 1.5.1's report
@@ -1128,7 +1128,7 @@ files by cumulative tokens read, with read counts, share of all context, and how
 each file's reading found it **unchanged** since the previous read — context re-acquired
 rather than retained.
 
-On this repository: `Run.tsx`, **139 reads, 3.83M tokens, 20.8% of everything read**, and
+On this repository: the heaviest file, **139 reads, 3.83M tokens, 20.8% of everything read**, and
 the top ten files account for 40.1% of 18.4M tokens across 1,189 files. Where the numbers
 warrant it the screen says what to do — a 3,833-line file read 139 times is a refactor
 candidate, and no read optimisation beats splitting it.
