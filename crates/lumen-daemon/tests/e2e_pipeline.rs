@@ -163,9 +163,45 @@ fn turn_count(db: &std::path::Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether the turn with this message id is in the ledger.
+fn has_turn(db: &std::path::Path, message_id: &str) -> bool {
+    let Ok(conn) = lumen_core::meter::connect_db(db) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COUNT(*) FROM turns WHERE message_id = ?1",
+        [message_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .is_ok_and(|n| n > 0)
+}
+
 /// The faults the daemon has spooled, in the order it recorded them.
 fn spooled_faults(spool: &std::path::Path) -> Vec<lumen_core::faults::FaultRecord> {
     lumen_core::faults::peek_spool_at(spool).expect("read the fault spool")
+}
+
+/// The `ingest_failed` faults spooled for files whose name satisfies `named`, oldest first.
+fn ingest_failures(
+    spool: &std::path::Path,
+    named: impl Fn(&str) -> bool,
+) -> Vec<lumen_core::faults::FaultRecord> {
+    spooled_faults(spool)
+        .into_iter()
+        .filter(|f| f.kind == "ingest_failed")
+        .filter(|f| {
+            f.path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .and_then(|n| n.to_str())
+                .is_some_and(&named)
+        })
+        .collect()
+}
+
+/// A directory with a transcript's name: the daemon cannot read it, and only the watcher reports it.
+fn make_unreadable(projects: &std::path::Path, n: usize) {
+    std::fs::create_dir(projects.join(format!("unreadable-{n}.jsonl"))).unwrap();
 }
 
 // Each test gets its own HOME, its own DB and its own WS port, so they are safe
@@ -545,53 +581,48 @@ async fn a_snapshot_labels_the_session_with_its_project() {
 #[tokio::test]
 async fn a_transcript_deleted_before_the_daemon_reads_it_is_not_a_fault() {
     let fx = start_daemon().await;
-    let db = fx.db.clone();
-    let spool = fx.spool.clone();
 
-    let gone = fx.projects.join("gone.jsonl");
-    append(
-        &gone,
-        &[transcript_line(
-            "gone-1",
-            "sess-g",
-            "2026-01-01T10:00:00Z",
-            (1, 1, 1, 1),
-        )],
-    );
-    wait_until("the turn", || turn_count(&db) == 1).await;
-
-    // The watcher reports the deletion, and the daemon opens a path that is no longer there.
-    std::fs::remove_file(&gone).unwrap();
-    // Watcher events are handled in order, so the fault on this directory is filed after
-    // whatever the deletion produced. The daemon records one fault per variant a minute, so
-    // the first one spooled says which of the two it was.
-    std::fs::create_dir(fx.projects.join("unreadable.jsonl")).unwrap();
-    wait_until("the unreadable directory to be reported", || {
-        !spooled_faults(&spool).is_empty()
+    // Rounds repeat under new names until one is heard: a round before the watcher registers is lost.
+    let mut round = 0;
+    wait_until("a fault for the directory made after a deletion", || {
+        round += 1;
+        let gone = fx.projects.join(format!("gone-{round}.jsonl"));
+        append(
+            &gone,
+            &[transcript_line(
+                &format!("gone-{round}"),
+                "sess-g",
+                "2026-01-01T10:00:00Z",
+                (1, 1, 1, 1),
+            )],
+        );
+        std::fs::remove_file(&gone).unwrap();
+        make_unreadable(&fx.projects, round);
+        !ingest_failures(&fx.spool, |n| {
+            n.starts_with("gone-") || n.starts_with("unreadable-")
+        })
+        .is_empty()
     })
     .await;
 
-    let faults = spooled_faults(&spool);
+    let faults = ingest_failures(&fx.spool, |n| n.starts_with("gone-"));
     assert!(
-        faults[0]
-            .path
-            .as_deref()
-            .is_some_and(|p| p.ends_with("unreadable.jsonl")),
+        faults.is_empty(),
         "a transcript deleted before it was read was filed as a fault: {faults:#?}"
     );
 
-    // The deletion left the daemon ingesting.
+    // The deletions left the daemon ingesting.
     append(
         &fx.projects.join("next.jsonl"),
         &[transcript_line(
-            "gone-2",
+            "after-deletion",
             "sess-g",
             "2026-01-01T10:05:00Z",
             (1, 1, 1, 1),
         )],
     );
-    wait_until("a transcript written after the deletion", || {
-        turn_count(&db) == 2
+    wait_until("a transcript written after the deletions", || {
+        has_turn(&fx.db, "after-deletion")
     })
     .await;
 }
@@ -601,43 +632,17 @@ async fn a_transcript_the_daemon_cannot_read_is_still_filed_as_a_fault() {
     // Only a missing file is excused. Any other reason the daemon cannot read a transcript is
     // what the fault report is for.
     let fx = start_daemon().await;
-    let db = fx.db.clone();
-    let spool = fx.spool.clone();
 
-    // A turn first, so the daemon is past its startup pass before the directory appears.
-    append(
-        &fx.projects.join("first.jsonl"),
-        &[transcript_line(
-            "first-1",
-            "sess-f",
-            "2026-01-01T10:00:00Z",
-            (1, 1, 1, 1),
-        )],
-    );
-    wait_until("the turn", || turn_count(&db) == 1).await;
-
-    // A directory with a transcript's name: refused at open on Windows, at read elsewhere,
-    // and skipped by the poll, so only the watcher reports it.
-    std::fs::create_dir(fx.projects.join("unreadable.jsonl")).unwrap();
-    wait_until("the unreadable directory to be reported", || {
-        !spooled_faults(&spool).is_empty()
+    let mut made = 0;
+    wait_until("a fault for an unreadable directory", || {
+        made += 1;
+        make_unreadable(&fx.projects, made);
+        !ingest_failures(&fx.spool, |n| n.starts_with("unreadable-")).is_empty()
     })
     .await;
 
-    let faults = spooled_faults(&spool);
-    let first = &faults[0];
-    assert_eq!(
-        (first.kind.as_str(), first.variant.as_str()),
-        ("ingest_failed", "notify"),
-        "{faults:#?}"
-    );
-    assert!(
-        first
-            .path
-            .as_deref()
-            .is_some_and(|p| p.ends_with("unreadable.jsonl")),
-        "{faults:#?}"
-    );
+    let faults = ingest_failures(&fx.spool, |n| n.starts_with("unreadable-"));
+    assert_eq!(faults[0].variant, "notify", "{faults:#?}");
 }
 
 #[cfg(unix)]
@@ -657,22 +662,22 @@ async fn a_listed_transcript_that_is_gone_when_opened_is_not_a_fault() {
             .unwrap();
     })
     .await;
-    let db = fx.db.clone();
 
     for i in 1..=2 {
+        let id = format!("poll-{i}");
         append(
             &target,
             &[transcript_line(
-                &format!("poll-{i}"),
+                &id,
                 "sess-poll",
                 "2026-01-01T10:00:00Z",
                 (1, 1, 1, 1),
             )],
         );
-        wait_until(&format!("{i} turns"), || turn_count(&db) == i).await;
+        wait_until(&format!("the turn {id}"), || has_turn(&fx.db, &id)).await;
     }
 
-    let faults = spooled_faults(&fx.spool);
+    let faults = ingest_failures(&fx.spool, |n| n == "gone.jsonl");
     assert!(
         faults.is_empty(),
         "a transcript that was gone when the daemon opened it was filed as a fault: {faults:#?}"
