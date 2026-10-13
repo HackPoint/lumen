@@ -70,6 +70,43 @@ they had without opening the log.
   e2e (Linux and Windows) and the Issue 5 launch check (macOS) read the version from those files
   and assert the window's text.
 
+### The app says when repeat reads are waiting for Setup
+
+Repeat reads are on by default from 1.8.0, but they need the hook that tells Lumen which
+conversation a call belongs to: a PreToolUse hook on `smart_read`, `recall_file` and `compress_logs`
+in `~/.claude/settings.json` (#32, below). Setup registers it, and Setup runs by itself only while
+`~/.claude/lumen/.setup_done` is missing. An install set up under 1.7.0 or earlier has that file, so
+the app never sent it back: the switch said on, every read was still answered in full, and nothing
+in the window said why. **Anyone upgrading from 1.7.0 or earlier has to run Setup once, and restart
+Claude Code, for repeat reads to start working.** The app now says so until Setup has done it.
+
+- **A prompt at the top of the Context and Optimizer tabs**, in the look of the startup-health
+  banner: "Repeat reads are on, but not working yet", what is missing, and a Run Setup button. The
+  button opens Setup, which runs its steps when it opens. It is announced as a status, the button
+  takes the keyboard, and it is not on the Setup screen or in the menu-bar panel.
+- **Only while there is something to do.** Not while Setup is still to run (a first launch opens it
+  by itself), not once the hook is registered, and not when the settings file turns repeat reads
+  off. Not before the setting has been read, so it does not flash and withdraw. Not when the app
+  cannot tell: a check that fails, or a `settings.json` that is not a JSON object (Setup refuses
+  that file too), shows nothing, since an unknown is not an accusation.
+- **It clears when the hook is registered.** The window asks again each time one of those tabs
+  opens, which includes coming back from Setup, and when the window gets focus while the prompt is
+  showing. Nothing polls.
+- **One test for "registered".** The prompt and the hook validator behind `lumen_artifact_health`
+  read `settings.json` through the same function, so one cannot say the hook is there while the
+  other says it is not: a command of Lumen's under PreToolUse, on each of the three tool names as
+  Setup writes them. Another tool's hook on the same name does not count, nor does one left on
+  PostToolUse, which runs after the tool has answered. A hand-written pattern that happens to select
+  the tools (`mcp__lumen__.*`) is not recognised here, though `lumen doctor` recognises it.
+- **The Claude Code plugin.** It registers the hooks from its own `hooks/hooks.json`, so
+  `settings.json` lacking them proves nothing there. The prompt stays away when the ledger shows the
+  hook working: any of the newest fifty Lumen tool calls that carry a repeat plan was identified,
+  the rule `lumen doctor` uses. The ledger is opened read-only.
+- **What it does not do.** It is in the window, and the window is not opened for it: someone who
+  never opens it sees nothing, and `lumen doctor` says the same from a terminal. It does not fire
+  when the hook is registered and calls are still unidentified, since running Setup would not
+  fix that.
+
 ### Repeat reads are on by default
 
 1.7.0 shipped repeat reads (a repeat `smart_read` or `recall_file` of an unchanged file answered

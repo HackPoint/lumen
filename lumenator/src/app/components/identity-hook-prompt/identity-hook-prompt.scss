@@ -1,0 +1,52 @@
+/* No box of its own. Both pages lay their children out in a flex column with a gap, and a host
+   with a box is a flex item even when it is empty, so a hidden prompt would still push the page
+   down by one gap. With none, the prompt is a flex item only while it shows, as the banners are. */
+:host {
+  display: contents;
+}
+
+/* The startup-health banner's look, on Home: amber rather than red, because nothing is broken,
+   a feature is waiting for a step, and red is reserved for the alert threshold on the gauge. */
+.prompt {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #6b5320;
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(210, 153, 34, 0.08);
+}
+
+.prompt__head {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumen-warn);
+}
+
+.prompt__body {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--lumen-text-dim);
+}
+
+.prompt__btn {
+  font-family: var(--lumen-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lumen-warn);
+  background: transparent;
+  border: 1px solid var(--lumen-warn);
+  border-radius: 6px;
+  padding: 0.28rem 0.7rem;
+  cursor: pointer;
+}
+
+.prompt__btn:hover {
+  background: rgba(210, 153, 34, 0.14);
+}
+
+.prompt__btn:focus-visible {
+  outline: 2px solid var(--lumen-warn);
+  outline-offset: 2px;
+}

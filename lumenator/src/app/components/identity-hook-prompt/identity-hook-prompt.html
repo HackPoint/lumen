@@ -1,0 +1,12 @@
+<!-- Shown only while there is something to do: repeat reads on, Setup done, the hook not
+     registered. The look and the announcement are the startup-health banner's. -->
+@if (visible()) {
+    <section class="prompt" role="status" aria-live="polite">
+        <p class="prompt__head">Repeat reads are on, but not working yet</p>
+        <p class="prompt__body">
+            Lumen cannot tell which conversation a call belongs to until Setup registers one hook,
+            so every read is still sent in full. Run Setup once, then restart Claude Code.
+        </p>
+        <button type="button" class="prompt__btn" (click)="runSetup()">Run Setup</button>
+    </section>
+}
