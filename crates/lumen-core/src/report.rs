@@ -288,6 +288,7 @@ struct Group {
 /// `every_emitted_kind_is_classified` fails if that happens again.
 pub const FAULT_KINDS: &[&str] = &[
     "hook_fail_open",
+    "request_panic",
     "schema_drift",
     "meter_write_failed",
     "ingest_failed",
@@ -302,31 +303,33 @@ pub const FAULT_KINDS: &[&str] = &[
 const UNCLASSIFIED: &str = "Unclassified fault. See the table below.";
 
 /// Where a kind this build does not know sorts: after every known one.
-const CATCH_ALL_PRIORITY: u8 = 9;
+const CATCH_ALL_PRIORITY: u8 = 10;
 
 /// Sort order for the table and for picking the headline. A fired fail-open guard
 /// outranks everything: it means the routing contract broke in the field.
 fn kind_priority(kind: &str) -> u8 {
     match kind {
         "hook_fail_open" => 0,
-        "schema_drift" => 1,
+        // A crashed tool call is a bug in lumen, not a degraded saving; only a released Read outranks it.
+        "request_panic" => 1,
+        "schema_drift" => 2,
         // A read that never reached the ledger. Below schema drift only because drift is
         // the commonest cause of it, so the cause should head the report.
-        "meter_write_failed" => 2,
+        "meter_write_failed" => 3,
         // Silent data loss: the daemon logged and continued, so the gauge is wrong and
         // nothing said so. Ranks above the two that merely retry.
-        "ingest_failed" => 3,
+        "ingest_failed" => 4,
         // The report itself is incomplete. Not the fault being reported, but it changes
         // how much the rest of the report can be trusted.
-        "reporter_degraded" => 4,
-        "ws_restart" => 5,
+        "reporter_degraded" => 5,
+        "ws_restart" => 6,
         // Costs the calls it touches their saving and their attribution, and nothing else:
         // they are answered in full. Above a ranked decline, which is not a failure.
-        "identity_unrecorded" => 6,
+        "identity_unrecorded" => 7,
         // The repeat-reads switch could not be read, so they are off. Costs only their saving
         // and the user was not told by anything else; above a ranked decline for that reason.
-        "repeat_reads_config" => 7,
-        "ranked_decline" => 8,
+        "repeat_reads_config" => 8,
+        "ranked_decline" => 9,
         _ => CATCH_ALL_PRIORITY,
     }
 }
@@ -337,6 +340,12 @@ fn impact(kind: &str) -> &'static str {
             "The Read intercept redirected to lumen, lumen did not serve the call, and a \
              fail-open guard released the Read. Routing is degraded, not broken — context \
              was spent that lumen was supposed to save."
+        }
+        "request_panic" => {
+            "A lumen tool call hit a bug and panicked. The server caught it, answered that \
+             call with an error and kept serving, so the model got no result for it; the \
+             same call is likely to fail the same way. The detail is where in the code it \
+             panicked."
         }
         "schema_drift" => {
             "The database's `read_events` columns do not match the set this build expects. \
@@ -558,6 +567,10 @@ fn headline(top: &Group, version: &str) -> String {
             top.count,
             files,
             if files == 1 { "" } else { "s" }
+        ),
+        "request_panic" => format!(
+            "{} panicked {}× and was answered with an error",
+            top.variant, top.count
         ),
         "schema_drift" => "read_events schema drift".to_string(),
         "meter_write_failed" => format!(
@@ -2012,6 +2025,69 @@ mod tests {
         assert!(
             first.contains("escape valve"),
             "headline should lead with the fail-open guard, got: {first}"
+        );
+    }
+
+    fn a_request_that_panicked() -> Fault {
+        Fault {
+            kind: "request_panic".into(),
+            guard: Some("recall_file".into()),
+            detail: Some("panicked at crates/lumen-mcp/src/lib.rs:1125:36".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_panicked_request_outranks_every_kind_but_a_fired_fail_open_guard() {
+        let first_line = |faults: &[Fault]| {
+            render(faults, &test_env(), &RenderOpts::default())
+                .expect("non-empty")
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        for kind in FAULT_KINDS
+            .iter()
+            .filter(|k| !matches!(**k, "hook_fail_open" | "request_panic"))
+        {
+            let noisier = Fault {
+                kind: (*kind).into(),
+                count: 500,
+                ..Default::default()
+            };
+            let first = first_line(&[noisier, a_request_that_panicked()]);
+            assert!(
+                first.contains("recall_file panicked"),
+                "a panic should head the report over {kind}, got: {first}"
+            );
+        }
+
+        let released = Fault {
+            kind: "hook_fail_open".into(),
+            guard: Some("lumen_mcp_missing".into()),
+            ..Default::default()
+        };
+        let first = first_line(&[a_request_that_panicked(), released]);
+        assert!(first.contains("lumen mcp missing"), "got: {first}");
+    }
+
+    #[test]
+    fn the_headline_for_a_panicked_request_names_the_tool_and_how_often() {
+        let faults = vec![Fault {
+            count: 3,
+            ..a_request_that_panicked()
+        }];
+        let body = render(&faults, &test_env(), &RenderOpts::default()).expect("non-empty");
+        let title = title_from(&body);
+        assert_eq!(
+            title,
+            "lumen 1.4.0 — recall_file panicked 3× and was answered with an error"
+        );
+        assert!(
+            body.contains("panicked at crates/lumen-mcp/src/lib.rs:1125:36"),
+            "where it panicked is the detail"
         );
     }
 
