@@ -211,6 +211,16 @@ reach because the first Read was blocked and never entered its cache.
 - On a 1,442-line fixture the scenario costs 444 tokens (a 211-token redirect and a 233-token
   `recall_file`) against 13,807 for the released Read.
 
+### The settings file is read with a limit, and a bad value is repeated back in short
+
+`lumen_settings.json` is read on every tool call, and it was read whole, whatever it was: a very
+large file was read into memory each time, and a named pipe or a device where the file should be
+could block every call. A file larger than 64 KiB, or one that is not a regular file, is now
+reported as unreadable: repeat reads are off, as for any unreadable file, and the problem says
+why. A wrong-typed value in the file, and a `LUMEN_REPEAT_READS` that is not `on`, `off` or `ab`,
+are repeated back in the fault row and on stderr as written when that is at most 64 characters,
+and otherwise as its first 64 characters and an ellipsis. A valid file is read exactly as before.
+
 ### A rewind the daemon could not see is now treated as one
 
 When the daemon tailed a transcript from a byte offset without that transcript's tracker (an ingest
