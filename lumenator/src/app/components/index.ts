@@ -228,6 +228,23 @@ interface RepeatReadsSetting {
     file: string;
 }
 
+/**
+ * Whether the identity hook is registered, from `lumen_identity_hook_status`.
+ *
+ * The hook is what lets the server tell which conversation a call belongs to, and repeat reads
+ * answer in full until it is there. Setup registers it, but Setup does not run again for an
+ * install that set Lumen up under 1.7.0 or earlier.
+ */
+interface IdentityHookStatus {
+    /** Claude Code's settings run Lumen's hook before all three Lumen tools. */
+    registered: boolean;
+    /**
+     * Not in the settings file, but a recent call to a Lumen tool was identified all the same:
+     * a plugin install registers its hooks from the plugin. Nothing is missing then.
+     */
+    servedElsewhere: boolean;
+}
+
 export type {
     Turn,
     SessionState,
@@ -242,6 +259,7 @@ export type {
     OptimizerReport,
     RepeatReads,
     RepeatReadsSetting,
+    IdentityHookStatus,
 };
 export { RATE };
 

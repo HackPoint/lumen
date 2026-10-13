@@ -815,4 +815,52 @@ describe('Optimizer', () => {
       expect(text().toLowerCase()).not.toContain('repeat');
     });
   });
+
+  // ── identity hook prompt ───────────────────────────────────────────────────
+  //
+  // Repeat reads are promised here, in the card above, and an upgrade from 1.7.0 or earlier
+  // leaves them unable to work until Setup is run once. Someone who opens the app on this tab
+  // is told so here as well. Its own behaviour is pinned in the component's spec; these pin
+  // that this page hosts it, and for whom.
+
+  describe('identity hook prompt', () => {
+    const PROMPT = 'identity-hook-prompt [role="status"]';
+    const MISSING = { registered: false, servedElsewhere: false };
+
+    /** An upgrader: Setup done, so nothing sends them to it, and the hook not registered. */
+    const upgrader = (status: unknown = MISSING) => (b: FakeTauriBridge) => {
+      b.responses.set('lumen_setup_needed', false);
+      b.responses.set('lumen_identity_hook_status', status);
+    };
+
+    it('tells an upgrader whose settings lack the hook to run Setup, above the tabs', async () => {
+      await build(report(), usage(), upgrader());
+      expect(rendered(PROMPT)).toContain('Repeat reads are on, but not working yet');
+      expect(rendered(`${PROMPT} button`)).toBe('Run Setup');
+      const prompt = (fixture.nativeElement as HTMLElement).querySelector(PROMPT)!;
+      const nav = (fixture.nativeElement as HTMLElement).querySelector('nav.tab-nav')!;
+      expect(prompt.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('is not there once the hook is registered', async () => {
+      await build(report(), usage(), upgrader({ registered: true, servedElsewhere: false }));
+      expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+    });
+
+    it('is not there when repeat reads are off', async () => {
+      await build(report(), usage(), (b) => {
+        upgrader()(b);
+        b.responses.set('get_repeat_reads_setting', setting({ on: false, source: 'file' }));
+      });
+      expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+    });
+
+    it('is not there when Setup is still to run', async () => {
+      await build(report(), usage(), (b) => {
+        upgrader()(b);
+        b.responses.set('lumen_setup_needed', true);
+      });
+      expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+    });
+  });
 });

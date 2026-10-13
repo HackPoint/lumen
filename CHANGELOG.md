@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.8.0] — 2026-10-13
+
+**Repeat reads are on by default.** A second `smart_read` or `recall_file` of the same thing in a conversation is answered with a short stub when the file has not changed since, and with only what changed when it has. To turn them off, use the Repeat reads switch in the app, put `{"repeat_reads": false}` in `lumen_settings.json` in the Lumen data directory, or set `LUMEN_REPEAT_READS=off` (the variable wins over the file). The app now shows which version it is, under the tagline in the main window and in an About section. Measurements on a pinned corpus, 1.7.0 beside this build: [benchmarks/README.md](https://github.com/HackPoint/lumen/blob/v1.8.0/benchmarks/README.md#what-is-committed-here). They show a cost in time: a Read that Lumen blocks takes 0.4 to 2.6 ms longer than in 1.7.0, and the hook that names the conversation adds about 0.1 to 2 ms to each Lumen tool call, depending on the machine.
+
+**Upgrading from 1.7.0 or earlier: run Setup once, then restart Claude Code.** Repeat reads need the hook that tells Lumen which conversation a call belongs to, and Setup is what registers it. An install set up under 1.7.0 or earlier does not have it, and Setup does not run again by itself, so until you run it every read is answered in full, as before. The Context and Optimizer tabs say "Repeat reads are on, but not working yet", with a Run Setup button, until the hook is registered.
 
 ### A `recall_file` line range the file cannot satisfy no longer kills the server
 
@@ -70,6 +74,43 @@ they had without opening the log.
   e2e (Linux and Windows) and the Issue 5 launch check (macOS) read the version from those files
   and assert the window's text.
 
+### The app says when repeat reads are waiting for Setup
+
+Repeat reads are on by default from 1.8.0, but they need the hook that tells Lumen which
+conversation a call belongs to: a PreToolUse hook on `smart_read`, `recall_file` and `compress_logs`
+in `~/.claude/settings.json` (#32, below). Setup registers it, and Setup runs by itself only while
+`~/.claude/lumen/.setup_done` is missing. An install set up under 1.7.0 or earlier has that file, so
+the app never sent it back: the switch said on, every read was still answered in full, and nothing
+in the window said why. **Anyone upgrading from 1.7.0 or earlier has to run Setup once, and restart
+Claude Code, for repeat reads to start working.** The app now says so until Setup has done it.
+
+- **A prompt at the top of the Context and Optimizer tabs**, in the look of the startup-health
+  banner: "Repeat reads are on, but not working yet", what is missing, and a Run Setup button. The
+  button opens Setup, which runs its steps when it opens. It is announced as a status, the button
+  takes the keyboard, and it is not on the Setup screen or in the menu-bar panel.
+- **Only while there is something to do.** Not while Setup is still to run (a first launch opens it
+  by itself), not once the hook is registered, and not when the settings file turns repeat reads
+  off. Not before the setting has been read, so it does not flash and withdraw. Not when the app
+  cannot tell: a check that fails, or a `settings.json` that is not a JSON object (Setup refuses
+  that file too), shows nothing, since an unknown is not an accusation.
+- **It clears when the hook is registered.** The window asks again each time one of those tabs
+  opens, which includes coming back from Setup, and when the window gets focus while the prompt is
+  showing. Nothing polls.
+- **One test for "registered".** The prompt and the hook validator behind `lumen_artifact_health`
+  read `settings.json` through the same function, so one cannot say the hook is there while the
+  other says it is not: a command of Lumen's under PreToolUse, on each of the three tool names as
+  Setup writes them. Another tool's hook on the same name does not count, nor does one left on
+  PostToolUse, which runs after the tool has answered. A hand-written pattern that happens to select
+  the tools (`mcp__lumen__.*`) is not recognised here, though `lumen doctor` recognises it.
+- **The Claude Code plugin.** It registers the hooks from its own `hooks/hooks.json`, so
+  `settings.json` lacking them proves nothing there. The prompt stays away when the ledger shows the
+  hook working: any of the newest fifty Lumen tool calls that carry a repeat plan was identified,
+  the rule `lumen doctor` uses. The ledger is opened read-only.
+- **What it does not do.** It is in the window, and the window is not opened for it: someone who
+  never opens it sees nothing, and `lumen doctor` says the same from a terminal. It does not fire
+  when the hook is registered and calls are still unidentified, since running Setup would not
+  fix that.
+
 ### Repeat reads are on by default
 
 1.7.0 shipped repeat reads (a repeat `smart_read` or `recall_file` of an unchanged file answered
@@ -116,8 +157,7 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
   baselines are untouched.
 - **The benchmark harness** (`benchmarks/`, #46) now sets `LUMEN_REPEAT_READS=off` in its
   repeat-reads-off arms instead of relying on the default; left alone, every "off" figure would
-  have measured the gate. The committed pre-release results were taken with off as the default,
-  so they are the same measurement.
+  have measured the gate.
 
 ### The app can turn repeat reads off, and shows what they have done
 
@@ -340,6 +380,33 @@ Not checked: that a release binary writes `Lumen.log`. Nothing launches a releas
 and looks for the file: the app e2e and the Issue 5 launch check run debug builds, and
 `scripts/verify-install.sh` only checks that an installed app is running. A `release_max_level_*`
 feature switched on by a dependency cannot be read from a manifest.
+
+### A release dispatch builds the tag's own commit, and never main
+
+Run by hand for an existing tag, the release workflow built the head of `main` and attached the
+result to that tag's release, so a re-run could ship code that was never in the version. It took the
+commit from `github.sha`, which on a dispatch is the branch head, and pasted the tag input into a
+shell script's text, so an input such as `v1.0.0"; touch pwned; "` ran as a command.
+
+- The first job turns the tag into the commit it points at, once (an annotated tag is peeled), and
+  every job that checks out this repository does so at that SHA: the macOS build, both CLI builds,
+  both GUI builds and the Homebrew tap's formula templates. Nothing reads `github.sha` or the ref to
+  decide what to build, and a tag moved after the run started cannot change it.
+- Before anything is built the run refuses a tag that is not `vN.N.N`, `vN.N.N-pre` or
+  `vN.N.N+build`, a tag that does not exist, and one that does not point at a commit. The input
+  reaches the script through `env`, not through its text.
+- When the tag's source does not build, the run fails with `<tag> (<sha>) does not build. A dispatch
+  never builds from main: ship a patch release (a new tag) instead.` as an annotation and in the job
+  summary. It never falls back to main.
+- `scripts/test-resolve-release.sh` runs the workflow's own script in a throwaway repository whose
+  `main` is past every tag, in CI on Linux and macOS. It covers annotated, lightweight and nested
+  tags, a tag push, malformed, missing and non-commit tags, injection-shaped input and the job that
+  reports a failed build, and fails if a job checks out anything but the resolved commit.
+
+Not checked: a dispatch itself. The test runs the step against a local repository, so the fetch with
+the job's token and the conditions of the jobs that follow run only on GitHub. A dispatch for a tag
+before v1.1.4 now fails in `update-tap`, because that tag has no cask template to copy, and leaves
+the tap as it was.
 
 ## [1.7.0] — 2026-10-11
 
@@ -770,8 +837,8 @@ no count is passed over rather than taken for an empty file.
 
 The ledger has no notion of a project, so the report covers every project it holds, but its
 advice called a file's share of all of them its share of "everything this project has read",
-and its empty state spoke of "this project" too. Both now say what is measured. `Run.tsx`, which
-1.4.0's entry gave as this repository's heaviest file, has never been in this repository; those
+and its empty state spoke of "this project" too. Both now say what is measured. The file that
+1.4.0's entry gave as this repository's heaviest has never been in this repository; those
 figures were the whole ledger's.
 
 The report also reads the ledger three times rather than four. Release builds of 1.5.1's report
@@ -1128,7 +1195,7 @@ files by cumulative tokens read, with read counts, share of all context, and how
 each file's reading found it **unchanged** since the previous read — context re-acquired
 rather than retained.
 
-On this repository: `Run.tsx`, **139 reads, 3.83M tokens, 20.8% of everything read**, and
+On this repository: the heaviest file, **139 reads, 3.83M tokens, 20.8% of everything read**, and
 the top ten files account for 40.1% of 18.4M tokens across 1,189 files. Where the numbers
 warrant it the screen says what to do — a 3,833-line file read 139 times is a refactor
 candidate, and no read optimisation beats splitting it.

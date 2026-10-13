@@ -268,6 +268,171 @@ ls ~/.claude/settings.json.lumen_bak && echo "backup present"
 
 ---
 
+## TEST 6 — Conversation Identity (`/clear`, `/resume`, subagents)
+
+The MCP server keeps running across `/clear` and `/resume` and cannot see either. The
+PreToolUse hook on `smart_read`, `recall_file` and `compress_logs` is what tells it which
+conversation, and which subagent, a call belongs to. This test runs that for real, on a
+scratch Claude Code config (`CLAUDE_CONFIG_DIR`) and a scratch Lumen ledger and home, not
+yours. It needs `claude`, `python3` and `sqlite3` on the PATH.
+
+### 6.1 Scratch setup
+
+Run the blocks of 6.1, 6.2 and 6.7 in one terminal (terminal 1): they share `SCRATCH` and
+`LUMEN_MCP`. `LUMEN_MCP` is the binary under test, by default the one in the installed app.
+To test a build from your checkout instead, export `LUMEN_MCP` as the full path of that
+build's `lumen-mcp` before the block, for example the one in its `target/release`; the block
+keeps a value that is already set.
+
+```bash
+export SCRATCH=/private/tmp/lumen_identity
+export LUMEN_MCP="${LUMEN_MCP:-/Applications/Lumen.app/Contents/MacOS/lumen-mcp}"
+rm -rf "${SCRATCH:?}"; mkdir -p "$SCRATCH/cfg" "$SCRATCH/home" "$SCRATCH/work"
+```
+
+The `SCRATCH` path is fixed on purpose: the outline repeats it, so the token counts below
+hold only for this one. A source file past the intercept threshold, generated so the numbers
+stay put:
+
+```bash
+python3 - <<'PY'
+import os
+lines = ["use std::collections::HashMap;", ""]
+for i in range(1, 13):
+    lines += [f"/// Step {i} of the pipeline.", f"pub fn step_{i}(input: &HashMap<String, u64>) -> u64 {{", "    let mut total = 0;"]
+    lines += [f'    total += input.get("key_{i}_{j}").copied().unwrap_or({i * j});' for j in range(1, 21)]
+    lines += ["    total", "}", ""]
+open(os.environ["SCRATCH"] + "/work/sample.rs", "w").write("\n".join(lines))
+PY
+wc -l "$SCRATCH/work/sample.rs"
+```
+
+The MCP config and the hook settings, both pointing at the scratch ledger and a scratch home.
+The installed hook is a small script that ends in `lumen-mcp hook intercept`; here the binary
+is called directly, on the same three tools Setup registers it for:
+
+```bash
+python3 - <<'PY'
+import json, os
+s, mcp = os.environ["SCRATCH"], os.environ["LUMEN_MCP"]
+where = f"HOME={s}/home LUMEN_DB={s}/lumen.db"
+server = {"type": "stdio", "command": mcp, "args": [], "env": {"HOME": f"{s}/home", "LUMEN_DB": f"{s}/lumen.db"}}
+json.dump({"mcpServers": {"lumen": server}}, open(f"{s}/mcp.json", "w"), indent=2)
+hook = {"hooks": [{"type": "command", "command": f"{where} {mcp} hook intercept"}]}
+tools = ["mcp__lumen__smart_read", "mcp__lumen__recall_file", "mcp__lumen__compress_logs"]
+json.dump({"hooks": {"PreToolUse": [{"matcher": t, **hook} for t in tools]}}, open(f"{s}/settings.json", "w"), indent=2)
+PY
+```
+
+- [ ] `wc -l` printed 313
+- [ ] `test -x "$LUMEN_MCP" && echo ok` printed `ok`: the binary exists and is executable
+- [ ] `$SCRATCH/settings.json` has three `PreToolUse` entries, one per Lumen tool
+
+### 6.2 Start Claude Code on the scratch config
+
+In terminal 1:
+
+```bash
+cd "$SCRATCH/work"
+CLAUDE_CONFIG_DIR="$SCRATCH/cfg" claude --mcp-config "$SCRATCH/mcp.json" --strict-mcp-config \
+  --settings "$SCRATCH/settings.json" --setting-sources project \
+  --allowedTools "mcp__lumen__smart_read mcp__lumen__recall_file mcp__lumen__compress_logs Agent" \
+  --model haiku
+```
+
+- [ ] The config is new, so Claude Code asks its first-run questions: Enter for the theme,
+      Enter past the security notes, then arrow down to "Yes, I trust this folder" (the
+      default is "No, exit") and Enter. Sign in if it asks, or have your usual API variables
+      exported
+- [ ] `/mcp` lists `lumen` with a check mark and `4 tools`; Esc closes it
+
+Stay in this one session for 6.3 to 6.6. A second terminal (terminal 2) does not have
+`SCRATCH`: export it there once, then run the `sqlite3` line after every step to see
+what the server recorded for each read:
+
+```bash
+export SCRATCH=/private/tmp/lumen_identity
+sqlite3 -header "$SCRATCH/lumen.db" "select rowid as n, substr(session_id,1,8) as session, substr(agent_id,1,8) as agent, repeat_plan as plan, tokens_returned as returned, full_tokens as full from read_events order by rowid"
+```
+
+The prompt for a read, with `WORD` set to ALPHA in the first conversation and BRAVO in the
+second, so the transcript tells you which one you are in:
+
+> Call the lumen smart_read tool with path exactly /private/tmp/lumen_identity/work/sample.rs, then reply with only the word WORD.
+
+### 6.3 One conversation: full outline, then the stub
+
+- [ ] Send the prompt with `WORD` = ALPHA
+- [ ] **Expected**: row 1: `plan` = `first`, `returned` = 282, `full` = 5263; `session` is set
+      and `agent` is empty. Ctrl+O shows what the model received, an outline that starts
+      `# 313 lines | 5263 full tokens | 13 items` and lists `function step_1 L4-27` and the
+      rest. Ctrl+O again goes back
+- [ ] Send the same prompt again
+- [ ] **Expected**: row 2: the same `session`, `plan` = `unchanged`, `returned` = 30. Ctrl+O
+      shows "Unchanged since an earlier read of this file in this session. If that read is
+      not in your context, call smart_read(path, fresh=true)."
+
+### 6.4 `/clear`
+
+- [ ] Type `/clear`, then send the prompt with `WORD` = BRAVO
+- [ ] **Expected**: row 3: a NEW `session`, `plan` = `first`, `returned` = 282: the outline
+      in full, not the stub
+
+### 6.5 `/resume`
+
+- [ ] Type `/resume`. The picker lists the folder's other conversations, not the one you
+      are in, so the earlier one is the only entry (Claude Code titles it; here "Lumen
+      smart_read sample.rs"). Press Enter
+- [ ] The transcript shows the two ALPHA reads. Send the prompt with `WORD` = ALPHA
+- [ ] **Expected**: row 4: the `session` of rows 1 and 2, `plan` = `first`, `returned` = 282:
+      the outline in full. The server gave up what it remembered when the conversation
+      changed, so it does not claim that the resumed context still holds the outline
+- [ ] Send the same prompt again
+- [ ] **Expected**: row 5: `plan` = `unchanged`, `returned` = 30
+
+### 6.6 A subagent
+
+The subagent shares its parent's `session`, has an `agent` of its own, and starts with an
+empty context. Send:
+
+> Use the Agent tool to start one general-purpose subagent. Tell it to call the lumen smart_read tool with path exactly /private/tmp/lumen_identity/work/sample.rs and reply with only the word DONE. When it has finished, call that smart_read tool yourself with the same path, then reply with only the word DONE.
+
+- [ ] If Claude Code shows a notice about auto mode when the subagent starts, press Enter.
+      The subagent runs in the background and the parent waits for it, so row 6 comes first
+- [ ] **Expected**: row 6 is the subagent's: the `session` of row 5, an `agent` set to the
+      subagent's own id (`<agent-id>`, eight characters), `plan` = `first`, `returned` =
+      282. It got the outline although its parent had read the file
+- [ ] **Expected**: row 7 is the parent's: the same `session`, an empty `agent`,
+      `plan` = `unchanged`, `returned` = 30. The subagent's read did not use up the parent's
+
+### 6.7 Control: no hook
+
+The same read with the hook not registered shows what a failure looks like. Leave Claude
+Code with `/exit`, then run this in terminal 1:
+
+```bash
+cd "$SCRATCH/work"
+echo '{"hooks":{}}' > "$SCRATCH/settings_nohook.json"
+CLAUDE_CONFIG_DIR="$SCRATCH/cfg" claude -p "Call the lumen smart_read tool with path exactly /private/tmp/lumen_identity/work/sample.rs, then reply with only the word DONE." \
+  --mcp-config "$SCRATCH/mcp.json" --strict-mcp-config --settings "$SCRATCH/settings_nohook.json" \
+  --setting-sources project --allowedTools "mcp__lumen__smart_read" --model haiku
+```
+
+- [ ] **Expected**: row 8: `session` and `agent` empty, `plan` = `unidentified`, `returned` =
+      282. A call the server cannot place is answered in full and remembers nothing
+
+### 6.8 What a failure looks like, and clean-up
+
+- [ ] A stub (`returned` = 30) as the first read after `/clear` or `/resume`, or for the
+      subagent: the server answered for a conversation that was not asking. FAIL
+- [ ] `plan` = `unidentified` or an empty `session` in rows 1 to 7 (row 8 is that case on
+      purpose): the hook did not run or its record was lost. FAIL
+- [ ] In terminal 1, `find "$SCRATCH" -maxdepth 1 -name 'lumen_call_*.json'` prints nothing:
+      every record was claimed by its call
+- [ ] In terminal 1, `rm -rf "${SCRATCH:?}"`
+
+---
+
 ## Checklist summary
 
 | # | Test | Status |
@@ -277,5 +442,6 @@ ls ~/.claude/settings.json.lumen_bak && echo "backup present"
 | 3 | Monitoring — gauge moves, cost tiles update | [ ] PASS / [ ] FAIL |
 | 4 | Soak 3–4h — max(ts) advances, daemon stays alive | [ ] PASS / [ ] FAIL |
 | 5 | Uninstall — lumen gone, unrelated preserved, re-install works | [ ] PASS / [ ] FAIL |
+| 6 | Identity — full after `/clear` and `/resume`, stub on a repeat, subagent told apart | [ ] PASS / [ ] FAIL |
 
 **Do not publish the release until TEST 4 (soak) is complete.**

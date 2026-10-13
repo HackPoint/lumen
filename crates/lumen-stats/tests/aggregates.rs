@@ -1604,7 +1604,7 @@ async fn rows_without_an_mtime_are_excluded_rather_than_assumed_unchanged() {
 async fn a_large_repeatedly_read_file_is_recommended_for_splitting() {
     let (_d, pool) = fixture().await;
     for i in 0..25 {
-        read_of(&pool, "/p/Run.tsx", 27_000, 3_833, 1_000 + i).await;
+        read_of(&pool, "/p/large.rs", 27_000, 3_833, 1_000 + i).await;
     }
     let r = get_context_report(&pool).await.unwrap();
     let rec = r.top_files[0].recommendation.as_deref().unwrap_or("");

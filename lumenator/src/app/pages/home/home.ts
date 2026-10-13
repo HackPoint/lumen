@@ -4,6 +4,7 @@ import { Gauge } from '../../components/gauge/gauge';
 import { Cost } from '../../components/cost/cost';
 import { Usage } from '../../components/usage/usage';
 import { Firefly } from '../../components/firefly/firefly';
+import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identity-hook-prompt';
 import { SessionService } from '../../session.service';
 import { RepeatReadsService } from '../../repeat-reads.service';
 import { TauriBridge } from '../../tauri-bridge';
@@ -20,7 +21,7 @@ interface StartupHealth {
 
 @Component({
     selector: 'home',
-    imports: [RouterLink, RouterLinkActive, Gauge, Cost, Usage, Firefly, LumenTooltip],
+    imports: [RouterLink, RouterLinkActive, Gauge, Cost, Usage, Firefly, IdentityHookPrompt, LumenTooltip],
     templateUrl: './home.html',
     styleUrl: './home.css',
     changeDetection: ChangeDetectionStrategy.OnPush

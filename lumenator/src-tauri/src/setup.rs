@@ -829,8 +829,6 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
     let settings = global_settings_path_in(home);
     let mut dangling: Vec<String> = Vec::new();
     let mut unquoted: Vec<String> = Vec::new();
-    let mut found = 0usize;
-    let mut registered: Vec<(&str, String)> = Vec::new();
 
     let v = match read_config_object(&settings) {
         Ok(v) => v,
@@ -842,30 +840,15 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
             }
         }
     };
-    {
-        for phase in ["PreToolUse", "PostToolUse"] {
-            if let Some(arr) = v["hooks"][phase].as_array() {
-                for entry in arr {
-                    let matcher = entry["matcher"].as_str().unwrap_or("").to_string();
-                    if let Some(hs) = entry["hooks"].as_array() {
-                        for h in hs {
-                            if let Some(c) = h["command"].as_str() {
-                                if c.contains("lumen_") {
-                                    found += 1;
-                                    registered.push((phase, matcher.clone()));
-                                    if command_needs_quotes(c) {
-                                        unquoted.push(c.to_string());
-                                    } else {
-                                        let p = hook_command_path(c);
-                                        if !Path::new(&p).exists() {
-                                            dangling.push(p);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    let hooks = lumen_hooks(&v);
+    let found = hooks.len();
+    for hook in &hooks {
+        if command_needs_quotes(hook.command) {
+            unquoted.push(hook.command.to_string());
+        } else {
+            let p = hook_command_path(hook.command);
+            if !Path::new(&p).exists() {
+                dangling.push(p);
             }
         }
     }
@@ -878,7 +861,7 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
         };
     }
 
-    let has = |phase: &str, m: &str| registered.iter().any(|(p, r)| *p == phase && r == m);
+    let has = |phase: &str, m: &str| hooks.iter().any(|h| h.phase == phase && h.matcher == m);
 
     let mut problems: Vec<String> = Vec::new();
     if !dangling.is_empty() {
@@ -906,10 +889,9 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
         .collect();
     if !absent_pre.is_empty() {
         let mut p = format!("PreToolUse not registered: {}", absent_pre.join(", "));
-        if absent_pre
-            .iter()
-            .any(|m| lumen_core::identity::MATCHERS.contains(m))
-        {
+        // Whether the identity hook is among what is missing is the window's question too, and
+        // is asked of the one function, so this report and the prompt cannot disagree about it.
+        if !identity_hook_registered(&v) {
             // The consequence, so the Setup screen says what is wrong and not only that
             // something is: with these absent the server cannot tell whose call it is.
             p.push_str(&format!(
@@ -942,6 +924,139 @@ fn validate_hooks_in(home: &Path) -> ArtifactStatus {
             detail: problems.join("; "),
         }
     }
+}
+
+/// One command of Lumen's that settings.json registers, and where it runs.
+struct LumenHook<'a> {
+    /// The event, `PreToolUse` or `PostToolUse`.
+    phase: &'static str,
+    /// The tool names the entry matches, as written, `""` when the entry has none.
+    matcher: &'a str,
+    command: &'a str,
+}
+
+/// Every command of Lumen's that `settings` registers on a tool event, in file order.
+///
+/// A command is Lumen's when it names one of the `lumen_` scripts, and a matcher counts as
+/// registered only for such a command: another tool's hook on the same name says nothing about
+/// Lumen. This is the one place that is decided. The validator reads the hooks from here, and so
+/// does [`identity_hook_registered`], which the window's prompt asks, so a report and a prompt
+/// about the same file cannot come out differently.
+///
+/// Read by index, which gives `Null` for whatever is not there and never panics, so a file of
+/// any shape is a shorter list and not a crash.
+fn lumen_hooks(settings: &serde_json::Value) -> Vec<LumenHook<'_>> {
+    let mut found = Vec::new();
+    for phase in ["PreToolUse", "PostToolUse"] {
+        for entry in settings["hooks"][phase].as_array().into_iter().flatten() {
+            let matcher = entry["matcher"].as_str().unwrap_or("");
+            for hook in entry["hooks"].as_array().into_iter().flatten() {
+                if let Some(command) = hook["command"].as_str().filter(|c| c.contains("lumen_")) {
+                    found.push(LumenHook {
+                        phase,
+                        matcher,
+                        command,
+                    });
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Whether `settings` runs Lumen's hook before each of the three Lumen tools, which is what lets
+/// the MCP server tell which conversation a call belongs to (1.8.0, #32).
+///
+/// Before, not after: Claude Code runs a PostToolUse hook once the tool has answered, too late to
+/// say whose call it was, so the entries earlier versions left on PostToolUse do not count. All
+/// three: a call to a tool without it is answered in full whatever the other two do.
+///
+/// The `Read` intercept sits in the same list ([`INTERCEPT_MATCHERS`]) and is not this.
+fn identity_hook_registered(settings: &serde_json::Value) -> bool {
+    let hooks = lumen_hooks(settings);
+    lumen_core::identity::MATCHERS.iter().all(|m| {
+        hooks
+            .iter()
+            .any(|h| h.phase == "PreToolUse" && h.matcher == *m)
+    })
+}
+
+/// What the main window asks about the identity hook, to say whether repeat reads can work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityHookStatus {
+    /// settings.json runs Lumen's hook before all three Lumen tools: [`identity_hook_registered`].
+    pub registered: bool,
+    /// Not in settings.json, but the ledger says it reaches the server all the same: a recent
+    /// call to a Lumen tool was identified. That is a plugin install, which registers its hooks
+    /// from the plugin and not from this file. Never true when `registered` is.
+    pub served_elsewhere: bool,
+}
+
+/// [`lumen_identity_hook_status`] against an explicit home and ledger, so a test chooses both.
+///
+/// An `Err` for a settings.json that cannot be used, naming it, by the rule Setup refuses it by:
+/// a file that is not a JSON object is not one to send the user to Setup about, since Setup would
+/// refuse it too. A file that is absent or blank is a machine that was never set up, and answers
+/// `registered: false`.
+///
+/// The ledger is consulted only when the file lacks the hook, and only for `served_elsewhere`.
+/// Nothing here writes.
+fn identity_hook_status_in(
+    home: &Path,
+    ledger: Option<&Path>,
+) -> Result<IdentityHookStatus, String> {
+    let settings = read_config_object(&global_settings_path_in(home))?;
+    let registered = identity_hook_registered(&settings);
+    let served_elsewhere = !registered && ledger.is_some_and(some_recent_call_identified);
+    Ok(IdentityHookStatus {
+        registered,
+        served_elsewhere,
+    })
+}
+
+/// Whether any of the newest calls to a Lumen tool that carried a repeat plan was identified,
+/// from the ledger at `db`.
+///
+/// `lumen doctor` asks the same of the same rows, and for the same reason: settings.json lacking
+/// the hook is grounds to suspect, but a plugin install registers its hooks from the plugin, so
+/// the file alone would accuse a machine that works. Of the newest fifty calls with a plan, any
+/// fewer than all `unidentified` means the hook is reaching the server. None yet, a ledger from
+/// before 1.7.0 with no such column, a file that is not a database and a path with nothing at it
+/// prove nothing, and answer no.
+///
+/// Opened read-only, so asking never creates, migrates or writes the ledger the daemon owns.
+fn some_recent_call_identified(db: &Path) -> bool {
+    let Ok(conn) = lumen_core::meter::open_read_only(db) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT COALESCE(SUM(repeat_plan = ?1), 0), COUNT(*) FROM (
+             SELECT repeat_plan FROM read_events
+             WHERE routed_via IN ('smart_read', 'recall_file', 'compress_logs')
+               AND repeat_plan IS NOT NULL
+             ORDER BY rowid DESC LIMIT 50)",
+        [lumen_core::repeat::PLAN_UNIDENTIFIED],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    )
+    .is_ok_and(|(unidentified, all)| unidentified < all)
+}
+
+/// Whether the identity hook is registered, for the prompt on Home and the Optimizer tab.
+///
+/// 1.8.0 turns repeat reads on, and they work only once this hook is registered. Setup registers
+/// it, but Setup runs by itself only until its marker exists, so someone who set Lumen up under
+/// 1.7.0 or earlier has the marker, is never sent back, and has every read answered in full with
+/// nothing to say so. This is what the window asks to say so.
+///
+/// Off the main thread, as a command that reads files and a ledger should be.
+#[tauri::command]
+pub async fn lumen_identity_hook_status() -> Result<IdentityHookStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        identity_hook_status_in(&home(), lumen_core::meter::db_path().as_deref())
+    })
+    .await
+    .map_err(|e| format!("identity hook check failed: {e}"))?
 }
 
 /// Tools whose PostToolUse events the meter must receive.
@@ -4052,6 +4167,622 @@ mod tests {
             post, METER_MATCHERS,
             "no PostToolUse entry for the Lumen tools"
         );
+    }
+
+    // ── The identity hook, as the prompt in the window asks about it ─────────────────────────
+    //
+    // 1.8.0 turns repeat reads on, and they need the PreToolUse hook on the three Lumen tools.
+    // Setup registers it, but Setup runs on its own only until its marker exists, so a user who
+    // set Lumen up under 1.7.0 or earlier is never sent back: the hook is missing, every call is
+    // answered in full, and nothing says so. The window asks `identity_hook_status_in`, and what
+    // it asks has to be what the validator tests, or the two will tell the user different things.
+
+    /// Lumen's intercept as a settings.json runs it, and another tool's hook, which Setup must
+    /// neither count as Lumen's nor touch.
+    const LUMEN_HOOK: &str = "/Users/me/.claude/lumen/lumen_read_intercept.sh";
+    const FOREIGN_HOOK: &str = "/opt/someone-elses-tool.sh";
+
+    const NOT_REGISTERED: IdentityHookStatus = IdentityHookStatus {
+        registered: false,
+        served_elsewhere: false,
+    };
+    const REGISTERED: IdentityHookStatus = IdentityHookStatus {
+        registered: true,
+        served_elsewhere: false,
+    };
+
+    /// One settings.json entry: `matcher`, running each of `commands`.
+    fn hook_entry(matcher: &str, commands: &[&str]) -> serde_json::Value {
+        json!({
+            "matcher": matcher,
+            "hooks": commands
+                .iter()
+                .map(|c| json!({"type": "command", "command": c}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// A settings.json that runs Lumen's hook before each of `matchers`.
+    fn lumen_before(matchers: &[&str]) -> serde_json::Value {
+        json!({"hooks": {"PreToolUse": matchers
+            .iter()
+            .map(|m| hook_entry(m, &[LUMEN_HOOK]))
+            .collect::<Vec<_>>()}})
+    }
+
+    /// Put `text` where Claude Code keeps its settings.
+    fn write_settings_text(home: &Path, text: &str) -> PathBuf {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let file = global_settings_path_in(home);
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn the_identity_hook_is_registered_when_all_three_lumen_tools_have_it() {
+        let [smart, recall, logs] = lumen_core::identity::MATCHERS;
+        // What Setup installs, and the three alone: the intercept on `Read` is not the identity hook.
+        assert!(identity_hook_registered(&lumen_before(&[
+            "Read", smart, recall, logs
+        ])));
+        assert!(identity_hook_registered(&lumen_before(&[
+            smart, recall, logs
+        ])));
+        // Each one missing in turn: a call to that tool alone is unidentified.
+        assert!(!identity_hook_registered(&lumen_before(&[
+            "Read", recall, logs
+        ])));
+        assert!(!identity_hook_registered(&lumen_before(&[
+            "Read", smart, logs
+        ])));
+        assert!(!identity_hook_registered(&lumen_before(&[
+            "Read", smart, recall
+        ])));
+        // What 1.7.0 left, and nothing at all.
+        assert!(!identity_hook_registered(&lumen_before(&["Read"])));
+        assert!(!identity_hook_registered(&lumen_before(&[])));
+        assert!(!identity_hook_registered(&json!({})));
+        assert!(!identity_hook_registered(&json!({"hooks": {}})));
+    }
+
+    /// Claude Code runs a PostToolUse hook after the tool has answered, which is too late for the
+    /// server to be told whose call it was. Earlier versions registered the Lumen tools there,
+    /// and that is not the identity hook.
+    #[test]
+    fn the_identity_hook_has_to_run_before_the_tool_and_not_after_it() {
+        let after_only = json!({"hooks": {
+            "PreToolUse": [hook_entry("Read", &[LUMEN_HOOK])],
+            "PostToolUse": lumen_core::identity::MATCHERS
+                .iter()
+                .map(|m| hook_entry(m, &[LUMEN_HOOK]))
+                .collect::<Vec<_>>(),
+        }});
+        assert!(!identity_hook_registered(&after_only));
+    }
+
+    /// A matcher counts when a command of Lumen's runs on it. Another tool's hook on the same
+    /// name is not Lumen's, and it hides nothing when the two share an entry.
+    #[test]
+    fn only_a_lumen_command_counts_and_another_tools_hook_beside_it_hides_nothing() {
+        let on_the_three = |commands: &[&str]| {
+            json!({"hooks": {"PreToolUse": lumen_core::identity::MATCHERS
+                .iter()
+                .map(|m| hook_entry(m, commands))
+                .collect::<Vec<_>>()}})
+        };
+        assert!(
+            !identity_hook_registered(&on_the_three(&[FOREIGN_HOOK])),
+            "another tool's hook on the three names says nothing about Lumen"
+        );
+        assert!(identity_hook_registered(&on_the_three(&[
+            FOREIGN_HOOK,
+            LUMEN_HOOK
+        ])));
+        assert!(identity_hook_registered(&on_the_three(&[
+            LUMEN_HOOK,
+            FOREIGN_HOOK
+        ])));
+    }
+
+    /// The file is the user's, and nothing stops it holding anything. Whatever it holds gets an
+    /// answer, never a panic: this runs in the window's process.
+    #[test]
+    fn a_settings_file_of_any_shape_gets_an_answer_and_never_a_panic() {
+        let m = "mcp__lumen__smart_read";
+        for v in [
+            json!(null),
+            json!(7),
+            json!("x"),
+            json!([]),
+            json!({}),
+            json!({"hooks": null}),
+            json!({"hooks": "x"}),
+            json!({"hooks": []}),
+            json!({"hooks": {"PreToolUse": null}}),
+            json!({"hooks": {"PreToolUse": {}}}),
+            json!({"hooks": {"PreToolUse": "x"}}),
+            json!({"hooks": {"PreToolUse": [null, 3, "x", [], {}]}}),
+            json!({"hooks": {"PreToolUse": [{"matcher": m}]}}),
+            json!({"hooks": {"PreToolUse": [{"matcher": m, "hooks": "x"}]}}),
+            json!({"hooks": {"PreToolUse": [{"matcher": m,
+                "hooks": [null, 1, "x", {}, {"command": 7}, {"command": null}]}]}}),
+            json!({"hooks": {"PreToolUse": [{"hooks": [{"command": LUMEN_HOOK}]}]}}),
+            json!({"hooks": {"PreToolUse": [{"matcher": 7, "hooks": [{"command": LUMEN_HOOK}]}]}}),
+        ] {
+            assert!(!identity_hook_registered(&v), "{v}");
+        }
+    }
+
+    /// The window reads this, so the keys are the ones its TypeScript names.
+    #[test]
+    fn the_status_reaches_the_window_in_camel_case() {
+        assert_eq!(
+            serde_json::to_value(IdentityHookStatus {
+                registered: false,
+                served_elsewhere: true,
+            })
+            .unwrap(),
+            json!({"registered": false, "servedElsewhere": true})
+        );
+    }
+
+    /// No `~/.claude` at all, a file with nothing in it, and an empty object are what a machine
+    /// that was never set up looks like. Setup writes into each of them without complaint, and
+    /// none of them registers anything.
+    #[test]
+    fn a_missing_or_empty_settings_file_means_the_hook_is_not_registered() {
+        let none = TempDir::new().unwrap();
+        assert_eq!(
+            identity_hook_status_in(none.path(), None),
+            Ok(NOT_REGISTERED)
+        );
+        for text in ["", "  \n", "{}", r#"{"hooks": {}}"#] {
+            let h = TempDir::new().unwrap();
+            write_settings_text(h.path(), text);
+            assert_eq!(
+                identity_hook_status_in(h.path(), None),
+                Ok(NOT_REGISTERED),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// The same file Setup refuses to touch. The window says nothing about a file that cannot
+    /// be read rather than send the user to a Setup that would only refuse it again, and a
+    /// check that only reads must leave it exactly as it was.
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_an_error_and_is_left_alone() {
+        for (what, text) in [
+            ("not JSON", r#"{"hooks": {"PreToolUse": ["#),
+            ("a JSON array", "[]"),
+            ("a JSON string", r#""hooks""#),
+        ] {
+            let h = TempDir::new().unwrap();
+            let file = write_settings_text(h.path(), text);
+            let err = identity_hook_status_in(h.path(), None).unwrap_err();
+            assert!(
+                err.contains(&file.display().to_string()),
+                "{what}: the error names the file: {err}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                text,
+                "{what}: reading never writes"
+            );
+            // The validator reads it the same way, and from a file it could not read it
+            // makes no claim about identity.
+            let st = validate_hooks_in(h.path());
+            assert!(!st.healthy, "{what}: {}", st.detail);
+            assert!(
+                !st.detail.contains("which conversation"),
+                "{what}: {}",
+                st.detail
+            );
+        }
+        // A directory where the file belongs cannot be read either.
+        let h = TempDir::new().unwrap();
+        std::fs::create_dir_all(global_settings_path_in(h.path())).unwrap();
+        assert!(identity_hook_status_in(h.path(), None).is_err());
+    }
+
+    /// Write the scripts every hook command points at, so the validator's dangling-path check
+    /// passes and only what settings.json registers is under test.
+    fn scripts_in(home: &Path) {
+        settings_with_matchers(home, &[], &[]);
+    }
+
+    /// The validator and the prompt read one file. For each shape it can take: the prompt's
+    /// answer is the expected one, a healthy report implies the hook is registered, the report
+    /// says the tools cannot tell which conversation a call is from exactly when it is not, and
+    /// "no lumen hooks registered" is the one report that says it another way. Everything the
+    /// user is told about the hook comes from these two, so they may not disagree.
+    #[test]
+    fn the_validator_and_the_identity_check_read_one_file_and_never_disagree() {
+        let [smart, recall, logs] = lumen_core::identity::MATCHERS;
+        type Build<'a> = Box<dyn Fn(&Path) + 'a>;
+        let shapes: Vec<(&str, bool, Build)> = vec![
+            (
+                "what Setup installs",
+                true,
+                Box::new(|h| {
+                    scripts_in(h);
+                    assert_eq!(step_install_hooks_in(h).status, StepStatus::Ok);
+                }),
+            ),
+            (
+                "a 1.7.0 install",
+                false,
+                Box::new(|h| settings_with_matchers(h, &["Read"], &METER_MATCHERS)),
+            ),
+            (
+                "the intercept on Read and on one tool",
+                false,
+                Box::new(|h| settings_with_matchers(h, &["Read", smart], &METER_MATCHERS)),
+            ),
+            (
+                "the three tools and no Read",
+                true,
+                Box::new(|h| settings_with_matchers(h, &[smart, recall, logs], &METER_MATCHERS)),
+            ),
+            (
+                "the tools registered after the call and not before",
+                false,
+                Box::new(|h| {
+                    settings_with_matchers(h, &["Read"], &["Read", "Bash", smart, recall, logs])
+                }),
+            ),
+            (
+                "a broader matcher than the tools' names",
+                false,
+                Box::new(|h| {
+                    settings_with_matchers(h, &["Read", "mcp__lumen__.*"], &METER_MATCHERS)
+                }),
+            ),
+            (
+                "the tools and a retired meter entry",
+                true,
+                Box::new(|h| {
+                    settings_with_matchers(h, &INTERCEPT_MATCHERS, &["Read", "Bash", smart])
+                }),
+            ),
+            (
+                "the tools and no meter",
+                true,
+                Box::new(|h| settings_with_matchers(h, &INTERCEPT_MATCHERS, &[])),
+            ),
+            (
+                "another tool's hook on the three, Lumen's on Read",
+                false,
+                Box::new(|h| {
+                    scripts_in(h);
+                    let intercept = hook_command(&lumen_dir_in(h).join("lumen_read_intercept.sh"));
+                    let mut pre = vec![hook_entry("Read", &[&intercept])];
+                    pre.extend(
+                        [smart, recall, logs]
+                            .iter()
+                            .map(|m| hook_entry(m, &[FOREIGN_HOOK])),
+                    );
+                    std::fs::write(
+                        global_settings_path_in(h),
+                        json!({"hooks": {"PreToolUse": pre}}).to_string(),
+                    )
+                    .unwrap();
+                }),
+            ),
+            (
+                "another tool's hook only",
+                false,
+                Box::new(|h| {
+                    scripts_in(h);
+                    std::fs::write(
+                        global_settings_path_in(h),
+                        json!({"hooks": {"PreToolUse": [hook_entry("Read", &[FOREIGN_HOOK])]}})
+                            .to_string(),
+                    )
+                    .unwrap();
+                }),
+            ),
+            ("no settings file", false, Box::new(scripts_in)),
+        ];
+        for (name, registered, build) in shapes {
+            let h = TempDir::new().unwrap();
+            build(h.path());
+            if name == "no settings file" {
+                let _ = std::fs::remove_file(global_settings_path_in(h.path()));
+            }
+            let status =
+                identity_hook_status_in(h.path(), None).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let report = validate_hooks_in(h.path());
+            assert_eq!(status.registered, registered, "{name}: {}", report.detail);
+            let says_identity = report.detail.contains("which conversation");
+            if status.registered {
+                assert!(
+                    !says_identity,
+                    "{name}: the report blames identity for a hook that is registered: {}",
+                    report.detail
+                );
+            } else {
+                assert!(
+                    says_identity || report.detail.starts_with("no lumen hooks registered"),
+                    "{name}: the hook is not registered and the report does not say so: {}",
+                    report.detail
+                );
+            }
+            if report.healthy {
+                assert!(status.registered, "{name}: healthy without the hook");
+            }
+        }
+    }
+
+    /// A ledger as the Lumen tools leave one: one row per call, `(routed_via, repeat_plan)`, in
+    /// the order the calls were made. Returns the directory with it, which must outlive its use.
+    fn ledger_with(rows: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("lumen.db");
+        let conn = lumen_core::meter::connect_db(&db).unwrap();
+        for (routed_via, plan) in rows {
+            conn.execute(
+                "INSERT INTO read_events(ts, tool, path, tokens_returned, full_tokens, \
+                 saved_tokens, routed_via, repeat_plan) \
+                 VALUES ('2026-01-01T00:00:00Z', 't', 'p', 1, 1, 0, ?1, ?2)",
+                rusqlite::params![routed_via, plan],
+            )
+            .unwrap();
+        }
+        (dir, db)
+    }
+
+    /// A home whose settings.json is what 1.7.0 left: the hook is not there.
+    fn home_without_the_hook() -> TempDir {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(h.path(), &["Read"], &METER_MATCHERS);
+        h
+    }
+
+    /// A plugin install registers its hooks from the plugin, so settings.json alone would
+    /// accuse a machine that works. `lumen doctor` lets the ledger overrule the file, and so
+    /// does this: a recent call that was identified means the hook is reaching the server,
+    /// whatever settings.json says. A ledger that shows every call unidentified, or shows
+    /// nothing, leaves the file's word standing.
+    #[test]
+    fn identified_calls_in_the_ledger_overrule_a_settings_file_without_the_hook() {
+        let h = home_without_the_hook();
+        let unidentified = lumen_core::repeat::PLAN_UNIDENTIFIED;
+        let status = |rows: &[(&str, Option<&str>)]| {
+            let (_dir, db) = ledger_with(rows);
+            identity_hook_status_in(h.path(), Some(&db)).unwrap()
+        };
+        let elsewhere = IdentityHookStatus {
+            registered: false,
+            served_elsewhere: true,
+        };
+
+        // Every recent call answered for want of an identity: the file is right, and Setup is the fix.
+        assert_eq!(
+            status(&[
+                ("smart_read", Some(unidentified)),
+                ("recall_file", Some(unidentified)),
+                ("compress_logs", Some(unidentified)),
+            ]),
+            NOT_REGISTERED
+        );
+        // One that was identified, anywhere in the window, and it is reaching the server.
+        assert_eq!(
+            status(&[
+                ("smart_read", Some(unidentified)),
+                ("recall_file", Some(lumen_core::repeat::PLAN_FIRST)),
+                ("smart_read", Some(unidentified)),
+            ]),
+            elsewhere
+        );
+        assert_eq!(
+            status(&[("compress_logs", Some(lumen_core::repeat::PLAN_UNCHANGED))]),
+            elsewhere
+        );
+        // No call yet, and calls that carried no plan, prove nothing either way.
+        assert_eq!(status(&[]), NOT_REGISTERED);
+        assert_eq!(
+            status(&[("smart_read", None), ("recall_file", None)]),
+            NOT_REGISTERED
+        );
+        // A built-in Read goes through the intercept and not the identity hook, so it is no
+        // evidence about the Lumen tools, whatever plan it was stamped with.
+        assert_eq!(
+            status(&[("builtin_read", Some(lumen_core::repeat::PLAN_FIRST))]),
+            NOT_REGISTERED
+        );
+    }
+
+    /// The evidence is the newest fifty calls that carried a plan, as `lumen doctor` reads them:
+    /// an identified call from long ago does not vouch for what the hook does today.
+    #[test]
+    fn the_ledger_is_read_for_its_newest_fifty_calls_only() {
+        let h = home_without_the_hook();
+        let unidentified = lumen_core::repeat::PLAN_UNIDENTIFIED;
+        let first = lumen_core::repeat::PLAN_FIRST;
+        let oldest_identified = |after: usize| {
+            let mut rows = vec![("smart_read", Some(first))];
+            rows.extend(std::iter::repeat_n(
+                ("smart_read", Some(unidentified)),
+                after,
+            ));
+            let (_dir, db) = ledger_with(&rows);
+            identity_hook_status_in(h.path(), Some(&db)).unwrap()
+        };
+        // 49 newer calls: the identified one is the fiftieth newest, and counts.
+        assert!(oldest_identified(49).served_elsewhere);
+        // 50 newer calls: it is the fifty-first, and does not.
+        assert!(!oldest_identified(50).served_elsewhere);
+    }
+
+    /// A ledger from before 1.7.0 has no `repeat_plan` column, a file may not be a database at
+    /// all, and there may be no ledger yet. None of them is evidence, and none is opened to be
+    /// written: nothing is created, migrated or changed by asking.
+    #[test]
+    fn a_ledger_that_cannot_answer_is_no_evidence_and_is_left_as_it_was() {
+        let h = home_without_the_hook();
+        let dir = TempDir::new().unwrap();
+        let old = dir.path().join("old.db");
+        rusqlite::Connection::open(&old)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE read_events (id INTEGER PRIMARY KEY, routed_via TEXT);
+                 INSERT INTO read_events(routed_via) VALUES ('smart_read');",
+            )
+            .unwrap();
+        let junk = dir.path().join("junk.db");
+        std::fs::write(&junk, "this is a note, not a database").unwrap();
+        let absent = dir.path().join("absent.db");
+
+        for db in [&old, &junk, &absent] {
+            let before = std::fs::read(db).ok();
+            assert_eq!(
+                identity_hook_status_in(h.path(), Some(db)),
+                Ok(NOT_REGISTERED),
+                "{}",
+                db.display()
+            );
+            assert_eq!(
+                std::fs::read(db).ok(),
+                before,
+                "{} is read, never written or created",
+                db.display()
+            );
+        }
+        assert!(!absent.exists());
+        // And a caller with no ledger to offer gets the file's answer.
+        assert_eq!(identity_hook_status_in(h.path(), None), Ok(NOT_REGISTERED));
+    }
+
+    /// The ledger only ever speaks for a file that lacks the hook. With the hook registered
+    /// the answer is "registered", and the ledger is not what is being asked.
+    #[test]
+    fn a_registered_hook_is_registered_whatever_the_ledger_says() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(h.path(), &INTERCEPT_MATCHERS, &METER_MATCHERS);
+        let (_dir, identified) =
+            ledger_with(&[("smart_read", Some(lumen_core::repeat::PLAN_FIRST))]);
+        let (_dir2, unidentified) =
+            ledger_with(&[("smart_read", Some(lumen_core::repeat::PLAN_UNIDENTIFIED))]);
+        for db in [&identified, &unidentified] {
+            assert_eq!(identity_hook_status_in(h.path(), Some(db)), Ok(REGISTERED));
+        }
+    }
+
+    /// The whole upgrade, with the real installer in the middle. A 1.7.0 install has its marker,
+    /// so the window never sends it to Setup, and its settings.json has the intercept on `Read`
+    /// and the meter on `Read` and `Bash`, which is everything 1.7.0 registered, beside whatever
+    /// else the user has hooked. The prompt's question says the hook is not registered and the
+    /// validator calls the install stale; Setup's own hooks step runs; the question says
+    /// registered and the validator is satisfied. Everything that was not Lumen's is where it
+    /// was, once.
+    #[test]
+    fn setup_registers_the_identity_hook_for_a_1_7_0_install_and_only_adds_to_what_is_there() {
+        let h = TempDir::new().unwrap();
+        settings_with_matchers(h.path(), &["Read"], &["Read", "Bash"]);
+        let settings = global_settings_path_in(h.path());
+
+        // What is not Lumen's: another tool's hook in Lumen's own entry on Read, one of its own
+        // on Write, one alone on a Lumen tool's name (not Lumen's command, so that tool is still
+        // unidentified), a hook on another event, and a setting.
+        let (audit_read, audit_write) = ("/opt/audit/read.sh", "/opt/audit/write.sh");
+        let (audit_tool, on_start) = ("/opt/audit/smart-read.sh", "/opt/audit/start.sh");
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        root["theme"] = json!("dark");
+        root["hooks"]["PreToolUse"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"type": "command", "command": audit_read}));
+        let pre = root["hooks"]["PreToolUse"].as_array_mut().unwrap();
+        pre.push(hook_entry("Write", &[audit_write]));
+        pre.push(hook_entry("mcp__lumen__smart_read", &[audit_tool]));
+        root["hooks"]["SessionStart"] = json!([hook_entry("startup", &[on_start])]);
+        std::fs::write(&settings, root.to_string()).unwrap();
+
+        assert_eq!(identity_hook_status_in(h.path(), None), Ok(NOT_REGISTERED));
+        let before = validate_hooks_in(h.path());
+        assert!(!before.healthy, "{}", before.detail);
+        assert!(
+            before.detail.contains("which conversation"),
+            "{}",
+            before.detail
+        );
+
+        let step = step_install_hooks_in(h.path());
+        assert_eq!(step.status, StepStatus::Ok, "{}", step.detail);
+
+        assert_eq!(identity_hook_status_in(h.path(), None), Ok(REGISTERED));
+        let after = validate_hooks_in(h.path());
+        assert!(after.healthy, "{}", after.detail);
+
+        let text = std::fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(
+            v["hooks"]["SessionStart"], root["hooks"]["SessionStart"],
+            "a hook on another event is not touched"
+        );
+        for foreign in [audit_read, audit_write, audit_tool, on_start] {
+            assert_eq!(text.matches(foreign).count(), 1, "{foreign} is kept, once");
+        }
+
+        let intercept = hook_command(&lumen_dir_in(h.path()).join("lumen_read_intercept.sh"));
+        let commands_on = |phase: &str, matcher: &str| -> Vec<String> {
+            let entries: Vec<&serde_json::Value> = v["hooks"][phase]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["matcher"] == matcher)
+                .collect();
+            assert_eq!(entries.len(), 1, "{phase} has one entry for {matcher}");
+            entries[0]["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["command"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // Lumen's command joins the other tool's in its entry, after it, and replaces nothing of it.
+        assert_eq!(
+            commands_on("PreToolUse", "Read"),
+            [audit_read, intercept.as_str()]
+        );
+        assert_eq!(
+            commands_on("PreToolUse", "mcp__lumen__smart_read"),
+            [audit_tool, intercept.as_str()]
+        );
+        assert_eq!(commands_on("PreToolUse", "Write"), [audit_write]);
+        for matcher in ["mcp__lumen__recall_file", "mcp__lumen__compress_logs"] {
+            assert_eq!(commands_on("PreToolUse", matcher), [intercept.as_str()]);
+        }
+        // What was there keeps its place, what was missing is added after it, and nothing is repeated.
+        let matchers = |phase: &str| -> Vec<&str> {
+            v["hooks"][phase]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["matcher"].as_str().unwrap())
+                .collect()
+        };
+        assert_eq!(
+            matchers("PreToolUse"),
+            [
+                "Read",
+                "Write",
+                "mcp__lumen__smart_read",
+                "mcp__lumen__recall_file",
+                "mcp__lumen__compress_logs"
+            ]
+        );
+        assert_eq!(matchers("PostToolUse"), METER_MATCHERS);
+        assert_eq!(text.matches("lumen_read_intercept.sh").count(), 4);
+        assert_eq!(text.matches("lumen_meter.sh").count(), 2);
+
+        // Running Setup again, as the prompt's button does for anyone who clicks it twice,
+        // changes nothing.
+        assert_eq!(step_install_hooks_in(h.path()).status, StepStatus::Ok);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), text);
     }
 
     /// The Lumen tools are retired as meter matchers and registered as intercept matchers,

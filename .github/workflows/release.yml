@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to build Windows/Linux/CLI artifacts for (e.g. v1.1.0). The macOS DMG is NOT rebuilt on manual runs; the Homebrew tap IS updated, from whatever is published on that release.'
+        description: 'Existing release tag, e.g. v1.1.0. Builds the Windows/Linux/CLI artifacts from the commit that tag points at, never from main. The macOS DMG is NOT rebuilt on manual runs; the Homebrew tap IS updated, from whatever is published on that release.'
         required: true
         default: 'v1.0.0'
 
@@ -25,11 +25,13 @@ env:
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
-  # Job 0: Resolve the target tag/version for both push and manual dispatch
+  # Job 0: Resolve the tag to the commit it points at, for push and dispatch
   # ────────────────────────────────────────────────────────────────────────────
-  # On a tag push, GITHUB_REF_NAME is the tag. On workflow_dispatch it is the
-  # branch (e.g. "main"), so we read the tag from the input instead. Every other
-  # job consumes these outputs rather than GITHUB_REF_NAME directly.
+  # The tag is the pushed ref, or the dispatch input (on a dispatch
+  # GITHUB_REF_NAME is the branch). It is checked for shape and resolved once to
+  # the commit it points at, published as build_ref, so a dispatch builds the
+  # tagged source and never main. A tag that is malformed, missing or not a
+  # commit stops the run before anything is built.
   #
   # On a tag push this job also refuses a tag whose CHANGELOG.md has no block for
   # its version, before any build starts: the block is the release's notes, and
@@ -39,35 +41,83 @@ jobs:
   resolve:
     name: Resolve tag/version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag:       ${{ steps.r.outputs.tag }}
       version:   ${{ steps.r.outputs.version }}
       build_ref: ${{ steps.r.outputs.build_ref }}
     steps:
+      - id: r
+        name: Resolve the tag to its commit
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          shape='^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'
+          if [[ ! "${TAG}" =~ ${shape} ]]; then
+            shown=$(printf '%.60s' "${TAG}" | tr -c '[:print:]' '?')
+            echo "::error::\"${shown}\" is not a release tag (vN.N.N, vN.N.N-pre or vN.N.N+build). Nothing was built."
+            exit 1
+          fi
+
+          remote="${LUMEN_RELEASE_REMOTE:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git}"
+          export GIT_TERMINAL_PROMPT=0
+          if [[ -n "${TOKEN:-}" && "${remote}" == http* ]]; then
+            auth=$(printf 'x-access-token:%s' "${TOKEN}" | base64 | tr -d '\n')
+            echo "::add-mask::${auth}"
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
+            export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
+          fi
+
+          if ! listing=$(git ls-remote --tags "${remote}" "refs/tags/${TAG}"); then
+            echo "::error::cannot read the tags of ${GITHUB_REPOSITORY}, so ${TAG} was not resolved. Nothing was built."
+            exit 1
+          fi
+          if ! printf '%s\n' "${listing}" | awk -v ref="refs/tags/${TAG}" '$2 == ref { found = 1 } END { exit !found }'; then
+            echo "::error::the tag ${TAG} does not exist in ${GITHUB_REPOSITORY}. Nothing was built."
+            exit 1
+          fi
+
+          scratch=$(mktemp -d "${RUNNER_TEMP:-/tmp}/resolve.XXXXXX")
+          trap 'rm -rf "${scratch}"' EXIT
+          git init -q "${scratch}"
+          if ! git -C "${scratch}" fetch -q --no-tags --depth=1 "${remote}" "+refs/tags/${TAG}:refs/tags/${TAG}"; then
+            echo "::error::cannot fetch the tag ${TAG} from ${GITHUB_REPOSITORY}. Nothing was built."
+            exit 1
+          fi
+          sha=$(git -C "${scratch}" rev-parse --verify --quiet "refs/tags/${TAG}^{commit}" 2>/dev/null || true)
+          full_sha='^[0-9a-f]{40}$'
+          if [[ ! "${sha}" =~ ${full_sha} ]]; then
+            echo "::error::the tag ${TAG} does not point at a commit. Nothing was built."
+            exit 1
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "version=${TAG#v}"
+            echo "build_ref=${sha}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Resolved tag=${TAG} version=${TAG#v} build_ref=${sha}"
+
       - uses: actions/checkout@v7
         if: github.event_name == 'push'
         with:
+          ref: ${{ steps.r.outputs.build_ref }}
           sparse-checkout: |
             /CHANGELOG.md
             /scripts/release-notes.sh
           sparse-checkout-cone-mode: false
-
-      - id: r
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # Attach artifacts to the chosen release tag, but BUILD from the
-            # commit the dispatch ran on (the default branch HEAD). The tagged
-            # source may predate cross-platform fixes needed to build on Windows.
-            TAG="${{ inputs.tag }}"
-            BUILD_REF="${{ github.sha }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-            BUILD_REF="${GITHUB_REF_NAME}"
-          fi
-          echo "tag=${TAG}"              >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}"        >> "$GITHUB_OUTPUT"
-          echo "build_ref=${BUILD_REF}"  >> "$GITHUB_OUTPUT"
-          echo "Resolved tag=${TAG} version=${TAG#v} build_ref=${BUILD_REF}"
 
       - name: Require this version's CHANGELOG block
         if: github.event_name == 'push'
@@ -97,12 +147,15 @@ jobs:
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.build_ref }}
 
       # ── 2. Version metadata ─────────────────────────────────────────────────
       - name: Extract version from tag
         id: meta
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"    # strip leading 'v'
           echo "version=${VERSION}"          >> "$GITHUB_OUTPUT"
           echo "dmg_name=Lumen_${VERSION}_aarch64.dmg"                        >> "$GITHUB_OUTPUT"
           echo "tarball_name=lumen-v${VERSION}-aarch64-apple-darwin.tar.gz"   >> "$GITHUB_OUTPUT"
@@ -204,9 +257,9 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
-          TAG="${GITHUB_REF_NAME}"
           DMG_PATH="${{ steps.checksums.outputs.dmg_path }}"
           TARBALL="${{ steps.cli.outputs.tarball }}"
           DMG_NAME="${{ steps.checksums.outputs.dmg_name }}"
@@ -547,6 +600,8 @@ jobs:
     steps:
       - name: Checkout lumen (for formula templates)
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.build_ref }}
 
       - name: Check tap credentials availability
         id: tap_token
@@ -700,3 +755,49 @@ jobs:
           git diff --cached --quiet && echo "No tap changes needed." && exit 0
           git commit -m "chore: bump lumen to v${VERSION}"
           git push
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 5: Say so when a dispatch's tag does not build (dispatch only)
+  # ────────────────────────────────────────────────────────────────────────────
+  # A dispatch builds the tag's own commit and never falls back to main, so a
+  # failed build means the tag needs a patch release. This keys on the build
+  # jobs' results, not failure(): that is also true when resolve refused the tag
+  # and nothing was built.
+  # ════════════════════════════════════════════════════════════════════════════
+  dispatch-build-failed:
+    name: Tag does not build
+    needs: [resolve, build-cli, build-gui-windows, build-gui-linux]
+    if: |
+      always() && github.event_name == 'workflow_dispatch'
+      && needs.resolve.result == 'success'
+      && (needs.build-cli.result == 'failure'
+          || needs.build-gui-windows.result == 'failure'
+          || needs.build-gui-linux.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - id: refuse
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          BUILD_REF: ${{ needs.resolve.outputs.build_ref }}
+          CLI: ${{ needs.build-cli.result }}
+          GUI_WINDOWS: ${{ needs.build-gui-windows.result }}
+          GUI_LINUX: ${{ needs.build-gui-linux.result }}
+        run: |
+          set -euo pipefail
+          failed=""
+          for pair in "build-cli:${CLI}" "build-gui-windows:${GUI_WINDOWS}" "build-gui-linux:${GUI_LINUX}"; do
+            if [[ "${pair#*:}" == "failure" ]]; then
+              failed="${failed} ${pair%%:*}"
+            fi
+          done
+          failed="${failed# }"
+          echo "::error::${TAG} (${BUILD_REF}) does not build. A dispatch never builds from main: ship a patch release (a new tag) instead. Failed: ${failed}."
+          {
+            echo "## ${TAG} does not build"
+            echo
+            echo "The tag ${TAG} (commit ${BUILD_REF}) failed in: ${failed}."
+            echo
+            echo "A dispatch never builds from main, so there is nothing to fall back on. Ship a patch release (a new tag) instead."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit 1

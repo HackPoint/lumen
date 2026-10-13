@@ -115,13 +115,13 @@ describe('Hotspots', () => {
         distinctFiles: 1_189,
         top10SharePct: 40.1,
         topFiles: [
-          file({ name: 'Run.tsx', path: '/p/Run.tsx', reads: 139, totalTokens: 3_833_250, sharePct: 20.8, lines: 3_833 }),
+          file({ name: 'large.rs', path: '/p/large.rs', reads: 139, totalTokens: 3_833_250, sharePct: 20.8, lines: 3_833 }),
           file({ name: 'small.rs', path: '/p/small.rs', reads: 2, totalTokens: 900, sharePct: 0.1, lines: 40 }),
         ],
       }),
     );
     const t = text();
-    expect(t).toContain('Run.tsx');
+    expect(t).toContain('large.rs');
     expect(t).toContain('139 reads');
     expect(t).toContain('3,833 lines');
     expect(t).toContain('20.8% of all context');

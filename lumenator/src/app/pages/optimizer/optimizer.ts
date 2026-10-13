@@ -7,6 +7,7 @@ import {
 } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
+import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identity-hook-prompt';
 import { SessionService } from '../../session.service';
 import { RepeatReadsService } from '../../repeat-reads.service';
 import { RATE } from '../../components/index';
@@ -15,7 +16,7 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
 
 @Component({
     selector: 'optimizer',
-    imports: [RouterLink, RouterLinkActive, Firefly, LumenTooltip],
+    imports: [RouterLink, RouterLinkActive, Firefly, IdentityHookPrompt, LumenTooltip],
     templateUrl: './optimizer.html',
     styleUrl: './optimizer.css',
     changeDetection: ChangeDetectionStrategy.OnPush,
