@@ -122,20 +122,9 @@ describe('Optimizer', () => {
   it('reports no data before any optimized read', async () => {
     const o = await build();
     expect(o.hasData()).toBe(false);
-    expect(o.effectPct()).toBe(0);
-  });
-
-  it('never shows NaN or a negative effectiveness', async () => {
-    const o = await build(report({ lifetimeOptimizedTokens: 500, lifetimeFullTokens: 0 }));
-    expect(o.effectPct()).toBe(0);
-    expect(text()).not.toContain('NaN');
-  });
-
-  it('rounds effectiveness to one decimal', async () => {
-    const o = await build(
-      report({ lifetimeOptimizedTokens: 6_666, lifetimeFullTokens: 10_000 }),
+    expect(rendered('.hero__empty-text')).toBe(
+      'No optimizer events recorded yet. Run a task that reads a large file — Lumen will show what it saved here.',
     );
-    expect(o.effectPct()).toBe(66.7);
   });
 
   it('flags that it has data once something was optimized', async () => {
@@ -164,32 +153,6 @@ describe('Optimizer', () => {
     const o = await build(report({ currentChannel: 'unknown' }));
     expect(o.modeLabel()).toBe('No activity yet');
     expect(o.fireflyState()).toBe('idle');
-  });
-
-  // ── hero colour thresholds ─────────────────────────────────────────────────
-
-  it.each([
-    [9_000, 10_000, 'var(--lumen-ok)'], // 90%
-    [8_000, 10_000, 'var(--lumen-ok)'], // exactly 80%
-    [7_900, 10_000, 'var(--lumen-warn)'], // 79%
-    [5_000, 10_000, 'var(--lumen-warn)'], // exactly 50%
-    [4_900, 10_000, 'var(--lumen-text-dim)'], // 49%
-    [0, 0, 'var(--lumen-text-dim)'],
-  ])('colours %i/%i as %s', async (saved, full, expected) => {
-    const o = await build(
-      report({ lifetimeOptimizedTokens: saved, lifetimeFullTokens: full }),
-    );
-    expect(o.heroColor()).toBe(expected);
-  });
-
-  it('colours by the rounded figure it displays, not the raw one', async () => {
-    // 79.99% rounds to "80.0%" for display, so it must also take the 80% colour.
-    // A page showing 80.0% in the warn colour would contradict itself.
-    const o = await build(
-      report({ lifetimeOptimizedTokens: 7_999, lifetimeFullTokens: 10_000 }),
-    );
-    expect(o.effectPct()).toBe(80);
-    expect(o.heroColor()).toBe('var(--lumen-ok)');
   });
 
   // ── the two savings numbers must stay separate ─────────────────────────────
@@ -229,79 +192,6 @@ describe('Optimizer', () => {
     expect(o.showMissed()).toBe(false);
   });
 
-  // ── breakdown bars ─────────────────────────────────────────────────────────
-
-  it('scales bars against the largest row', async () => {
-    const o = await build(
-      report({
-        byTool: [
-          { tool: 'smart_read', calls: 1, savedTokens: 1_000, fullTokens: 2_000 },
-          { tool: 'recall_file', calls: 1, savedTokens: 500, fullTokens: 1_000 },
-        ],
-      }),
-    );
-    expect(o.maxToolSaved()).toBe(1_000);
-    expect(o.barPct(1_000, o.maxToolSaved())).toBe(100);
-    expect(o.barPct(500, o.maxToolSaved())).toBe(50);
-  });
-
-  it('never divides by zero when every row is empty', async () => {
-    const o = await build(
-      report({ byTool: [{ tool: 'smart_read', calls: 1, savedTokens: 0, fullTokens: 0 }] }),
-    );
-    expect(o.maxToolSaved()).toBe(1); // floor of 1 keeps the division safe
-    expect(o.barPct(0, o.maxToolSaved())).toBe(0);
-  });
-
-  it('returns 0% for a zero maximum rather than NaN', async () => {
-    const o = await build();
-    expect(o.barPct(5, 0)).toBe(0);
-  });
-
-  it('has a max of 1 when there are no rows at all', async () => {
-    const o = await build();
-    expect(o.maxToolSaved()).toBe(1);
-    expect(o.maxChanSaved()).toBe(1);
-  });
-
-  // ── what the breakdowns render ─────────────────────────────────────────────
-
-  function rows(section: string): string[] {
-    return Array.from(
-      (fixture.nativeElement as HTMLElement).querySelectorAll(`section[aria-label="${section}"] .breakdown__row`),
-    ).map((r) => (r.textContent ?? '').replace(/\s+/g, ' ').trim());
-  }
-
-  it('renders a row per channel, labelled with its mode', async () => {
-    await build(report({
-      lifetimeOptimizedTokens: 1_500,
-      lifetimeFullTokens: 3_000,
-      byChannel: [
-        { channel: 'cli', calls: 2, savedTokens: 1_000, fullTokens: 2_000 },
-        { channel: 'vscode', calls: 1, savedTokens: 500, fullTokens: 1_000 },
-      ],
-    }));
-    expect(rows('Savings by channel')).toEqual([
-      `CLI (Full mode) ${(1_000).toLocaleString()} tok · 2 calls`,
-      `VS Code (Soft mode) ${(500).toLocaleString()} tok · 1 call`,
-    ]);
-  });
-
-  it('renders no channel section until a channel has a row', async () => {
-    await build();
-    expect(fixture.nativeElement.querySelector('section[aria-label="Savings by channel"]')).toBeNull();
-  });
-
-  it('says "1 call", not "1 calls", for a single tool call', async () => {
-    await build(report({
-      lifetimeOptimizedTokens: 10,
-      lifetimeFullTokens: 20,
-      byTool: [{ tool: 'mcp__lumen__smart_read', calls: 1, savedTokens: 10, fullTokens: 20 }],
-    }));
-    expect(text()).toContain('tok · 1 call');
-    expect(text()).not.toContain('1 calls');
-  });
-
   it('renders the missed reads as context, with their count and tokens', async () => {
     await build(report({ currentChannel: 'cli', missedCalls: 3, missedFullTokens: 12_000 }));
     const note = (fixture.nativeElement as HTMLElement).querySelector('.missed__val');
@@ -315,7 +205,7 @@ describe('Optimizer', () => {
       .toMatch(/^\s*1 call\s/);
   });
 
-  it('badges the Hotspots tab with the recorded fault count', async () => {
+  it('badges the Settings tab, where Report a fault is, with the recorded fault count', async () => {
     bridge = new FakeTauriBridge();
     bridge.responses.set('get_optimizer_stats', report());
     bridge.responses.set('get_usage', usage());
@@ -327,34 +217,9 @@ describe('Optimizer', () => {
     fixture.detectChanges();
     for (let i = 0; i < 4; i++) await Promise.resolve();
     fixture.detectChanges();
-    const badge = (fixture.nativeElement as HTMLElement).querySelector('.tab-nav__badge');
+    const badge = (fixture.nativeElement as HTMLElement).querySelector('a[href="/settings"] .tab-nav__badge');
     expect(badge?.textContent?.trim()).toBe('2');
     expect(badge?.getAttribute('aria-label')).toBe('2 faults recorded');
-  });
-
-  // ── labels ─────────────────────────────────────────────────────────────────
-
-  it('strips the mcp prefix from tool names', async () => {
-    const o = await build();
-    const row = (tool: string) => ({ tool, calls: 0, savedTokens: 0, fullTokens: 0 });
-    expect(o.toolLabel(row('mcp__lumen__smart_read'))).toBe('smart_read');
-    expect(o.toolLabel(row('mcp__lumen__recall_file'))).toBe('recall_file');
-    expect(o.toolLabel(row('mcp__lumen__compress_logs'))).toBe('compress_logs');
-  });
-
-  it('passes an unrecognised tool name through unchanged', async () => {
-    const o = await build();
-    expect(o.toolLabel({ tool: 'something_new', calls: 0, savedTokens: 0, fullTokens: 0 })).toBe(
-      'something_new',
-    );
-  });
-
-  it('labels channels with their mode', async () => {
-    const o = await build();
-    const row = (channel: string) => ({ channel, calls: 0, savedTokens: 0, fullTokens: 0 });
-    expect(o.chanLabel(row('cli'))).toBe('CLI (Full mode)');
-    expect(o.chanLabel(row('vscode'))).toBe('VS Code (Soft mode)');
-    expect(o.chanLabel(row('unknown'))).toBe('unknown');
   });
 
   // ── currency formatting ────────────────────────────────────────────────────
@@ -395,126 +260,82 @@ describe('Optimizer', () => {
 
     it('says exact, and verifiable, when every count was measured', async () => {
       await build(report({ ...data, unverifiedProvenanceRows: 0, provenanceTotalRows: 7_192 }));
-      expect(rendered('.hero__secondary'))
-        .toContain('Counted to the token by a local tokenizer, never estimated.');
+      expect(rendered('.savings-provenance'))
+        .toBe('Counted to the token by a local tokenizer, never estimated.');
       expect(rendered('.savings-card--caused .savings-card__note'))
         .toBe('caused · measured · verifiable · grows with use');
-      expect(fixture.nativeElement.querySelector('.hero__warn')).toBeNull();
       expect(text()).not.toContain('unverified');
     });
 
-    it('says N of M unverified, and not verifiable, when some counts were not measured', async () => {
+    it('qualifies the claim, and is not verifiable, when some counts were not measured', async () => {
       await build(report({ ...data, unverifiedProvenanceRows: 2_584, provenanceTotalRows: 7_192 }));
-      expect(rendered('.hero__secondary')).not.toContain('never estimated');
-      expect(rendered('.hero__secondary'))
-        .toContain('Counts are exact for Lumen tool calls; some older events have unverified provenance.');
-      expect(rendered('.hero__warn')).toContain(
-        `${(2_584).toLocaleString()} of ${(7_192).toLocaleString()} metered events have `
-        + 'unverified token provenance',
-      );
+      expect(rendered('.savings-provenance'))
+        .toBe('Counts are exact for Lumen tool calls; some older events have unverified provenance.');
       expect(rendered('.savings-card--caused .savings-card__note'))
         .toBe('caused · partly unverified · grows with use');
+      expect(text()).not.toContain('never estimated');
     });
 
     it('qualifies the claim over a single unverified count', async () => {
       // The boundary: one row is enough to make "never estimated" false.
       await build(report({ ...data, unverifiedProvenanceRows: 1, provenanceTotalRows: 1 }));
-      expect(rendered('.hero__warn')).toContain('1 of 1 metered events');
       expect(rendered('.savings-card--caused .savings-card__note')).toContain('partly unverified');
       expect(text()).not.toContain('never estimated');
     });
+
+    it('makes no claim about counts before there are any', async () => {
+      await build(report({ unverifiedProvenanceRows: 0, provenanceTotalRows: 0 }));
+      expect(fixture.nativeElement.querySelector('.savings-provenance')).toBeNull();
+    });
   });
 
-
-  // ── The dollar headline (1.4.0) ────────────────────────────────────────────
+  // ── What moved to Details, and what left (1.9.0) ───────────────────────────
   //
-  // Published per a pre-committed rule: whatever the number is, it renders. A metric
-  // that only displays well when it flatters is not a measurement, and the token ratio
-  // it replaced could not be wrong in the direction that mattered — a smaller reply
-  // that forces another round is a loss however good the ratio looks.
+  // The token ratio, the by-tool and by-channel breakdowns and the provenance counts are on
+  // Details now. The net value hero is on no screen until the savings engine replaces it.
 
-  describe('net dollar value', () => {
-    it('leads with the dollar figure, not the token ratio', async () => {
-      await build(report({
-        lifetimeOptimizedTokens: 1_000_000,
-        lifetimeFullTokens: 1_200_000,
-        netValueUsd: 275.93,
-        grossValueUsd: 386.72,
-        roundCostUsd: 110.79,
-        valueRounds: 194,
-        pairMultiplier: 1.604,
-      }));
-      const hero = fixture.nativeElement.querySelector('.hero__num') as HTMLElement;
-      expect(hero.textContent).toContain('+$276');
-      expect(hero.textContent).not.toContain('%');
-      // The ratio is still on the page, demoted.
-      expect(fixture.nativeElement.querySelector('.hero__secondary')?.textContent)
-        .toContain('fewer tokens');
+  describe('since 1.9.0', () => {
+    const full = report({
+      lifetimeOptimizedTokens: 1_000_000,
+      lifetimeFullTokens: 1_200_000,
+      netValueUsd: 275.93,
+      grossValueUsd: 386.72,
+      roundCostUsd: 110.79,
+      valueRounds: 194,
+      pairMultiplier: 1.604,
+      unverifiedProvenanceRows: 3,
+      provenanceTotalRows: 10,
+      byTool: [{ tool: 'mcp__lumen__smart_read', calls: 2, savedTokens: 900, fullTokens: 1_000 }],
+      byChannel: [{ channel: 'cli', calls: 2, savedTokens: 900, fullTokens: 1_000 }],
     });
 
-    it('renders a negative result as negative, with no softening', async () => {
-      await build(report({
-        lifetimeOptimizedTokens: 300,
-        lifetimeFullTokens: 400,
-        netValueUsd: -42.5,
-        grossValueUsd: 10,
-        roundCostUsd: 52.5,
-        valueRounds: 194,
-      }));
-      const hero = fixture.nativeElement.querySelector('.hero__num') as HTMLElement;
-      expect(hero.textContent).toContain('−$42.50');
-      const t = text().toLowerCase();
-      for (const softener of ['but ', 'still', 'however', 'nonetheless', 'despite']) {
-        expect(t).not.toContain(softener);
+    it('shows no net value card, and no dollar figure built on the rounds assumption', async () => {
+      await build(full);
+      const present = ['.hero__num', '.hero__ring', '.hero__label', '.hero__sub']
+        .filter((sel) => fixture.nativeElement.querySelector(sel) !== null);
+      expect(present).toEqual([]);
+      const said = text().replace(/\s+/g, ' ');
+      for (const words of ['net value', 'break-even', '+$276', '194 rounds', 'price a round']) {
+        expect(said, words).not.toContain(words);
       }
     });
 
-    it('says break-even rather than rounding it into a win', async () => {
-      // lifetime tokens must be non-zero or hasData() is false and the empty state
-      // renders instead of the hero — the test would then assert nothing.
-      await build(report({
-        lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000,
-        netValueUsd: 0.4, grossValueUsd: 50, roundCostUsd: 49.6, valueRounds: 194,
-      }));
-      expect(text()).toContain('roughly break-even');
-      expect(fixture.nativeElement.querySelector('.hero__label')?.textContent)
-        .not.toContain('net value');
+    it('shows neither the token ratio, the breakdowns nor the provenance counts', async () => {
+      await build(full);
+      const present = ['.hero__secondary', '.hero__warn', '.breakdown',
+        'section[aria-label="Savings by tool"]', 'section[aria-label="Savings by channel"]']
+        .filter((sel) => fixture.nativeElement.querySelector(sel) !== null);
+      expect(present).toEqual([]);
+      const said = text().replace(/\s+/g, ' ');
+      for (const words of ['fewer tokens', 'By tool', 'By channel', 'metered events']) {
+        expect(said, words).not.toContain(words);
+      }
     });
 
-    it('claims no figure at all when a round cannot be priced', async () => {
-      await build(report({
-        lifetimeOptimizedTokens: 1_000,
-        lifetimeFullTokens: 2_000,
-        netValueUsd: 0,
-        grossValueUsd: 0,
-        roundCostUsd: 0,
-      }));
-      expect(text()).toContain('Not enough recorded turns yet to price a round');
-      // Not "+$0.00, roughly break-even" beside it: that is a figure, and a verdict.
-      const hero = fixture.nativeElement.querySelector('.hero__num') as HTMLElement;
-      expect(hero.textContent?.trim()).toBe('—');
-      expect(fixture.nativeElement.querySelector('.hero__ring')?.textContent).not.toContain('$');
-      expect(text()).not.toContain('break-even');
-    });
-
-    it('surfaces R, because the result is most sensitive to it', async () => {
-      await build(report({
-        lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000,
-        netValueUsd: 100, grossValueUsd: 200, roundCostUsd: 100, valueRounds: 194,
-      }));
-      expect(text()).toContain('194 rounds');
-      expect(text()).toContain('sensitive');
-    });
-
-    it('still renders against a backend that predates the field', async () => {
-      // 1.3.x sends no netValueUsd at all; the page must not show NaN.
-      const r = report({ lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 });
-      const bare = r as unknown as Record<string, unknown>;
-      delete bare['netValueUsd'];
-      delete bare['roundCostUsd'];
-      await build(r);
-      expect(text()).not.toContain('NaN');
-      expect(text()).toContain('Not enough recorded turns yet to price a round');
+    it('still shows what Lumen caused beside what caching did', async () => {
+      await build(full);
+      expect(rendered('.savings-card--caused .savings-card__num')).toBe((1_000_000).toLocaleString());
+      expect(fixture.nativeElement.querySelector('.savings-card--reported')).not.toBeNull();
     });
   });
 
@@ -625,7 +446,7 @@ describe('Optimizer', () => {
       await build(report({ repeatReads: SERVED }));
       expect(said()).toContain(
         'Counted apart from the totals above: these answers are in none of the token totals, '
-        + 'the by-tool and by-channel breakdowns, or the net value.',
+        + 'or the by-tool and by-channel breakdowns on Details.',
       );
     });
 
@@ -633,19 +454,18 @@ describe('Optimizer', () => {
       const totals = {
         lifetimeOptimizedTokens: 900,
         lifetimeFullTokens: 1_000,
-        netValueUsd: 100,
-        grossValueUsd: 200,
-        roundCostUsd: 100,
-        valueRounds: 194,
+        thisWeekSavedTokens: 40,
       };
       const above = (): string[] =>
-        ['.hero__num', '.savings-card--caused .savings-card__num', '.period-row'].map(rendered);
+        ['.savings-card--caused .savings-card__num', '.savings-card--caused .savings-card__usd', '.period-row']
+          .map(rendered);
       await build(report(totals));
       const before = above();
       TestBed.resetTestingModule();
       await build(report({ ...totals, repeatReads: SERVED }));
       expect(above()).toEqual(before);
-      expect(before.slice(0, 2)).toEqual(['+$100', '900']);
+      expect(before[0]).toBe('900');
+      expect(before[2]).toContain('40');
     });
 
     it('never words a figure as a saving, and shows no dollars or percentage', async () => {
@@ -764,7 +584,7 @@ describe('Optimizer', () => {
       expect(said()).toContain(
         `Repeat reads are off now: the settings file ${SETTINGS_FILE} could not be read `
         + '(not JSON: expected value at line 1 column 1). '
-        + 'The Repeat reads switch on the Context tab rewrites it.',
+        + 'The Repeat reads switch on the Settings screen rewrites it.',
       );
       expect(said()).toContain(ENV_CAVEAT);
       expect(said()).not.toContain('the settings file says off');
@@ -786,7 +606,7 @@ describe('Optimizer', () => {
       await build(report({ repeatReads: repeats() }), usage(), cannotRead);
       expect(said()).toContain(
         'The repeat reads setting could not be read, so nothing is said here about its current state. '
-        + 'The Context tab shows why.',
+        + 'The Settings screen shows why.',
       );
       expect(said()).not.toMatch(/\b(on|off)\b/i);
     });

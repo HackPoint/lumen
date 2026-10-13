@@ -5,58 +5,30 @@ import {
     computed,
     inject,
 } from '@angular/core';
-import { RouterLink, RouterLinkActive } from '@angular/router';
+import { RouterLink } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
 import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identity-hook-prompt';
+import { TabNav } from '../../components/tab-nav/tab-nav';
 import { SessionService } from '../../session.service';
 import { RepeatReadsService } from '../../repeat-reads.service';
 import { RATE } from '../../components/index';
-import type { ChannelBreakdown, ToolBreakdown } from '../../components/index';
 import { LumenTooltip } from '../../directives/tooltip.directive';
 
+/**
+ * What Lumen caused, beside what Claude Code's cache did, and whether Lumen is working.
+ *
+ * Until 1.9.0 this screen led with a net dollar value of interception. It is gone until the
+ * savings engine replaces it with its own figures; the token ratio, the by-tool and by-channel
+ * breakdowns and the provenance counts it carried are on Details.
+ */
 @Component({
     selector: 'optimizer',
-    imports: [RouterLink, RouterLinkActive, Firefly, IdentityHookPrompt, LumenTooltip],
+    imports: [RouterLink, Firefly, IdentityHookPrompt, TabNav, LumenTooltip],
     templateUrl: './optimizer.html',
     styleUrl: './optimizer.css',
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Optimizer implements OnInit {
-    /**
-     * The headline, in dollars, with its sign.
-     *
-     * Dollars rather than the token ratio because a ratio cannot be wrong in the
-     * direction that matters: returning 87% fewer tokens still loses money if the round
-     * it forced cost more than the tokens it avoided. The ratio stays on the page, below
-     * this, as the input it is.
-     */
-    readonly netUsd = computed(() => this.s.netValueUsd());
-    /** A dash until a round can be priced: an unpriced $0.00 would read as a result. */
-    readonly netLabel = computed(() => {
-        if (!this.s.netValuePriced()) return '—';
-        const v = this.netUsd();
-        const abs = Math.abs(v);
-        const s = abs >= 100 ? abs.toFixed(0) : abs.toFixed(2);
-        return `${v < 0 ? '−' : '+'}$${s}`;
-    });
-    /** Break-even is reported as break-even, not rounded into a win — once there is a figure. */
-    readonly netIsBreakEven = computed(() => this.s.netValuePriced() && Math.abs(this.netUsd()) < 1);
-    readonly netColor = computed(() =>
-        !this.s.netValuePriced() || this.netIsBreakEven()
-            ? '#8b949e'
-            : this.netUsd() > 0 ? '#3fb950' : '#f85149',
-    );
-    readonly netSub = computed(() => {
-        if (!this.s.netValuePriced()) {
-            return 'Not enough recorded turns yet to price a round, so no net figure is claimed.';
-        }
-        const r = this.s.valueRounds();
-        return `Tokens avoided are worth $${this.s.grossValueUsd().toFixed(2)}; `
-             + `the extra rounds cost $${this.s.roundCostUsd().toFixed(2)}. `
-             + `Assumes a saving keeps paying for ${r} rounds — the figure is most `
-             + `sensitive to that.`;
-    });
-
     /**
      * Wording for the effectiveness claim, qualified when provenance is unknown.
      *
@@ -81,20 +53,11 @@ export class Optimizer implements OnInit {
     readonly rr = inject(RepeatReadsService);
 
     ngOnInit(): void {
-        // Only the badge: this page's own figures already arrive through the daemon
-        // stream, and the fault count is the one thing not on it.
-        this.s.refreshFaultCount();
-        // The repeat reads card says whether the settings file turns them off, so it reads that file.
+        // This page's own figures arrive through the daemon stream, and the navigation reads
+        // the fault count. The repeat reads card says whether the settings file turns them
+        // off, so it reads that file.
         void this.rr.load();
     }
-
-    // ── hero ──────────────────────────────────────────────────────────────────
-
-    /** Effectiveness %, rounded to one decimal. 0 when no data yet (never NaN). */
-    readonly effectPct = computed(() => {
-        const p = this.s.effectivenessPct();
-        return isFinite(p) && p > 0 ? Math.round(p * 10) / 10 : 0;
-    });
 
     /** True once at least one lumen-optimized read has been recorded. */
     readonly hasData = computed(() => this.s.lifetimeOptimizedTokens() > 0);
@@ -126,14 +89,6 @@ export class Optimizer implements OnInit {
             default:
                 return 'Run a task that reads a large file. Use the CLI for full interception.';
         }
-    });
-
-    /** Hero accent color follows the gauge status palette. */
-    readonly heroColor = computed(() => {
-        const p = this.effectPct();
-        if (p >= 80) return 'var(--lumen-ok)';
-        if (p >= 50) return 'var(--lumen-warn)';
-        return 'var(--lumen-text-dim)';
     });
 
     // ── D2: caching savings (REPORTED by Claude Code, NOT caused by Lumen) ────
@@ -169,37 +124,6 @@ export class Optimizer implements OnInit {
         const served = r.unchangedServed + r.deltasServed;
         return { ...r, served, asked: served + r.freshRequests };
     });
-
-    // ── breakdown bar helpers ─────────────────────────────────────────────────
-
-    readonly maxToolSaved = computed(() =>
-        Math.max(1, ...this.s.optimizedByTool().map((r) => r.savedTokens)),
-    );
-
-    readonly maxChanSaved = computed(() =>
-        Math.max(1, ...this.s.optimizedByChannel().map((r) => r.savedTokens)),
-    );
-
-    barPct(val: number, max: number): number {
-        return max > 0 ? Math.round((val / max) * 100) : 0;
-    }
-
-    toolLabel(row: ToolBreakdown): string {
-        switch (row.tool) {
-            case 'mcp__lumen__smart_read':    return 'smart_read';
-            case 'mcp__lumen__recall_file':   return 'recall_file';
-            case 'mcp__lumen__compress_logs': return 'compress_logs';
-            default:                           return row.tool;
-        }
-    }
-
-    chanLabel(row: ChannelBreakdown): string {
-        switch (row.channel) {
-            case 'cli':     return 'CLI (Full mode)';
-            case 'vscode':  return 'VS Code (Soft mode)';
-            default:        return row.channel;
-        }
-    }
 
     // ── formatting ────────────────────────────────────────────────────────────
 

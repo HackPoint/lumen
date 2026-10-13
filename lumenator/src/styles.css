@@ -145,11 +145,10 @@ body {
   opacity: 1;
 }
 
-/* Fault badge on the Hotspots nav tab.
-   Global rather than per-component: three pages render the same tab-nav markup and
-   each duplicates its styles, so a component copy would need to be a fourth. Angular
-   scopes component CSS, so a copy in hotspots.css could never reach home or optimizer
-   — which is exactly the bug this placement avoids. */
+/* Fault badge on the Settings nav tab, where Report a fault is.
+   Global, like the rest of the nav: the nav is its own component (lumen-tab-nav) and
+   the badge sits inside it, and Angular scopes component CSS, so a copy in a page's
+   stylesheet could never reach it — the bug the nav rules below were moved here for. */
 .tab-nav__badge {
   display: inline-block;
   margin-left: 0.3rem;
@@ -225,8 +224,10 @@ body {
     font-size: 0.82rem;
 }
 
-/* ── tab nav (Context ↔ Optimizer) ── */
+/* ── tab nav (Home · Optimizer · Details · Why · Settings) ──
+   Centred on its own, so a route that stretches its column (Why) keeps the nav a pill. */
 .tab-nav {
+    align-self: center;
     display: flex;
     gap: 0;
     background: var(--lumen-bg-secondary);
@@ -237,7 +238,7 @@ body {
 }
 
 .tab-nav__tab {
-    padding: 0.38rem 1.1rem;
+    padding: 0.38rem 0.9rem;
     border-radius: 999px;
     font-family: var(--lumen-font-sans);
     font-size: 0.8rem;

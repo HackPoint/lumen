@@ -1,14 +1,12 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, computed, inject, signal } from '@angular/core';
-import { RouterLink, RouterLinkActive, Router } from '@angular/router';
-import { Gauge } from '../../components/gauge/gauge';
-import { Cost } from '../../components/cost/cost';
-import { Usage } from '../../components/usage/usage';
+import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
+import { Router } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
 import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identity-hook-prompt';
-import { SessionService } from '../../session.service';
+import { BillingPrompt } from '../../components/billing-prompt/billing-prompt';
+import { TabNav } from '../../components/tab-nav/tab-nav';
+import { SavingsHeadline, SavingsSummary } from '../../components/savings-headline/savings-headline';
 import { RepeatReadsService } from '../../repeat-reads.service';
 import { TauriBridge } from '../../tauri-bridge';
-import { LumenTooltip } from '../../directives/tooltip.directive';
 
 /** Mirrors the `lumen_startup_health` command's payload. */
 interface StartupHealth {
@@ -19,15 +17,24 @@ interface StartupHealth {
     restored?: string[];
 }
 
+/**
+ * The main window's first screen, which answers three questions only: how much Lumen saved, is
+ * it working, and what to do.
+ *
+ * Everything else that used to be here has a place of its own since 1.9.0: the context gauge
+ * and its window selector are on Details, with the alert banner that describes them; the spend
+ * figures, the alert thresholds, the Repeat reads switch and About are on Settings. Each answers
+ * a question about Claude Code or about Lumen's configuration, not about savings.
+ */
 @Component({
     selector: 'home',
-    imports: [RouterLink, RouterLinkActive, Gauge, Cost, Usage, Firefly, IdentityHookPrompt, LumenTooltip],
+    imports: [Firefly, IdentityHookPrompt, BillingPrompt, TabNav, SavingsHeadline],
     templateUrl: './home.html',
     styleUrl: './home.css',
     changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class Home implements OnInit {
-    readonly s = inject(SessionService);
+    /** The switch the identity hook prompt reads; this page loads it, as the prompt expects. */
     readonly rr = inject(RepeatReadsService);
     private readonly router = inject(Router);
     private readonly bridge = inject(TauriBridge);
@@ -60,11 +67,17 @@ export class Home implements OnInit {
      */
     readonly version = signal<string | null>(null);
 
-    /** Set when the runtime could not say, so the About section says so rather than staying blank. */
-    readonly versionFailed = signal(false);
+    /**
+     * True once the backend has said Setup is done. The billing question waits for it: it is
+     * asked after Setup and never instead of it, and an answer that cannot be had keeps it away.
+     */
+    readonly setupDone = signal(false);
 
-    /** The About section's value: the version, `unavailable` once reading it has failed, else empty. */
-    readonly aboutVersion = computed(() => this.version() ?? (this.versionFailed() ? 'unavailable' : ''));
+    /**
+     * What the headline shows. Nothing computes a summary yet, so it stays null and the headline
+     * renders nothing; the savings engine sets it.
+     */
+    readonly savings = signal<SavingsSummary | null>(null);
 
     ngOnInit(): void {
         // Subscribed before the first read. A reason that arrives later, such as the tray checks
@@ -75,17 +88,19 @@ export class Home implements OnInit {
         this.readHealth();
         this.readVersion();
         this.bridge.invoke<boolean>('lumen_setup_needed')
-            .then(needed => { if (needed) this.router.navigate(['/setup']); })
+            .then(needed => {
+                if (needed) this.router.navigate(['/setup']);
+                else if (needed === false) this.setupDone.set(true);
+            })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });
-        this.s.refreshFaultCount();
         void this.rr.load();
     }
 
     private readVersion(): void {
         this.bridge.getVersion()
             .then(v => this.version.set(v))
-            // Non-fatal, and said so in the About section instead of faking a number.
-            .catch(() => this.versionFailed.set(true));
+            // Non-fatal: the header leaves the line out, and Settings' About says it is unavailable.
+            .catch(() => { /* nothing to show here */ });
     }
 
     private readHealth(): void {
@@ -95,50 +110,5 @@ export class Home implements OnInit {
                 if (h?.restored?.length) this.restored.set(h.restored);
             })
             .catch(() => { /* non-fatal: an older backend simply has no such command */ });
-    }
-
-    /** Explains which session the gauge is following, and that others exist. */
-    readonly projectHint = computed(() => {
-        const n = this.s.sessionCount();
-        return n > 1
-            ? `Showing the most recently active of ${n} sessions: ${this.s.project()}. `
-              + 'The gauge and the cost below both follow whichever window you are '
-              + 'working in, so they always describe the same session.'
-            : `Project: ${this.s.project()}`;
-    });
-
-    readonly activeIndex = computed(() => {
-        const i = this.s.windowOptions.findIndex((o) => o.value === this.s.contextOverride());
-        return i < 0 ? 0 : i;
-    });
-
-    // D4: unwrap number inputs for threshold settings.
-    onDailyLimit(e: Event): void {
-        const v = +(e.target as HTMLInputElement).value;
-        if (v >= 0) this.s.setDailyLimit(v);
-    }
-
-    onSessionLimit(e: Event): void {
-        const v = +(e.target as HTMLInputElement).value;
-        if (v >= 0) this.s.setSessionLimit(v);
-    }
-
-    // D5: toggle native OS notifications.
-    onNativeNotify(e: Event): void {
-        this.s.setNativeNotify((e.target as HTMLInputElement).checked);
-    }
-
-    async onRepeatReads(e: Event): Promise<void> {
-        const box = e.target as HTMLInputElement;
-        // Left enabled while it writes: a disabled box would drop the keyboard focus it holds.
-        if (this.rr.saving()) {
-            box.checked = !box.checked;
-            return;
-        }
-        const took = await this.rr.set(box.checked);
-        // A click flips the box by itself, and the binding writes it back only when the
-        // stored value changed, so a write that did not take has to put it back here.
-        const now = this.rr.setting();
-        if (!took && now) box.checked = now.on;
     }
 }

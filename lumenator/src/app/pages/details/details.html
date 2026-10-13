@@ -1,0 +1,154 @@
+<main class="home">
+    <div class="home__inner">
+        <header class="home__head">
+            <lumen-firefly class="home__logo" mode="logo" state="full"></lumen-firefly>
+            <p class="brand__tag">Context &amp; cost for Claude Code</p>
+        </header>
+
+        <lumen-tab-nav />
+
+        <!-- ── Claude Code's context window ── -->
+        <section class="details__section" aria-labelledby="context-title">
+            <h2 class="details__title" id="context-title">Context window</h2>
+
+            <div
+                class="segmented"
+                role="tablist"
+                aria-label="Context window"
+                [style.--seg-count]="s.windowOptions.length"
+                [style.--seg-index]="activeIndex()">
+                <span class="segmented__thumb" aria-hidden="true"></span>
+                @for (opt of s.windowOptions; track opt.label) {
+                    <button
+                        type="button"
+                        role="tab"
+                        class="segmented__opt"
+                        [class.is-active]="s.contextOverride() === opt.value"
+                        [attr.aria-selected]="s.contextOverride() === opt.value"
+                        (click)="s.setWindow(opt.value)">
+                        {{ opt.label }}
+                    </button>
+                }
+            </div>
+
+            <!-- Context and spend alerts. The native notifications fire whichever screen is open;
+                 this is the in-window copy, beside the gauge most of them describe. -->
+            @if (s.notification(); as note) {
+                <div class="banner" [attr.data-level]="note.level" role="status">
+                    <span class="banner__dot"></span>
+                    <span class="banner__text">{{ note.text }}</span>
+                </div>
+            }
+
+            <div class="gauge-stage">
+                <gauge [fill]="s.fill()" [model]="s.model()" [max]="s.maxContext()"></gauge>
+                <!-- Which session the gauge is following. Only worth the space when
+                     the answer is not obvious. -->
+                @if (s.project()) {
+                    <div class="gauge-stage__project" [lumenTooltip]="projectHint()">
+                        {{ s.project() }}
+                        @if (s.sessionCount() > 1) {
+                            <span class="gauge-stage__count">+{{ s.sessionCount() - 1 }} more</span>
+                        }
+                    </div>
+                }
+            </div>
+        </section>
+
+        <!-- ── How the optimizer's figures are made ── -->
+        <section class="details__section" aria-labelledby="optimizer-title">
+            <h2 class="details__title" id="optimizer-title">Optimizer</h2>
+
+            @if (hasData()) {
+                <!-- The token ratio. An input to what a read is worth, not a result: a smaller
+                     reply that forces another round can still cost more than it saved. -->
+                <p class="effect">
+                    Intercepted reads returned
+                    <strong class="effect__pct">{{ effectPct() }}% fewer tokens</strong>
+                    than the files they read, across every one recorded.
+                </p>
+
+                <dl class="provenance" aria-label="Token provenance">
+                    <div class="provenance__row">
+                        <dt>
+                            Metered events
+                            <button class="info-btn" type="button"
+                                    [lumenTooltip]="'Rows in the ledger that carry a token count: Lumen tool calls and built-in Read events.'">ⓘ</button>
+                        </dt>
+                        <dd class="provenance__val">{{ fmtTokens(s.provenanceTotalRows()) }}</dd>
+                    </div>
+                    <div class="provenance__row">
+                        <dt>With unverified token provenance</dt>
+                        <dd class="provenance__val">{{ fmtTokens(s.unverifiedProvenanceRows()) }}</dd>
+                    </div>
+                </dl>
+                <!-- Before 1.1.5 a dead tokenizer path made the metering hook substitute bytes/4
+                     in silence, and until 1.6.0 it still could, saying so. Reads of images carry
+                     no count and are in neither figure. -->
+                @if (s.unverifiedProvenanceRows() > 0) {
+                    <p class="provenance__warn">
+                        {{ fmtTokens(s.unverifiedProvenanceRows()) }} of
+                        {{ fmtTokens(s.provenanceTotalRows()) }} metered events have
+                        unverified token provenance — estimated by a hook before 1.6.0,
+                        or recorded before Lumen tracked whether a count was measured
+                        or estimated. See the 1.1.5 release notes.
+                    </p>
+                }
+            } @else {
+                <p class="details__empty">No optimizer events recorded yet.</p>
+            }
+        </section>
+
+        <!-- ── Breakdown by tool ── -->
+        @if (s.optimizedByTool().length > 0) {
+            <section class="breakdown" aria-label="Savings by tool">
+                <h2 class="breakdown__title">
+                    By tool
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'Tokens saved by each Lumen tool. Only reads routed through Lumen\'s tools are counted.'">ⓘ</button>
+                </h2>
+                <div class="breakdown__rows">
+                    @for (row of s.optimizedByTool(); track row.tool) {
+                        <div class="breakdown__row">
+                            <span class="breakdown__name">{{ toolLabel(row) }}</span>
+                            <div class="breakdown__bar-wrap" aria-hidden="true">
+                                <div class="breakdown__bar"
+                                     [style.width.%]="barPct(row.savedTokens, maxToolSaved())">
+                                </div>
+                            </div>
+                            <span class="breakdown__count">
+                                {{ fmtTokens(row.savedTokens) }} tok · {{ row.calls }} call{{ row.calls === 1 ? '' : 's' }}
+                            </span>
+                        </div>
+                    }
+                </div>
+            </section>
+        }
+
+        <!-- ── Breakdown by channel ── -->
+        @if (s.optimizedByChannel().length > 0) {
+            <section class="breakdown" aria-label="Savings by channel">
+                <h2 class="breakdown__title">
+                    By channel
+                    <button class="info-btn" type="button"
+                            [lumenTooltip]="'CLI (Full mode) = reads intercepted by hook. VS Code (Soft mode) = Lumen tools available but not enforced.'">ⓘ</button>
+                </h2>
+                <div class="breakdown__rows">
+                    @for (row of s.optimizedByChannel(); track row.channel) {
+                        <div class="breakdown__row">
+                            <span class="breakdown__name">{{ chanLabel(row) }}</span>
+                            <div class="breakdown__bar-wrap" aria-hidden="true">
+                                <div class="breakdown__bar"
+                                     [style.width.%]="barPct(row.savedTokens, maxChanSaved())">
+                                </div>
+                            </div>
+                            <span class="breakdown__count">
+                                {{ fmtTokens(row.savedTokens) }} tok · {{ row.calls }} call{{ row.calls === 1 ? '' : 's' }}
+                            </span>
+                        </div>
+                    }
+                </div>
+            </section>
+        }
+    </div>
+</main>

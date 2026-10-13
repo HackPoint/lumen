@@ -23,12 +23,13 @@ It watches your session files locally and surfaces things Claude Code doesn't sh
 
 | Signal | Where it appears |
 | --- | --- |
-| **Context fill** — tokens used / window size, live | Menu-bar icon · tray popover · main window gauge |
-| **Compaction warning** — amber at 80%, red at 95% | Tray popover · OS notification |
-| **Session cost** — input + output + cache tokens, priced | Main window cost tiles |
+| **What Lumen saved** — tokens and dollars, net, this week and all time | Home, at the top (from 1.9.0; until the savings summary lands it shows nothing rather than a guess) |
+| **Context fill** — tokens used / window size, live | Menu-bar icon · tray popover · Details screen gauge |
+| **Compaction warning** — amber at 80%, red at 95% | Tray popover · OS notification · Details screen |
+| **Session cost** — input + output + cache tokens, priced | Tray popover · Settings screen, beside the spend alerts |
 | **Caching savings** — what Claude Code's cache actually saved | Optimizer screen (labeled "reported by Claude Code") |
-| **Net value of interception** — tokens saved, priced, less the round they cost | Optimizer screen hero metric |
-| **Context hotspots** — which files your context actually goes into | Hotspots screen |
+| **Lumen optimized** — tokens Lumen's tools kept out of context, with the token ratio and per-tool breakdowns | Optimizer screen · Details screen |
+| **What to do** — files read in full again and again, and what to change | Why screen, shown in the window's tabs only while there is something to act on |
 
 No account, and no telemetry: none of the above leaves your machine. Lumen makes two
 network requests in total, both described under [Security & privacy](#security--privacy)
@@ -203,7 +204,15 @@ on macOS, wherever your desktop puts indicators on Linux and Windows.
 | Action | Result |
 | --- | --- |
 | **Left-click** the tray icon | Quick popover — context gauge, current cost, mode badge |
-| **Right-click** → "Open Lumen" | Full window with **Context** and **Optimizer** tabs |
+| **Right-click** → "Open Lumen" | Full window with **Home**, **Optimizer**, **Details** and **Settings** tabs, and **Why** when it has something to say |
+
+Home answers three questions: how much Lumen saved, whether it is working, and what to do.
+Every other figure is on Details (the context gauge, the token ratio, the breakdowns) or
+Settings (spend and its alert thresholds, the Repeat reads switch, billing mode, Report a
+fault, the version). After Setup, Home asks once how you pay for Claude Code — a
+subscription (Pro/Max) or the API, per token — because that decides what a saving is
+worth to you; change it later on Settings. The answer is kept as `billing_mode` in
+`lumen_settings.json`, beside `repeat_reads`.
 
 The tray icon pulses with ring animations; its color reflects context fill status
 (green → amber at 80% → red at 95%).
@@ -212,8 +221,8 @@ The tray icon pulses with ring animations; its color reflects context fill statu
 
 ## How to run the CLI (`lumen`)
 
-The `lumen` terminal command is a **live dashboard** — the same data as the GUI,
-rendered in your terminal.
+The `lumen` terminal command prints one headline line; `lumen dash` is the **live
+dashboard** — the same data as the GUI, rendered in your terminal.
 
 > **Correction.** Earlier versions of this document said hooks fire only in the
 > Claude Code CLI and not in the VS Code extension, and built a "Full mode vs Soft
@@ -242,9 +251,21 @@ Open Lumen → click **"Install CLI"** — this symlinks the bundled binary into
 ### Run
 
 ```bash
-lumen          # live terminal dashboard
-# Press q or Ctrl-C to quit
+lumen          # one line: what Lumen saved (a placeholder until the savings summary lands),
+               # naming lumen report and lumen dash
+lumen dash     # live terminal dashboard; --no-anim turns the ring animation off
+               # press q or Ctrl-C to quit; piped, it prints one line and exits
+lumen report   # the savings in detail (a placeholder until the savings summary lands)
+lumen faults   # render a fault report, and file it with --yes (see Filing a fault report)
+lumen doctor   # everything a bug report needs, in one paste
+lumen show     # ask a running Lumen to show its window (macOS)
 ```
+
+Until 1.9.0 bare `lumen` was the dashboard and `lumen report` was the fault report. Both old
+spellings still work: `lumen --no-anim` opens the dashboard, and `lumen report` with any of the
+fault report's flags (`--dry-run`, `--yes`, `--repo`, `--include-source`, `--faults`) runs
+`lumen faults`. Each says so in one line on stderr, as does `--no-anim` given to any command
+but `lumen dash`, where it does nothing.
 
 The dashboard reads from the same local SQLite database as the GUI. It works best
 with the Lumen daemon running (the GUI starts the daemon automatically); if the daemon
@@ -263,7 +284,17 @@ is not running, the CLI falls back to polling the database directly.
 Every number in Lumen comes from your local session files or is computed locally.
 Here is what each one means, where it comes from, and any honesty caveat.
 
-### Context tab
+### Home
+
+The top of Home is the savings headline: tokens saved and dollars saved, net and signed, this
+week and all time. A period that cost more than it saved shows as a loss. Until the savings
+summary lands it shows nothing at all, not a zero, because nothing has computed a figure yet.
+
+### Details and Settings
+
+The context gauge and its window selector are on **Details** (they were the top of the Context
+tab until 1.9.0). The session cost tiles, the usage report and the spend alert thresholds are
+on **Settings**.
 
 #### Context gauge (the ring)
 
@@ -343,10 +374,14 @@ Monday-based week.
 > **Screenshot needed** — `docs/assets/screenshot-optimizer.png`
 > Capture: the Optimizer tab showing effectiveness %, Lumen optimized, Saved by caching, and a by-tool breakdown row.
 
-#### Effectiveness %
+#### Effectiveness % (on Details)
 
-**The optimizer's hero metric is dollars, not the token ratio.** The token ratio was the
-headline until 1.3.1, and it flattered the product. Returning 87% fewer tokens sounds
+**From 1.9.0 the Optimizer screen has no dollar hero.** The net value figure described below
+was taken off it until the savings summary replaces it with its own figures; the token ratio,
+the by-tool and by-channel breakdowns and the provenance counts are on the Details screen.
+
+**Until 1.9.0 the optimizer's hero metric was dollars, not the token ratio.** The token ratio
+was the headline until 1.3.1, and it flattered the product. Returning 87% fewer tokens sounds
 decisive, but an intercepted read also *costs* something — the read was blocked, so the
 model spends an extra round calling a Lumen tool instead. The honest question is whether
 the tokens saved are worth more than the round they cost:
@@ -363,8 +398,8 @@ other input comes from the call itself.
 machine, and it rested on `R`: not derived per call, but one assumed constant, 65 rounds
 (`DEFAULT_ROUNDS_REMAINING` in `crates/lumen-core/src/econ.rs`), and the value side of the
 formula is linear in it. Until `R` is derived per call, a dollar total
-is that assumption multiplied out. The Optimizer screen still computes the figure from your
-own ledger; read it with that in mind. The token ratio beneath it is measured.
+is that assumption multiplied out, which is why 1.9.0 no longer shows it. The token ratio is
+measured.
 
 **Tool calls and built-in `Read` events are measured to the token.**
 
@@ -396,13 +431,13 @@ derived directly from the database — not estimated, not extrapolated.
 Shown alongside "Lumen optimized" for context, but in a clearly separate row.
 See [Saved by caching](#saved-by-caching) above. The two numbers are **never added together.**
 
-#### By tool
+#### By tool (on Details)
 
 A breakdown of Lumen-optimized tokens by which tool produced them:
 `smart_read`, `recall_file`, or `compress_logs`. Useful for understanding which
 reads are being intercepted and which file types are generating the most savings.
 
-#### By channel
+#### By channel (on Details)
 
 Reads intercepted by the PreToolUse hook, in either client. Interception is
 enforced wherever hooks run: a Read of a file over the line threshold is blocked and
@@ -473,13 +508,14 @@ caching savings display.
 
 ## How much you save
 
-The hero metric on the Optimizer screen is the **net dollar value** of interception: what
-the tokens Lumen avoided are worth, less what the extra round cost. It is computed from your
-own ledger with one assumed input, how many rounds a saving keeps paying for, so no figure
-is quoted here; [Effectiveness %](#effectiveness-) says why.
+Until 1.9.0 the hero metric on the Optimizer screen was the **net dollar value** of
+interception: what the tokens Lumen avoided are worth, less what the extra round cost. It was
+computed from your own ledger with one assumed input, how many rounds a saving keeps paying
+for, so no figure is quoted here; [Effectiveness %](#effectiveness--on-details) says why. 1.9.0
+takes it off the screen until the savings summary on Home replaces it.
 
 The token ratio — **84% fewer tokens per intercepted read** on the author's machine — is
-shown underneath it. It is real and measured to the token, but on its own it is not a
+on the Details screen. It is real and measured to the token, but on its own it is not a
 result: a smaller reply that forces a second round is a loss however good the ratio looks.
 
 Every intercepted read reports `full_tokens` vs `returned_tokens`, counted with the
@@ -550,8 +586,8 @@ The `lumen` server should appear as Connected.
 
 ### The Optimizer screen shows data
 
-After any session where Claude reads a large file via a Lumen tool, the effectiveness
-ratio and token counts appear on the Optimizer tab.
+After any session where Claude reads a large file via a Lumen tool, the token counts appear
+on the Optimizer tab, and the effectiveness ratio on the Details tab.
 
 ### Trigger an interception (Full mode / CLI)
 
@@ -635,7 +671,7 @@ Claude with no way to read the file at all:
   a hook lets through a read it would have redirected, loses an event it should have
   metered, or a tool call crashes and is answered with an error. It contains the file path,
   its line count, what went wrong, and the session id
-  — **never file contents**. `lumen report` reads these; nothing is sent anywhere unless
+  — **never file contents**. `lumen faults` reads these; nothing is sent anywhere unless
   you explicitly file a report. Set `LUMEN_CAPTURE=0` to keep the hooks and record nothing.
 
 If `lumen-mcp` is gone — Lumen moved or removed — both scripts let the event through, say
@@ -673,8 +709,9 @@ With that set, Lumen makes no unprompted network request of any kind.
 **→ [Filing a fault report](docs/filing-a-fault-report.md)** walks through it with
 screenshots. The short version:
 
-Nothing is sent until you ask for it — via `lumen report --yes`, or the **File issue**
-button under **Report a fault** on the Hotspots screen. You see the exact text first,
+Nothing is sent until you ask for it — via `lumen faults --yes` (`lumen report --yes`
+before 1.9.0, which still works), or the **File issue** button under **Report a fault** on the
+Settings screen. You see the exact text first,
 and it is the text that gets sent; it is never re-generated at send time.
 
 `lumen` comes from the `lumen-cli` formula; a cask-only install leaves it off your `PATH`.
@@ -748,7 +785,7 @@ Claude Code already dedups it. It was an opt-in flag in 1.7.0 (`LUMEN_REPEAT_REA
 
 **Turning it off.** Any of these, and the environment variable wins when it says something:
 
-- the **Repeat reads** switch on the Context tab of the Lumen app's main window. It writes the
+- the **Repeat reads** switch on the Settings screen of the Lumen app's main window. It writes the
   settings file below, so a change applies to the next Lumen read in every running Claude Code
   session, with no restart, and it is still there after Lumen or Claude Code restarts.
 - the environment variable, in the `env` block of `~/.claude/settings.json` (or wherever Claude
@@ -777,7 +814,7 @@ stub text names `fresh=true` and the server honours it whether or not it was adv
 A value that cannot be told is never guessed at: an unrecognised `LUMEN_REPEAT_READS`, or a
 settings file that is not valid JSON, is not a boolean or cannot be read, turns repeat reads
 **off** (every answer in full), is recorded as a `repeat_reads_config` fault (the app's fault
-count and `lumen report` pick it up), and `lumen doctor` names it and says what to fix. Write
+count and `lumen faults` pick it up), and `lumen doctor` names it and says what to fix. Write
 the file as UTF-8 **without a byte-order mark**: a BOM, UTF-16 or an empty file is rejected as
 corrupt, which is off plus the fault. A mistyped key (`repeat_read`) is only an unknown key: it
 is ignored and repeat reads stay **on**, so check the state `lumen doctor` prints after editing.
@@ -852,10 +889,10 @@ rate and the `fresh=true` rate are measured live, in the `ab` split.
 
 **What the Optimizer tab shows (1.8.0).** A Repeat reads card, below the other figures, counts
 what repeat reads have done over the ledger's lifetime. It is counted apart from the rest: these
-answers are in none of the token totals (Lumen optimized, Today, This week), the by-tool and
-by-channel breakdowns or the net value, and the card never calls anything a saving. (The
-provenance counts at the top of the tab, how many metered events have unverified token
-provenance, still include these rows: they count every row that carries a token count.)
+answers are in none of the token totals (Lumen optimized, Today, This week) or the by-tool and
+by-channel breakdowns, and the card never calls anything a saving. (The provenance counts on
+the Details tab, how many metered events have unverified token provenance, still include these
+rows: they count every row that carries a token count.)
 
 - *Unchanged answers served* and *Edits served as a delta*: how many repeat reads got the
   one-sentence note and how many got a delta.

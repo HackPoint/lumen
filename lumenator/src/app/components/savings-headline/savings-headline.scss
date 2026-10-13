@@ -1,0 +1,92 @@
+/* No box of its own: with no summary it renders nothing, and a host with a box would still take
+   a gap in Home's column. */
+:host {
+  display: contents;
+}
+
+.headline {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+}
+
+.headline__period {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+}
+
+.headline__label {
+  margin: 0;
+  font-family: var(--lumen-font-sans);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--lumen-text-dim);
+}
+
+.headline__figure {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+/* The two figures are the screen's answer, so they are the boldest thing on it. Monospace and
+   tabular, as money is everywhere else. */
+.headline__tokens,
+.headline__usd {
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--lumen-save);
+}
+
+.headline__tokens {
+  font-size: 1.35rem;
+}
+
+.headline__usd {
+  font-size: 1.15rem;
+}
+
+/* A loss in the alert colour: shown, not softened. */
+.headline__tokens.is-loss,
+.headline__usd.is-loss {
+  color: var(--lumen-alert);
+}
+
+.headline__unit {
+  font-family: var(--lumen-font-sans);
+  font-size: 0.72rem;
+  color: var(--lumen-text-dim);
+}
+
+.headline__tag {
+  padding: 0 0.35rem;
+  border: 1px solid var(--lumen-border);
+  border-radius: 999px;
+  font-family: var(--lumen-font-sans);
+  font-size: 0.6rem;
+  color: var(--lumen-text-dim);
+}
+
+.headline__none {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0.9rem 1rem;
+  font-family: var(--lumen-font-sans);
+  font-size: 0.82rem;
+  color: var(--lumen-text-dim);
+  text-align: center;
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+}

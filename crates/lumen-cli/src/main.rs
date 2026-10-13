@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyModifiers},
@@ -25,59 +25,231 @@ mod ui;
 #[command(
     name = "lumen",
     version,
-    about = "Live Claude Code context + cost monitor"
+    about = "What Lumen saved you, and Claude Code's live context and cost"
 )]
 struct Cli {
-    /// Disable pulse-ring animation
-    #[arg(long)]
+    /// Before 1.9.0 bare `lumen` was the dashboard and this flag went with it. Kept, hidden, so
+    /// an old `lumen --no-anim` still opens the dashboard; the spelling now is
+    /// `lumen dash --no-anim`.
+    #[arg(long, hide = true)]
     no_anim: bool,
 
-    /// Bare `lumen` stays the TUI; a subcommand opts out of it.
+    /// Bare `lumen` prints the headline; each subcommand is one of the views behind it.
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Render a fault report, and optionally file it as a GitHub issue.
-    Report {
-        /// Print the issue body and exit without filing it.
+    /// Live terminal dashboard: context fill, model and cost. Piped, it prints one line.
+    Dash {
+        /// Disable pulse-ring animation
         #[arg(long)]
-        dry_run: bool,
-        /// Render this fault fixture instead of the database. Kept permanently: it is
-        /// how the renderer is snapshot-tested without standing up a database.
-        #[arg(long, value_name = "FILE")]
-        faults: Option<PathBuf>,
-        /// Embed the contents of affected in-workspace files. Prints a manifest of
-        /// exactly what will be embedded first.
-        #[arg(long)]
-        include_source: bool,
-        /// Issue tracker to file against.
-        #[arg(long, default_value = report::DEFAULT_REPO)]
-        repo: String,
-        /// Required to actually file. Without it, filing stops after the preview.
-        #[arg(long)]
-        yes: bool,
+        no_anim: bool,
     },
+    /// What Lumen saved, in detail. A placeholder until the savings engine lands.
+    Report {
+        #[command(flatten)]
+        legacy: LegacyFaultFlags,
+    },
+    /// Render a fault report, and optionally file it as a GitHub issue.
+    Faults(FaultArgs),
     /// Ask a running Lumen to show its window — a way in when the menu-bar icon is missing.
     Show,
     /// Print everything a bug report needs: status-item preferences, processes, paths, logs.
     Doctor,
 }
 
+/// The fault report's flags.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+struct FaultArgs {
+    /// Print the issue body and exit without filing it.
+    #[arg(long)]
+    dry_run: bool,
+    /// Render this fault fixture instead of the database. Kept permanently: it is
+    /// how the renderer is snapshot-tested without standing up a database.
+    #[arg(long, value_name = "FILE")]
+    faults: Option<PathBuf>,
+    /// Embed the contents of affected in-workspace files. Prints a manifest of
+    /// exactly what will be embedded first.
+    #[arg(long)]
+    include_source: bool,
+    /// Issue tracker to file against.
+    #[arg(long, default_value = report::DEFAULT_REPO)]
+    repo: String,
+    /// Required to actually file. Without it, filing stops after the preview.
+    #[arg(long)]
+    yes: bool,
+}
+
+/// The fault report's flags as `lumen report` took them until 1.9.0, when the fault report
+/// moved to `lumen faults`.
+///
+/// Accepted and hidden rather than refused: they are in shell history, in docs written before
+/// 1.9.0 and in an older plugin's `/lumen-report` command, and a fault report that stops
+/// working is the one a user will not find out about until they need it. `repo` has no default
+/// here, so a given `--repo` can be told apart from none.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+struct LegacyFaultFlags {
+    #[arg(long, hide = true)]
+    dry_run: bool,
+    #[arg(long, hide = true, value_name = "FILE")]
+    faults: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    include_source: bool,
+    #[arg(long, hide = true)]
+    repo: Option<String>,
+    #[arg(long, hide = true)]
+    yes: bool,
+}
+
+impl LegacyFaultFlags {
+    /// The fault report these flags ask for, or `None` when no fault flag was given, which is
+    /// the new `lumen report`.
+    fn into_fault_args(self) -> Option<FaultArgs> {
+        let LegacyFaultFlags {
+            dry_run,
+            faults,
+            include_source,
+            repo,
+            yes,
+        } = self;
+        if !(dry_run || faults.is_some() || include_source || repo.is_some() || yes) {
+            return None;
+        }
+        Some(FaultArgs {
+            dry_run,
+            faults,
+            include_source,
+            repo: match repo {
+                Some(r) => r,
+                None => report::DEFAULT_REPO.to_string(),
+            },
+            yes,
+        })
+    }
+}
+
+/// What a command line asks for, decided before anything runs so the routing is testable
+/// without a terminal, a ledger or a network.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// Bare `lumen`: the one headline line.
+    Headline,
+    /// The dashboard. `moved` is set for the pre-1.9.0 spelling, bare `lumen --no-anim`.
+    Dash {
+        no_anim: bool,
+        moved: bool,
+    },
+    /// `lumen report` with no fault flag: the savings detail.
+    SavingsDetail,
+    /// The fault report. `moved` is set for the pre-1.9.0 spelling, `lumen report <flags>`.
+    Faults {
+        args: FaultArgs,
+        moved: bool,
+    },
+    Show,
+    Doctor,
+}
+
+fn route(cli: Cli) -> Route {
+    match cli.cmd {
+        None if cli.no_anim => Route::Dash {
+            no_anim: true,
+            moved: true,
+        },
+        None => Route::Headline,
+        Some(Cmd::Dash { no_anim }) => Route::Dash {
+            no_anim: no_anim || cli.no_anim,
+            moved: false,
+        },
+        Some(Cmd::Report { legacy }) => match legacy.into_fault_args() {
+            Some(args) => Route::Faults { args, moved: true },
+            None => Route::SavingsDetail,
+        },
+        Some(Cmd::Faults(args)) => Route::Faults { args, moved: false },
+        Some(Cmd::Show) => Route::Show,
+        Some(Cmd::Doctor) => Route::Doctor,
+    }
+}
+
+/// The one line bare `lumen` prints.
+///
+/// A placeholder until the savings engine lands. The engine replaces this function's body and
+/// nothing else prints a headline, so the line cannot say one thing here and another elsewhere.
+/// It claims no figure, because nothing has computed one yet. It names `lumen dash` because
+/// until 1.9.0 bare `lumen` was the dashboard, and someone who typed it for that has to be told
+/// where it went.
+fn headline_line() -> String {
+    "Lumen: no savings computed yet (lumen report for detail, lumen dash for the live dashboard)"
+        .to_string()
+}
+
+/// What `lumen report` prints until the savings engine lands: a stub, and it says so, with
+/// where the two things it and bare `lumen` used to show have gone.
+fn savings_detail() -> String {
+    "lumen report: the savings detail is not computed yet. This command is a placeholder \
+     until Lumen's savings engine lands.\n\
+     The fault report moved to `lumen faults` (see `lumen faults --help`), and the live \
+     dashboard to `lumen dash`.\n"
+        .to_string()
+}
+
+/// True when `--no-anim` was given to a command it does nothing for. Said rather than ignored,
+/// as the moved spellings are, so a flag that has stopped mattering does not look like it works.
+fn stray_no_anim(cli: &Cli) -> bool {
+    cli.no_anim && !matches!(cli.cmd, None | Some(Cmd::Dash { .. }))
+}
+
 fn main() {
     let cli = Cli::parse();
-
-    // Before the TTY branch below, not after: `lumen report > issue.md` has a non-TTY
-    // stdout, and would otherwise print the one-shot gauge line instead of the report.
-    if let Some(cmd) = cli.cmd {
-        std::process::exit(run_subcommand(cmd));
+    if stray_no_anim(&cli) {
+        eprintln!("lumen: --no-anim only changes `lumen dash`, so it does nothing here");
     }
+    let code = match route(cli) {
+        Route::Headline => {
+            println!("{}", headline_line());
+            0
+        }
+        Route::SavingsDetail => {
+            print!("{}", savings_detail());
+            0
+        }
+        // Decided by the command, never by the terminal: `lumen faults > issue.md` has a
+        // non-TTY stdout, and only the dashboard trades itself for a one-shot line then.
+        Route::Faults { args, moved } => {
+            if moved {
+                eprintln!(
+                    "lumen: the fault report is now `lumen faults`; `lumen report` with its \
+                     flags still runs it"
+                );
+            }
+            run_faults(args)
+        }
+        Route::Show => doctor::show(),
+        Route::Doctor => {
+            print!("{}", doctor::render(&doctor::collect()));
+            0
+        }
+        Route::Dash { no_anim, moved } => {
+            if moved {
+                eprintln!(
+                    "lumen: the dashboard is now `lumen dash`; running `lumen dash --no-anim`"
+                );
+            }
+            dash(no_anim)
+        }
+    };
+    std::process::exit(code);
+}
 
+/// The terminal dashboard, or its one-shot line when stdout is not a terminal. Returns the
+/// process exit code.
+fn dash(no_anim: bool) -> i32 {
     // Piped output → one-shot plain text + exit 0
     if !io::stdout().is_tty() {
         oneshot_print();
-        return;
+        return 0;
     }
 
     setup_panic_hook();
@@ -93,15 +265,16 @@ fn main() {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let result = run_loop(&mut terminal, &state, cli.no_anim);
+    let result = run_loop(&mut terminal, &state, no_anim);
 
     let _ = terminal::disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
 
     if let Err(e) = result {
         eprintln!("lumen: {e}");
-        std::process::exit(1);
+        return 1;
     }
+    0
 }
 
 // ratatui 0.30 gave `Backend` an associated `Error` type, so the backend's error
@@ -135,31 +308,17 @@ where
     }
 }
 
-/// Returns the process exit code.
-fn run_subcommand(cmd: Cmd) -> i32 {
-    match cmd {
-        Cmd::Report {
-            dry_run,
-            faults,
-            include_source,
-            repo,
-            yes,
-        } => run_report(dry_run, faults, include_source, &repo, yes),
-        Cmd::Show => doctor::show(),
-        Cmd::Doctor => {
-            print!("{}", doctor::render(&doctor::collect()));
-            0
-        }
-    }
-}
-
-fn run_report(
-    dry_run: bool,
-    fixture: Option<PathBuf>,
-    include_source: bool,
-    repo: &str,
-    yes: bool,
-) -> i32 {
+/// `lumen faults`: render the fault report, and file it only with `--yes`. Returns the process
+/// exit code.
+fn run_faults(args: FaultArgs) -> i32 {
+    let FaultArgs {
+        dry_run,
+        faults: fixture,
+        include_source,
+        repo,
+        yes,
+    } = args;
+    let repo = repo.as_str();
     let loaded = match &fixture {
         Some(p) => report::load_faults(p),
         None => open_db().and_then(|c| report::load_faults_from_db(&c)),
@@ -167,7 +326,7 @@ fn run_report(
     let faults = match loaded {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("lumen report: {e}");
+            eprintln!("lumen faults: {e}");
             return 1;
         }
     };
@@ -180,9 +339,9 @@ fn run_report(
     if include_source {
         let manifest = report::source_manifest(&faults, &env);
         if manifest.is_empty() {
-            eprintln!("lumen report: --include-source matched no in-workspace file");
+            eprintln!("lumen faults: --include-source matched no in-workspace file");
         } else {
-            eprintln!("lumen report: --include-source will embed these files verbatim:");
+            eprintln!("lumen faults: --include-source will embed these files verbatim:");
             for (label, bytes) in manifest {
                 eprintln!("  {label} ({bytes} bytes)");
             }
@@ -190,7 +349,7 @@ fn run_report(
     }
 
     let Some(body) = report::render(&faults, &env, &opts) else {
-        eprintln!("lumen report: no faults recorded — nothing to report");
+        eprintln!("lumen faults: no faults recorded — nothing to report");
         return 0;
     };
 
@@ -204,7 +363,7 @@ fn run_report(
     if !yes {
         print!("{body}");
         eprintln!(
-            "\nlumen report: not filed. Re-run with --yes to file against {repo}, \
+            "\nlumen faults: not filed. Re-run with --yes to file against {repo}, \
              or --dry-run to suppress this notice."
         );
         return 2;
@@ -216,7 +375,7 @@ fn run_report(
             // Every fallback is reported, not just the winner: a run that silently
             // switched routes hides that the preferred one is broken.
             for step in &filing.fell_back {
-                eprintln!("lumen report: {step}");
+                eprintln!("lumen faults: {step}");
             }
             match filing.outcome {
                 report::Filed::Created(url) => println!("opened {url} (via {})", filing.route),
@@ -233,13 +392,13 @@ fn run_report(
             0
         }
         Err(e) => {
-            eprintln!("lumen report: {e}");
+            eprintln!("lumen faults: {e}");
             1
         }
     }
 }
 
-/// Open the metering database read-write: `report` drains the fault spool into it.
+/// Open the metering database read-write: `faults` drains the fault spool into it.
 fn open_db() -> Result<rusqlite::Connection, String> {
     let path = lumen_core::meter::db_path()
         .ok_or_else(|| "cannot resolve a database path; set LUMEN_DB".to_string())?;
@@ -264,4 +423,210 @@ fn setup_panic_hook() {
         let _ = execute!(io::stderr(), LeaveAlternateScreen, cursor::Show);
         original(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routed(args: &[&str]) -> Route {
+        let argv = std::iter::once("lumen").chain(args.iter().copied());
+        route(Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?}: {e}")))
+    }
+
+    fn fault_args(over: impl FnOnce(&mut FaultArgs)) -> FaultArgs {
+        let mut a = FaultArgs {
+            dry_run: false,
+            faults: None,
+            include_source: false,
+            repo: report::DEFAULT_REPO.to_string(),
+            yes: false,
+        };
+        over(&mut a);
+        a
+    }
+
+    #[test]
+    fn bare_lumen_is_the_headline() {
+        assert_eq!(routed(&[]), Route::Headline);
+    }
+
+    #[test]
+    fn the_headline_is_one_line_and_claims_no_figure() {
+        let line = headline_line();
+        assert!(!line.contains('\n'), "{line:?}");
+        assert!(!line.chars().any(|c| c.is_ascii_digit()), "{line:?}");
+        assert!(line.contains("lumen report"), "{line:?}");
+        // Bare `lumen` was the dashboard until 1.9.0: the line says where it went.
+        assert!(line.contains("lumen dash"), "{line:?}");
+    }
+
+    #[test]
+    fn the_savings_detail_says_it_is_a_stub_and_where_the_fault_report_went() {
+        let said = savings_detail();
+        assert!(said.contains("placeholder"), "{said}");
+        assert!(said.contains("not computed yet"), "{said}");
+        assert!(said.contains("`lumen faults`"), "{said}");
+        assert!(said.contains("`lumen dash`"), "{said}");
+        assert!(!said.chars().any(|c| c.is_ascii_digit()), "{said}");
+    }
+
+    #[test]
+    fn no_anim_is_said_to_do_nothing_wherever_it_does_nothing() {
+        let parsed = |args: &[&str]| {
+            let argv = std::iter::once("lumen").chain(args.iter().copied());
+            Cli::try_parse_from(argv).unwrap()
+        };
+        for args in [
+            &["--no-anim", "report"][..],
+            &["--no-anim", "faults"][..],
+            &["--no-anim", "doctor"][..],
+        ] {
+            assert!(stray_no_anim(&parsed(args)), "{args:?}");
+        }
+        for args in [
+            &["--no-anim"][..],
+            &["--no-anim", "dash"][..],
+            &["dash", "--no-anim"][..],
+            &["report"][..],
+        ] {
+            assert!(!stray_no_anim(&parsed(args)), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn dash_is_the_dashboard_with_or_without_animation() {
+        assert_eq!(
+            routed(&["dash"]),
+            Route::Dash {
+                no_anim: false,
+                moved: false
+            }
+        );
+        for args in [&["dash", "--no-anim"][..], &["--no-anim", "dash"][..]] {
+            assert_eq!(
+                routed(args),
+                Route::Dash {
+                    no_anim: true,
+                    moved: false
+                },
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_bare_no_anim_still_opens_the_dashboard_and_is_marked_moved() {
+        assert_eq!(
+            routed(&["--no-anim"]),
+            Route::Dash {
+                no_anim: true,
+                moved: true
+            }
+        );
+    }
+
+    #[test]
+    fn report_with_no_flag_is_the_savings_detail() {
+        assert_eq!(routed(&["report"]), Route::SavingsDetail);
+    }
+
+    #[test]
+    fn faults_takes_every_fault_flag() {
+        assert_eq!(
+            routed(&["faults"]),
+            Route::Faults {
+                args: fault_args(|_| {}),
+                moved: false
+            }
+        );
+        assert_eq!(
+            routed(&[
+                "faults",
+                "--dry-run",
+                "--faults",
+                "f.json",
+                "--include-source",
+                "--repo",
+                "o/r",
+                "--yes"
+            ]),
+            Route::Faults {
+                args: fault_args(|a| {
+                    a.dry_run = true;
+                    a.faults = Some(PathBuf::from("f.json"));
+                    a.include_source = true;
+                    a.repo = "o/r".into();
+                    a.yes = true;
+                }),
+                moved: false
+            }
+        );
+    }
+
+    #[test]
+    fn each_old_report_flag_routes_to_faults_as_it_did_and_is_marked_moved() {
+        let cases: [(&[&str], FaultArgs); 5] = [
+            (&["--dry-run"], fault_args(|a| a.dry_run = true)),
+            (
+                &["--faults", "f.json"],
+                fault_args(|a| a.faults = Some(PathBuf::from("f.json"))),
+            ),
+            (
+                &["--include-source"],
+                fault_args(|a| a.include_source = true),
+            ),
+            (&["--repo", "o/r"], fault_args(|a| a.repo = "o/r".into())),
+            (&["--yes"], fault_args(|a| a.yes = true)),
+        ];
+        for (flags, args) in cases {
+            let mut argv = vec!["report"];
+            argv.extend_from_slice(flags);
+            assert_eq!(
+                routed(&argv),
+                Route::Faults { args, moved: true },
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_old_report_flags_are_hidden_from_its_help() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("report")
+            .expect("a report subcommand")
+            .render_help()
+            .to_string();
+        for flag in [
+            "--dry-run",
+            "--faults",
+            "--include-source",
+            "--repo",
+            "--yes",
+        ] {
+            assert!(!help.contains(flag), "{flag} shows in:\n{help}");
+        }
+        let help = cmd
+            .find_subcommand_mut("faults")
+            .expect("a faults subcommand")
+            .render_help()
+            .to_string();
+        for flag in [
+            "--dry-run",
+            "--faults",
+            "--include-source",
+            "--repo",
+            "--yes",
+        ] {
+            assert!(help.contains(flag), "{flag} missing from:\n{help}");
+        }
+    }
+
+    #[test]
+    fn show_and_doctor_are_unchanged() {
+        assert_eq!(routed(&["show"]), Route::Show);
+        assert_eq!(routed(&["doctor"]), Route::Doctor);
+    }
 }

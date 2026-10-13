@@ -1,6 +1,7 @@
 import { Observable, Subject } from 'rxjs';
 import type { TauriBridge } from './tauri-bridge';
 import type { RepeatReadsSetting } from './components/index';
+import type { BillingMode, BillingModeSetting } from './billing-mode.service';
 
 /** The command behind `getVersion()` in `@tauri-apps/api/app`. */
 export const APP_VERSION_CMD = 'plugin:app|version';
@@ -62,6 +63,14 @@ export class FakeTauriBridge implements TauriBridge {
 
   setRepeatReadsSetting(on: boolean): Promise<RepeatReadsSetting> {
     return this.invoke<RepeatReadsSetting>('set_repeat_reads_setting', { on });
+  }
+
+  getBillingModeSetting(): Promise<BillingModeSetting> {
+    return this.invoke<BillingModeSetting>('get_billing_mode_setting');
+  }
+
+  setBillingModeSetting(mode: BillingMode): Promise<BillingModeSetting> {
+    return this.invoke<BillingModeSetting>('set_billing_mode_setting', { mode });
   }
 
   isPermissionGranted(): Promise<boolean> {

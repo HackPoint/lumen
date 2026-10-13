@@ -1,7 +1,7 @@
 // The built app, launched through WebDriver, showing a ledger the real lumen-mcp wrote.
 //
 // What the page specs cannot reach: the binary's own startup, whether it opens its window,
-// and the Optimizer and Hotspots screens rendering figures that came out of SQLite through
+// and the Optimizer and Why screens rendering figures that came out of SQLite through
 // the Tauri commands rather than from a test double.
 //
 // After `bash build-sidecar.sh` and `pnpm tauri build --debug --no-bundle`, from lumenator/:
@@ -220,21 +220,22 @@ function builtVersion() {
   return conf;
 }
 
-// How the About section is built: a region named by its heading, the version as the value of a
-// "Version" term, and both places the version is shown actually laid out.
+/** Whether the first element matching the selector is laid out: present, with an area. */
+const LAID_OUT = `
+  const r = document.querySelector(arguments[0])?.getBoundingClientRect();
+  return !!r && r.width > 0 && r.height > 0;`;
+
+// How the About section, on Settings since 1.9.0, is built: a region named by its heading, the
+// version as the value of a "Version" term, and the version actually laid out.
 const ABOUT = `
   const section = document.querySelector('section.about');
   const heading = document.getElementById(section?.getAttribute('aria-labelledby') ?? '');
-  const laidOut = sel => {
-    const r = document.querySelector(sel)?.getBoundingClientRect();
-    return !!r && r.width > 0 && r.height > 0;
-  };
+  const r = document.querySelector('section.about .about__version')?.getBoundingClientRect();
   return {
     heading: heading?.textContent.trim() ?? null,
     term: section?.querySelector('dl > dt')?.textContent.trim() ?? null,
     valueFollowsTerm: section?.querySelector('dl > dt + dd')?.classList.contains('about__version') ?? false,
-    headerLaidOut: laidOut('.home__head .home__version'),
-    aboutLaidOut: laidOut('section.about .about__version'),
+    aboutLaidOut: !!r && r.width > 0 && r.height > 0,
   };`;
 
 // Each banner text against what is behind it, as WCAG computes contrast: the colours as the
@@ -290,16 +291,17 @@ test('a tray that cannot be built leaves the window open, saying so legibly', as
   assert.equal(appLog(sb).match(/FALLBACK: revealed the main window/g)?.length, 1, appLog(sb));
 });
 
-test('the Optimizer and Hotspots screens show what the ledger holds', async t => {
+test('the Optimizer and Why screens show what the ledger holds', async t => {
   const sb = sandbox();
-  smartRead(sb, SETUP_RS);
-  smartRead(sb, SETUP_RS);
+  // Ten reads of an unchanged file is what the Why screen exists to point at (at least ten
+  // reads, half of them unchanged), and what puts it in the window's tabs.
+  for (let i = 0; i < 10; i++) smartRead(sb, SETUP_RS);
   smartRead(sb, LIB_RS);
   const want = ledger(sb.db);
   t.diagnostic(`ledger: ${JSON.stringify(want)}`);
   assert.ok(want.optimized > 0, 'smart_read recorded no saving to show');
   const setup = want.files.find(f => path.basename(f.path) === 'setup.rs');
-  assert.equal(setup?.reads, 2, `ledger rows: ${JSON.stringify(want.files)}`);
+  assert.equal(setup?.reads, 10, `ledger rows: ${JSON.stringify(want.files)}`);
 
   // Simulated so the window is shown and its tabs can be clicked; the screens are the subject.
   await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'err' }, async s => {
@@ -313,7 +315,14 @@ test('the Optimizer and Hotspots screens show what the ledger holds', async t =>
     );
     t.diagnostic(`Optimizer, Lumen optimized: "${shown}"`);
 
-    await s.click('a.tab-nav__tab[href="/hotspots"]');
+    await s.click('a.tab-nav__tab[href="/why"]');
+    const todo = await s.until(
+      'what to do',
+      `const r = [...document.querySelectorAll('.why__item .why__name')].map(n => n.textContent.trim());
+       return r.length ? r : null;`,
+    );
+    t.diagnostic(`Why, what to do: ${JSON.stringify(todo)}`);
+    assert.deepEqual(todo, ['setup.rs']);
     const rows = await s.until(
       'the hotspot rows',
       `const r = [...document.querySelectorAll('.hs__row')].map(r => ({
@@ -323,11 +332,11 @@ test('the Optimizer and Hotspots screens show what the ledger holds', async t =>
        }));
        return r.length ? r : null;`,
     );
-    t.diagnostic(`Hotspots rows: ${JSON.stringify(rows)}`);
-    // setup.rs, twice, outweighs lib.rs once.
+    t.diagnostic(`Why rows: ${JSON.stringify(rows)}`);
+    // setup.rs, ten times, outweighs lib.rs once.
     assert.equal(rows[0].name, 'setup.rs');
     assert.equal(rows[0].title, setup.path);
-    assert.match(rows[0].meta, /^2 reads · [\d,]+ lines · [\d.]+% of all context/);
+    assert.match(rows[0].meta, /^10 reads · [\d,]+ lines · [\d.]+% of all context · 90% unchanged/);
     assert.equal(rows.length, want.files.length);
     const across = await s.run(TEXT, '.hs__stat-sub');
     assert.equal(across, `across ${want.files.length} files`);
@@ -337,15 +346,20 @@ test('the Optimizer and Hotspots screens show what the ledger holds', async t =>
 test('an empty ledger shows the empty states rather than zeros dressed as data', async t => {
   const sb = sandbox();
   await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'err' }, async s => {
+    // Home: no savings figure before anything computes one, and the billing question, since
+    // this sandbox's settings file has no answer.
+    const asked = await s.until('the billing question', TEXT, 15_000, 'lumen-billing-prompt .prompt__head');
+    assert.equal(asked, 'How do you pay for Claude Code?');
+    assert.equal(await s.run('return document.querySelector("lumen-savings-headline")?.childElementCount'), 0);
+
     await s.click('a.tab-nav__tab[href="/optimizer"]');
     const empty = await s.until('the Optimizer empty state', TEXT, 15_000, '.hero__empty-text');
     assert.match(empty, /^No optimizer events recorded yet\./);
     assert.equal(digits(await s.run(TEXT, '.savings-card--caused .savings-card__num')), '0');
 
-    await s.click('a.tab-nav__tab[href="/hotspots"]');
-    const none = await s.until('the Hotspots empty state', TEXT, 15_000, '.hs__empty');
-    assert.match(none, /^No reads recorded yet\./);
-    assert.equal(await s.run('return document.querySelectorAll(".hs__row").length'), 0);
+    // Nothing read, so nothing to act on: Why is not offered at all.
+    await s.until('the Optimizer screen\'s tabs', TEXT, 15_000, 'a.tab-nav__tab[href="/settings"]');
+    assert.equal(await s.run('return document.querySelectorAll(\'a.tab-nav__tab[href="/why"]\').length'), 0);
   });
 });
 
@@ -356,9 +370,13 @@ test('the window shows the version the app was built as, in its header and in Ab
   // for it (`getVersion()`), so what is read here went through the built app, not a test double.
   await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'err' }, async s => {
     const head = await s.until('the version in the header', TEXT, 15_000, '.home__version');
+    assert.equal(head, `Lumen ${want}`);
+    assert.equal(await s.run(LAID_OUT, '.home__head .home__version'), true);
+
+    // About has been on Settings since 1.9.0.
+    await s.click('a.tab-nav__tab[href="/settings"]');
     const about = await s.until('the version in About', TEXT, 15_000, '.about__version');
     t.diagnostic(`built as ${want}; header "${head}", About "${about}"`);
-    assert.equal(head, `Lumen ${want}`);
     assert.equal(about, want);
 
     const a = await s.run(ABOUT);
@@ -366,7 +384,6 @@ test('the window shows the version the app was built as, in its header and in Ab
       heading: 'About',
       term: 'Version',
       valueFollowsTerm: true,
-      headerLaidOut: true,
       aboutLaidOut: true,
     });
   });

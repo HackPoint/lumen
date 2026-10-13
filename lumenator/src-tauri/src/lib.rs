@@ -524,6 +524,8 @@ pub fn run() {
             get_fault_count,
             get_repeat_reads_setting,
             set_repeat_reads_setting,
+            get_billing_mode_setting,
+            set_billing_mode_setting,
             check_for_update,
             file_fault_report,
             show_main_window,
@@ -1042,7 +1044,7 @@ async fn get_fault_count() -> Result<u64, String> {
     .map_err(|e| format!("fault count task failed: {e}"))
 }
 
-/// What the Home window's "Repeat reads" switch shows.
+/// What the Settings screen's "Repeat reads" switch shows.
 ///
 /// The settings file, or the default when there is none, and nothing else. In the MCP server
 /// `LUMEN_REPEAT_READS` outranks the file, but one set in a Claude Code MCP config is not in
@@ -1145,6 +1147,76 @@ async fn set_repeat_reads_setting(on: bool) -> Result<RepeatReadsSetting, String
     tauri::async_runtime::spawn_blocking(move || set_repeat_reads_at(&ledger_path()?, on))
         .await
         .map_err(|e| format!("repeat reads setting task failed: {e}"))?
+}
+
+/// What the Settings screen's Billing mode setting, and Home's first-run question, show.
+///
+/// `mode` is `None` until the user has answered: not asked yet, which the window asks about
+/// rather than guessing. A file that cannot be used, or a value that is not a mode, is `None`
+/// with the reason in `problem`, so the window says what is wrong instead of asking again as if
+/// nothing had been said.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingModeSetting {
+    /// `"subscription"` or `"api"`, as the file spells it.
+    pub mode: Option<&'static str>,
+    /// Why the file's answer could not be used; `None` when it could.
+    pub problem: Option<String>,
+    /// Where the file is (or would be), so the text can name it.
+    pub file: String,
+}
+
+/// [`get_billing_mode_setting`] for a ledger it is given, so a test drives it without
+/// resolving the ledger from the environment.
+fn billing_mode_setting_at(db: &std::path::Path) -> BillingModeSetting {
+    let file = lumen_core::settings::settings_path(db)
+        .display()
+        .to_string();
+    match lumen_core::settings::billing_mode_for(db) {
+        Ok(mode) => BillingModeSetting {
+            mode: mode.map(lumen_core::settings::BillingMode::as_str),
+            problem: None,
+            file,
+        },
+        Err(why) => BillingModeSetting {
+            mode: None,
+            problem: Some(why),
+            file,
+        },
+    }
+}
+
+fn set_billing_mode_at(db: &std::path::Path, mode: &str) -> Result<BillingModeSetting, String> {
+    // Refused before anything is written, so a mistyped value from the window never reaches
+    // the file, where every reader would then have to reject it. Repeated back short, as the
+    // settings file's own bad values are.
+    let mode = lumen_core::settings::BillingMode::parse(mode).ok_or_else(|| {
+        let shown: String = mode.chars().take(64).collect();
+        format!("{shown:?} is not a billing mode: subscription or api")
+    })?;
+    lumen_core::settings::write_billing_mode(db, mode).map_err(|e| {
+        format!(
+            "cannot write {}: {e}",
+            lumen_core::settings::settings_path(db).display()
+        )
+    })?;
+    Ok(billing_mode_setting_at(db))
+}
+
+/// How the user pays for Claude Code, as the settings file has it.
+#[tauri::command]
+async fn get_billing_mode_setting() -> Result<BillingModeSetting, String> {
+    tauri::async_runtime::spawn_blocking(|| ledger_path().map(|db| billing_mode_setting_at(&db)))
+        .await
+        .map_err(|e| format!("billing mode setting task failed: {e}"))?
+}
+
+/// Write the billing mode, then say what the file now holds.
+#[tauri::command]
+async fn set_billing_mode_setting(mode: String) -> Result<BillingModeSetting, String> {
+    tauri::async_runtime::spawn_blocking(move || set_billing_mode_at(&ledger_path()?, &mode))
+        .await
+        .map_err(|e| format!("billing mode setting task failed: {e}"))?
 }
 
 /// Width of the tray popover. Fixed: it is positioned under the tray icon and a varying
@@ -1656,6 +1728,107 @@ mod tests {
         );
     }
 
+    // ── billing mode ─────────────────────────────────────────────────────────
+
+    fn billing(dir: &tempfile::TempDir) -> BillingModeSetting {
+        billing_mode_setting_at(&ledger_in(dir))
+    }
+
+    #[test]
+    fn with_no_settings_file_the_billing_mode_is_not_asked_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            billing(&dir),
+            BillingModeSetting {
+                mode: None,
+                problem: None,
+                file: settings_file(&dir).display().to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn choosing_a_billing_mode_writes_it_and_reads_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        for mode in ["subscription", "api"] {
+            let v = set_billing_mode_at(&ledger_in(&dir), mode).unwrap();
+            assert_eq!((v.mode, v.problem.as_deref()), (Some(mode), None));
+            assert_eq!(billing(&dir).mode, Some(mode), "and a later read sees it");
+        }
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings_file(&dir)).unwrap()).unwrap();
+        assert_eq!(on_disk, serde_json::json!({ "billing_mode": "api" }));
+    }
+
+    #[test]
+    fn choosing_a_billing_mode_leaves_the_repeat_reads_switch_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        set_repeat_reads_at(&ledger_in(&dir), false).unwrap();
+        set_billing_mode_at(&ledger_in(&dir), "subscription").unwrap();
+        assert!(!shown(&dir).on);
+        assert_eq!(shown(&dir).problem, None);
+    }
+
+    #[test]
+    fn a_billing_mode_the_window_should_never_send_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "API", "pro", "max", "subscription "] {
+            let err = set_billing_mode_at(&ledger_in(&dir), bad).unwrap_err();
+            assert!(err.contains("not a billing mode"), "{bad:?}: {err}");
+        }
+        let err = set_billing_mode_at(&ledger_in(&dir), &"x".repeat(10_000)).unwrap_err();
+        assert!(
+            err.len() < 200,
+            "a long value is repeated back short: {err}"
+        );
+        assert!(!settings_file(&dir).exists());
+    }
+
+    #[test]
+    fn a_billing_mode_the_file_cannot_hold_is_shown_as_a_problem_not_as_unasked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), r#"{"billing_mode": "pro"}"#).unwrap();
+        let v = billing(&dir);
+        assert_eq!(v.mode, None);
+        assert!(
+            v.problem.as_deref().unwrap_or("").contains("must be"),
+            "{v:?}"
+        );
+        // Choosing repairs a bad value.
+        let v = set_billing_mode_at(&ledger_in(&dir), "api").unwrap();
+        assert_eq!((v.mode, v.problem), (Some("api"), None));
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_used_is_not_replaced_by_a_billing_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), "{not json").unwrap();
+        assert!(billing(&dir).problem.is_some());
+        let err = set_billing_mode_at(&ledger_in(&dir), "api").unwrap_err();
+        assert!(err.contains("left as it is"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(settings_file(&dir)).unwrap(),
+            "{not json"
+        );
+        assert!(
+            !shown(&dir).on,
+            "repeat reads stay off, as the unusable file has them"
+        );
+    }
+
+    #[test]
+    fn the_billing_mode_goes_to_the_window_under_the_keys_it_reads() {
+        let v = BillingModeSetting {
+            mode: Some("api"),
+            problem: None,
+            file: "/d/lumen_settings.json".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&v).unwrap(),
+            serde_json::json!({ "mode": "api", "problem": null, "file": "/d/lumen_settings.json" })
+        );
+    }
+
     // ── commands the window invokes ──────────────────────────────────────────
 
     /// Every `.ts` file the app ships: specs and the fake bridge only describe calls.
@@ -1738,10 +1911,15 @@ mod tests {
                 invoked.push(name);
             }
         }
-        for needed in ["get_repeat_reads_setting", "set_repeat_reads_setting"] {
+        for needed in [
+            "get_repeat_reads_setting",
+            "set_repeat_reads_setting",
+            "get_billing_mode_setting",
+            "set_billing_mode_setting",
+        ] {
             assert!(
                 invoked.iter().any(|n| n == needed),
-                "the switch needs {needed}, and the scan found only {invoked:?}"
+                "the settings need {needed}, and the scan found only {invoked:?}"
             );
         }
     }
@@ -1822,7 +2000,12 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app/tauri-bridge.ts"),
         )
         .unwrap();
-        for command in ["get_repeat_reads_setting", "set_repeat_reads_setting"] {
+        for command in [
+            "get_repeat_reads_setting",
+            "set_repeat_reads_setting",
+            "get_billing_mode_setting",
+            "set_billing_mode_setting",
+        ] {
             assert_eq!(
                 invoke_arg_keys(&bridge, command),
                 command_params(command),

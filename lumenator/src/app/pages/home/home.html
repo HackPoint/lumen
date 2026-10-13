@@ -21,7 +21,7 @@
                     <p class="degraded__item">{{ d }}</p>
                 }
                 <p class="degraded__hint">
-                    Use <strong>Report a fault</strong> on the Optimizer screen — the report
+                    Use <strong>Report a fault</strong> on the Settings screen — the report
                     includes this detail already.
                 </p>
             </section>
@@ -48,204 +48,14 @@
              which an install set up under 1.7.0 or earlier never got. -->
         <identity-hook-prompt />
 
-        <!-- Tab nav: switch between Context and Optimizer screens -->
-        <nav class="tab-nav" role="tablist" aria-label="Main navigation">
-            <a class="tab-nav__tab"
-               routerLink="/"
-               routerLinkActive="is-active"
-               [routerLinkActiveOptions]="{exact: true}"
-               role="tab">
-               Context
-            </a>
-            <a class="tab-nav__tab"
-               routerLink="/optimizer"
-               routerLinkActive="is-active"
-               role="tab">
-               Optimizer
-            </a>
-            <a class="tab-nav__tab"
-               routerLink="/hotspots"
-               routerLinkActive="is-active"
-               role="tab">
-               Hotspots@if (s.faultCount() > 0) {<span class="tab-nav__badge"
-                     [attr.aria-label]="s.faultCount() + ' faults recorded'">{{ s.faultCount() }}</span>}
-            </a>
-        </nav>
-
-        <div
-            class="segmented"
-            role="tablist"
-            aria-label="Context window"
-            [style.--seg-count]="s.windowOptions.length"
-            [style.--seg-index]="activeIndex()">
-            <span class="segmented__thumb" aria-hidden="true"></span>
-            @for (opt of s.windowOptions; track opt.label) {
-                <button
-                    type="button"
-                    role="tab"
-                    class="segmented__opt"
-                    [class.is-active]="s.contextOverride() === opt.value"
-                    [attr.aria-selected]="s.contextOverride() === opt.value"
-                    (click)="s.setWindow(opt.value)">
-                    {{ opt.label }}
-                </button>
-            }
-        </div>
-
-        @if (s.notification(); as note) {
-            <div class="banner" [attr.data-level]="note.level" role="status">
-                <span class="banner__dot"></span>
-                <span class="banner__text">{{ note.text }}</span>
-            </div>
+        <!-- Asked once, after Setup: how the user pays, which decides what a saving is worth. -->
+        @if (setupDone()) {
+            <lumen-billing-prompt />
         }
 
-        <div class="gauge-stage">
-            <gauge [fill]="s.fill()" [model]="s.model()" [max]="s.maxContext()"></gauge>
-            <!-- Which session the gauge is following. Only worth the space when
-                 the answer is not obvious. -->
-            @if (s.project()) {
-                <div class="gauge-stage__project" [lumenTooltip]="projectHint()">
-                    {{ s.project() }}
-                    @if (s.sessionCount() > 1) {
-                        <span class="gauge-stage__count">+{{ s.sessionCount() - 1 }} more</span>
-                    }
-                </div>
-            }
-        </div>
+        <lumen-tab-nav />
 
-        <cost [totals]="s.totals()"></cost>
-
-        @if (s.usage(); as u) {
-            <usage [report]="u"></usage>
-        }
-
-        <!-- D4+D5: alert settings (in-memory signals only — no localStorage). -->
-        <section class="limits" aria-label="Alert settings">
-            <h2 class="limits__title">Alert Thresholds</h2>
-
-            <div class="limits__fields">
-                <label class="limits__field">
-                    <span class="limits__label">Daily spend</span>
-                    <div class="limits__input-wrap">
-                        <span class="limits__currency" aria-hidden="true">$</span>
-                        <input
-                            class="limits__input"
-                            type="number"
-                            min="0"
-                            step="1"
-                            aria-label="Daily spend limit in dollars"
-                            [value]="s.dailySpendLimit()"
-                            (change)="onDailyLimit($event)">
-                    </div>
-                </label>
-                <label class="limits__field">
-                    <span class="limits__label">Per session</span>
-                    <div class="limits__input-wrap">
-                        <span class="limits__currency" aria-hidden="true">$</span>
-                        <input
-                            class="limits__input"
-                            type="number"
-                            min="0"
-                            step="1"
-                            aria-label="Per-session spend limit in dollars"
-                            [value]="s.sessionSpendLimit()"
-                            (change)="onSessionLimit($event)">
-                    </div>
-                </label>
-            </div>
-
-            <!-- D5: native notification toggle -->
-            <label class="limits__toggle-row">
-                <span class="toggle__track" [class.is-on]="s.nativeNotify()" aria-hidden="true">
-                    <span class="toggle__knob"></span>
-                </span>
-                <span class="limits__toggle-label">Native notifications</span>
-                <input
-                    class="sr-only"
-                    type="checkbox"
-                    aria-label="Enable native OS notifications"
-                    [checked]="s.nativeNotify()"
-                    (change)="onNativeNotify($event)">
-            </label>
-
-            <p class="limits__hint">0 disables a spend alert. Resets to defaults on restart.</p>
-        </section>
-
-        <!-- Repeat reads: the settings file's switch. Saved to disk, unlike the thresholds above. -->
-        <section class="repeat" aria-label="Repeat reads">
-            <h2 class="repeat__title">Repeat reads</h2>
-            <p class="repeat__intro">
-                When Claude reads a file again in the same conversation, Lumen answers with a short note
-                that it is unchanged, or with only what an edit changed, instead of the whole result.
-            </p>
-
-            @if (rr.setting(); as st) {
-                <label class="repeat__toggle-row">
-                    <span class="toggle__track" [class.is-on]="st.on" aria-hidden="true">
-                        <span class="toggle__knob"></span>
-                    </span>
-                    <span class="repeat__toggle-label">Repeat reads</span>
-                    <input
-                        class="sr-only"
-                        type="checkbox"
-                        aria-label="Repeat reads"
-                        [checked]="st.on"
-                        [attr.aria-disabled]="rr.saving() ? 'true' : null"
-                        (change)="onRepeatReads($event)">
-                </label>
-
-                @if (st.problem; as why) {
-                    <p class="repeat__state repeat__state--problem">
-                        The settings file {{ st.file }} could not be read: {{ why }}.
-                        Repeat reads are off until it is fixed. Switching on again rewrites the file.
-                    </p>
-                } @else if (!st.on) {
-                    <p class="repeat__state">Off, as the settings file says. Every read returns its full result.</p>
-                } @else if (st.source === 'file') {
-                    <p class="repeat__state">On, as the settings file says.</p>
-                } @else {
-                    <p class="repeat__state">On by default. The settings file does not turn it off.</p>
-                }
-            } @else if (rr.readError(); as err) {
-                <div class="repeat__unknown" role="alert">
-                    <p class="repeat__state repeat__state--problem">
-                        The repeat reads setting could not be read: {{ err }}.
-                        Lumen does not know whether repeat reads are on or off.
-                    </p>
-                    <button type="button" class="repeat__retry" (click)="rr.load()">Retry</button>
-                </div>
-            } @else {
-                <p class="repeat__state">Reading the settings file…</p>
-            }
-
-            @if (rr.writeError(); as werr) {
-                <p class="repeat__error" role="alert">Not saved: {{ werr }}</p>
-            }
-
-            @if (rr.setting(); as st) {
-                <p class="repeat__note">
-                    A change applies to the next Lumen read in every running Claude Code session, with no restart.
-                    It is saved in {{ st.file }}, so unlike the alert thresholds above it survives a restart.
-                </p>
-                <p class="repeat__note">
-                    This shows the settings file, not what the server will do: a LUMEN_REPEAT_READS value in a
-                    Claude Code MCP config takes priority over the file, and a LUMEN_DB there that points at
-                    another ledger makes the server read that ledger's settings file instead. This window cannot
-                    see either. A session that started with repeat reads off is not told about the fresh option
-                    until Claude Code restarts; every unchanged note still tells the model to pass fresh=true,
-                    and it is honoured.
-                </p>
-            }
-        </section>
-
-        <!-- Lumen has no separate settings window: this is where the settings are, and so where
-             a build is identified when someone files a report. -->
-        <section class="about" aria-labelledby="about-title">
-            <h2 id="about-title" class="about__title">About</h2>
-            <dl class="about__list">
-                <dt class="about__term">Version</dt>
-                <dd class="about__version">{{ aboutVersion() }}</dd>
-            </dl>
-        </section>
+        <!-- How much Lumen saved, this week and all time. Renders nothing until a summary exists. -->
+        <lumen-savings-headline [summary]="savings()" />
     </div>
 </main>

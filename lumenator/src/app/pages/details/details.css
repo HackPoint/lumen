@@ -1,0 +1,284 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Details: Claude Code's context window, then the Optimizer's workings.
+   The context rules came from Home and the breakdown rules from the Optimizer screen,
+   unchanged, when those parts moved here in 1.9.0.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Each part is a card with a small uppercase title, like the cards on Settings. */
+.details__section {
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.9rem 0.9rem 1.1rem;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+}
+
+.details__title {
+    align-self: flex-start;
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.details__empty {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--lumen-text-dim);
+}
+
+/* ── segmented control ── */
+.segmented {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(var(--seg-count, 4), 1fr);
+    padding: 4px;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: 999px;
+    user-select: none;
+}
+
+.segmented__thumb {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    left: 4px;
+    width: calc((100% - 8px) / var(--seg-count, 4));
+    transform: translateX(calc(var(--seg-index, 0) * 100%));
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border-strong);
+    border-radius: 999px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.segmented__opt {
+    position: relative;
+    z-index: 1;
+    padding: 0.42rem 0.3rem;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    color: var(--lumen-text-dim);
+    font-family: var(--lumen-font-sans);
+    font-size: 0.8rem;
+    font-weight: 500;
+    letter-spacing: 0.2px;
+    transition: color 0.2s ease;
+}
+
+.segmented__opt:hover {
+    color: var(--lumen-text);
+}
+
+.segmented__opt.is-active {
+    color: var(--lumen-text);
+}
+
+/* ── notification banner ── */
+.banner {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid;
+    border-radius: var(--lumen-radius-sm);
+    font-size: 0.85rem;
+    animation: fade-up 0.4s ease both;
+}
+
+.banner__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+}
+
+.banner__text {
+    color: var(--lumen-text);
+}
+
+.banner[data-level="warn"] {
+    border-color: color-mix(in srgb, var(--lumen-warn) 40%, transparent);
+    background: color-mix(in srgb, var(--lumen-warn) 12%, transparent);
+}
+.banner[data-level="warn"] .banner__dot {
+    background: var(--lumen-warn);
+}
+
+.banner[data-level="alert"] {
+    border-color: color-mix(in srgb, var(--lumen-alert) 42%, transparent);
+    background: color-mix(in srgb, var(--lumen-alert) 13%, transparent);
+}
+.banner[data-level="alert"] .banner__dot {
+    background: var(--lumen-alert);
+}
+
+/* ── gauge stage ── */
+.gauge-stage {
+    width: 240px;
+    max-width: 72%;
+    margin: 0.25rem 0 0.5rem;
+}
+
+/* Which session the gauge is following. Dim and small: it answers a question the user
+   only asks when several editor windows are open, so it must not compete with the gauge
+   it annotates. Matches .panel__project, which is the same label in the popover. */
+.gauge-stage__project {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    margin-top: 0.5rem;
+    font-family: var(--lumen-font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.2px;
+    color: var(--lumen-text-dim);
+    cursor: help;
+}
+
+/* "+2 more" — a count of the other live sessions. A pill rather than plain text so it
+   reads as a quantity attached to the label, not a second label. */
+.gauge-stage__count {
+    padding: 0 0.3rem;
+    border-radius: 999px;
+    border: 1px solid var(--lumen-border);
+    font-size: 0.6rem;
+    font-variant-numeric: tabular-nums;
+}
+
+@keyframes fade-up {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* ── the token ratio and its provenance ── */
+.effect {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--lumen-text-dim);
+    text-align: center;
+}
+
+.effect__pct {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-text);
+}
+
+.provenance {
+    width: 100%;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.74rem;
+    color: var(--lumen-text-dim);
+}
+
+.provenance__row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.provenance__val {
+    margin: 0;
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-text);
+}
+
+/* The provenance caveat. Amber left rule, the same device .hs__rec uses for advice: this
+   qualifies the figures above it rather than reporting a fault, so it must be visible without
+   reading as an error. */
+.provenance__warn {
+    align-self: stretch;
+    margin: 0;
+    padding-left: 0.5rem;
+    border-left: 2px solid color-mix(in srgb, var(--lumen-warn) 60%, transparent);
+    font-size: 0.68rem;
+    line-height: 1.4;
+    color: var(--lumen-text-dim);
+}
+
+/* ── breakdowns ── */
+.breakdown {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    padding: 0.75rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.breakdown__title {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.breakdown__rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.breakdown__row {
+    display: grid;
+    grid-template-columns: 8rem 1fr auto;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.breakdown__name {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.75rem;
+    color: var(--lumen-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.breakdown__bar-wrap {
+    height: 4px;
+    background: var(--lumen-track);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.breakdown__bar {
+    height: 100%;
+    background: var(--lumen-save);
+    border-radius: 2px;
+    min-width: 2px;
+    transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.breakdown__count {
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.67rem;
+    color: var(--lumen-text-dim);
+    white-space: nowrap;
+}

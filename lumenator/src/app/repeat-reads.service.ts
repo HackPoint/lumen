@@ -3,7 +3,7 @@ import { TauriBridge } from './tauri-bridge';
 import type { RepeatReadsSetting } from './components/index';
 
 /**
- * The repeat-reads switch as the settings file holds it, shared by the Home toggle and the
+ * The repeat-reads switch as the settings file holds it, shared by the Settings toggle and the
  * Optimizer card so both say the same thing about the same file.
  *
  * It never answers for the server. A `LUMEN_REPEAT_READS` value in a Claude Code MCP config

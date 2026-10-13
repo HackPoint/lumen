@@ -377,7 +377,9 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
 pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
     let mut built: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
-    for entry in tray_menu_entries(&ui_version(app.package_info())) {
+    // No savings line yet: nothing computes one until the savings engine lands, and a line
+    // with no figure behind it would be a claim. The engine passes its summary here.
+    for entry in tray_menu_entries(&ui_version(app.package_info()), None) {
         built.push(match entry {
             TrayEntry::Item { id, text, enabled } => {
                 Box::new(MenuItem::with_id(app, id, text, enabled, None::<&str>)?)
@@ -396,6 +398,9 @@ pub const TRAY_QUIT_ID: &str = "quit";
 /// The tray menu's version line. Neither id above, so the menu-event handler ignores it, and it
 /// is built disabled, so no platform delivers a click on it in the first place.
 pub const TRAY_VERSION_ID: &str = "version";
+/// The tray menu's savings line, under the version line. Disabled and ignored for the same
+/// reasons as the version line.
+pub const TRAY_SAVINGS_ID: &str = "savings";
 
 /// The version the app tells the user it is, wherever it says so.
 ///
@@ -432,13 +437,24 @@ pub enum TrayEntry {
 /// The tray menu, top to bottom. The version leads, disabled: it is information, and a
 /// disabled item is how every platform's tray (the macOS menu bar, the Windows notification
 /// area, the Linux indicator) shows a line that does nothing.
-pub fn tray_menu_entries(version: &str) -> Vec<TrayEntry> {
-    vec![
-        TrayEntry::Item {
-            id: TRAY_VERSION_ID,
-            text: tray_version_label(version),
+///
+/// `savings` is the second line, such as "Saved ≈ $X this week · working", made by the savings
+/// summary. With `None` there is no such line at all, not an empty or placeholder one: until
+/// something has computed a saving, the menu says nothing about savings.
+pub fn tray_menu_entries(version: &str, savings: Option<&str>) -> Vec<TrayEntry> {
+    let mut entries = vec![TrayEntry::Item {
+        id: TRAY_VERSION_ID,
+        text: tray_version_label(version),
+        enabled: false,
+    }];
+    if let Some(line) = savings {
+        entries.push(TrayEntry::Item {
+            id: TRAY_SAVINGS_ID,
+            text: line.to_string(),
             enabled: false,
-        },
+        });
+    }
+    entries.extend([
         TrayEntry::Separator,
         TrayEntry::Item {
             id: TRAY_SHOW_ID,
@@ -450,7 +466,8 @@ pub fn tray_menu_entries(version: &str) -> Vec<TrayEntry> {
             text: "Quit Lumen".to_string(),
             enabled: true,
         },
-    ]
+    ]);
+    entries
 }
 
 #[cfg(test)]
@@ -772,7 +789,7 @@ mod tests {
 
     #[test]
     fn the_tray_menu_leads_with_a_version_line_that_cannot_be_clicked() {
-        let entries = tray_menu_entries("9.8.7");
+        let entries = tray_menu_entries("9.8.7", None);
         assert_eq!(
             entries[0],
             TrayEntry::Item {
@@ -807,10 +824,44 @@ mod tests {
     }
 
     #[test]
+    fn the_savings_line_is_absent_until_there_is_a_summary_to_show() {
+        let none = tray_menu_entries("9.8.7", None);
+        assert!(
+            none.iter().all(|e| !matches!(
+                e,
+                TrayEntry::Item {
+                    id: TRAY_SAVINGS_ID,
+                    ..
+                }
+            )),
+            "no savings line, not even an empty one: {none:?}"
+        );
+        assert_eq!(none[1], TrayEntry::Separator, "the version line is alone");
+
+        let line = "Saved ≈ $1.23 this week · working";
+        let some = tray_menu_entries("9.8.7", Some(line));
+        assert_eq!(
+            some[1],
+            TrayEntry::Item {
+                id: TRAY_SAVINGS_ID,
+                text: line.to_string(),
+                enabled: false,
+            },
+            "second, under the version line, as given, and disabled"
+        );
+        assert_eq!(some[0], none[0], "the version line is unchanged");
+        assert_eq!(some[2..], none[1..], "and so is everything below it");
+        // The handler in lib.rs acts on the show and quit ids only.
+        assert_ne!(TRAY_SAVINGS_ID, TRAY_SHOW_ID);
+        assert_ne!(TRAY_SAVINGS_ID, TRAY_QUIT_ID);
+        assert_ne!(TRAY_SAVINGS_ID, TRAY_VERSION_ID);
+    }
+
+    #[test]
     fn the_tray_version_line_follows_the_version_it_is_given() {
         // A label with a version written into it would pass the test above and not this one.
         for v in ["0.0.1", "1.8.0", "12.34.56-rc.1"] {
-            let TrayEntry::Item { text, .. } = &tray_menu_entries(v)[0] else {
+            let TrayEntry::Item { text, .. } = &tray_menu_entries(v, None)[0] else {
                 panic!("the first entry is the version line");
             };
             assert_eq!(text, &format!("Lumen {v}"));
@@ -883,7 +934,7 @@ mod tests {
         );
 
         // And the tray line is made from that same value.
-        let TrayEntry::Item { text, enabled, .. } = &tray_menu_entries(&ui)[0] else {
+        let TrayEntry::Item { text, enabled, .. } = &tray_menu_entries(&ui, None)[0] else {
             panic!("the first entry is the version line");
         };
         assert_eq!(text, &format!("Lumen {conf_version}"));

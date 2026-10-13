@@ -1,12 +1,12 @@
 ---
 name: Fault report
-about: A Lumen routing, metering or ingest fault — the shape `lumen report` generates
+about: A Lumen routing, metering or ingest fault — the shape `lumen faults` generates
 title: 'lumen <version> — <what fired, how often>'
 labels: fault
 ---
 
 <!--
-`lumen report --dry-run` generates this whole body for you, with the environment
+`lumen faults --dry-run` (`lumen report --dry-run` before 1.9.0) generates this whole body for you, with the environment
 block filled in and paths already redacted. Prefer that over filling this in by
 hand; this template exists so a hand-written report is diffable against a
 generated one.
@@ -40,7 +40,7 @@ do not paste source, absolute paths, or private project names.
 - env overrides in effect: <`LUMEN_*=...`, or none>
 
 <!--
-A generated report ends with a fingerprint marker. `lumen report` looks for it to
+A generated report ends with a fingerprint marker. `lumen faults` looks for it to
 comment on an existing issue instead of opening a duplicate, so leave it in place
 if you copied a generated body:
 

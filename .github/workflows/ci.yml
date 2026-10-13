@@ -101,7 +101,7 @@ jobs:
   #
   # Two chains, both driving real binaries with no stubs between the ends:
   #   read path   — a source file -> the lumen-mcp binary over stdio -> SQLite ->
-  #                 the Optimizer and Hotspots aggregates the GUI renders
+  #                 the Optimizer and Why (Hotspots until 1.9.0) aggregates the GUI renders
   #   ingest path — a Claude Code transcript line -> the lumen-daemon binary ->
   #                 SQLite + a live WebSocket frame -> the same aggregates
   #
@@ -264,8 +264,8 @@ jobs:
 
   # ── The built app, driven through WebDriver ──────────────────────────────────
   # The debug build of the app itself, launched by tauri-driver: whether it opens its window
-  # when it should and only then, says why when it does, and whether the Optimizer and Hotspots
-  # screens show what a ledger the real lumen-mcp wrote holds. lumenator/e2e/app.e2e.mjs says
+  # when it should and only then, says why when it does, and whether the Optimizer and Why
+  # screens show what a ledger the real lumen-mcp wrote holds, and About on Settings the version. lumenator/e2e/app.e2e.mjs says
   # what each test covers.
   #
   # Linux and Windows only. tauri-driver needs the platform's own WebDriver behind it,

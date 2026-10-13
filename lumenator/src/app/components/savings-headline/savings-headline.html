@@ -1,0 +1,28 @@
+<!-- Nothing at all without a summary: see the class for why there is no placeholder. -->
+@if (summary()) {
+    <section class="headline" aria-label="Savings">
+        @if (nothingRecorded()) {
+            <p class="headline__none">No savings recorded yet.</p>
+        } @else {
+            <!-- Each &ngsp; is a space Angular keeps, so the figure, its unit and its tag read as
+                 words to anything that reads the text. Flex layout gives it no width on screen. -->
+            @for (row of periods(); track row.label) {
+                <div class="headline__period">
+                    <h2 class="headline__label">{{ row.label }}</h2>&ngsp;
+                    <p class="headline__figure">
+                        <strong class="headline__tokens" [class.is-loss]="row.period.tokens < 0">{{ fmtTokens(row.period.tokens) }}</strong>&ngsp;<span class="headline__unit">tokens saved, net</span>
+                    </p>&ngsp;
+                    <p class="headline__figure">
+                        <strong class="headline__usd"
+                                [class.is-loss]="row.period.usd !== null && row.period.usd < 0">{{ fmtUsd(row.period.usd) }}</strong>&ngsp;<span class="headline__unit">saved, net</span>
+                        @if (row.period.usd === null) {
+                            &ngsp;<span class="headline__tag">not priced</span>
+                        } @else if (row.period.usdModelled) {
+                            &ngsp;<span class="headline__tag">modelled</span>
+                        }
+                    </p>
+                </div>
+            }
+        }
+    </section>
+}
