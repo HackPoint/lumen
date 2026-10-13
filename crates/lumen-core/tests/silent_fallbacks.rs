@@ -171,9 +171,9 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-core/src/meter.rs",
         DroppedWrite,
-        "execute_batch(migration)",
-        "A duplicate column is the expected outcome. Any other failure leaves a column \
-         missing, and the insert that binds it files meter_write_failed.",
+        "execute_batch(backfill)",
+        "A row rewrite, not a schema change, and idempotent: a ledger that stayed busy for it \
+         keeps its rows as they were and the next open runs it again.",
     ),
     allow(
         "crates/lumen-core/src/meter.rs",
@@ -260,10 +260,9 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-core/src/schema.rs",
         DroppedWrite,
-        "AssertSqlSafe(*migration)",
-        "A duplicate column is the expected outcome. Any other failure leaves a column \
-         missing, and the insert that binds it fails and is filed (ingest_failed, \
-         meter_write_failed): how 1.1.3's missing column would show now.",
+        "AssertSqlSafe(*backfill)",
+        "A row rewrite, not a schema change, and idempotent: a ledger that stayed busy for it \
+         keeps its rows as they were and the next open runs it again.",
     ),
     allow(
         "crates/lumen-core/src/update.rs",
