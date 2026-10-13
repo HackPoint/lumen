@@ -181,6 +181,16 @@ pub const MIGRATIONS: &[&str] = &[
         path TEXT, lines INTEGER, detail TEXT, session_id TEXT, \
         version TEXT, channel TEXT NOT NULL DEFAULT 'unknown')",
     "CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant)",
+    // ── 1.9.0: the sessions table is gone ────────────────────────────────────
+    // Every DDL from the first release to 1.8.0 created `sessions`, and no release ever wrote a
+    // row to it or read one: a session is the `session_id` its turns carry. An empty table
+    // that looks like the place to find sessions misleads whoever reads the schema next.
+    //
+    // IF EXISTS makes this a no-op on a fresh database, and on one where it already ran.
+    // An older build that opens the ledger afterwards creates the table again, empty, through
+    // its own CREATE TABLE IF NOT EXISTS, and the next open by this one drops it again. Nothing
+    // in either reads it, so the round trip changes no figure.
+    "DROP TABLE IF EXISTS sessions",
 ];
 
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
@@ -218,14 +228,6 @@ CREATE TABLE IF NOT EXISTS turns (
     -- 1 when the turn came from a subagent transcript. Counted in cost, excluded
     -- from the context-fill gauge (a subagent's context is not the session's).
     is_subagent                 INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id  TEXT PRIMARY KEY,
-    cwd         TEXT,
-    model       TEXT,
-    started_at  TEXT,
-    source_file TEXT
 );
 
 CREATE TABLE IF NOT EXISTS calibration (
@@ -699,6 +701,10 @@ mod tests {
                 .await
                 .contains(&"channel".into())
         );
+        assert!(
+            columns(&pool, "sessions").await.is_empty(),
+            "a fresh database must not have the dropped sessions table"
+        );
     }
 
     // ── 1.6.0: read_events.is_subagent dropped ───────────────────────────────
@@ -987,5 +993,85 @@ mod tests {
         assert_eq!(idx, 1);
         drop(conn);
         crate::meter::connect_db(&path).expect("a second open must be a no-op");
+    }
+
+    // ── 1.9.0: sessions dropped ──────────────────────────────────────────────
+
+    /// `sessions` as every release through 1.8.0 created it, holding a row. Hand-written: the
+    /// current DDL no longer has the table.
+    const SESSIONS_THROUGH_1_8_0: &str = "\
+        CREATE TABLE sessions ( \
+            session_id TEXT PRIMARY KEY, cwd TEXT, model TEXT, started_at TEXT, \
+            source_file TEXT); \
+        INSERT INTO sessions VALUES ('s-1','/p','claude-opus-5','2026-09-01T10:00:00Z', \
+            's-1.jsonl');";
+
+    #[tokio::test]
+    async fn a_database_with_sessions_loses_it_and_keeps_every_other_row() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        for sql in [READ_EVENTS_1_6_0, ROWS_1_6_0, SESSIONS_THROUGH_1_8_0] {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+        assert!(
+            !columns(&pool, "sessions").await.is_empty(),
+            "precondition: the table is there"
+        );
+        let before: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+
+        init_schema(&pool).await.unwrap();
+
+        assert!(
+            columns(&pool, "sessions").await.is_empty(),
+            "sessions must be dropped"
+        );
+        let after: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before, "no other row may change");
+
+        init_schema(&pool)
+            .await
+            .expect("a second run, with nothing left to drop, must not error");
+        assert!(columns(&pool, "sessions").await.is_empty());
+    }
+
+    #[test]
+    fn the_rusqlite_open_drops_sessions_too() {
+        let has_sessions = |c: &rusqlite::Connection| -> bool {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                == 1
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("1_8_0.db");
+        let before = {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            for sql in [READ_EVENTS_1_6_0, ROWS_1_6_0, SESSIONS_THROUGH_1_8_0] {
+                c.execute_batch(sql).unwrap();
+            }
+            assert!(has_sessions(&c), "precondition: the table is there");
+            rendered_rows(&c)
+        };
+        assert_eq!(before.len(), 2);
+
+        let conn = crate::meter::connect_db(&path).unwrap();
+
+        assert!(!has_sessions(&conn), "sessions must be dropped");
+        assert_eq!(rendered_rows(&conn), before);
+
+        drop(conn);
+        let again = crate::meter::connect_db(&path).expect("a second open must be a no-op");
+        assert!(!has_sessions(&again));
+        assert_eq!(rendered_rows(&again), before);
     }
 }

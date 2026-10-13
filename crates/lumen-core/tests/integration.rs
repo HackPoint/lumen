@@ -18,12 +18,12 @@ fn connect_db_creates_all_tables() {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master \
-             WHERE type='table' AND name IN ('turns','sessions','calibration','read_events')",
+             WHERE type='table' AND name IN ('turns','calibration','read_events')",
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 4, "all four tables must exist after connect_db");
+    assert_eq!(count, 3, "all three tables must exist after connect_db");
 }
 
 #[test]
