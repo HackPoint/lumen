@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "label": "pre-release-8855fe4c2ed8",
+  "label": "pre-release-4ca4fd1ffe21",
   "pre_release": true,
   "tokenizer": {
     "name": "cl100k_base",
@@ -1577,15 +1577,15 @@
       }
     },
     {
-      "label": "pre-8855fe4",
+      "label": "pre-4ca4fd1",
       "role": "candidate",
-      "sha": "8855fe4c2ed896d91abd5ef410f5815e0538e655",
+      "sha": "4ca4fd1ffe216f47e2c764be80cce4cbb56de6bc",
       "dirty": false,
       "profile": "release",
       "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
       "source": "the checkout this harness was run from, built in its own target directory",
-      "identity": "env",
-      "identity_note": "CLAUDE_CODE_SESSION_ID, read once when the server starts",
+      "identity": "hook",
+      "identity_note": "a hook record per call (PreToolUse on the Lumen tool), claimed by the server through _meta claudecode/toolUseId",
       "reported_version": "1.7.0",
       "tokens": {
         "digest": "2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7",
@@ -3126,8 +3126,8 @@
       {
         "label": "v1.7.0",
         "reported_version": "1.7.0",
-        "load_before": "load average 7.43 11.61 17.81 (1, 5, 15 min)",
-        "load_after": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
+        "load_before": "load average 4.99 5.50 6.29 (1, 5, 15 min)",
+        "load_after": "load average 4.89 5.24 6.07 (1, 5, 15 min)",
         "series": [
           {
             "id": "hook.floor",
@@ -3136,19 +3136,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1994167,
-              "median_ns": 2257875,
-              "p90_ns": 2876042,
-              "p99_ns": 3263292,
-              "max_ns": 3596958
+              "min_ns": 2440834,
+              "median_ns": 2993250,
+              "p90_ns": 3471792,
+              "p99_ns": 7399375,
+              "max_ns": 10607125
             },
             "routes": {},
             "pass_medians_ns": [
-              2181916,
-              2281541,
-              2273750,
-              2866666,
-              2092334
+              2981792,
+              2958584,
+              3469500,
+              2755709,
+              3030041
             ]
           },
           {
@@ -3158,19 +3158,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2040250,
-              "median_ns": 2324333,
-              "p90_ns": 2607250,
-              "p99_ns": 2897500,
-              "max_ns": 18913292
+              "min_ns": 2524292,
+              "median_ns": 3061625,
+              "p90_ns": 3319834,
+              "p99_ns": 3639792,
+              "max_ns": 3811625
             },
             "routes": {},
             "pass_medians_ns": [
-              2153917,
-              2355875,
-              2355125,
-              2559542,
-              2154333
+              2960458,
+              3166625,
+              3026250,
+              3038917,
+              3087458
             ]
           },
           {
@@ -3180,19 +3180,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2011750,
-              "median_ns": 2270042,
-              "p90_ns": 2452958,
-              "p99_ns": 3070833,
-              "max_ns": 4717500
+              "min_ns": 2362375,
+              "median_ns": 2897042,
+              "p90_ns": 3168500,
+              "p99_ns": 4312708,
+              "max_ns": 4674292
             },
             "routes": {},
             "pass_medians_ns": [
-              2120209,
-              2315375,
-              2313625,
-              2419125,
-              2118708
+              2896083,
+              2686292,
+              2990083,
+              2904916,
+              2956750
             ]
           },
           {
@@ -3202,19 +3202,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 28986666,
-              "median_ns": 29615041,
-              "p90_ns": 30263125,
-              "p99_ns": 34807875,
-              "max_ns": 37666250
+              "min_ns": 32741916,
+              "median_ns": 33926167,
+              "p90_ns": 34783708,
+              "p99_ns": 38114916,
+              "max_ns": 41934208
             },
             "routes": {},
             "pass_medians_ns": [
-              29481125,
-              29586708,
-              29775708,
-              29739125,
-              29491667
+              33762375,
+              34005000,
+              34224083,
+              33780125,
+              33826417
             ]
           },
           {
@@ -3224,19 +3224,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 28055042,
-              "median_ns": 29018416,
-              "p90_ns": 29983417,
-              "p99_ns": 31423042,
-              "max_ns": 38618667
+              "min_ns": 31690458,
+              "median_ns": 33327875,
+              "p90_ns": 33990000,
+              "p99_ns": 36786292,
+              "max_ns": 46128459
             },
             "routes": {},
             "pass_medians_ns": [
-              29673333,
-              28685417,
-              28611959,
-              29135416,
-              28949208
+              33393958,
+              33221166,
+              33406292,
+              33243292,
+              33438292
             ]
           },
           {
@@ -3291,19 +3291,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1772791,
-              "median_ns": 2025042,
-              "p90_ns": 2291792,
-              "p99_ns": 2565417,
-              "max_ns": 2711084
+              "min_ns": 2081834,
+              "median_ns": 2670041,
+              "p90_ns": 2975041,
+              "p99_ns": 3388792,
+              "max_ns": 3502083
             },
             "routes": {},
             "pass_medians_ns": [
-              2025042,
-              2244292,
-              1924792,
-              2148917,
-              1907292
+              2489333,
+              2385916,
+              2802000,
+              2779750,
+              2678458
             ]
           },
           {
@@ -3313,19 +3313,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 7125,
-              "median_ns": 11833,
-              "p90_ns": 13500,
-              "p99_ns": 17375,
-              "max_ns": 20583
+              "min_ns": 6833,
+              "median_ns": 11625,
+              "p90_ns": 13375,
+              "p99_ns": 25000,
+              "max_ns": 41833
             },
             "routes": {},
             "pass_medians_ns": [
-              11125,
-              11917,
-              12417,
-              11333,
-              11042
+              11583,
+              11542,
+              11708,
+              11959,
+              11333
             ]
           },
           {
@@ -3335,21 +3335,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 486000,
-              "median_ns": 517709,
-              "p90_ns": 561042,
-              "p99_ns": 643792,
-              "max_ns": 723583
+              "min_ns": 547542,
+              "median_ns": 657541,
+              "p90_ns": 852959,
+              "p99_ns": 1185208,
+              "max_ns": 1267667
             },
             "routes": {
               "smart_read": 300
             },
             "pass_medians_ns": [
-              509000,
-              560333,
-              510375,
-              518417,
-              516375
+              666167,
+              666416,
+              640959,
+              652500,
+              629583
             ]
           },
           {
@@ -3359,21 +3359,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 503334,
-              "median_ns": 610667,
-              "p90_ns": 772041,
-              "p99_ns": 979917,
-              "max_ns": 1131625
+              "min_ns": 553541,
+              "median_ns": 667750,
+              "p90_ns": 871250,
+              "p99_ns": 1225625,
+              "max_ns": 1297500
             },
             "routes": {
               "recall_file": 300
             },
             "pass_medians_ns": [
-              689000,
-              713542,
-              528291,
-              603792,
-              610667
+              667750,
+              707166,
+              655500,
+              652833,
+              643750
             ]
           },
           {
@@ -3383,21 +3383,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1997500,
-              "median_ns": 2091375,
-              "p90_ns": 2267000,
-              "p99_ns": 2403708,
-              "max_ns": 2534209
+              "min_ns": 2165208,
+              "median_ns": 2453250,
+              "p90_ns": 2897125,
+              "p99_ns": 3087250,
+              "max_ns": 3480500
             },
             "routes": {
               "smart_read": 300
             },
             "pass_medians_ns": [
-              2156709,
-              2215542,
-              2039583,
-              2043416,
-              2071750
+              2456833,
+              2433042,
+              2443208,
+              2465375,
+              2436583
             ]
           },
           {
@@ -3407,21 +3407,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1909625,
-              "median_ns": 1976333,
-              "p90_ns": 2036791,
-              "p99_ns": 2130167,
-              "max_ns": 2512333
+              "min_ns": 2069541,
+              "median_ns": 2339417,
+              "p90_ns": 2719916,
+              "p99_ns": 2904542,
+              "max_ns": 2959833
             },
             "routes": {
               "recall_file": 300
             },
             "pass_medians_ns": [
-              1959875,
-              2001000,
-              1971958,
-              1964000,
-              1989750
+              2339417,
+              2316458,
+              2376208,
+              2357125,
+              2321334
             ]
           },
           {
@@ -3431,21 +3431,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 4855041,
-              "median_ns": 4989709,
-              "p90_ns": 5110000,
-              "p99_ns": 5575625,
-              "max_ns": 5969625
+              "min_ns": 5433042,
+              "median_ns": 5653833,
+              "p90_ns": 6115375,
+              "p99_ns": 6378250,
+              "max_ns": 6707292
             },
             "routes": {
               "smart_read": 300
             },
             "pass_medians_ns": [
-              4989375,
-              4973083,
-              4993916,
-              4962917,
-              5018875
+              5614542,
+              5620084,
+              5769875,
+              5630958,
+              5670084
             ]
           },
           {
@@ -3455,21 +3455,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 4797541,
-              "median_ns": 4920209,
-              "p90_ns": 5073375,
-              "p99_ns": 5297875,
-              "max_ns": 5435750
+              "min_ns": 5345500,
+              "median_ns": 5660541,
+              "p90_ns": 6243917,
+              "p99_ns": 6761667,
+              "max_ns": 7264000
             },
             "routes": {
               "recall_file": 300
             },
             "pass_medians_ns": [
-              4895916,
-              4947875,
-              4976625,
-              4904333,
-              4884333
+              6222834,
+              5577250,
+              5632750,
+              5638916,
+              5596166
             ]
           },
           {
@@ -3479,21 +3479,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1499542,
-              "median_ns": 2133958,
-              "p90_ns": 3426209,
-              "p99_ns": 4248375,
-              "max_ns": 4450500
+              "min_ns": 2186708,
+              "median_ns": 3383667,
+              "p90_ns": 3965000,
+              "p99_ns": 5066833,
+              "max_ns": 6548458
             },
             "routes": {
               "smart_read_unchanged": 300
             },
             "pass_medians_ns": [
-              2191417,
-              1820708,
-              3342166,
-              2080250,
-              2045542
+              3212250,
+              3218333,
+              3498041,
+              3456167,
+              3267125
             ]
           },
           {
@@ -3503,21 +3503,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2247708,
-              "median_ns": 3985250,
-              "p90_ns": 6373583,
-              "p99_ns": 7127083,
-              "max_ns": 7397042
+              "min_ns": 2802000,
+              "median_ns": 4573958,
+              "p90_ns": 5466209,
+              "p99_ns": 9011500,
+              "max_ns": 11379125
             },
             "routes": {
               "smart_read_delta": 300
             },
             "pass_medians_ns": [
-              2709416,
-              2548291,
-              6274416,
-              4180166,
-              4032833
+              4093792,
+              4600250,
+              4818500,
+              4732333,
+              3552625
             ]
           },
           {
@@ -3527,21 +3527,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3231042,
-              "median_ns": 3947083,
-              "p90_ns": 5647459,
-              "p99_ns": 12321417,
-              "max_ns": 19631042
+              "min_ns": 3640500,
+              "median_ns": 4705084,
+              "p90_ns": 5200875,
+              "p99_ns": 5491959,
+              "max_ns": 5592625
             },
             "routes": {
               "smart_read_unchanged": 300
             },
             "pass_medians_ns": [
-              3849041,
-              3902250,
-              5647459,
-              3731167,
-              4048000
+              4684291,
+              4631500,
+              4756334,
+              4726833,
+              4598917
             ]
           },
           {
@@ -3551,21 +3551,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3894542,
-              "median_ns": 7368625,
-              "p90_ns": 9901792,
-              "p99_ns": 11386291,
-              "max_ns": 31154083
+              "min_ns": 5991000,
+              "median_ns": 7875750,
+              "p90_ns": 8921959,
+              "p99_ns": 10844917,
+              "max_ns": 12185375
             },
             "routes": {
               "smart_read_delta": 300
             },
             "pass_medians_ns": [
-              6509292,
-              7779875,
-              4412208,
-              7227000,
-              9885583
+              7692333,
+              7879041,
+              7637791,
+              7886750,
+              7900167
             ]
           },
           {
@@ -3575,21 +3575,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 6325084,
-              "median_ns": 6633875,
-              "p90_ns": 7721125,
-              "p99_ns": 9469417,
-              "max_ns": 15351917
+              "min_ns": 7273375,
+              "median_ns": 8600125,
+              "p90_ns": 9230750,
+              "p99_ns": 16368250,
+              "max_ns": 18934250
             },
             "routes": {
               "smart_read_unchanged": 300
             },
             "pass_medians_ns": [
-              6547375,
-              6601125,
-              6503583,
-              6930375,
-              7585666
+              8717375,
+              8797208,
+              8678334,
+              8579167,
+              8109375
             ]
           },
           {
@@ -3599,21 +3599,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 7914708,
-              "median_ns": 9536167,
-              "p90_ns": 14258875,
-              "p99_ns": 14996833,
-              "max_ns": 17379667
+              "min_ns": 8680875,
+              "median_ns": 13037625,
+              "p90_ns": 14130125,
+              "p99_ns": 17293959,
+              "max_ns": 21598875
             },
             "routes": {
               "smart_read_delta": 300
             },
             "pass_medians_ns": [
-              9431750,
-              9531125,
-              8889250,
-              10245000,
-              14230625
+              12831916,
+              13358458,
+              13158792,
+              12043250,
+              12833917
             ]
           }
         ],
@@ -3621,22 +3621,22 @@
           {
             "id": "hook.intercept_pass.spawn_minus_floor",
             "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
-            "median_ns": 66458
+            "median_ns": 68375
           },
           {
             "id": "hook.intercept_block.spawn_minus_floor",
             "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
-            "median_ns": 12167
+            "median_ns": -96208
           },
           {
             "id": "hook.meter_read.spawn_minus_floor",
             "what": "median(hook.meter_read.spawn) - median(hook.floor)",
-            "median_ns": 27357166
+            "median_ns": 30932917
           },
           {
             "id": "hook.meter_bash.spawn_minus_floor",
             "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
-            "median_ns": 26760541
+            "median_ns": 30334625
           },
           {
             "id": "hook.per_call_identity.spawn_minus_floor",
@@ -3651,10 +3651,10 @@
         ]
       },
       {
-        "label": "pre-8855fe4",
+        "label": "pre-4ca4fd1",
         "reported_version": "1.7.0",
-        "load_before": "load average 7.43 11.61 17.81 (1, 5, 15 min)",
-        "load_after": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
+        "load_before": "load average 4.99 5.50 6.29 (1, 5, 15 min)",
+        "load_after": "load average 4.89 5.24 6.07 (1, 5, 15 min)",
         "series": [
           {
             "id": "hook.floor",
@@ -3663,19 +3663,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2027000,
-              "median_ns": 2325583,
-              "p90_ns": 2455917,
-              "p99_ns": 2569375,
-              "max_ns": 2627625
+              "min_ns": 2228250,
+              "median_ns": 2874875,
+              "p90_ns": 3182750,
+              "p99_ns": 3465083,
+              "max_ns": 3604334
             },
             "routes": {},
             "pass_medians_ns": [
-              2119084,
-              2326292,
-              2281500,
-              2348958,
-              2414625
+              2746417,
+              2788375,
+              2895584,
+              3101917,
+              2633917
             ]
           },
           {
@@ -3685,19 +3685,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2053375,
-              "median_ns": 2310250,
-              "p90_ns": 2618208,
-              "p99_ns": 2817291,
-              "max_ns": 2852459
+              "min_ns": 2559625,
+              "median_ns": 3036917,
+              "p90_ns": 3292917,
+              "p99_ns": 3524375,
+              "max_ns": 3685375
             },
             "routes": {},
             "pass_medians_ns": [
-              2171292,
-              2373125,
-              2148458,
-              2385041,
-              2614584
+              3033916,
+              3117042,
+              2992417,
+              3019541,
+              3029625
             ]
           },
           {
@@ -3707,19 +3707,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3244250,
-              "median_ns": 3786750,
-              "p90_ns": 4178042,
-              "p99_ns": 5024292,
-              "max_ns": 13827625
+              "min_ns": 4273375,
+              "median_ns": 5530709,
+              "p90_ns": 5920291,
+              "p99_ns": 6504458,
+              "max_ns": 10331375
             },
             "routes": {},
             "pass_medians_ns": [
-              3532125,
-              3864500,
-              3395834,
-              3817333,
-              4132417
+              5345209,
+              5655541,
+              5492458,
+              5220542,
+              5580625
             ]
           },
           {
@@ -3729,19 +3729,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 28755667,
-              "median_ns": 29532417,
-              "p90_ns": 30247542,
-              "p99_ns": 32791667,
-              "max_ns": 34587500
+              "min_ns": 32821000,
+              "median_ns": 34026708,
+              "p90_ns": 34766125,
+              "p99_ns": 36636459,
+              "max_ns": 41321292
             },
             "routes": {},
             "pass_medians_ns": [
-              29461500,
-              29476083,
-              29511583,
-              29571500,
-              29660166
+              34071792,
+              34128084,
+              34026708,
+              33470417,
+              34398375
             ]
           },
           {
@@ -3751,19 +3751,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 27874417,
-              "median_ns": 28763250,
-              "p90_ns": 29829584,
-              "p99_ns": 31758292,
-              "max_ns": 34885250
+              "min_ns": 31216875,
+              "median_ns": 33305584,
+              "p90_ns": 34126084,
+              "p99_ns": 53982583,
+              "max_ns": 67448459
             },
             "routes": {},
             "pass_medians_ns": [
-              29677959,
-              28763333,
-              28704500,
-              28578208,
-              28675208
+              33305584,
+              33392333,
+              33484750,
+              33075291,
+              33299125
             ]
           },
           {
@@ -3773,19 +3773,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 22875,
-              "median_ns": 46750,
-              "p90_ns": 68584,
-              "p99_ns": 80750,
-              "max_ns": 96250
+              "min_ns": 34583,
+              "median_ns": 58875,
+              "p90_ns": 66750,
+              "p99_ns": 95167,
+              "max_ns": 139084
             },
             "routes": {},
             "pass_medians_ns": [
-              65791,
-              67125,
-              27916,
-              31750,
-              46750
+              64000,
+              64375,
+              55708,
+              55375,
+              55584
             ]
           },
           {
@@ -3795,19 +3795,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 814375,
-              "median_ns": 1920292,
-              "p90_ns": 2860000,
-              "p99_ns": 4337875,
-              "max_ns": 4457583
+              "min_ns": 1476625,
+              "median_ns": 2509459,
+              "p90_ns": 3155750,
+              "p99_ns": 5078875,
+              "max_ns": 9643125
             },
             "routes": {},
             "pass_medians_ns": [
-              2774542,
-              2764125,
-              1664166,
-              1328958,
-              1588250
+              2183333,
+              2115458,
+              2734375,
+              2553209,
+              2780917
             ]
           },
           {
@@ -3817,19 +3817,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2244458,
-              "median_ns": 2744375,
-              "p90_ns": 4155750,
-              "p99_ns": 4498542,
-              "max_ns": 5403375
+              "min_ns": 3107000,
+              "median_ns": 4635209,
+              "p90_ns": 5572375,
+              "p99_ns": 6151708,
+              "max_ns": 12681292
             },
             "routes": {},
             "pass_medians_ns": [
-              4016084,
-              4064458,
-              2673834,
-              2369166,
-              2648750
+              4712917,
+              4871125,
+              4626416,
+              4781125,
+              4268375
             ]
           },
           {
@@ -3839,29 +3839,42 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2111541,
-              "median_ns": 3106083,
-              "p90_ns": 4778250,
-              "p99_ns": 9969125,
-              "max_ns": 15613417
+              "min_ns": 2890625,
+              "median_ns": 4711917,
+              "p90_ns": 5582959,
+              "p99_ns": 7017500,
+              "max_ns": 9767958
             },
             "routes": {},
             "pass_medians_ns": [
-              4417375,
-              4516875,
-              2363541,
-              2864208,
-              2422875
+              4711917,
+              3715000,
+              4770000,
+              5098833,
+              4879125
             ]
           },
           {
             "id": "hook.per_call_identity",
             "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
             "subject": null,
-            "status": "n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 8855fe4c2ed8)",
-            "lat": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3000750,
+              "median_ns": 4840167,
+              "p90_ns": 5348959,
+              "p99_ns": 11627334,
+              "max_ns": 27895667
+            },
             "routes": {},
-            "pass_medians_ns": []
+            "pass_medians_ns": [
+              3983958,
+              5054333,
+              4588792,
+              4953625,
+              4947375
+            ]
           },
           {
             "id": "server.start",
@@ -3870,19 +3883,19 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1918916,
-              "median_ns": 2312083,
-              "p90_ns": 2910083,
-              "p99_ns": 3203084,
-              "max_ns": 3563208
+              "min_ns": 2203792,
+              "median_ns": 2880833,
+              "p90_ns": 3182667,
+              "p99_ns": 3898292,
+              "max_ns": 12385834
             },
             "routes": {},
             "pass_medians_ns": [
-              2811833,
-              2794291,
-              2269750,
-              2198417,
-              2214750
+              2767542,
+              2925458,
+              2886125,
+              2896084,
+              2801083
             ]
           },
           {
@@ -3893,18 +3906,18 @@
             "lat": {
               "n": 200,
               "min_ns": 7125,
-              "median_ns": 10833,
-              "p90_ns": 12667,
-              "p99_ns": 14833,
-              "max_ns": 18958
+              "median_ns": 11334,
+              "p90_ns": 12917,
+              "p99_ns": 15917,
+              "max_ns": 18750
             },
             "routes": {},
             "pass_medians_ns": [
-              11708,
-              11750,
-              10875,
-              10500,
-              10375
+              10584,
+              11917,
+              11875,
+              10459,
+              12208
             ]
           },
           {
@@ -3914,21 +3927,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 506500,
-              "median_ns": 586792,
-              "p90_ns": 762791,
-              "p99_ns": 824041,
-              "max_ns": 832042
+              "min_ns": 760542,
+              "median_ns": 925917,
+              "p90_ns": 1093750,
+              "p99_ns": 1568125,
+              "max_ns": 1885625
             },
             "routes": {
               "smart_read": 300
             },
             "pass_medians_ns": [
-              651709,
-              740208,
-              586792,
-              542417,
-              522000
+              911084,
+              951958,
+              923250,
+              939125,
+              901792
             ]
           },
           {
@@ -3938,21 +3951,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 509917,
-              "median_ns": 650834,
-              "p90_ns": 847500,
-              "p99_ns": 945709,
-              "max_ns": 981500
+              "min_ns": 770458,
+              "median_ns": 957166,
+              "p90_ns": 1251791,
+              "p99_ns": 1492250,
+              "max_ns": 1546291
             },
             "routes": {
               "recall_file": 300
             },
             "pass_medians_ns": [
-              671583,
-              843833,
-              662375,
-              627166,
-              589500
+              952875,
+              969709,
+              962458,
+              917750,
+              964417
             ]
           },
           {
@@ -3962,21 +3975,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1985292,
-              "median_ns": 2098292,
-              "p90_ns": 2228750,
-              "p99_ns": 2480000,
-              "max_ns": 2661750
+              "min_ns": 2494417,
+              "median_ns": 2751083,
+              "p90_ns": 3274000,
+              "p99_ns": 3506208,
+              "max_ns": 3577666
             },
             "routes": {
               "smart_read": 300
             },
             "pass_medians_ns": [
-              2140500,
-              2079000,
-              2094125,
-              2112209,
-              2040833
+              2737959,
+              2769791,
+              2675875,
+              2751750,
+              2758125
             ]
           },
           {
@@ -3986,21 +3999,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1927709,
-              "median_ns": 2039500,
-              "p90_ns": 2366292,
-              "p99_ns": 3162583,
-              "max_ns": 5179708
+              "min_ns": 2406292,
+              "median_ns": 2634417,
+              "p90_ns": 3146334,
+              "p99_ns": 6407750,
+              "max_ns": 9400375
             },
             "routes": {
               "recall_file": 300
             },
             "pass_medians_ns": [
-              2339583,
-              2025208,
-              2026875,
-              2036583,
-              2016792
+              2607458,
+              2591041,
+              2689292,
+              2670500,
+              2657541
             ]
           },
           {
@@ -4010,21 +4023,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 4891583,
-              "median_ns": 5050791,
-              "p90_ns": 5415167,
-              "p99_ns": 6832959,
-              "max_ns": 7671500
+              "min_ns": 5692917,
+              "median_ns": 6422375,
+              "p90_ns": 6574875,
+              "p99_ns": 7244000,
+              "max_ns": 7376500
             },
             "routes": {
               "smart_read": 300
             },
             "pass_medians_ns": [
-              5261125,
-              5050791,
-              4977333,
-              5062000,
-              4981833
+              6449375,
+              6405125,
+              6405167,
+              6402834,
+              6392625
             ]
           },
           {
@@ -4034,21 +4047,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 4820708,
-              "median_ns": 4943916,
-              "p90_ns": 5139250,
-              "p99_ns": 5628792,
-              "max_ns": 5983708
+              "min_ns": 5607584,
+              "median_ns": 6321208,
+              "p90_ns": 6483500,
+              "p99_ns": 7091125,
+              "max_ns": 7184458
             },
             "routes": {
               "recall_file": 300
             },
             "pass_medians_ns": [
-              5068750,
-              4912292,
-              4911958,
-              4952750,
-              4919375
+              6327875,
+              6349042,
+              6349708,
+              6283583,
+              6256334
             ]
           },
           {
@@ -4058,21 +4071,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 1670000,
-              "median_ns": 2160208,
-              "p90_ns": 4086500,
-              "p99_ns": 4950000,
-              "max_ns": 14329833
+              "min_ns": 1810334,
+              "median_ns": 2925042,
+              "p90_ns": 3333125,
+              "p99_ns": 3579708,
+              "max_ns": 3646083
             },
             "routes": {
               "smart_read_unchanged": 300
             },
             "pass_medians_ns": [
-              2109833,
-              2007125,
-              2391458,
-              4057500,
-              2061958
+              2925042,
+              2788250,
+              2776500,
+              2978333,
+              3119209
             ]
           },
           {
@@ -4082,21 +4095,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 2866708,
-              "median_ns": 3768333,
-              "p90_ns": 6293667,
-              "p99_ns": 7205334,
-              "max_ns": 7492500
+              "min_ns": 2467875,
+              "median_ns": 3335125,
+              "p90_ns": 3727958,
+              "p99_ns": 5107334,
+              "max_ns": 8378667
             },
             "routes": {
               "smart_read_delta": 300
             },
             "pass_medians_ns": [
-              3289416,
-              3735125,
-              4265042,
-              6193250,
-              3288375
+              3478666,
+              3373792,
+              3213666,
+              3404250,
+              3187541
             ]
           },
           {
@@ -4106,21 +4119,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 3476750,
-              "median_ns": 3954292,
-              "p90_ns": 4770584,
-              "p99_ns": 7420834,
-              "max_ns": 25064709
+              "min_ns": 3856875,
+              "median_ns": 4979250,
+              "p90_ns": 5621208,
+              "p99_ns": 16967334,
+              "max_ns": 36247833
             },
             "routes": {
               "smart_read_unchanged": 300
             },
             "pass_medians_ns": [
-              3770583,
-              3804167,
-              4033125,
-              4700791,
-              3944291
+              5011167,
+              4913125,
+              4602666,
+              5105208,
+              5042917
             ]
           },
           {
@@ -4130,21 +4143,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 4168875,
-              "median_ns": 6706875,
-              "p90_ns": 10443458,
-              "p99_ns": 11311083,
-              "max_ns": 12187500
+              "min_ns": 4416542,
+              "median_ns": 5307583,
+              "p90_ns": 6019750,
+              "p99_ns": 6429417,
+              "max_ns": 6469583
             },
             "routes": {
               "smart_read_delta": 300
             },
             "pass_medians_ns": [
-              6442584,
-              6430750,
-              6691916,
-              9268041,
-              10192208
+              5294209,
+              5284541,
+              5259250,
+              5297208,
+              5337833
             ]
           },
           {
@@ -4154,21 +4167,21 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 6354375,
-              "median_ns": 6775959,
-              "p90_ns": 7625250,
-              "p99_ns": 7941833,
-              "max_ns": 17012292
+              "min_ns": 7782042,
+              "median_ns": 8916042,
+              "p90_ns": 9601792,
+              "p99_ns": 10184750,
+              "max_ns": 20109500
             },
             "routes": {
               "smart_read_unchanged": 300
             },
             "pass_medians_ns": [
-              6677375,
-              6498417,
-              6626459,
-              7443000,
-              7467250
+              8404000,
+              9027417,
+              8909500,
+              9130750,
+              8810083
             ]
           },
           {
@@ -4178,21 +4191,69 @@
             "status": "measured",
             "lat": {
               "n": 200,
-              "min_ns": 8171208,
-              "median_ns": 9739333,
-              "p90_ns": 14728292,
-              "p99_ns": 15626333,
-              "max_ns": 25901084
+              "min_ns": 8074042,
+              "median_ns": 9336125,
+              "p90_ns": 9983084,
+              "p99_ns": 11089666,
+              "max_ns": 13065042
             },
             "routes": {
               "smart_read_delta": 300
             },
             "pass_medians_ns": [
-              9488791,
-              9445833,
-              9071042,
-              14551166,
-              14183458
+              9354041,
+              9059792,
+              9470625,
+              9301583,
+              9455458
+            ]
+          },
+          {
+            "id": "server.identity.placed",
+            "what": "smart_read, repeat reads off, with the hook's record in place and the _meta id that names it: the server claims it",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2454041,
+              "median_ns": 2709708,
+              "p90_ns": 3263042,
+              "p99_ns": 4541666,
+              "max_ns": 9867833
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2742833,
+              2702542,
+              2681375,
+              2765833,
+              2661500
+            ]
+          },
+          {
+            "id": "server.identity.unplaced",
+            "what": "smart_read, repeat reads off, with no record and no _meta id: nothing to claim",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2194375,
+              "median_ns": 2531459,
+              "p90_ns": 3076875,
+              "p99_ns": 4616417,
+              "max_ns": 12241208
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2589541,
+              2547292,
+              2440875,
+              2692834,
+              2456500
             ]
           }
         ],
@@ -4200,32 +4261,32 @@
           {
             "id": "hook.intercept_pass.spawn_minus_floor",
             "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
-            "median_ns": -15333
+            "median_ns": 162042
           },
           {
             "id": "hook.intercept_block.spawn_minus_floor",
             "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
-            "median_ns": 1461167
+            "median_ns": 2655834
           },
           {
             "id": "hook.meter_read.spawn_minus_floor",
             "what": "median(hook.meter_read.spawn) - median(hook.floor)",
-            "median_ns": 27206834
+            "median_ns": 31151833
           },
           {
             "id": "hook.meter_bash.spawn_minus_floor",
             "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
-            "median_ns": 26437667
+            "median_ns": 30430709
           },
           {
             "id": "hook.per_call_identity.spawn_minus_floor",
             "what": "median(hook.per_call_identity) - median(hook.floor)",
-            "median_ns": null
+            "median_ns": 1965292
           },
           {
             "id": "hook.per_call_identity.server_claim",
             "what": "median(server.identity.placed) - median(server.identity.unplaced)",
-            "median_ns": null
+            "median_ns": 178249
           }
         ]
       }
@@ -4265,9 +4326,9 @@
     "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
     "host_triple": "aarch64-apple-darwin",
     "rustflags": null,
-    "started_utc": "2026-10-12T04:06:58Z",
-    "load_at_start": "load average 8.50 12.24 18.25 (1, 5, 15 min)",
-    "load_at_end": "load average 5.63 10.01 16.55 (1, 5, 15 min)",
+    "started_utc": "2026-10-13T11:18:42Z",
+    "load_at_start": "load average 3.75 5.46 6.33 (1, 5, 15 min)",
+    "load_at_end": "load average 4.89 5.24 6.07 (1, 5, 15 min)",
     "probe_errors": []
   }
 }
