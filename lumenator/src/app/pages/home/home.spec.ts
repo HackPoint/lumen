@@ -44,7 +44,9 @@ describe('Home', () => {
 
   it('asks the backend whether setup is needed', async () => {
     await build();
-    expect(bridge.countOf('lumen_setup_needed')).toBe(1);
+    // Once for the redirect, and once for the identity hook prompt on this page, which has to
+    // know it as well and asks wherever it is hosted.
+    expect(bridge.countOf('lumen_setup_needed')).toBe(2);
   });
 
   it('stays on home when setup is already done', async () => {
@@ -719,6 +721,66 @@ describe('Home', () => {
       await TestBed.inject(RepeatReadsService).load();
       await settle();
       expect(said()).not.toContain('Not saved');
+    });
+  });
+
+  // ── identity hook prompt ───────────────────────────────────────────────────
+  //
+  // Anyone who ran Setup under 1.7.0 or earlier has its marker, so this page never sends them
+  // back to it, and their settings lack the one hook repeat reads need. The prompt is the only
+  // place the app says so. Its own behaviour is pinned in the component's spec; these pin that
+  // Home hosts it, where, and for whom.
+
+  describe('identity hook prompt', () => {
+    const PROMPT = 'identity-hook-prompt [role="status"]';
+    const MISSING = { registered: false, servedElsewhere: false };
+
+    async function open(
+      status: unknown,
+      seed?: (b: FakeTauriBridge) => void,
+    ): Promise<void> {
+      await build((b) => {
+        b.responses.set('lumen_identity_hook_status', status);
+        seed?.(b);
+      });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      fixture.detectChanges();
+    }
+
+    it('tells an upgrader whose settings lack the hook to run Setup, above the tabs', async () => {
+      await open(MISSING);
+      expect(el<HTMLElement>(PROMPT).textContent).toContain('Repeat reads are on, but not working yet');
+      expect(el<HTMLButtonElement>(`${PROMPT} button`).textContent?.trim()).toBe('Run Setup');
+      // Where the banners are: before the tabs, so it is seen before the page is used.
+      const before = el<HTMLElement>(PROMPT).compareDocumentPosition(el<HTMLElement>('nav.tab-nav'));
+      expect(before & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('is not there once the hook is registered', async () => {
+      await open({ registered: true, servedElsewhere: false });
+      expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+    });
+
+    it('is not there when the backend has no such command', async () => {
+      await open(MISSING, (b) => b.failures.add('lumen_identity_hook_status'));
+      expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+    });
+
+    it('is not there when repeat reads are off', async () => {
+      await open(MISSING, (b) =>
+        b.responses.set('get_repeat_reads_setting', setting({ on: false, source: 'file' })),
+      );
+      expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+    });
+
+    it('is not there on a first run, which is on its way to Setup anyway', async () => {
+      const navigate = vi.spyOn(Router.prototype, 'navigate').mockResolvedValue(true);
+      try {
+        await open(MISSING, (b) => b.responses.set('lumen_setup_needed', true));
+        expect(fixture.nativeElement.querySelector(PROMPT)).toBeNull();
+      } finally {
+        navigate.mockRestore();
+      }
     });
   });
 });

@@ -38,11 +38,71 @@ builds, which is the longest part.
 is stamped **pre-release** in the JSON (`"pre_release": true`) and at the top of the summary. The
 default label is `pre-release-<12 characters of the commit that was built>`, and the candidate
 build is labelled `pre-<7 characters>` in the tables, so a result always says which commit it is a
-measurement of and never calls it "main" (main moves; the commit does not). The files committed
-here are a measurement of one commit before 1.8.0 and are not a 1.8.0 result. That commit is
-this pull request's branch, whose `crates/` and `lumenator/` are identical to `main` at
-`3008af7` (`git diff 3008af7 <commit> -- crates lumenator` is empty): the harness was added, no
-shipped code was touched.
+measurement of and never calls it "main" (main moves; the commit does not).
+
+## What is committed here
+
+`results/pre-release-4ca4fd1ffe21-*` measure commit `4ca4fd1ffe216f47e2c764be80cce4cbb56de6bc`,
+the last code commit before the 1.8.0 version bump, against v1.7.0. They carry the pre-release
+stamp because the bump is a later commit. Nothing after it changes what the harness measures: the
+commits that follow touch this directory, this file, the version strings (in `Cargo.lock`, only the
+workspace crates' own lines) and `CHANGELOG.md`.
+
+| platform | run | machine |
+|---|---|---|
+| macOS 26.6.2 | tokens and latency, 200 runs per series | Apple M4 (4 performance and 6 efficiency cores), 24 GiB, on mains and in use: load average 5.0 before the latency series, 4.9 after |
+| Ubuntu 24.04 | latency only, 200 runs per series, the Benchmarks workflow (run 38389263356) | GitHub-hosted runner, AMD EPYC 9V45, 4 logical cores, 15.6 GiB, load average 3.1 before, 1.6 after |
+| Windows Server 2025 | the same | GitHub-hosted runner, AMD EPYC 9V74, 4 logical cores, 16.0 GiB, CPU 1% busy before, 4% after |
+
+Medians, v1.7.0 then this commit. Every figure is in the summaries and there is no overall figure
+(see "No headline"). Compare a platform's two builds with each other, not one platform's latency
+with another's.
+
+| | macOS | Ubuntu | Windows |
+|---|---:|---:|---:|
+| `hook.intercept_block.spawn`: a large file's Read, blocked | 2.90 to 5.53 ms | 1.01 to 1.40 ms | 4.63 to 5.66 ms |
+| `hook.intercept_pass.spawn`: a small file's Read, let through | 3.06 to 3.04 ms | 0.98 to 0.97 ms | 4.42 to 4.54 ms |
+| `hook.floor`: a hook that does nothing | 2.99 to 2.87 ms | 0.93 to 0.92 ms | 4.28 to 4.31 ms |
+| `hook.per_call_identity`: new in this commit, 1.7.0 has none | 4.84 ms | 1.02 ms | 4.69 ms |
+| `server.smart_read`, a file under 300 lines | 658 to 926 us | 671 to 724 us | 1.26 to 1.56 ms |
+| `server.smart_read`, a file of 1000 to 2999 lines | 5.65 to 6.42 ms | 6.17 to 6.21 ms | 11.43 to 12.30 ms |
+
+- **Tokens** (macOS only; they do not depend on the machine): equal for every file and mode. The
+  two builds' digests are the same, `2d99da988a0f...` (see "Reading a result").
+- **A blocked Read costs more than in 1.7.0**, on all three platforms and in every pass: the
+  slowest of 1.7.0's five pass medians is faster than the fastest of this commit's. Since #42 a
+  blocked Read opens the ledger read-only and runs up to two SELECTs on `read_events`
+  (`lumen_served` in `crates/lumen-mcp/src/hook.rs`, which calls `meter::lumen_answered`) to decide
+  whether the retry goes to `recall_file`; 1.7.0 did not touch the ledger there. A reviewer
+  confirmed on macOS that this lookup is the cost: a scratch build with `lumen_served` made to
+  return false at once blocked a Read in 1.7.0's time (within about 0.1 ms), where the unmodified
+  build took 2.3 to 2.7 ms longer; a second reviewer repeated it over eight runs and got the same.
+  Ubuntu and Windows were not tried. A Read that is let through costs what it did, within 3% on all
+  three platforms in the first run.
+- **A hook runs before every Lumen call.** 1.7.0 read the session id once, from the environment,
+  when the server started. This commit names the conversation per call, so that `/clear` and
+  `/resume` get a full result (#32). `hook.per_call_identity` is that hook: above the process floor,
+  about 1 to 2 ms on the macOS laptop (1.97 ms in the committed run), 0.10 ms on Ubuntu and 0.38 ms
+  on Windows. The server's claim of its record (`hook.per_call_identity.server_claim`: 178 us,
+  39 us, 191 us) is inside every server call.
+- **Server calls** (`server.smart_read`, `server.recall_file`) take longer in every bucket: by 0.27
+  to 0.77 ms on macOS, 0.04 to 0.06 ms on Ubuntu and 0.30 to 0.90 ms on Windows. The identity
+  claim is part of it; the harness does not trace the rest.
+- **Close to 1.7.0**: the meter hooks (`hook.meter_*`, 0.98 to 1.02 of its median on every
+  platform) and the repeat-read calls (`server.repeat_*`: 1.00 to 1.14 on Ubuntu and Windows; on
+  macOS 0.86 to 1.06, except the next bullet).
+- **Faster than 1.7.0**: on macOS `server.repeat_changed.*` takes 0.67 to 0.73 of 1.7.0's median
+  (a reviewer's re-run: 0.67 to 0.74). The cause was not traced, and it does not show on Ubuntu or
+  Windows.
+
+A second run of the same workflow on the same commit (run 38390782413) agreed with the first in
+direction on every latency claim above, and not in size. The runners drew other CPUs (Ubuntu an AMD
+EPYC 9V74 where the first run had a 9V45, Windows an EPYC 7763 where it had a 9V74), every median
+was 1.2 to 2.3 times the first run's, and the differences moved: a blocked Read cost 0.56 ms more
+than in 1.7.0 on Ubuntu and 1.85 ms more on Windows, and the identity hook sat 0.13 ms and 0.82 ms
+above the floor. A let-through Read on Windows cost 7.6% more than in 1.7.0 (2.7% in the first
+run), and the floor was 4.0% apart in that run (0.5% in the first), so that runner was the
+noisier one. Read the sizes from a shared runner as one draw, not as a constant.
 
 ## MEASURED and MODELLED
 
@@ -232,9 +292,10 @@ listed in the JSON and the summary. Hooks only ever see source files, and the re
 Rust, so latency does not depend on the other corpora.
 
 Latency varies, and on a shared machine it varies more than 20%. Tokens are exact; latency is
-not, and this section says how far. All runs below are the full latency run (42 series
-medians across both builds) on one Apple M4 laptop that other work was using, so its load
-average ranged from 4 to 25 during the session:
+not, and this section says how far. All runs below are the full latency run (42 series medians
+across both builds, 45 in this release's run) on one Apple M4 laptop that other work was using, so
+its load average ranged from about 4 to 25 across them ("the committed run" is the first run
+committed here, from the harness's development; this release's run replaced it):
 
 | pair of runs (same code, one machine) | series medians within 20% |
 |---|---|
@@ -243,6 +304,7 @@ average ranged from 4 to 25 during the session:
 | a full run against a latency-only run 18 minutes earlier | 18 of 42 |
 | the committed run against that same run, 21 minutes earlier | 15 of 42 |
 | `compare` (100 runs per series) against the committed run, a few minutes later, 1-minute load 3.6 against the committed run's 7.4 | 39 of 42 as measured, 32 of 34 after dividing by the floor; the floors were within 5%, and `compare` said the machine matched |
+| `compare` against this release's committed macOS run, two reviewers' re-runs, one about half an hour after the committed run started and one about an hour and a quarter after; 1-minute load 3.8 to 5.4 in the first and 5.0 to 8.0 in the second | 45 of 45 in the first and 42 of 45 in the second as measured (the three misses were in-process hooks that the re-run measured 21 to 23% lower; their pass medians span 13 to 27% of the median in the committed run); 37 of 37 after dividing by the floor in both; `compare` said the machine matched both times |
 
 In the back-to-back pair every process-spawn series (`hook.*.spawn`, `hook.floor`,
 `server.start`) and `server.ping` agreed within 7%; the four that did not were longer server
@@ -317,8 +379,10 @@ file), and say whether it ran on mains or battery. Do not quote a latency figure
   The first call after boot is slower.
 - The dollar figures are a model of the author's usage with unverified rates; they say what a
   saved token is worth under that model, not what anyone was charged.
-- Windows: the latency part is meant to run there (`run.ps1`, or the Benchmarks workflow); the
-  committed first run is from macOS.
+- Ubuntu and Windows: only the latency part runs there (`--latency-only`: `run.ps1` on Windows,
+  or the Benchmarks workflow). The committed runs are from GitHub-hosted runners, which are shared
+  virtual machines with 4 logical cores. Compare a platform's two builds with each other, not one
+  platform's latency with another's.
 
 ## The workflow
 

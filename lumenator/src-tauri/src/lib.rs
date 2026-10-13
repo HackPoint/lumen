@@ -535,7 +535,8 @@ pub fn run() {
             setup::lumen_install_cli,
             setup::lumen_autostart_enabled,
             setup::lumen_set_autostart,
-            setup::lumen_artifact_health
+            setup::lumen_artifact_health,
+            setup::lumen_identity_hook_status
         ])
         .build(app_context())
         .expect("error while building tauri application")
@@ -1743,6 +1744,31 @@ mod tests {
                 "the switch needs {needed}, and the scan found only {invoked:?}"
             );
         }
+    }
+
+    /// The prompt that tells an upgrader to run Setup asks this command, and swallows a failure
+    /// on purpose, since a backend older than the window has no such command. A rename on either
+    /// side would therefore make the prompt vanish without a sound, and this is what notices.
+    #[test]
+    fn the_prompt_asks_a_command_the_backend_answers() {
+        let mut files = Vec::new();
+        frontend_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app"),
+            &mut files,
+        );
+        let invoked: Vec<String> = files
+            .iter()
+            .flat_map(|f| invoked_commands(&std::fs::read_to_string(f).unwrap()))
+            .collect();
+        let needed = "lumen_identity_hook_status";
+        assert!(
+            invoked.iter().any(|n| n == needed),
+            "the prompt needs {needed}, and the scan found only {invoked:?}"
+        );
+        assert!(
+            registered_commands().iter().any(|n| n == needed),
+            "the window asks {needed}, which no handler answers"
+        );
     }
 
     #[test]

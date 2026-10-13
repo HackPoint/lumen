@@ -44,6 +44,10 @@
             </section>
         }
 
+        <!-- Repeat reads are on and cannot work until Setup has registered the identity hook,
+             which an install set up under 1.7.0 or earlier never got. -->
+        <identity-hook-prompt />
+
         <!-- Tab nav: switch between Context and Optimizer screens -->
         <nav class="tab-nav" role="tablist" aria-label="Main navigation">
             <a class="tab-nav__tab"

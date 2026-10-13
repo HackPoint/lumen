@@ -1,6 +1,6 @@
-# Lumen benchmarks: pre-release-8855fe4c2ed8
+# Lumen benchmarks: pre-release-4ca4fd1ffe21
 
-> **Pre-release measurement.** This is the harness run on commit `8855fe4c2ed8`, before the 1.8.0 release. It is not a 1.8.0 result and must not be quoted as one.
+> **Pre-release measurement.** This is the harness run on commit `4ca4fd1ffe21`, before the 1.8.0 release. It is not a 1.8.0 result and must not be quoted as one.
 
 Per-call figures, per file-size bucket and per language. There is no overall "percent saved" here on purpose: how much a person saves overall depends on their usage mix (how many reads are large, how many repeat).
 
@@ -13,7 +13,7 @@ Per-call figures, per file-size bucket and per language. There is no overall "pe
 | label | role | commit | profile | per-call identity | reports version |
 |---|---|---|---|---|---|
 | v1.7.0 | baseline | `5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94` | release, cargo's default: the root Cargo.toml has no [profile.release] | CLAUDE_CODE_SESSION_ID, read once when the server starts | 1.7.0 |
-| pre-8855fe4 | candidate | `8855fe4c2ed896d91abd5ef410f5815e0538e655` | release, cargo's default: the root Cargo.toml has no [profile.release] | CLAUDE_CODE_SESSION_ID, read once when the server starts | 1.7.0 |
+| pre-4ca4fd1 | candidate | `4ca4fd1ffe216f47e2c764be80cce4cbb56de6bc` | release, cargo's default: the root Cargo.toml has no [profile.release] | a hook record per call (PreToolUse on the Lumen tool), claimed by the server through _meta claudecode/toolUseId | 1.7.0 |
 
 ## Machine
 
@@ -22,8 +22,8 @@ Per-call figures, per file-size bucket and per language. There is no overall "pe
 - RAM: 24.0 GiB
 - Power: Now drawing from 'AC Power'
 - Toolchain: rustc 1.98.1 (48a229cea 2026-09-01) / cargo 1.98.1 (797e8a9bc 2026-08-05)
-- Started: 2026-10-12T04:06:58Z
-- Load at start: load average 8.50 12.24 18.25 (1, 5, 15 min); at end: load average 5.63 10.01 16.55 (1, 5, 15 min)
+- Started: 2026-10-13T11:18:42Z
+- Load at start: load average 3.75 5.46 6.33 (1, 5, 15 min); at end: load average 4.89 5.24 6.07 (1, 5, 15 min)
 
 ## Corpus
 
@@ -41,7 +41,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **outline: `smart_read(path)`, the first read**
 
-| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | <300 | 595 | 277 | 1360 | 137 | 244 | $0.0048 | 137 | 244 | $0.0048 |
 | 300-999 | 116 | 3947 | 7359 | 307 | 694 | $0.1386 | 307 | 694 | $0.1386 |
@@ -50,7 +50,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **recall: `recall_file(path, [one representative item])`**
 
-| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | <300 | 334 | 277 | 1360 | 97 | 246 | $0.0096 | 97 | 246 | $0.0096 |
 | 300-999 | 76 | 3947 | 7359 | 228 | 431 | $0.1435 | 228 | 431 | $0.1435 |
@@ -59,7 +59,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **repeat-read stub: the second identical `smart_read`, repeat reads on**
 
-| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | <300 | 595 | 277 | 1360 | 30 | 30 | $0.0096 | 30 | 30 | $0.0096 |
 | 300-999 | 116 | 3947 | 7359 | 30 | 30 | $0.1518 | 30 | 30 | $0.1518 |
@@ -68,7 +68,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **repeat-read delta: `smart_read` after one small edit to the file, repeat reads on**
 
-| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| bucket (lines) | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | <300 | 300 | 277 | 1360 | 43 | 96 | $0.0144 | 43 | 96 | $0.0144 |
 | 300-999 | 74 | 3947 | 7359 | 44 | 51 | $0.1531 | 44 | 51 | $0.1531 |
@@ -80,7 +80,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **outline: `smart_read(path)`, the first read**
 
-| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rust | 58 | 3809 | 17615 | 320 | 838 | $0.1343 | 320 | 838 | $0.1343 |
 | python | 274 | 655 | 10796 | 195 | 864 | $0.0159 | 195 | 864 | $0.0159 |
@@ -89,7 +89,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **recall: `recall_file(path, [one representative item])`**
 
-| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rust | 57 | 3809 | 17615 | 234 | 370 | $0.1435 | 234 | 370 | $0.1435 |
 | python | 223 | 655 | 10796 | 184 | 361 | $0.0386 | 184 | 361 | $0.0386 |
@@ -98,7 +98,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **repeat-read stub: the second identical `smart_read`, repeat reads on**
 
-| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rust | 58 | 3809 | 17615 | 30 | 30 | $0.1464 | 30 | 30 | $0.1464 |
 | python | 274 | 655 | 10796 | 30 | 40 | $0.0242 | 30 | 40 | $0.0242 |
@@ -107,7 +107,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 **repeat-read delta: `smart_read` after one small edit to the file, repeat reads on**
 
-| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-8855fe4 med | pre-8855fe4 p90 | pre-8855fe4 modelled $/call |
+| language | n | full med | full p90 | v1.7.0 med | v1.7.0 p90 | v1.7.0 modelled $/call | pre-4ca4fd1 med | pre-4ca4fd1 p90 | pre-4ca4fd1 modelled $/call |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | rust | 57 | 3809 | 17615 | 44 | 55 | $0.1557 | 44 | 55 | $0.1557 |
 | python | 188 | 655 | 10796 | 45 | 96 | $0.0658 | 45 | 96 | $0.0658 |
@@ -118,7 +118,7 @@ Median and p90 over files, of the tokens the call returned. `full` is the file's
 
 How the server answered, from its own ledger. A route other than the mode's own is a fall-back the benchmark reports rather than hides: `would_inflate` is the guard returning the file because an outline would not be smaller; `unchanged_not_smaller`, `delta_too_big` and `no_base` are the repeat-read gate declining.
 
-| bucket | mode | v1.7.0 routes | pre-8855fe4 routes |
+| bucket | mode | v1.7.0 routes | pre-4ca4fd1 routes |
 |---|---|---|---|
 | <300 | outline | ranked_no_defs 19, smart_read 398, would_inflate 178 | ranked_no_defs 19, smart_read 398, would_inflate 178 |
 | <300 | recall | recall_file 291, would_inflate 43 | recall_file 291, would_inflate 43 |
@@ -137,11 +137,11 @@ How the server answered, from its own ledger. A route other than the mode's own 
 | 3000+ | stub | smart_read_unchanged/unchanged 7 | smart_read_unchanged/unchanged 7 |
 | 3000+ | delta | smart_read_delta/delta 6 | smart_read_delta/delta 6 |
 
-Token table digests (SHA-256 of the per-file rows of `*-tokens.tsv` with the build column blanked, so a digest does not depend on a label; equal digests mean equal token figures): v1.7.0 `2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7`; pre-8855fe4 `2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7`
+Token table digests (SHA-256 of the per-file rows of `*-tokens.tsv` with the build column blanked, so a digest does not depend on a label; equal digests mean equal token figures): v1.7.0 `2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7`; pre-4ca4fd1 `2d99da988a0f0bbb6dee245e26303f3dfcf525dd935d1cf86d60ef6c5c14abc7`
 
 ## Latency (MEASURED)
 
-200 recorded runs per series: 5 passes of 40, pooled. In each pass the builds take turns (the order flips every pass), and each series first has 20 warm-up runs that are discarded (per series per pass, run the same way as the recorded runs, so caches, page tables and the ledger file are warm; hook spawns are warm-start, not first launch after boot). Clock: std::time::Instant, a monotonic clock, nanosecond resolution. Release builds, built here. Medians vary with the machine and its load, and this document makes no claim about how closely another run will land. What this run shows about itself: in 25 of 42 series, the median of every one of the 5 passes is within 20% of the series' pooled median (per-pass medians are in the JSON). `benchmarks/run.sh compare <this file>` re-measures on another machine and prints, per series, the ratio to this run, the same ratio after dividing by the process floor, how many series are within 20%, and whether that machine looks like this one.
+200 recorded runs per series: 5 passes of 40, pooled. In each pass the builds take turns (the order flips every pass), and each series first has 20 warm-up runs that are discarded (per series per pass, run the same way as the recorded runs, so caches, page tables and the ledger file are warm; hook spawns are warm-start, not first launch after boot). Clock: std::time::Instant, a monotonic clock, nanosecond resolution. Release builds, built here. Medians vary with the machine and its load, and this document makes no claim about how closely another run will land. What this run shows about itself: in 43 of 45 series, the median of every one of the 5 passes is within 20% of the series' pooled median (per-pass medians are in the JSON). `benchmarks/run.sh compare <this file>` re-measures on another machine and prints, per series, the ratio to this run, the same ratio after dividing by the process floor, how many series are within 20%, and whether that machine looks like this one.
 
 Percentiles are nearest-rank: the percentile p of n runs is the run at rank ceil(p x n / 100) of the sorted runs, fastest first, with no interpolation. With n = 200 the median is run 100 (of the two middle runs of an even count, the faster), p90 is run 180, and p99 is run 198, which leaves the slowest 2 runs above it. Raw samples: not written. Each series carries `pass_medians_ns`, the median of each pass on its own, in pass order: how far they sit from one another is how much the machine moved while the run was going on.
 
@@ -157,61 +157,63 @@ Subjects (corpus files the series run on):
 
 The whole hook as Claude Code runs it. `hook.floor` is a hook invocation that does no work, so it is the cost of the process itself; the work is what each row adds to it. `hook.per_call_identity` is the PreToolUse hook on a call of one of Lumen's own MCP tools, which records who is calling; a build either has it (the series is timed) or does not (the slot says `n/a`, and why). Which one is decided by running the build, not by reading its usage text.
 
-| series | subject | n | v1.7.0 median | v1.7.0 p90 | v1.7.0 p99 | pre-8855fe4 median | pre-8855fe4 p90 | pre-8855fe4 p99 |
+| series | subject | n | v1.7.0 median | v1.7.0 p90 | v1.7.0 p99 | pre-4ca4fd1 median | pre-4ca4fd1 p90 | pre-4ca4fd1 p99 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `hook.floor` | - | 200 | 2.26 ms | 2.88 ms | 3.26 ms | 2.33 ms | 2.46 ms | 2.57 ms |
-| `hook.intercept_pass.spawn` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 2.32 ms | 2.61 ms | 2.90 ms | 2.31 ms | 2.62 ms | 2.82 ms |
-| `hook.intercept_block.spawn` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 2.27 ms | 2.45 ms | 3.07 ms | 3.79 ms | 4.18 ms | 5.02 ms |
-| `hook.meter_read.spawn` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 29.62 ms | 30.26 ms | 34.81 ms | 29.53 ms | 30.25 ms | 32.79 ms |
-| `hook.meter_bash.spawn` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 29.02 ms | 29.98 ms | 31.42 ms | 28.76 ms | 29.83 ms | 31.76 ms |
-| `hook.per_call_identity` | - | - | n/a (see notes) | | | n/a (see notes) | | |
+| `hook.floor` | - | 200 | 2.99 ms | 3.47 ms | 7.40 ms | 2.87 ms | 3.18 ms | 3.47 ms |
+| `hook.intercept_pass.spawn` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 3.06 ms | 3.32 ms | 3.64 ms | 3.04 ms | 3.29 ms | 3.52 ms |
+| `hook.intercept_block.spawn` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 2.90 ms | 3.17 ms | 4.31 ms | 5.53 ms | 5.92 ms | 6.50 ms |
+| `hook.meter_read.spawn` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 33.93 ms | 34.78 ms | 38.11 ms | 34.03 ms | 34.77 ms | 36.64 ms |
+| `hook.meter_bash.spawn` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 33.33 ms | 33.99 ms | 36.79 ms | 33.31 ms | 34.13 ms | 53.98 ms |
+| `hook.per_call_identity` | - | 200 | n/a (see notes) | | | 4.84 ms | 5.35 ms | 11.63 ms |
 
-Note: `hook.intercept_block.spawn` is 1.52 ms slower on pre-8855fe4 than on v1.7.0 (3.79 ms against 2.27 ms, medians as measured on this machine in this run). Reading the code, the cause is the lookup #42 (the `recall_file` redirect) added: on every blocked first Read of a file the hook now asks the ledger, with a read-only query (`meter::lumen_answered`), whether Lumen already answered for that file, before it decides what to tell the model; v1.7.0 makes no such lookup. It is a cost of that redirect, not noise. The hook that lets a Read through (`hook.intercept_pass.spawn`) is 2.31 ms on pre-8855fe4 and 2.32 ms on v1.7.0, so the extra time is in the blocking path, not in starting the process.
+Note: `hook.intercept_block.spawn` is 2.63 ms slower on pre-4ca4fd1 than on v1.7.0 (5.53 ms against 2.90 ms, medians as measured on this machine in this run). This run times the hook, it does not trace it, so it does not say why. To find the cause, read what changed in the blocking path of `hook intercept` between the two commits (`git log 5d1ec0408ad2..4ca4fd1ffe21 -- crates/lumen-mcp crates/lumen-core`). The hook that lets a Read through (`hook.intercept_pass.spawn`) is 3.04 ms on pre-4ca4fd1 and 3.06 ms on v1.7.0, which is no slower, so the extra time is in the blocking path rather than in starting the process.
 
 ### Hooks, work only: `hook::run_with` called in-process, warm (only for a build made from this checkout)
 
 No process start, a warm tokenizer. A fresh hook process pays tokenizer start-up that these calls do not, which is part of the spawn figures above.
 
-| series | subject | n | v1.7.0 median | v1.7.0 p90 | v1.7.0 p99 | pre-8855fe4 median | pre-8855fe4 p90 | pre-8855fe4 p99 |
+| series | subject | n | v1.7.0 median | v1.7.0 p90 | v1.7.0 p99 | pre-4ca4fd1 median | pre-4ca4fd1 p90 | pre-4ca4fd1 p99 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `hook.intercept_pass.inproc` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | n/a (see notes) | | | 47 us | 69 us | 81 us |
-| `hook.intercept_block.inproc` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | n/a (see notes) | | | 1.92 ms | 2.86 ms | 4.34 ms |
-| `hook.meter_read.inproc` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | n/a (see notes) | | | 2.74 ms | 4.16 ms | 4.50 ms |
-| `hook.meter_bash.inproc` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | n/a (see notes) | | | 3.11 ms | 4.78 ms | 9.97 ms |
+| `hook.intercept_pass.inproc` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | n/a (see notes) | | | 59 us | 67 us | 95 us |
+| `hook.intercept_block.inproc` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | n/a (see notes) | | | 2.51 ms | 3.16 ms | 5.08 ms |
+| `hook.meter_read.inproc` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | n/a (see notes) | | | 4.64 ms | 5.57 ms | 6.15 ms |
+| `hook.meter_bash.inproc` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | n/a (see notes) | | | 4.71 ms | 5.58 ms | 7.02 ms |
 
 ### Derived: hook work above the process floor
 
 `median(spawn) - median(floor)`, in each build. A derived figure, not a series of its own.
 
-| hook | v1.7.0 | pre-8855fe4 |
+| hook | v1.7.0 | pre-4ca4fd1 |
 |---|---:|---:|
-| `hook.intercept_pass.spawn_minus_floor` | 66 us | -15 us |
-| `hook.intercept_block.spawn_minus_floor` | 12 us | 1.46 ms |
-| `hook.meter_read.spawn_minus_floor` | 27.36 ms | 27.21 ms |
-| `hook.meter_bash.spawn_minus_floor` | 26.76 ms | 26.44 ms |
-| `hook.per_call_identity.spawn_minus_floor` | n/a | n/a |
-| `hook.per_call_identity.server_claim` | n/a | n/a |
+| `hook.intercept_pass.spawn_minus_floor` | 68 us | 162 us |
+| `hook.intercept_block.spawn_minus_floor` | -96 us | 2.66 ms |
+| `hook.meter_read.spawn_minus_floor` | 30.93 ms | 31.15 ms |
+| `hook.meter_bash.spawn_minus_floor` | 30.33 ms | 30.43 ms |
+| `hook.per_call_identity.spawn_minus_floor` | n/a | 1.97 ms |
+| `hook.per_call_identity.server_claim` | n/a | 178 us |
 
 ### Server calls, round trip as a client sees it
 
 From just before the request is written to the arrival of the reply line. `server.ping` is the round trip with no work; the ledger row is written after the reply and is not in the interval. For a build with per-call identity every call in these series also carries the hook's record and `_meta` id, so the server's claim of it is inside the interval; `server.identity.placed` against `server.identity.unplaced` (the same call with no record and no id) isolates that claim. Only a build with per-call identity has those two series.
 
-| series | subject | n | v1.7.0 median | v1.7.0 p90 | v1.7.0 p99 | pre-8855fe4 median | pre-8855fe4 p90 | pre-8855fe4 p99 |
+| series | subject | n | v1.7.0 median | v1.7.0 p90 | v1.7.0 p99 | pre-4ca4fd1 median | pre-4ca4fd1 p90 | pre-4ca4fd1 p99 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `server.start` | - | 200 | 2.03 ms | 2.29 ms | 2.57 ms | 2.31 ms | 2.91 ms | 3.20 ms |
-| `server.ping` | - | 200 | 12 us | 14 us | 17 us | 11 us | 13 us | 15 us |
-| `server.smart_read.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 518 us | 561 us | 644 us | 587 us | 763 us | 824 us |
-| `server.recall_file.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 611 us | 772 us | 980 us | 651 us | 848 us | 946 us |
-| `server.smart_read.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 2.09 ms | 2.27 ms | 2.40 ms | 2.10 ms | 2.23 ms | 2.48 ms |
-| `server.recall_file.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 1.98 ms | 2.04 ms | 2.13 ms | 2.04 ms | 2.37 ms | 3.16 ms |
-| `server.smart_read.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 4.99 ms | 5.11 ms | 5.58 ms | 5.05 ms | 5.42 ms | 6.83 ms |
-| `server.recall_file.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 4.92 ms | 5.07 ms | 5.30 ms | 4.94 ms | 5.14 ms | 5.63 ms |
-| `server.repeat_unchanged.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 2.13 ms | 3.43 ms | 4.25 ms | 2.16 ms | 4.09 ms | 4.95 ms |
-| `server.repeat_changed.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 3.99 ms | 6.37 ms | 7.13 ms | 3.77 ms | 6.29 ms | 7.21 ms |
-| `server.repeat_unchanged.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 3.95 ms | 5.65 ms | 12.32 ms | 3.95 ms | 4.77 ms | 7.42 ms |
-| `server.repeat_changed.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 7.37 ms | 9.90 ms | 11.39 ms | 6.71 ms | 10.44 ms | 11.31 ms |
-| `server.repeat_unchanged.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 6.63 ms | 7.72 ms | 9.47 ms | 6.78 ms | 7.63 ms | 7.94 ms |
-| `server.repeat_changed.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 9.54 ms | 14.26 ms | 15.00 ms | 9.74 ms | 14.73 ms | 15.63 ms |
+| `server.start` | - | 200 | 2.67 ms | 2.98 ms | 3.39 ms | 2.88 ms | 3.18 ms | 3.90 ms |
+| `server.ping` | - | 200 | 12 us | 13 us | 25 us | 11 us | 13 us | 16 us |
+| `server.smart_read.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 658 us | 853 us | 1.19 ms | 926 us | 1.09 ms | 1.57 ms |
+| `server.recall_file.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 668 us | 871 us | 1.23 ms | 957 us | 1.25 ms | 1.49 ms |
+| `server.smart_read.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 2.45 ms | 2.90 ms | 3.09 ms | 2.75 ms | 3.27 ms | 3.51 ms |
+| `server.recall_file.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 2.34 ms | 2.72 ms | 2.90 ms | 2.63 ms | 3.15 ms | 6.41 ms |
+| `server.smart_read.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 5.65 ms | 6.12 ms | 6.38 ms | 6.42 ms | 6.57 ms | 7.24 ms |
+| `server.recall_file.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 5.66 ms | 6.24 ms | 6.76 ms | 6.32 ms | 6.48 ms | 7.09 ms |
+| `server.repeat_unchanged.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 3.38 ms | 3.96 ms | 5.07 ms | 2.93 ms | 3.33 ms | 3.58 ms |
+| `server.repeat_changed.<300` | crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300) | 200 | 4.57 ms | 5.47 ms | 9.01 ms | 3.34 ms | 3.73 ms | 5.11 ms |
+| `server.repeat_unchanged.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 4.71 ms | 5.20 ms | 5.49 ms | 4.98 ms | 5.62 ms | 16.97 ms |
+| `server.repeat_changed.300-999` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | 7.88 ms | 8.92 ms | 10.84 ms | 5.31 ms | 6.02 ms | 6.43 ms |
+| `server.repeat_unchanged.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 8.60 ms | 9.23 ms | 16.37 ms | 8.92 ms | 9.60 ms | 10.18 ms |
+| `server.repeat_changed.1000-2999` | crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999) | 200 | 13.04 ms | 14.13 ms | 17.29 ms | 9.34 ms | 9.98 ms | 11.09 ms |
+| `server.identity.placed` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | - | | | 2.71 ms | 3.26 ms | 4.54 ms |
+| `server.identity.unplaced` | crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999) | 200 | - | | | 2.53 ms | 3.08 ms | 4.62 ms |
 
 Notes on series that are not plain measurements:
 
@@ -220,11 +222,10 @@ Notes on series that are not plain measurements:
 - `hook.meter_read.inproc` on v1.7.0: n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor
 - `hook.meter_bash.inproc` on v1.7.0: n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor
 - `hook.per_call_identity` on v1.7.0: n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 5d1ec0408ad2)
-- `hook.per_call_identity` on pre-8855fe4: n/a — this build records no per-call identity (a PreToolUse payload for mcp__lumen__smart_read, sent to `hook intercept`, left no record beside the ledger; commit 8855fe4c2ed8)
 
 Load on the machine around the whole latency run (every build, every pass):
 
-- before: load average 7.43 11.61 17.81 (1, 5, 15 min); after: load average 5.63 10.01 16.55 (1, 5, 15 min)
+- before: load average 4.99 5.50 6.29 (1, 5, 15 min); after: load average 4.89 5.24 6.07 (1, 5, 15 min)
 
 ## Dollars (MODELLED)
 

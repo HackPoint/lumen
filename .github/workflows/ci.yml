@@ -31,6 +31,9 @@ jobs:
       - name: Release notes come from the CHANGELOG
         run: bash scripts/test-release-notes.sh
 
+      - name: A release builds the commit its tag points at
+        run: bash scripts/test-resolve-release.sh
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -168,6 +171,10 @@ jobs:
       - name: Release notes come from the CHANGELOG
         if: runner.os == 'Linux'
         run: bash scripts/test-release-notes.sh
+
+      - name: A release builds the commit its tag points at
+        if: runner.os == 'Linux'
+        run: bash scripts/test-resolve-release.sh
 
       - name: Probe the hook environment
         run: |
