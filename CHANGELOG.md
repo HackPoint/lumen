@@ -341,6 +341,33 @@ and looks for the file: the app e2e and the Issue 5 launch check run debug build
 `scripts/verify-install.sh` only checks that an installed app is running. A `release_max_level_*`
 feature switched on by a dependency cannot be read from a manifest.
 
+### A release dispatch builds the tag's own commit, and never main
+
+Run by hand for an existing tag, the release workflow built the head of `main` and attached the
+result to that tag's release, so a re-run could ship code that was never in the version. It took the
+commit from `github.sha`, which on a dispatch is the branch head, and pasted the tag input into a
+shell script's text, so an input such as `v1.0.0"; touch pwned; "` ran as a command.
+
+- The first job turns the tag into the commit it points at, once (an annotated tag is peeled), and
+  every job that checks out this repository does so at that SHA: the macOS build, both CLI builds,
+  both GUI builds and the Homebrew tap's formula templates. Nothing reads `github.sha` or the ref to
+  decide what to build, and a tag moved after the run started cannot change it.
+- Before anything is built the run refuses a tag that is not `vN.N.N`, `vN.N.N-pre` or
+  `vN.N.N+build`, a tag that does not exist, and one that does not point at a commit. The input
+  reaches the script through `env`, not through its text.
+- When the tag's source does not build, the run fails with `<tag> (<sha>) does not build. A dispatch
+  never builds from main: ship a patch release (a new tag) instead.` as an annotation and in the job
+  summary. It never falls back to main.
+- `scripts/test-resolve-release.sh` runs the workflow's own script in a throwaway repository whose
+  `main` is past every tag, in CI on Linux and macOS. It covers annotated, lightweight and nested
+  tags, a tag push, malformed, missing and non-commit tags, injection-shaped input and the job that
+  reports a failed build, and fails if a job checks out anything but the resolved commit.
+
+Not checked: a dispatch itself. The test runs the step against a local repository, so the fetch with
+the job's token and the conditions of the jobs that follow run only on GitHub. A dispatch for a tag
+before v1.1.4 now fails in `update-tap`, because that tag has no cask template to copy, and leaves
+the tap as it was.
+
 ## [1.7.0] — 2026-10-11
 
 ### Repeat reads: a second `smart_read` or `recall_file` of the same thing no longer costs the same again
