@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.8.0] — 2026-10-13
+
+**Repeat reads are on by default.** A second `smart_read` or `recall_file` of the same thing in a conversation is answered with a short stub when the file has not changed since, and with only what changed when it has. To turn them off, use the Repeat reads switch in the app, put `{"repeat_reads": false}` in `lumen_settings.json` in the Lumen data directory, or set `LUMEN_REPEAT_READS=off` (the variable wins over the file). The app now shows which version it is, under the tagline in the main window and in an About section. Measurements on a pinned corpus, 1.7.0 beside this build: [benchmarks/README.md](https://github.com/HackPoint/lumen/blob/v1.8.0/benchmarks/README.md#what-is-committed-here). They show a cost in time: a Read that Lumen blocks takes 0.4 to 2.6 ms longer than in 1.7.0, and the hook that names the conversation adds about 0.1 to 2 ms to each Lumen tool call, depending on the machine.
+
+**Upgrading from 1.7.0 or earlier: run Setup once, then restart Claude Code.** Repeat reads need the hook that tells Lumen which conversation a call belongs to, and Setup is what registers it. An install set up under 1.7.0 or earlier does not have it, and Setup does not run again by itself, so until you run it every read is answered in full, as before. The Context and Optimizer tabs say "Repeat reads are on, but not working yet", with a Run Setup button, until the hook is registered.
 
 ### A `recall_file` line range the file cannot satisfy no longer kills the server
 
@@ -153,8 +157,7 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
   baselines are untouched.
 - **The benchmark harness** (`benchmarks/`, #46) now sets `LUMEN_REPEAT_READS=off` in its
   repeat-reads-off arms instead of relying on the default; left alone, every "off" figure would
-  have measured the gate. The committed pre-release results were taken with off as the default,
-  so they are the same measurement.
+  have measured the gate.
 
 ### The app can turn repeat reads off, and shows what they have done
 
