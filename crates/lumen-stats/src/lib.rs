@@ -16,7 +16,6 @@ use lumen_core::repeat::{
 };
 use serde::Serialize;
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
 
 /// The three `routed_via` values that represent a Lumen tool call which returned
 /// fewer tokens than the full file. `builtin_read` is deliberately excluded — it
@@ -38,18 +37,14 @@ pub fn db_url() -> String {
 }
 
 /// Open a pool against `url`.
+///
+/// Every query below references turns.is_subagent, which only exists after the migrations run.
+/// Opening the GUI before the daemon has started would otherwise hit "no such column" on a
+/// database created before 1.1.0, so the pool comes back migrated.
 pub async fn connect(url: &str) -> Result<SqlitePool, String> {
-    let pool = SqlitePoolOptions::new()
-        .connect(url)
+    lumen_core::schema::open_pool(url)
         .await
-        .map_err(|e| e.to_string())?;
-    // Every query below references turns.is_subagent, which only exists after the
-    // migrations run. Opening the GUI before the daemon has started would
-    // otherwise hit "no such column" on a database created before 1.1.0.
-    lumen_core::schema::init_schema(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(pool)
+        .map_err(|e| e.to_string())
 }
 
 /// Open a pool against the ambient `LUMEN_DB`.
