@@ -6,7 +6,7 @@
 //! The only place the live conversation is named is the PreToolUse hook payload, which carries
 //! the same `tool_use_id` the MCP request carries in `_meta["claudecode/toolUseId"]`. A test
 //! therefore does what Claude Code does for each Lumen tool call: run the hook with a payload,
-//! then send the request with that id.
+//! then send the request with that id. The payloads are the captures in `fixtures/hooks/`.
 //!
 //! Every test starts the server under `STALE`, a session that no call in it belongs to, so
 //! anything that still reads the environment answers for the wrong conversation.
@@ -20,6 +20,8 @@ const STALE: &str = "00000000-0000-0000-0000-00000000dead";
 const S1: &str = "11111111-2222-3333-4444-555555555551";
 const S2: &str = "11111111-2222-3333-4444-555555555552";
 const S3: &str = "11111111-2222-3333-4444-555555555553";
+const A1: &str = "a1111111111111111";
+const A2: &str = "a2222222222222222";
 const ON: &[(&str, &str)] = &[("LUMEN_REPEAT_READS", "on")];
 
 struct Rig {
@@ -76,6 +78,17 @@ fn source(defs: usize, body: usize) -> String {
     s
 }
 
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hooks")
+        .join(name)
+}
+
+fn captured(name: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(fixture(name)).expect("fixture");
+    serde_json::from_str(&text).expect("JSON")
+}
+
 impl Rig {
     fn file(&self, name: &str, body: &str) -> String {
         let p = self.dir.path().join(name);
@@ -102,6 +115,10 @@ impl Rig {
     }
 
     fn hook(&self, db: &Path, env: &[(&str, &str)], payload: &serde_json::Value) -> Ran {
+        self.hook_stdin(db, env, payload.to_string().as_bytes())
+    }
+
+    fn hook_stdin(&self, db: &Path, env: &[(&str, &str)], stdin: &[u8]) -> Ran {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_lumen-mcp"));
         cmd.args(["hook", "intercept"])
             .env("LUMEN_DB", db)
@@ -119,12 +136,7 @@ impl Rig {
             cmd.env(k, v);
         }
         let mut child = cmd.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.stdout.is_empty(), "the hook printed to stdout");
         Ran {
@@ -133,8 +145,7 @@ impl Rig {
         }
     }
 
-    /// The PreToolUse payload Claude Code sends for a Lumen tool call. A subagent's call has
-    /// the same `session_id` as its parent's and adds `agent_id` and `agent_type`.
+    /// A captured payload (a subagent's when `agent` is given) with this call's ids put in.
     fn payload(
         &self,
         tool: &str,
@@ -143,21 +154,34 @@ impl Rig {
         call_id: &str,
         path: &str,
     ) -> serde_json::Value {
-        let mut p = serde_json::json!({
-            "session_id": session,
-            "transcript_path": self.dir.path().join("t.jsonl").to_string_lossy(),
-            "cwd": self.dir.path().to_string_lossy(),
-            "permission_mode": "default",
-            "hook_event_name": "PreToolUse",
-            "tool_name": format!("mcp__lumen__{tool}"),
-            "tool_input": {"path": path},
-            "tool_use_id": call_id,
+        let mut p = captured(match agent {
+            Some(_) => "smart_read_pre_subagent.json",
+            None => "smart_read_pre.json",
         });
+        p["session_id"] = session.into();
+        p["cwd"] = self.dir.path().to_string_lossy().as_ref().into();
+        p["tool_name"] = format!("mcp__lumen__{tool}").into();
+        p["tool_input"]["path"] = path.into();
+        p["tool_use_id"] = call_id.into();
         if let Some(a) = agent {
             p["agent_id"] = a.into();
-            p["agent_type"] = "general-purpose".into();
         }
         p
+    }
+
+    /// A captured Read payload, a subagent's when `agent` is given, aimed at `path`.
+    fn read(&self, session: &str, agent: Option<&str>, path: &str) -> Ran {
+        let mut p = captured(match agent {
+            Some(_) => "read_pre_subagent.json",
+            None => "read_pre.json",
+        });
+        p["session_id"] = session.into();
+        p["cwd"] = self.dir.path().to_string_lossy().as_ref().into();
+        p["tool_input"]["file_path"] = path.into();
+        if let Some(a) = agent {
+            p["agent_id"] = a.into();
+        }
+        self.hook(&self.db, &[], &p)
     }
 
     fn announce(&self, session: &str, agent: Option<&str>, call_id: &str, path: &str) -> Ran {
@@ -370,16 +394,7 @@ fn resuming_an_earlier_conversation_in_the_same_process_is_a_new_conversation() 
 fn the_escape_valve_still_finds_the_smart_read_that_worked_after_a_clear() {
     let rig = rig();
     let f = rig.file("big.rs", &source(120, 8));
-    let read = |session: &str| {
-        rig.hook(
-            &rig.db,
-            &[],
-            &serde_json::json!({
-                "session_id": session, "hook_event_name": "PreToolUse", "tool_name": "Read",
-                "tool_input": {"file_path": f}, "cwd": rig.dir.path().to_string_lossy(),
-            }),
-        )
-    };
+    let read = |session: &str| rig.read(session, None, &f);
     let mut s = rig.start(&[]);
     s.step(&rig, S1, None, "toolu_01", &f);
     // /clear. The model is redirected, follows the redirect, and smart_read works.
@@ -583,27 +598,15 @@ fn a_subagent_is_not_told_that_the_main_agents_read_is_in_its_context() {
     assert!(is_full(&s.step(&rig, S1, None, "toolu_01", &f)));
     assert!(is_stub(&s.step(&rig, S1, None, "toolu_02", &f)));
 
-    let sub = s.step(&rig, S1, Some("agent-aaa"), "toolu_03", &f);
+    let sub = s.step(&rig, S1, Some(A1), "toolu_03", &f);
     assert!(
         is_full(&sub),
         "a subagent with an empty context was told its outline is unchanged: {}",
         sub.text
     );
-    assert!(is_stub(&s.step(
-        &rig,
-        S1,
-        Some("agent-aaa"),
-        "toolu_04",
-        &f
-    )));
+    assert!(is_stub(&s.step(&rig, S1, Some(A1), "toolu_04", &f)));
     // Another subagent is another empty context.
-    assert!(is_full(&s.step(
-        &rig,
-        S1,
-        Some("agent-bbb"),
-        "toolu_05",
-        &f
-    )));
+    assert!(is_full(&s.step(&rig, S1, Some(A2), "toolu_05", &f)));
     // The main agent's own base is where it was.
     assert!(is_stub(&s.step(&rig, S1, None, "toolu_06", &f)));
     s.end();
@@ -621,15 +624,8 @@ fn a_subagent_is_not_told_that_the_main_agents_read_is_in_its_context() {
     );
     assert_eq!(
         rig.agents(),
-        [
-            None,
-            None,
-            Some("agent-aaa"),
-            Some("agent-aaa"),
-            Some("agent-bbb"),
-            None
-        ]
-        .map(|a: Option<&str>| a.map(str::to_string))
+        [None, None, Some(A1), Some(A1), Some(A2), None]
+            .map(|a: Option<&str>| a.map(str::to_string))
     );
 }
 
@@ -640,24 +636,14 @@ fn a_subagent_is_not_told_that_the_main_agents_read_is_in_its_context() {
 fn a_subagents_smart_read_counts_for_the_subagent_and_not_for_the_main_agent() {
     let rig = rig();
     let f = rig.file("big.rs", &source(120, 8));
-    let read = |agent: Option<&str>| {
-        let mut p = serde_json::json!({
-            "session_id": S1, "hook_event_name": "PreToolUse", "tool_name": "Read",
-            "tool_input": {"file_path": f}, "cwd": rig.dir.path().to_string_lossy(),
-        });
-        if let Some(a) = agent {
-            p["agent_id"] = a.into();
-            p["agent_type"] = "general-purpose".into();
-        }
-        rig.hook(&rig.db, &[], &p)
-    };
-    assert_eq!(read(Some("agent-aaa")).code, 2);
+    let read = |agent: Option<&str>| rig.read(S1, agent, &f);
+    assert_eq!(read(Some(A1)).code, 2);
     assert_eq!(read(None).code, 2);
     let mut s = rig.start(&[]);
-    s.step(&rig, S1, Some("agent-aaa"), "toolu_01", &f);
+    s.step(&rig, S1, Some(A1), "toolu_01", &f);
     s.end();
 
-    let sub = read(Some("agent-aaa"));
+    let sub = read(Some(A1));
     assert_eq!(sub.code, 2, "{}", sub.stderr);
     assert!(sub.stderr.contains("recall_file"), "{}", sub.stderr);
     let main = read(None);
@@ -666,6 +652,56 @@ fn a_subagents_smart_read_counts_for_the_subagent_and_not_for_the_main_agent() {
         "the main agent was sent on from a read it does not hold: {}",
         main.stderr
     );
+}
+
+/// Only a subagent's payload carries an agent, and it shares its parent's session.
+#[test]
+fn the_captured_subagent_payloads_carry_an_agent_and_the_main_agents_do_not() {
+    let main = captured("smart_read_pre.json");
+    let sub = captured("smart_read_pre_subagent.json");
+    let subagent_read = captured("read_pre_subagent.json");
+    let subagents = [
+        ("smart_read_pre_subagent.json", &sub),
+        ("read_pre_subagent.json", &subagent_read),
+    ];
+    for (name, p) in subagents {
+        for key in ["agent_id", "agent_type"] {
+            let value = p[key].as_str().unwrap_or("");
+            assert!(!value.is_empty(), "{name} carries no {key}");
+        }
+    }
+    for (name, p) in [
+        ("smart_read_pre.json", &main),
+        ("read_pre.json", &captured("read_pre.json")),
+    ] {
+        for key in ["agent_id", "agent_type"] {
+            assert!(p.get(key).is_none(), "{name} carries {key}");
+        }
+    }
+    assert_eq!(main["session_id"], sub["session_id"]);
+    assert_ne!(main["tool_use_id"], sub["tool_use_id"]);
+}
+
+/// A payload as captured, nothing put in, still names its call, session and agent.
+#[test]
+fn a_payload_exactly_as_captured_names_its_conversation_and_its_agent() {
+    for name in ["smart_read_pre.json", "smart_read_pre_subagent.json"] {
+        let rig = rig();
+        let f = rig.file("a.rs", &source(40, 6));
+        let p = captured(name);
+        let session = p["session_id"].as_str().unwrap().to_string();
+        let call = p["tool_use_id"].as_str().unwrap().to_string();
+        let agent = p.get("agent_id").map(|a| a.as_str().unwrap().to_string());
+
+        let ran = rig.hook_stdin(&rig.db, &[], &std::fs::read(fixture(name)).unwrap());
+        assert_eq!(ran.code, 0, "{name}: {}", ran.stderr);
+        assert_eq!(rig.records(), [format!("lumen_call_{call}.json")], "{name}");
+        let mut s = rig.start(ON);
+        assert!(is_full(&s.call(Some(&call), &f)), "{name}");
+        s.end();
+        assert_eq!(sessions(&rig), [Some(session)], "{name}");
+        assert_eq!(rig.agents(), [agent], "{name}");
+    }
 }
 
 /// The hook that cannot record says so on stderr and in the spool, exits 0, and the call is
