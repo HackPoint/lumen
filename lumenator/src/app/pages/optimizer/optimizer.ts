@@ -11,7 +11,7 @@ import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identi
 import { TabNav } from '../../components/tab-nav/tab-nav';
 import { SessionService } from '../../session.service';
 import { RepeatReadsService } from '../../repeat-reads.service';
-import { RATE } from '../../components/index';
+import { aggTokens, figureTag, price } from '../../prices';
 import { LumenTooltip } from '../../directives/tooltip.directive';
 
 /**
@@ -93,20 +93,25 @@ export class Optimizer implements OnInit {
 
     // ── D2: caching savings (REPORTED by Claude Code, NOT caused by Lumen) ────
     //
-    // Derived from the same usage signal used by the Usage component.
-    // Formula: allTime.cacheRead * (RATE.input − RATE.cacheRead)
-    // This is the price differential — what those tokens WOULD have cost at
-    // full input price versus the discounted cache-read price.
+    // Derived from the same usage signal used by the Usage component, each model's
+    // cache reads at that model's prices: input price less cache-read price, which is
+    // what those tokens WOULD have cost at full price versus what they did cost.
     //
-    // NEVER merged with lifetimeOptimizedUsd (D2 is reported; E5 is caused).
+    // NEVER merged with the optimizer's figures (D2 is reported; E5 is caused).
 
     readonly cacheSavedTokens = computed(() =>
         this.s.usage()?.allTime?.cacheRead ?? 0,
     );
 
-    readonly cacheSavedUsd = computed(() =>
-        this.cacheSavedTokens() * (RATE.input - RATE.cacheRead),
-    );
+    readonly cacheSavedPriced = computed(() => {
+        const all = this.s.usage()?.allTime;
+        return price(all ? aggTokens(all) : [], this.s.prices());
+    });
+
+    readonly cacheSavedUsd = computed(() => this.cacheSavedPriced().cacheSavings);
+
+    /** What the saving carries when it is not the whole ('at least' or 'no price'), and why. */
+    readonly cacheSavedTag = computed(() => figureTag(this.cacheSavedPriced(), 'savings'));
 
     // ── missed reads (CLI only) ───────────────────────────────────────────────
 

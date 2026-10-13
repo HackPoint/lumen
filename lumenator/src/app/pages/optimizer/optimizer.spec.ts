@@ -3,8 +3,7 @@ import { provideRouter } from '@angular/router';
 import { Optimizer } from './optimizer';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
-import { FakeTauriBridge } from '../../tauri-bridge.fake';
-import { RATE } from '../../components/index';
+import { FakeTauriBridge, PRICE_TABLE } from '../../tauri-bridge.fake';
 import type {
   OptimizerReport,
   RepeatReads,
@@ -23,8 +22,10 @@ describe('Optimizer', () => {
   let fixture: ComponentFixture<Optimizer>;
   let bridge: FakeTauriBridge;
 
-  function agg(over: Partial<TokenAgg> = {}): TokenAgg {
-    return { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, ...over };
+  /** An aggregate of one model's turns, Opus 4.8 unless a test names another. */
+  function agg(over: Partial<TokenAgg> = {}, model = 'claude-opus-4-8'): TokenAgg {
+    const a = { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, ...over };
+    return { byModel: [{ ...a, model, speed: 'standard', cacheWrite1h: 0, cacheWriteUnknown: 0 }], ...a };
   }
 
   function report(over: Partial<OptimizerReport> = {}): OptimizerReport {
@@ -83,6 +84,7 @@ describe('Optimizer', () => {
     bridge = new FakeTauriBridge();
     bridge.responses.set('get_optimizer_stats', optimizerReport);
     bridge.responses.set('get_usage', usageReport);
+    bridge.responses.set('lumen_prices', PRICE_TABLE);
     // No settings file: repeat reads are on by default.
     bridge.responses.set('get_repeat_reads_setting', setting());
     seed?.(bridge);
@@ -162,12 +164,53 @@ describe('Optimizer', () => {
       report({ lifetimeOptimizedTokens: 1_000_000 }),
       usage({ allTime: agg({ cacheRead: 5_000_000 }) }),
     );
-    // Caused by Lumen: priced at the input rate.
-    expect(o.s.lifetimeOptimizedUsd()).toBeCloseTo(1_000_000 * RATE.input, 10);
-    // Reported by Claude Code: priced at the input/cache-read spread.
-    expect(o.cacheSavedUsd()).toBeCloseTo(5_000_000 * (RATE.input - RATE.cacheRead), 10);
-    // And they are different numbers, never summed into one headline.
-    expect(o.cacheSavedUsd()).not.toBeCloseTo(o.s.lifetimeOptimizedUsd(), 10);
+    // Reported by Claude Code: each model's reads at its input/cache-read spread.
+    expect(o.cacheSavedUsd()).toBeCloseTo(5 * (5 - 0.5), 10);
+    // Caused by Lumen: tokens, with no dollar figure, since a read event records no model.
+    expect(rendered('.savings-card--caused')).not.toContain('$');
+    expect(rendered('.savings-card--reported')).toContain('$22.50');
+  });
+
+  it("prices the caching saving at each model's own spread", async () => {
+    const allTime: TokenAgg = {
+      ...agg({ cacheRead: 2_000_000 }),
+      byModel: [
+        { model: 'claude-opus-4-8', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+        { model: 'claude-sonnet-5-5', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+      ],
+    };
+    const o = await build(report(), usage({ allTime }));
+    expect(o.cacheSavedUsd()).toBeCloseTo(4.5 + 1.9, 10);
+    expect(o.cacheSavedTag()).toBeNull();
+    expect(rendered('.savings-card--reported .partial-tag')).toBe('');
+  });
+
+  it('marks the caching saving a floor when a model has no price, and shows a dash when none has', async () => {
+    const allTime: TokenAgg = {
+      ...agg({ cacheRead: 2_000_000 }),
+      byModel: [
+        { model: 'claude-opus-4-8', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+        { model: 'claude-haiku-5-5', speed: 'standard', turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+      ],
+    };
+    const o = await build(report(), usage({ allTime }));
+    expect(o.cacheSavedUsd()).toBeCloseTo(4.5, 10);
+    expect(o.cacheSavedTag()).toEqual({ label: 'at least', why: 'No price for claude-haiku-5-5.' });
+    expect(rendered('.savings-card--reported .partial-tag')).toBe('at least');
+
+    TestBed.resetTestingModule();
+    await build(report(), usage({ allTime: agg({ cacheRead: 1_000_000 }, '<synthetic>') }));
+    expect(rendered('.savings-card--reported .savings-card__usd')).toBe('—');
+    expect(rendered('.savings-card--reported .partial-tag')).toBe('no price');
+  });
+
+  it('marks the caching saving a floor when turns of a model with fast mode recorded no speed', async () => {
+    const allTime: TokenAgg = {
+      ...agg({ cacheRead: 1_000_000 }),
+      byModel: [{ model: 'claude-opus-4-8', speed: null, turns: 1, input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 }],
+    };
+    const o = await build(report(), usage({ allTime }));
+    expect(o.cacheSavedTag()?.why).toContain('did not record their speed');
   });
 
   it('reports zero caching savings when the usage report has not loaded', async () => {

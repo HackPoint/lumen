@@ -1,3 +1,5 @@
+import type { ModelTokens } from '../prices';
+
 interface SessionState {
     fill: number;
     /** Monotonic fold counter, used only to break ties on `ts`. Millisecond
@@ -14,6 +16,11 @@ interface SessionState {
     startTs: number;        // first turn seen this session
     recentOutput: number[]; // last N output_tokens for velocity
     totals: { input: number; output: number; cacheRead: number; cacheWrite: number };
+    /**
+     * The same tokens by model and speed, keyed by both. A session can mix models, a subagent
+     * on a cheaper one, and speeds, so its cost is priced from these, never the totals.
+     */
+    byModel: Record<string, ModelTokens>;
 }
 type SessionMap = Record<string, SessionState>;
 
@@ -28,20 +35,18 @@ interface Turn {
     cache_creation_input_tokens: number;
     input_tokens: number;
     output_tokens: number;
+    /**
+     * The part of the cache write at the 1-hour rate. Null when the transcript recorded no
+     * split by duration, and absent on older daemons: either way the duration is unknown.
+     */
+    cache_creation_1h_input_tokens?: number | null;
+    /** `usage.speed`, 'standard' or 'fast'. Null or absent when not recorded. */
+    speed?: string | null;
     /** Subagent turns cost money but carry their own separate context, so they
      *  must not drive the fill gauge. Absent on older daemons. */
     is_subagent?: boolean;
     project?: string | null;
 }
-
-/** Opus pricing, USD per token (per-1M ÷ 1e6). */
-const RATE = {
-    input: 5.0 / 1_000_000,
-    output: 25.0 / 1_000_000,
-    cacheRead: 0.5 / 1_000_000,     // 0.1× input — 90% cheaper
-    cacheWrite: 6.25 / 1_000_000,   // 1.25× input (5-min default)
-};
-
 
 interface CostTotals {
     input: number;
@@ -68,12 +73,31 @@ interface SnapshotSession {
     /** Short project label derived from the transcript path. */
     project?: string | null;
     ts: string;
+    /**
+     * The sums above by model. Absent from daemons older than 1.9.0, and null when the daemon
+     * could not split them: the sums are then left unpriced, since the session's latest model
+     * need not be the one that consumed them.
+     */
+    by_model?: SnapshotModel[] | null;
+}
+
+/** One model's share of a snapshot session, at one speed. */
+interface SnapshotModel {
+    model: string | null;
+    speed?: string | null;
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_write: number;
+    cache_write_1h?: number;
+    /** Absent from a daemon that did not send it; the duration is then unknown. */
+    cache_write_unknown?: number;
 }
 
 /**
  * Aggregate consumption over a window (from the Rust `get_usage` command).
- * Token sums only — dollar cost is derived in the frontend via RATE (the
- * single price source), never recomputed here or in SQL.
+ * Token sums only. Dollars are priced here in the frontend, each model's share at that
+ * model's rates from the `lumen_prices` table, never in SQL.
  */
 interface TokenAgg {
     turns: number;
@@ -82,6 +106,13 @@ interface TokenAgg {
     cacheRead: number;
     cacheWrite: number;
     totalTokens: number;
+    /** The same sums by model. Optional because a backend older than 1.9.0 does not send it. */
+    byModel?: ModelAgg[];
+}
+
+/** One model's share of a {@link TokenAgg}, at one speed. */
+interface ModelAgg extends ModelTokens {
+    turns: number;
 }
 
 /**
@@ -101,7 +132,7 @@ interface UsageReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// E5 — Optimizer savings (raw token counts; frontend applies RATE.input for USD)
+// E5 — Optimizer savings (raw token counts; no dollars: a read event records no model)
 //
 // HONEST LABELING:
 //   OptimizerReport = tokens CAUSED by Lumen. Exact for Lumen tool calls, which
@@ -109,7 +140,7 @@ interface UsageReport {
 //   1.6.0 by a shell hook that could fall back to bytes/4; token_source records
 //   which, and unverifiedProvenanceRows counts the rows estimated that way or
 //   written before that tracking.
-//   This is distinct from "Saved by caching" (turns.cache_read * RATE diff),
+//   This is distinct from "Saved by caching" (turns.cache_read priced per model),
 //   which is REPORTED by Claude Code, not caused by Lumen.
 //   Never merge the two numbers in the UI.
 // ─────────────────────────────────────────────────────────────────────────
@@ -133,7 +164,7 @@ interface ToolBreakdown {
 /**
  * Lifetime optimizer savings from `get_optimizer_stats`.
  *
- * Dollar cost = lifetimeOptimizedTokens * RATE.input  (input reads saved).
+ * Tokens only: a read event records no model, so there is no price to put on them.
  * DO NOT mix with UsageReport.allTime.cacheRead (that's reported caching, not caused).
  *
  * missedCalls / missedFullTokens: CLI-only reads that bypassed Lumen.
@@ -253,6 +284,8 @@ export type {
     DaemonMsg,
     SnapshotSession,
     TokenAgg,
+    ModelAgg,
+    SnapshotModel,
     UsageReport,
     ChannelBreakdown,
     ToolBreakdown,
@@ -261,7 +294,6 @@ export type {
     RepeatReadsSetting,
     IdentityHookStatus,
 };
-export { RATE };
 
 /**
  * One file that a meaningful share of the project's context has gone into.

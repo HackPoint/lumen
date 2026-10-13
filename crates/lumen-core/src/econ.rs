@@ -21,16 +21,20 @@
 //! the 125-token file that recorded −54 could not have been trimmed under this rule
 //! because its budget is negative before any rendering happens.
 //!
-//! Rates mirror `crate::rates` deliberately rather than importing them as f64: the
-//! arithmetic here is per-million and mixing the two representations invites the kind of
-//! silent unit error this module exists to prevent.
+//! The rates are Opus-class list prices (Opus 4.5 to 4.8 and Opus 5), assumed whatever model
+//! will read the outline, because the hook that sizes it does not know which one will. They
+//! are this model's inputs. Spend is priced from the per-model table, `crate::rates::PRICES`;
+//! the optimizer's net value in lumen-stats makes the same Opus-class assumption as here.
 
 use serde::Serialize;
 
-/// Per-million-token prices, matching `crate::rates`.
-const CACHE_READ_PER_M: f64 = 0.5;
-const CACHE_WRITE_PER_M: f64 = 6.25;
-const OUTPUT_PER_M: f64 = 25.0;
+/// The Opus-class prices the model assumes for every turn, USD per million tokens.
+pub const CACHE_READ_PER_M: f64 = 0.5;
+pub const CACHE_WRITE_PER_M: f64 = 6.25;
+pub const OUTPUT_PER_M: f64 = 25.0;
+/// Not used by the arithmetic here, which never prices fresh input. Carried so that a
+/// report of the model's rates can name all four.
+pub const INPUT_PER_M: f64 = 5.0;
 
 /// Where the inputs to `S_min` came from.
 ///

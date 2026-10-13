@@ -3,8 +3,10 @@
 // HONESTY (carried over from the GUI, where this code used to live): these are
 // CONSUMPTION figures. Plan quota size / remaining / the real reset are
 // server-side and unknown locally, so nothing here is a "% of limit" or
-// "remaining". Dollar costs are NOT computed here — the frontend applies the
-// single RATE table to these token sums so there is one price source of truth.
+// "remaining". Usage carries no dollars: every token sum comes split by model, and the
+// frontend prices each model's share at that model's rates, from the table it gets
+// from `lumen_prices` (lumen_core::rates::PRICES). The one exception is the optimizer's
+// net value, below, which has no model to price by.
 //
 // Every struct is the wire format the Angular frontend consumes. The
 // `rename_all = "camelCase"` attributes are load-bearing: renaming a field here
@@ -92,6 +94,106 @@ pub struct TokenAgg {
     pub cache_read: i64,
     pub cache_write: i64,
     pub total_tokens: i64,
+    /// The same sums, per model. The sums above cannot be priced: a token costs five times
+    /// as much on Opus as on Haiku, so the frontend prices these instead.
+    pub by_model: Vec<ModelAgg>,
+}
+
+impl TokenAgg {
+    /// The totals of `by_model`, carrying it.
+    fn from_models(by_model: Vec<ModelAgg>) -> TokenAgg {
+        let mut agg = TokenAgg::default();
+        for m in &by_model {
+            agg.turns += m.turns;
+            agg.input += m.input;
+            agg.output += m.output;
+            agg.cache_read += m.cache_read;
+            agg.cache_write += m.cache_write;
+        }
+        agg.total_tokens = agg.input + agg.output + agg.cache_read + agg.cache_write;
+        agg.by_model = by_model;
+        agg
+    }
+}
+
+/// One model's share of a [`TokenAgg`], at one speed.
+#[derive(Serialize, Default, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelAgg {
+    /// As the transcript recorded it, dated ids included. Null for turns that recorded none,
+    /// which have no price.
+    pub model: Option<String>,
+    /// `usage.speed`, "standard" or "fast". Null for turns that did not record it, every one
+    /// ingested before 1.9.0: on a model with fast mode, those are priced at the standard rate
+    /// as a floor.
+    pub speed: Option<String>,
+    pub turns: i64,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    /// The part of `cache_write` the transcript recorded as 1-hour writes.
+    pub cache_write_1h: i64,
+    /// The part of `cache_write` whose duration was not recorded: every turn ingested before
+    /// 1.9.0. Priced at the 5-minute rate, so a figure holding it is a floor.
+    pub cache_write_unknown: i64,
+}
+
+/// Per-model, per-speed sums over the turns `where_clause` selects (pass "" for all of them).
+/// The `&'static str` bound is what makes the `AssertSqlSafe` below sound: no runtime value
+/// can reach the clause, so no user input is interpolated.
+async fn model_aggs(
+    pool: &SqlitePool,
+    where_clause: &'static str,
+) -> Result<Vec<ModelAgg>, String> {
+    let sql = format!(
+        "SELECT model, speed,
+                COUNT(*),
+                COALESCE(SUM(input_tokens),0),
+                COALESCE(SUM(output_tokens),0),
+                COALESCE(SUM(cache_read_input_tokens),0),
+                COALESCE(SUM(cache_creation_input_tokens),0),
+                COALESCE(SUM(cache_1h),0),
+                -- A turn that recorded no split has a write of unknown duration.
+                COALESCE(SUM(CASE WHEN cache_1h IS NULL
+                                  THEN cache_creation_input_tokens ELSE 0 END),0)
+         FROM turns {where_clause}
+         GROUP BY model, speed
+         ORDER BY model, speed"
+    );
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    )> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(model, speed, turns, input, output, cache_read, cache_write, w_1h, w_unknown)| {
+                ModelAgg {
+                    model,
+                    speed,
+                    turns,
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    cache_write_1h: w_1h,
+                    cache_write_unknown: w_unknown,
+                }
+            },
+        )
+        .collect())
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -109,33 +211,9 @@ pub struct UsageReport {
     pub all_time: TokenAgg,
 }
 
-/// Run the standard token-aggregate SELECT with a caller-supplied WHERE clause
-/// (pass "" for all-time). The `&'static str` bound is what makes the
-/// `AssertSqlSafe` below sound: no runtime value can reach the clause, so no
-/// user input is interpolated.
+/// Token sums over the turns `where_clause` selects (pass "" for all-time), split by model.
 pub async fn fetch_agg(pool: &SqlitePool, where_clause: &'static str) -> Result<TokenAgg, String> {
-    let sql = format!(
-        "SELECT COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(input_tokens + output_tokens
-                           + cache_read_input_tokens + cache_creation_input_tokens),0)
-         FROM turns {where_clause}"
-    );
-    let t: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(TokenAgg {
-        turns: t.0,
-        input: t.1,
-        output: t.2,
-        cache_read: t.3,
-        cache_write: t.4,
-        total_tokens: t.5,
-    })
+    Ok(TokenAgg::from_models(model_aggs(pool, where_clause).await?))
 }
 
 /// WHERE clause for "today" in the user's local timezone.
@@ -146,20 +224,27 @@ pub const WHERE_TODAY: &str = "WHERE date(ts,'localtime') = date('now','localtim
 pub const WHERE_THIS_WEEK: &str = "WHERE date(ts,'localtime') >= \
      date('now','localtime','-'||((strftime('%w','now','localtime')+6)%7)||' days')";
 
+/// WHERE clause for the trailing 5 hours. `ts` is ISO-8601 UTC ('…Z'); datetime()
+/// normalizes both sides to canonical UTC so the comparison is correct.
+const WHERE_LAST_5H: &str = "WHERE datetime(ts) >= datetime('now','-5 hours')";
+
+/// WHERE clause for the trailing 7 days.
+const WHERE_LAST_7D: &str = "WHERE datetime(ts) >= datetime('now','-7 days')";
+
+/// The 7-day split's test, as SQL's `model LIKE '%opus%'` reads it: ASCII case folded, and
+/// a turn with no model is "other".
+fn is_opus(m: &ModelAgg) -> bool {
+    m.model
+        .as_deref()
+        .is_some_and(|id| id.to_ascii_lowercase().contains("opus"))
+}
+
 pub async fn get_usage(pool: &SqlitePool) -> Result<UsageReport, String> {
-    // (a) Rolling 5h consumption. `ts` is ISO-8601 UTC ('…Z'); datetime()
-    //     normalizes both sides to canonical UTC so the comparison is correct.
-    //     reset_approx is a PROXY (window_start + 5h), not the server reset.
-    let r5: (i64, i64, i64, i64, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(input_tokens + output_tokens
-                           + cache_read_input_tokens + cache_creation_input_tokens),0),
-                MIN(ts),
-                datetime(MIN(ts), '+5 hours')
+    // (a) Rolling 5h consumption. reset_approx is a PROXY (window_start + 5h), not the
+    //     server reset.
+    let rolling_5h = fetch_agg(pool, WHERE_LAST_5H).await?;
+    let (window_start, reset_approx): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT MIN(ts), datetime(MIN(ts), '+5 hours')
          FROM turns
          WHERE datetime(ts) >= datetime('now','-5 hours')",
     )
@@ -168,40 +253,10 @@ pub async fn get_usage(pool: &SqlitePool) -> Result<UsageReport, String> {
     .map_err(|e| e.to_string())?;
 
     // (b) Rolling 7d consumption, split Opus vs other.
-    let rows: Vec<(String, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT CASE WHEN model LIKE '%opus%' THEN 'opus' ELSE 'other' END AS model_class,
-                COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(input_tokens + output_tokens
-                           + cache_read_input_tokens + cache_creation_input_tokens),0)
-         FROM turns
-         WHERE datetime(ts) >= datetime('now','-7 days')
-         GROUP BY model_class",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let mut opus = TokenAgg::default();
-    let mut other = TokenAgg::default();
-    for (class, turns, input, output, cache_read, cache_write, total_tokens) in rows {
-        let agg = TokenAgg {
-            turns,
-            input,
-            output,
-            cache_read,
-            cache_write,
-            total_tokens,
-        };
-        if class == "opus" {
-            opus = agg;
-        } else {
-            other = agg;
-        }
-    }
+    let (opus, other): (Vec<ModelAgg>, Vec<ModelAgg>) = model_aggs(pool, WHERE_LAST_7D)
+        .await?
+        .into_iter()
+        .partition(is_opus);
 
     // (c) Calendar rollups in LOCAL time.
     let today = fetch_agg(pool, WHERE_TODAY).await?;
@@ -209,18 +264,11 @@ pub async fn get_usage(pool: &SqlitePool) -> Result<UsageReport, String> {
     let all_time = fetch_agg(pool, "").await?;
 
     Ok(UsageReport {
-        rolling_5h: TokenAgg {
-            turns: r5.0,
-            input: r5.1,
-            output: r5.2,
-            cache_read: r5.3,
-            cache_write: r5.4,
-            total_tokens: r5.5,
-        },
-        window_start: r5.6,
-        reset_approx: r5.7,
-        rolling_7d_opus: opus,
-        rolling_7d_other: other,
+        rolling_5h,
+        window_start,
+        reset_approx,
+        rolling_7d_opus: TokenAgg::from_models(opus),
+        rolling_7d_other: TokenAgg::from_models(other),
         today,
         this_week,
         all_time,
@@ -324,9 +372,9 @@ pub async fn get_sessions(pool: &SqlitePool) -> Result<Vec<SessionSummary>, Stri
 // Savings CAUSED by Lumen. Distinct from "caching saved", which is REPORTED by
 // Claude Code and stored in the turns table's cache_read column.
 //
-// saved_tokens is exact BPE measured per call. Dollar conversion uses RATE.input
-// (these are input token reads); the frontend owns RATE and applies it so there
-// is one price source of truth.
+// saved_tokens is exact BPE measured per call. A read event records no model, so these
+// tokens carry no dollar figure of their own; the net value below prices them at the
+// savings model's assumed rates.
 //
 // builtin_read rows have saved_tokens=0 and represent CLI-only "missed
 // optimizations" — surfaced honestly but NEVER counted as savings.
@@ -384,8 +432,8 @@ pub struct RepeatReads {
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerReport {
-    /// SUM(saved_tokens) over lumen routes — CAUSED by Lumen, not reported.
-    /// Convert to USD in the frontend: lifetimeOptimizedTokens * RATE.input.
+    /// SUM(saved_tokens) over lumen routes — CAUSED by Lumen, not reported. No dollar
+    /// figure: a read event records no model to price it by.
     pub lifetime_optimized_tokens: i64,
     /// SUM(full_tokens) over lumen routes — denominator for effectivenessPct.
     pub lifetime_full_tokens: i64,
@@ -620,6 +668,9 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     .map_err(|e| e.to_string())?;
 
     // A saved token avoids one cache write and a cache read on each remaining round.
+    //
+    // Both sides are priced at the Opus-class rates lumen_core::econ assumes, not per
+    // model: a read event records no model, and the means below pool every model's turns.
     let value_per_token = (6.25 + 0.5 * VALUE_ROUNDS) / 1e6;
     let gross = lumen_saved as f64 * value_per_token;
 

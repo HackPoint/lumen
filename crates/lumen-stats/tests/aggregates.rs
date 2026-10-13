@@ -299,6 +299,191 @@ async fn usage_opus_matching_is_ascii_case_insensitive() {
     );
 }
 
+// ── get_usage: per-model sums ────────────────────────────────────────────────
+//
+// A summed total cannot be priced: the frontend prices each model's share at that model's
+// rates, so every aggregate has to carry the split.
+
+#[tokio::test]
+async fn usage_splits_every_sum_by_the_model_that_consumed_it() {
+    let (_d, pool) = fixture().await;
+    // Now, not an hour ago: shortly after midnight an hour ago is yesterday.
+    let now = "datetime('now')";
+    turn(&pool, "o1", "s1", now, "claude-opus-4-8", (1, 2, 3, 4)).await;
+    turn(&pool, "o2", "s1", now, "claude-opus-4-8", (10, 20, 30, 40)).await;
+    turn(
+        &pool,
+        "h1",
+        "s1",
+        now,
+        "claude-haiku-4-5-20251001",
+        (100, 0, 0, 0),
+    )
+    .await;
+    turn_no_model(&pool, "n1", "s1", now).await;
+
+    let u = get_usage(&pool).await.unwrap();
+    for (name, agg) in [
+        ("5h", &u.rolling_5h),
+        ("today", &u.today),
+        ("week", &u.this_week),
+        ("all", &u.all_time),
+    ] {
+        let rows: Vec<_> = agg
+            .by_model
+            .iter()
+            .map(|m| {
+                (
+                    m.model.as_deref(),
+                    m.turns,
+                    m.input,
+                    m.output,
+                    m.cache_read,
+                    m.cache_write,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (None, 1, 1, 0, 0, 0),
+                (Some("claude-haiku-4-5-20251001"), 1, 100, 0, 0, 0),
+                (Some("claude-opus-4-8"), 2, 11, 22, 33, 44),
+            ],
+            "{name}: one row per model, a turn with none included"
+        );
+        // The totals are the rows added up, so the two can never disagree.
+        assert_eq!(agg.turns, 4, "{name}");
+        assert_eq!(agg.input, 112, "{name}");
+        assert_eq!(agg.total_tokens, 112 + 22 + 33 + 44, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn usage_7d_split_carries_each_sides_models() {
+    let (_d, pool) = fixture().await;
+    let d1 = "datetime('now','-1 days')";
+    turn(&pool, "o1", "s1", d1, "claude-opus-5-5", (10, 0, 0, 0)).await;
+    turn(&pool, "s1", "s1", d1, "claude-sonnet-5-5", (70, 0, 0, 0)).await;
+    turn_no_model(&pool, "n1", "s1", d1).await;
+
+    let u = get_usage(&pool).await.unwrap();
+    let models = |a: &TokenAgg| -> Vec<Option<String>> {
+        a.by_model.iter().map(|m| m.model.clone()).collect()
+    };
+    assert_eq!(
+        models(&u.rolling_7d_opus),
+        vec![Some("claude-opus-5-5".to_string())]
+    );
+    assert_eq!(
+        models(&u.rolling_7d_other),
+        vec![None, Some("claude-sonnet-5-5".to_string())],
+        "a turn with no model is on the other side, as SQL's LIKE put it"
+    );
+    assert_eq!(u.rolling_7d_other.input, 71);
+}
+
+#[tokio::test]
+async fn usage_carries_the_one_hour_cache_writes_where_they_were_recorded() {
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "a",
+        "s1",
+        "datetime('now')",
+        "claude-opus-4-8",
+        (0, 0, 0, 500),
+    )
+    .await;
+    turn(
+        &pool,
+        "b",
+        "s1",
+        "datetime('now')",
+        "claude-opus-4-8",
+        (0, 0, 0, 300),
+    )
+    .await;
+    sqlx::query("UPDATE turns SET cache_1h = 200, cache_5m = 300 WHERE message_id = 'a'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let u = get_usage(&pool).await.unwrap();
+    let opus = &u.all_time.by_model[0];
+    assert_eq!(opus.cache_write, 800);
+    assert_eq!(
+        opus.cache_write_1h, 200,
+        "turn b recorded no duration and adds nothing to the 1-hour part"
+    );
+    assert_eq!(
+        opus.cache_write_unknown, 300,
+        "turn b's whole write is of unknown duration, and a"
+    );
+}
+
+#[tokio::test]
+async fn usage_splits_each_model_by_the_speed_it_ran_at() {
+    // Fast mode costs a premium, so a fast turn cannot be summed with a standard one, nor a
+    // turn that recorded no speed with either.
+    let (_d, pool) = fixture().await;
+    for (id, speed) in [("f", "'fast'"), ("s", "'standard'"), ("n", "NULL")] {
+        turn(
+            &pool,
+            id,
+            "s1",
+            "datetime('now')",
+            "claude-opus-4-8",
+            (0, 10, 0, 0),
+        )
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE turns SET speed = {speed} WHERE message_id = '{id}'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let u = get_usage(&pool).await.unwrap();
+    let speeds: Vec<(Option<&str>, i64)> = u
+        .all_time
+        .by_model
+        .iter()
+        .map(|m| (m.speed.as_deref(), m.output))
+        .collect();
+    assert_eq!(
+        speeds,
+        vec![(None, 10), (Some("fast"), 10), (Some("standard"), 10)]
+    );
+    assert_eq!(u.all_time.output, 30);
+}
+
+#[tokio::test]
+async fn usage_serializes_the_split_for_the_frontend() {
+    // The wire names are load-bearing: the frontend reads byModel and cacheWrite1h.
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "a",
+        "s1",
+        "datetime('now')",
+        "claude-opus-4-8",
+        (1, 2, 3, 4),
+    )
+    .await;
+    let json = serde_json::to_value(get_usage(&pool).await.unwrap()).unwrap();
+    let row = &json["allTime"]["byModel"][0];
+    assert_eq!(row["model"], "claude-opus-4-8");
+    assert_eq!(row["cacheRead"], 3);
+    assert_eq!(row["cacheWrite"], 4);
+    assert_eq!(row["cacheWrite1h"], 0);
+    assert_eq!(
+        row["cacheWriteUnknown"], 4,
+        "the fixture turn recorded no duration"
+    );
+    assert!(row["speed"].is_null(), "nor a speed");
+}
+
 // ── get_usage: local-time calendar rollups ───────────────────────────────────
 //
 // The highest-risk arithmetic in the app: "today" and "this week" are computed

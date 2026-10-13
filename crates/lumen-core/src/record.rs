@@ -41,6 +41,10 @@ pub struct Usage {
     pub cache_creation: Option<CacheCreation>,
     pub server_tool_use: Option<ServerToolUse>,
     pub service_tier: Option<String>,
+    /// "standard" or "fast": fast mode costs a premium. Absent from transcripts written
+    /// before the API reported it.
+    #[serde(default)]
+    pub speed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

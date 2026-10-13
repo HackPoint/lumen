@@ -213,12 +213,22 @@ struct TurnMsg {
     output_tokens: i64,
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
+    /// The part of `cache_creation_input_tokens` written to the 1-hour cache, which costs
+    /// more than a 5-minute write. Null when the transcript recorded no split by duration:
+    /// then none of the write's duration is known.
+    cache_creation_1h_input_tokens: Option<i64>,
+    /// `usage.speed`, "standard" or "fast"; null when the transcript did not record it.
+    speed: Option<String>,
     /// True when this turn came from a subagent transcript. Consumers must keep
     /// its tokens in cost but exclude its cache_read from the context gauge.
     is_subagent: bool,
     /// Short project label, so a client watching several concurrent sessions can
     /// say which one it is showing.
     project: Option<String>,
+    /// The turn's rowid in the ledger. Not sent: `serve_ws` uses it to hold back a live turn
+    /// the snapshot it just sent already counted.
+    #[serde(skip)]
+    rowid: i64,
 }
 
 /// Per-file byte offsets shared between the notify path and the poll path.
@@ -587,13 +597,22 @@ async fn ingest_from(
             continue;
         };
 
+        // The cache write's split by duration, where the transcript recorded one. A 1-hour
+        // write costs 1.6 times a 5-minute one, so pricing needs it. NULL, not 0, when it was
+        // not recorded: the two columns have been in the schema from the start, unfilled
+        // until 1.9.0, and an absent split is not a split of nothing.
+        let (cache_5m, cache_1h) = u.cache_creation.as_ref().map_or((None, None), |c| {
+            (c.ephemeral_5m_input_tokens, c.ephemeral_1h_input_tokens)
+        });
+
         let res = sqlx::query(
             "INSERT OR IGNORE INTO turns
              (message_id, session_id, ts, model,
               input_tokens, output_tokens,
-              cache_read_input_tokens, cache_creation_input_tokens, source_file,
-              is_subagent)
-             VALUES (?,?,?,?,?,?,?,?,?,?)",
+              cache_read_input_tokens, cache_creation_input_tokens,
+              cache_5m, cache_1h, source_file,
+              is_subagent, speed)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&rec.message.id)
         .bind(&rec.session_id)
@@ -603,8 +622,11 @@ async fn ingest_from(
         .bind(u.output_tokens)
         .bind(u.cache_read_input_tokens)
         .bind(u.cache_creation_input_tokens)
+        .bind(cache_5m)
+        .bind(cache_1h)
         .bind(&fname)
         .bind(is_subagent as i64)
+        .bind(&u.speed)
         .execute(pool)
         .await?;
 
@@ -640,8 +662,11 @@ async fn ingest_from(
                     output_tokens: u.output_tokens,
                     cache_read_input_tokens: u.cache_read_input_tokens,
                     cache_creation_input_tokens: u.cache_creation_input_tokens,
+                    cache_creation_1h_input_tokens: cache_1h,
+                    speed: u.speed.clone(),
                     is_subagent,
                     project: project.clone(),
+                    rowid: res.last_insert_rowid(),
                 });
             }
             // Calibration: real vs estimated output tokens.
@@ -809,84 +834,27 @@ async fn serve_ws(
             };
             let (mut sink, _read) = ws.split();
 
-            // 1. Snapshot on connect.
-            // fill = latest turn's cache_read (not session MAX) so the gauge
-            // reflects the real current context fill, including drops after /compact.
-            #[allow(clippy::type_complexity)]
-            let snapshot_rows = sqlx::query_as::<
-                _,
-                (
-                    String,
-                    i64,
-                    i64,
-                    i64,
-                    i64,
-                    Option<i64>,
-                    i64,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                ),
-            >(
-                // Cost SUMs cover every turn including subagents — that is real
-                // spend. fill / peak_fill deliberately exclude subagents: their
-                // transcripts reuse the parent's sessionId but carry a separate,
-                // fresh context, so counting them made the gauge dip whenever a
-                // subagent ran.
-                "SELECT t.session_id,
-                        SUM(t.input_tokens),
-                        SUM(t.output_tokens),
-                        SUM(t.cache_read_input_tokens),
-                        SUM(t.cache_creation_input_tokens),
-                        (SELECT cache_read_input_tokens FROM turns
-                          WHERE session_id = t.session_id AND is_subagent = 0
-                          ORDER BY ts DESC LIMIT 1),
-                        -- Peak fill: the window is derived from the session's
-                        -- high-water mark, never the momentary fill, so /compact
-                        -- cannot shrink the reported window mid-session.
-                        (SELECT COALESCE(MAX(cache_read_input_tokens),0) FROM turns
-                          WHERE session_id = t.session_id AND is_subagent = 0),
-                        MAX(t.ts),
-                        (SELECT t2.model FROM turns t2
-                          WHERE t2.session_id = t.session_id AND t2.model IS NOT NULL
-                          ORDER BY t2.ts DESC LIMIT 1),
-                        -- Project identity: the transcript records no cwd, so the
-                        -- encoded project directory is all we have.
-                        (SELECT t3.source_file FROM turns t3
-                          WHERE t3.session_id = t.session_id AND t3.source_file IS NOT NULL
-                          ORDER BY t3.ts DESC LIMIT 1)
-                 FROM turns t GROUP BY t.session_id",
-            )
-            .fetch_all(&pool)
-            .await;
-
-            if let Ok(rows) = snapshot_rows {
-                let snapshot = serde_json::json!({
-                    "type": "snapshot",
-                    "sessions": rows.iter().map(|(s, i, o, cr, cw, fill, peak, ts, model, src)| {
-                        // A session made up entirely of subagent turns has no
-                        // main-agent fill to report; 0 is the honest answer.
-                        let project = src
-                            .as_deref()
-                            .and_then(lumen_core::project::label_for_transcript);
-                        serde_json::json!({
-                            "session_id": s,
-                            "input": i, "output": o,
-                            "cache_read": cr, "cache_write": cw,
-                            "fill": fill.unwrap_or(0), "peak_fill": peak, "ts": ts,
-                            "model": model, "project": project
-                        })
-                    }).collect::<Vec<_>>()
-                });
+            // 1. Snapshot on connect, read in one transaction so its parts agree with each
+            //    other and with the live turns that follow.
+            //
+            // The subscription above was taken before the read, so a turn ingested in between
+            // is both in the snapshot and waiting in `rx`. Sending it again would count it
+            // twice, so a live turn the snapshot already holds, by rowid, is held back.
+            let mut sent_through = None;
+            if let Ok(snapshot) = read_snapshot(&pool).await {
+                sent_through = snapshot.last_rowid;
                 let _ = sink
                     .send(tokio_tungstenite::tungstenite::Message::Text(
-                        snapshot.to_string().into(),
+                        snapshot.json.to_string().into(),
                     ))
                     .await;
             }
 
             // 2. Live turns.
             while let Ok(turn) = rx.recv().await {
+                if sent_through.is_some_and(|last| turn.rowid <= last) {
+                    continue;
+                }
                 let msg = serde_json::json!({ "type": "event", "turn": turn });
                 if sink
                     .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -900,6 +868,137 @@ async fn serve_ws(
             }
         });
     }
+}
+
+/// The snapshot a client gets on connect, and the newest turn it counts.
+struct Snapshot {
+    json: serde_json::Value,
+    /// The highest rowid in the ledger when it was read; None for an empty ledger. Rowids
+    /// only grow, so every turn at or below it is in the snapshot and every later one is not.
+    last_rowid: Option<i64>,
+}
+
+/// Read the snapshot in one transaction.
+///
+/// Each session's sums come with their split by model and speed (`by_model`), which is what a
+/// client prices: a session can mix models, a subagent on a cheaper one. The session totals are
+/// the split added up, not a second query, so a turn that lands while the snapshot is read can
+/// never be in one and not the other.
+async fn read_snapshot(pool: &SqlitePool) -> Result<Snapshot, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // fill = latest turn's cache_read (not session MAX) so the gauge reflects the real current
+    // context fill, including drops after /compact.
+    #[allow(clippy::type_complexity)]
+    let sessions = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<i64>,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        // fill / peak_fill deliberately exclude subagents: their transcripts reuse the
+        // parent's sessionId but carry a separate, fresh context, so counting them made the
+        // gauge dip whenever a subagent ran. Cost covers every turn, subagents included, below.
+        "SELECT t.session_id,
+                (SELECT cache_read_input_tokens FROM turns
+                  WHERE session_id = t.session_id AND is_subagent = 0
+                  ORDER BY ts DESC LIMIT 1),
+                -- Peak fill: the window is derived from the session's high-water mark,
+                -- never the momentary fill, so /compact cannot shrink the reported window
+                -- mid-session.
+                (SELECT COALESCE(MAX(cache_read_input_tokens),0) FROM turns
+                  WHERE session_id = t.session_id AND is_subagent = 0),
+                MAX(t.ts),
+                (SELECT t2.model FROM turns t2
+                  WHERE t2.session_id = t.session_id AND t2.model IS NOT NULL
+                  ORDER BY t2.ts DESC LIMIT 1),
+                -- Project identity: the transcript records no cwd, so the encoded project
+                -- directory is all we have.
+                (SELECT t3.source_file FROM turns t3
+                  WHERE t3.session_id = t.session_id AND t3.source_file IS NOT NULL
+                  ORDER BY t3.ts DESC LIMIT 1)
+         FROM turns t GROUP BY t.session_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    #[allow(clippy::type_complexity)]
+    let parts = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ),
+    >(
+        "SELECT session_id, model, speed,
+                SUM(input_tokens), SUM(output_tokens),
+                SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
+                COALESCE(SUM(cache_1h),0),
+                -- A turn that recorded no split has a write of unknown duration, priced at
+                -- the 5-minute rate as a floor.
+                SUM(CASE WHEN cache_1h IS NULL THEN cache_creation_input_tokens ELSE 0 END)
+         FROM turns GROUP BY session_id, model, speed ORDER BY session_id, model, speed",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let (last_rowid,): (Option<i64>,) = sqlx::query_as("SELECT MAX(rowid) FROM turns")
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+
+    let mut by_session: HashMap<String, (lumen_core::rates::Tokens, Vec<serde_json::Value>)> =
+        HashMap::new();
+    for (session, model, speed, i, o, cr, cw, cw_1h, cw_unknown) in parts {
+        let entry = by_session.entry(session).or_default();
+        entry.0.add(&lumen_core::rates::Tokens {
+            input: i,
+            output: o,
+            cache_read: cr,
+            cache_write: cw,
+            cache_write_1h: cw_1h,
+            cache_write_unknown: cw_unknown,
+        });
+        entry.1.push(serde_json::json!({
+            "model": model, "speed": speed,
+            "input": i, "output": o,
+            "cache_read": cr, "cache_write": cw,
+            "cache_write_1h": cw_1h, "cache_write_unknown": cw_unknown
+        }));
+    }
+
+    let json = serde_json::json!({
+        "type": "snapshot",
+        "sessions": sessions.iter().map(|(s, fill, peak, ts, model, src)| {
+            let (totals, by_model) = by_session.remove(s).unwrap_or_default();
+            // A session made up entirely of subagent turns has no main-agent fill to
+            // report; 0 is the honest answer.
+            let project = src
+                .as_deref()
+                .and_then(lumen_core::project::label_for_transcript);
+            serde_json::json!({
+                "session_id": s,
+                "input": totals.input, "output": totals.output,
+                "cache_read": totals.cache_read, "cache_write": totals.cache_write,
+                "by_model": by_model,
+                "fill": fill.unwrap_or(0), "peak_fill": peak, "ts": ts,
+                "model": model, "project": project
+            })
+        }).collect::<Vec<_>>()
+    });
+    Ok(Snapshot { json, last_rowid })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1711,6 +1810,10 @@ mod ws_tests {
             output_tokens: 22,
             cache_read_input_tokens: 33,
             cache_creation_input_tokens: 44,
+            cache_creation_1h_input_tokens: None,
+            speed: None,
+            // Not in the ledger, so after any snapshot.
+            rowid: i64::MAX,
             is_subagent: false,
             project: None,
         })
@@ -1743,6 +1846,10 @@ mod ws_tests {
             output_tokens: 1,
             cache_read_input_tokens: 1,
             cache_creation_input_tokens: 1,
+            cache_creation_1h_input_tokens: None,
+            speed: None,
+            // Not in the ledger, so after any snapshot.
+            rowid: i64::MAX,
             is_subagent: false,
             project: None,
         })
@@ -1770,6 +1877,10 @@ mod ws_tests {
                 output_tokens: 0,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                cache_creation_1h_input_tokens: None,
+                speed: None,
+                // Not in the ledger, so after any snapshot.
+                rowid: i64::MAX,
                 is_subagent: false,
                 project: None,
             })
@@ -1804,6 +1915,10 @@ mod ws_tests {
             output_tokens: 0,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: None,
+            speed: None,
+            // Not in the ledger, so after any snapshot.
+            rowid: i64::MAX,
             is_subagent: false,
             project: None,
         });
@@ -1859,6 +1974,144 @@ mod ws_tests {
                 .await
                 .unwrap();
         assert_eq!(stored, 1);
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_splits_each_sessions_sums_by_model_and_speed() {
+        // A session can mix models, a subagent on a cheaper one, and speeds, and its sums can
+        // only be priced per model and speed.
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        add_turn(&pool, "m1", "s1", "2026-01-01T10:00:00Z", 1_000).await;
+        add_turn(&pool, "m2", "s1", "2026-01-01T11:00:00Z", 2_000).await;
+        sqlx::query(
+            "INSERT INTO turns(message_id,session_id,ts,model,input_tokens,output_tokens,
+                               cache_read_input_tokens,cache_creation_input_tokens,cache_1h,speed)
+             VALUES('h1','s1','2026-01-01T11:30:00Z','claude-haiku-4-5-20251001',1,2,3,40,30,
+                    'standard'),
+                   ('f1','s1','2026-01-01T11:40:00Z','claude-opus-4-8',0,7,0,0,0,'fast')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (url, _tx) = start(pool).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let snap = next_json(&mut ws).await;
+        let session = &snap["sessions"][0];
+        assert_eq!(session["input"], 21, "the totals still cover every model");
+        assert_eq!(session["output"], 49);
+        assert_eq!(
+            session["by_model"],
+            serde_json::json!([
+                {"model": "claude-haiku-4-5-20251001", "speed": "standard", "input": 1,
+                 "output": 2, "cache_read": 3, "cache_write": 40, "cache_write_1h": 30,
+                 "cache_write_unknown": 0},
+                {"model": "claude-opus-4-8", "speed": "fast", "input": 0, "output": 7,
+                 "cache_read": 0, "cache_write": 0, "cache_write_1h": 0,
+                 "cache_write_unknown": 0},
+                // add_turn records neither a speed nor a duration split: both unknown.
+                {"model": "claude-sonnet-4", "speed": null, "input": 20, "output": 40,
+                 "cache_read": 3_000, "cache_write": 10, "cache_write_1h": 0,
+                 "cache_write_unknown": 10},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_records_the_cache_writes_duration_and_speed_and_broadcasts_them() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool.clone()).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _ = next_json(&mut ws).await;
+
+        // The usage shape Claude Code writes: the write total, its split by duration, and the
+        // speed.
+        let split = r#"{"sessionId":"s-ttl","timestamp":"2026-01-01T12:00:00Z","message":{"id":"msg-ttl","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":9,"cache_read_input_tokens":50,"cache_creation_input_tokens":2799,"cache_creation":{"ephemeral_1h_input_tokens":2000,"ephemeral_5m_input_tokens":799},"speed":"fast"}}}"#;
+        // An older line, with neither.
+        let bare = r#"{"sessionId":"s-ttl","timestamp":"2026-01-01T12:01:00Z","message":{"id":"msg-bare","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":100}}}"#;
+        let jsonl = dir.path().join("session.jsonl");
+        std::fs::write(&jsonl, format!("{split}\n{bare}\n")).unwrap();
+        ingest_from(&pool, &jsonl, 0, &tx, true).await.unwrap();
+
+        let event = next_json(&mut ws).await;
+        assert_eq!(event["turn"]["cache_creation_input_tokens"], 2799);
+        assert_eq!(event["turn"]["cache_creation_1h_input_tokens"], 2000);
+        assert_eq!(event["turn"]["speed"], "fast");
+        let event = next_json(&mut ws).await;
+        assert!(
+            event["turn"]["cache_creation_1h_input_tokens"].is_null(),
+            "no recorded split: the duration of the whole write is unknown, not zero"
+        );
+        assert!(event["turn"]["speed"].is_null());
+
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT message_id, cache_5m, cache_1h, speed FROM turns ORDER BY message_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("msg-bare".to_string(), None, None, None),
+                (
+                    "msg-ttl".to_string(),
+                    Some(799),
+                    Some(2000),
+                    Some("fast".to_string())
+                ),
+            ],
+            "what was not recorded is stored as unknown, not as zero or standard"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_ingested_while_a_client_connects_is_counted_once() {
+        // The client is subscribed to live turns before its snapshot is read, so a turn that
+        // lands in between is in both. It used to be sent twice: in the snapshot's sums, then
+        // again as a live event.
+        let dir = TempDir::new().unwrap();
+        let pool = pool_with_schema(&dir).await;
+        let (url, tx) = start(pool.clone()).await;
+
+        // Open the TCP connection, wait until the server has subscribed, and only then ingest
+        // a turn and complete the WebSocket handshake: the snapshot is read after the turn.
+        let addr = url.trim_start_matches("ws://").to_string();
+        let tcp = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        while tx.receiver_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        let line = |id: &str, out: i64| {
+            format!(
+                r#"{{"sessionId":"s-race","timestamp":"2026-01-01T12:00:00Z","message":{{"id":"{id}","model":"claude-opus-4-8","role":"assistant","content":[],"usage":{{"input_tokens":0,"output_tokens":{out},"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+            )
+        };
+        let jsonl = dir.path().join("race.jsonl");
+        std::fs::write(&jsonl, format!("{}\n", line("msg-1", 100))).unwrap();
+        let end = ingest_from(&pool, &jsonl, 0, &tx, true).await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::client_async(&url, tcp).await.unwrap();
+        let snap = next_json(&mut ws).await;
+        assert_eq!(
+            snap["sessions"][0]["output"], 100,
+            "the snapshot holds msg-1"
+        );
+
+        // A later turn, so the next frame is whatever the client is sent next.
+        std::fs::write(
+            &jsonl,
+            format!("{}\n{}\n", line("msg-1", 100), line("msg-2", 7)),
+        )
+        .unwrap();
+        ingest_from(&pool, &jsonl, end, &tx, true).await.unwrap();
+        let next = next_json(&mut ws).await;
+        assert_eq!(
+            next["turn"]["message_id"], "msg-2",
+            "msg-1 is already in the snapshot and must not be sent again"
+        );
     }
 
     #[tokio::test]

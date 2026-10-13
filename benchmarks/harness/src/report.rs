@@ -133,21 +133,20 @@ fn round9(x: f64) -> f64 {
 /// The economics model, as the code in `lumen-core` defines it.
 pub fn model() -> Model {
     let e = lumen_core::econ::Econ::default();
-    use lumen_core::rates;
+    use lumen_core::econ;
     Model {
         status: "modelled".to_string(),
-        source: "crates/lumen-core/src/econ.rs (Econ::default) and crates/lumen-core/src/rates.rs"
-            .to_string(),
+        source: "crates/lumen-core/src/econ.rs (Econ::default and its rates)".to_string(),
         rates_usd_per_million_tokens: Rates {
-            input: round9(rates::INPUT * 1e6),
-            output: round9(rates::OUTPUT * 1e6),
-            cache_read: round9(rates::CACHE_READ * 1e6),
-            cache_write: round9(rates::CACHE_WRITE * 1e6),
+            input: econ::INPUT_PER_M,
+            output: econ::OUTPUT_PER_M,
+            cache_read: econ::CACHE_READ_PER_M,
+            cache_write: econ::CACHE_WRITE_PER_M,
         },
-        rates_note:
-            "rates.rs labels these Sonnet 3.5 / 3.7 / 4 pricing. The harness does not check \
-                     them against a current price list; they are the model's inputs, not a quote."
-                .to_string(),
+        rates_note: "econ.rs assumes these Opus-class prices for every turn, whatever its \
+                     model. They are the model's inputs, not a quote; the per-model prices are \
+                     in crates/lumen-core/src/rates.rs."
+            .to_string(),
         context_tokens: e.context_tokens,
         output_tokens: e.output_tokens,
         rounds_remaining: e.rounds_remaining,

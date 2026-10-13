@@ -36,7 +36,8 @@ import os
 import statistics
 import sys
 
-# Per-token prices, mirroring crates/lumen-core/src/rates.rs.
+# Per-token prices: the Opus-class rates crates/lumen-core/src/econ.rs assumes for every
+# turn, whatever its model. The per-model table is PRICES in crates/lumen-core/src/rates.rs.
 INPUT, OUTPUT, CACHE_READ, CACHE_WRITE = 5e-6, 25e-6, 0.5e-6, 6.25e-6
 
 LUMEN_TOOLS = {

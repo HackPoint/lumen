@@ -520,6 +520,7 @@ pub fn run() {
             get_sessions,
             get_optimizer_stats,
             get_context_report,
+            lumen_prices,
             get_fault_report,
             get_fault_count,
             get_repeat_reads_setting,
@@ -856,6 +857,46 @@ async fn get_sessions() -> Result<Vec<lumen_stats::SessionSummary>, String> {
 async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
     let pool = lumen_stats::connect_default().await?;
     lumen_stats::get_optimizer_stats(&pool).await
+}
+
+/// The price of every model Lumen knows, for the frontend to price each model's tokens with.
+///
+/// The frontend holds no price of its own, and `crates/lumen-core/tests/frontend_prices.rs`
+/// fails if it gets one, so every dollar figure in the app comes from this table. A model
+/// that is missing or unpriced has no dollar figure, and a total that leaves it out says so.
+#[tauri::command]
+fn lumen_prices() -> PriceTable {
+    price_table()
+}
+
+/// `lumen_core::rates::PRICES`, with the date it was checked and each row's source.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PriceTable {
+    as_of: &'static str,
+    models: Vec<PriceTableRow>,
+}
+
+#[derive(serde::Serialize)]
+struct PriceTableRow {
+    #[serde(flatten)]
+    row: lumen_core::rates::PriceRow,
+    /// Where the row's provider publishes its prices.
+    source: &'static str,
+}
+
+fn price_table() -> PriceTable {
+    use lumen_core::rates;
+    PriceTable {
+        as_of: rates::PRICES_AS_OF,
+        models: rates::PRICES
+            .iter()
+            .map(|row| PriceTableRow {
+                row: *row,
+                source: row.provider.source(),
+            })
+            .collect(),
+    }
 }
 
 /// Where this project's context has gone.
@@ -1319,6 +1360,53 @@ mod tests {
     fn px(rgba: &[u8], x: u32, y: u32) -> (u8, u8, u8, u8) {
         let i = ((y * ICON_SIZE + x) * 4) as usize;
         (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3])
+    }
+
+    // ── prices ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_price_table_carries_every_row_its_date_and_its_source() {
+        let json = serde_json::to_value(price_table()).unwrap();
+        assert_eq!(json["asOf"], lumen_core::rates::PRICES_AS_OF);
+        let models = json["models"].as_array().unwrap();
+        assert_eq!(models.len(), lumen_core::rates::PRICES.len());
+        for (row, sent) in lumen_core::rates::PRICES.iter().zip(models) {
+            assert_eq!(sent["model"], row.model);
+            assert_eq!(sent["provider"], "anthropic");
+            assert_eq!(sent["source"], row.provider.source());
+            assert_eq!(sent["note"], row.note);
+            match row.prices {
+                // The wire names the frontend reads.
+                Some(p) => {
+                    assert_eq!(sent["prices"]["input"], p.input);
+                    assert_eq!(sent["prices"]["output"], p.output);
+                    assert_eq!(sent["prices"]["cacheWrite5m"], p.cache_write_5m);
+                    assert_eq!(sent["prices"]["cacheWrite1h"], p.cache_write_1h);
+                    assert_eq!(sent["prices"]["cacheRead"], p.cache_read);
+                }
+                None => assert!(sent["prices"].is_null(), "{}", row.model),
+            }
+            match row.fast {
+                Some(p) => {
+                    assert_eq!(sent["fast"]["input"], p.input);
+                    assert_eq!(sent["fast"]["cacheRead"], p.cache_read);
+                }
+                None => assert!(sent["fast"].is_null(), "{}", row.model),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unpriced_model_is_sent_with_its_reason_and_no_prices() {
+        let json = serde_json::to_value(price_table()).unwrap();
+        let haiku_5_5 = json["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["model"] == "claude-haiku-5-5")
+            .expect("listed, so the frontend can say why it has no price");
+        assert!(haiku_5_5["prices"].is_null());
+        assert!(!haiku_5_5["note"].as_str().unwrap().is_empty());
     }
 
     // ── status colours ───────────────────────────────────────────────────────

@@ -43,7 +43,7 @@
             CRITICAL MESSAGING:
             Card A = "Lumen optimized (caused)" — SUM(saved_tokens) from read_events.
                      This is what Lumen verifiably did.
-            Card B = "Saved by caching (reported)" — allTime.cacheRead * price-delta.
+            Card B = "Saved by caching (reported)" — allTime.cacheRead priced per model.
                      This is reported BY Claude Code; Lumen did not cause it.
             These two numbers are NEVER added together. Visual separation enforces this.
         -->
@@ -58,7 +58,8 @@
                 </span>
                 <span class="savings-card__num">{{ fmtTokens(s.lifetimeOptimizedTokens()) }}</span>
                 <span class="savings-card__unit">tokens saved</span>
-                <span class="savings-card__usd">{{ fmtUsd(s.lifetimeOptimizedUsd()) }}</span>
+                <!-- No dollar figure: a read event records no model, so there is no price to
+                     put on these tokens. -->
                 <span class="savings-card__note">{{ savingsNote() }}</span>
             </div>
 
@@ -78,7 +79,10 @@
                 </span>
                 <span class="savings-card__num">{{ fmtTokens(cacheSavedTokens()) }}</span>
                 <span class="savings-card__unit">cache-read tokens</span>
-                <span class="savings-card__usd">{{ fmtUsd(cacheSavedUsd()) }}</span>
+                <span class="savings-card__usd">{{ cacheSavedPriced().hasFigure ? fmtUsd(cacheSavedUsd()) : '—' }}</span>
+                @if (cacheSavedTag(); as t) {
+                    <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+                }
                 <span class="savings-card__note">reported by Claude Code · not caused by Lumen</span>
             </div>
 

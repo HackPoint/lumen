@@ -5,7 +5,7 @@ import { SessionService } from '../../session.service';
 import { RepeatReadsService } from '../../repeat-reads.service';
 import { BillingModeService } from '../../billing-mode.service';
 import { TauriBridge } from '../../tauri-bridge';
-import { APP_VERSION_CMD, FakeTauriBridge } from '../../tauri-bridge.fake';
+import { APP_VERSION_CMD, FakeTauriBridge, PRICE_TABLE } from '../../tauri-bridge.fake';
 import type { FaultReport, FilingResult, RepeatReadsSetting } from '../../components/index';
 import type { BillingModeSetting } from '../../billing-mode.service';
 
@@ -228,6 +228,50 @@ describe('Settings', () => {
       await open();
       expect(fixture.nativeElement.querySelector('.usage')).toBeNull();
     });
+
+    it('prices the session per model and tags a figure that is not the whole', async () => {
+      await open((b) => b.responses.set('lumen_prices', PRICE_TABLE));
+      bridge.emit('daemon', JSON.stringify({
+        type: 'event',
+        turn: {
+          session_id: 's1', model: 'claude-sonnet-4-6', speed: 'standard', input_tokens: 0,
+          output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+          cache_creation_1h_input_tokens: 0,
+        },
+      }));
+      fixture.detectChanges();
+      expect(rendered('section.spend .tile__value')).toBe('$15.00');
+      expect(fixture.nativeElement.querySelector('section.spend .partial-tag')).toBeNull();
+
+      bridge.emit('daemon', JSON.stringify({
+        type: 'event',
+        turn: {
+          session_id: 's1', model: '<synthetic>', input_tokens: 0, output_tokens: 10,
+          cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+        },
+      }));
+      fixture.detectChanges();
+      expect(rendered('section.spend .partial-tag')).toBe('at least');
+    });
+
+    it('prices the usage report from the price table', async () => {
+      const zero = { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+      const today = {
+        ...zero, turns: 1, output: 1_000_000, totalTokens: 1_000_000,
+        byModel: [{
+          model: 'claude-haiku-4-5-20251001', speed: 'standard', turns: 1, input: 0,
+          output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, cacheWriteUnknown: 0,
+        }],
+      };
+      await open((b) => {
+        b.responses.set('lumen_prices', PRICE_TABLE);
+        b.responses.set('get_usage', {
+          rolling5h: zero, windowStart: null, resetApprox: null,
+          rolling7dOpus: zero, rolling7dOther: zero, today, thisWeek: zero, allTime: zero,
+        });
+      });
+      expect(rendered('section.spend .usage__rollups')).toContain('$5.00');
+    });
   });
 
   // ── alert thresholds ───────────────────────────────────────────────────────
@@ -282,6 +326,26 @@ describe('Settings', () => {
       page.onSessionLimit(inputEvent(''));
       expect(page.s.dailySpendLimit()).toBe(0);
       expect(page.s.sessionSpendLimit()).toBe(0);
+    });
+
+    it('says under the thresholds when a limit cannot be checked against unpriced spend', async () => {
+      const page = await open((b) => b.responses.set('lumen_prices', PRICE_TABLE));
+      bridge.emit('daemon', JSON.stringify({
+        type: 'event',
+        turn: {
+          session_id: 's1', model: '<synthetic>', input_tokens: 0, output_tokens: 1_000_000,
+          cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+        },
+      }));
+      fixture.detectChanges();
+      const notes = [...(fixture.nativeElement as HTMLElement)
+        .querySelectorAll('section.limits .limits__hint[role="status"]')]
+        .map((n) => n.textContent?.trim());
+      expect(notes).toEqual([
+        'The per-session limit of $2 cannot be checked: none of that spend has a price. '
+          + 'No price for <synthetic>.',
+      ]);
+      expect(page.s.notification()).toBeNull();
     });
 
     it('turns native notifications off and on from the rendered toggle', async () => {

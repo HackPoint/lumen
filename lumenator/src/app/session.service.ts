@@ -1,10 +1,13 @@
 import { DestroyRef, Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { Observable, scan, startWith, merge, from, filter } from 'rxjs';
 import { toSignal } from '@angular/core/rxjs-interop';
-import { RATE } from './components';
 import { TauriBridge } from './tauri-bridge';
 import type { ContextReport, FaultReport, FilingResult, UpdateAvailable } from './components/index';
-import type { DaemonMsg, OptimizerReport, SessionMap, SessionState, Turn, UsageReport } from './components';
+import type {
+  DaemonMsg, OptimizerReport, SessionMap, SessionState, SnapshotSession, Turn, UsageReport,
+} from './components';
+import { aggTokens, isFloor, price, shortfalls } from './prices';
+import type { ModelTokens, PriceTable, Priced } from './prices';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
 const CONTEXT_TIERS = [200_000, 500_000, 1_000_000] as const;
@@ -120,6 +123,60 @@ function cachedSnapshot$(bridge: TauriBridge): Observable<DaemonMsg> {
 /** Fold counter for `SessionState.seq`. Module-scoped: one reducer per service. */
 let seq = 0;
 
+/** The key a model's tokens at one speed are kept under in `SessionState.byModel`. */
+function rateKey(model: string | null | undefined, speed: string | null | undefined): string {
+  return `${model ?? ''}\u0000${speed ?? ''}`;
+}
+
+/**
+ * A snapshot session's tokens by model and speed. Without a split the sums go under no model,
+ * which has no price: the session's latest model need not be the one that consumed them.
+ */
+function snapshotModels(s: SnapshotSession): Record<string, ModelTokens> {
+  const rows: ModelTokens[] = s.by_model
+    ? s.by_model.map((m) => ({
+        model: m.model,
+        speed: m.speed ?? null,
+        input: m.input,
+        output: m.output,
+        cacheRead: m.cache_read,
+        cacheWrite: m.cache_write,
+        cacheWrite1h: m.cache_write_1h ?? 0,
+        cacheWriteUnknown: m.cache_write_unknown ?? m.cache_write - (m.cache_write_1h ?? 0),
+      }))
+    : [{
+        model: null, input: s.input, output: s.output, cacheRead: s.cache_read,
+        cacheWrite: s.cache_write, cacheWriteUnknown: s.cache_write,
+      }];
+  const out: Record<string, ModelTokens> = {};
+  for (const row of rows) out[rateKey(row.model, row.speed)] = row;
+  return out;
+}
+
+/**
+ * `byModel` with one turn's tokens added to its model and speed, as a new object. A turn whose
+ * cache write recorded no split by duration adds all of it as of unknown duration.
+ */
+function addTurn(byModel: Record<string, ModelTokens>, t: Turn): Record<string, ModelTokens> {
+  const key = rateKey(t.model || null, t.speed);
+  const prev = byModel[key];
+  const oneHour = t.cache_creation_1h_input_tokens;
+  const known = oneHour !== null && oneHour !== undefined;
+  return {
+    ...byModel,
+    [key]: {
+      model: t.model || null,
+      speed: t.speed ?? null,
+      input: (prev?.input ?? 0) + t.input_tokens,
+      output: (prev?.output ?? 0) + t.output_tokens,
+      cacheRead: (prev?.cacheRead ?? 0) + t.cache_read_input_tokens,
+      cacheWrite: (prev?.cacheWrite ?? 0) + t.cache_creation_input_tokens,
+      cacheWrite1h: (prev?.cacheWrite1h ?? 0) + (known ? oneHour : 0),
+      cacheWriteUnknown: (prev?.cacheWriteUnknown ?? 0) + (known ? 0 : t.cache_creation_input_tokens),
+    },
+  };
+}
+
 @Injectable({ providedIn: 'root' })
 export class SessionService {
   /**
@@ -159,6 +216,7 @@ export class SessionService {
                     cacheRead: s.cache_read,
                     cacheWrite: s.cache_write,
                   },
+                  byModel: snapshotModels(s),
                 };
               }
               return { ...acc };
@@ -198,6 +256,8 @@ export class SessionService {
                 cacheRead: pt.cacheRead + t.cache_read_input_tokens,
                 cacheWrite: pt.cacheWrite + t.cache_creation_input_tokens,
               },
+              // At the turn's own model, a subagent's included: its tokens are its model's.
+              byModel: addTurn(prev?.byModel ?? {}, t),
             };
             return { ...acc };
           }, {}),
@@ -266,22 +326,59 @@ export class SessionService {
 
   // ─────────────────────────────────────────────────────────────────────────
   // D4 — Cost signals derived from existing queries; no new DB calls.
+  //
+  // Each model's tokens at that model's prices and speed, from the table `lumen_prices`
+  // serves. The frontend has no price of its own: until the table arrives, or for a model it
+  // does not price, there is no dollar figure, and a figure that is not the whole says so.
   // ─────────────────────────────────────────────────────────────────────────
 
-  /** Active-session cost from the live totals signal. */
-  readonly costSession = computed(() => {
-    const t = this.totals();
-    return t.input * RATE.input + t.output * RATE.output +
-           t.cacheRead * RATE.cacheRead + t.cacheWrite * RATE.cacheWrite;
+  /** The price table from `lumen_prices`. Null until it loads, and then nothing is priced. */
+  readonly prices = signal<PriceTable | null>(null);
+
+  /** Fetch the price table. It is compiled into the backend, so once is enough. */
+  refreshPrices(): void {
+    this.bridge.invoke<PriceTable>('lumen_prices')
+        .then((t) => this.prices.set(t ?? null))
+        .catch(() => { /* not in Tauri — every dollar figure stays absent */ });
+  }
+
+  /** The active session, priced per model. */
+  readonly sessionPriced = computed<Priced>(() =>
+      price(Object.values(this.active()?.byModel ?? {}), this.prices()),
+  );
+
+  /** Active-session cost: what could be priced, a floor when `sessionPriced` says it is one. */
+  readonly costSession = computed(() => this.sessionPriced().total);
+
+  /** Today's usage, priced per model. Null until the usage report loads. */
+  readonly todayPriced = computed<Priced | null>(() => {
+    const u = this.usage();
+    return u ? price(aggTokens(u.today), this.prices()) : null;
   });
 
   /** Today's cost from the usage rollup signal (0 until usage loads). */
-  readonly costToday = computed(() => {
-    const u = this.usage();
-    if (!u) return 0;
-    const t = u.today;
-    return t.input * RATE.input + t.output * RATE.output +
-           t.cacheRead * RATE.cacheRead + t.cacheWrite * RATE.cacheWrite;
+  readonly costToday = computed(() => this.todayPriced()?.total ?? 0);
+
+  /**
+   * A line for each spend limit that cannot be checked: the spend behind it is a floor, or has
+   * no price at all, and is still under the limit, so whether the limit was crossed is unknown.
+   * The alert below stays quiet then, and without this nothing would say why.
+   */
+  readonly limitNotes = computed<string[]>(() => {
+    const notes: string[] = [];
+    const check = (what: string, limit: number, p: Priced | null): void => {
+      if (limit <= 0 || p === null || !isFloor(p, 'total')) return;
+      if (p.hasFigure && p.total > limit) return; // Crossed whatever the rest cost.
+      const why = shortfalls(p, 'total').join(' ');
+      notes.push(p.hasFigure
+          ? `The ${what} limit of $${limit.toFixed(0)} can only be checked against at least `
+              + `$${p.total.toFixed(2)}. ${why}`
+          : `The ${what} limit of $${limit.toFixed(0)} cannot be checked: none of that spend `
+              + `has a price. ${why}`);
+    };
+    check('daily', this.dailySpendLimit(), this.todayPriced());
+    check('per-session', this.sessionSpendLimit(), this.sessionPriced());
+    return notes;
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -411,8 +508,9 @@ export class SessionService {
   //   "Lumen optimized" (here) = caused = saved_tokens in read_events.
   //   "Saved by caching" (D2)  = reported = cache_read in turns table.
   //
-  // Dollar conversion: lifetimeOptimizedTokens * RATE.input — optimizer
-  // saves input token reads, so the input rate is correct.
+  // No dollar figure for the tokens saved: a read event records no model, and pricing
+  // them at one model's rates is the guess per-model prices replaced. The net value
+  // below comes priced from the backend.
   //
   // Mode banner:
   //   cli     → "Full mode — reads intercepted; savings + missed both tracked."
@@ -622,15 +720,6 @@ export class SessionService {
       () => this.optimizerStats()?.lifetimeOptimizedTokens ?? 0,
   );
 
-  /**
-   * Lifetime optimizer savings in USD.
-   * Uses RATE.input: optimizer saves input reads; this is the correct rate.
-   * Distinct from cacheSavings (D2) which uses RATE.input − RATE.cacheRead.
-   */
-  readonly lifetimeOptimizedUsd = computed(
-      () => this.lifetimeOptimizedTokens() * RATE.input,
-  );
-
   /** Per-channel breakdown (cli | vscode | unknown). */
   readonly optimizedByChannel = computed(
       () => this.optimizerStats()?.byChannel ?? [],
@@ -696,6 +785,10 @@ export class SessionService {
     effect(() => {
       const daily = this.costToday();
       const session = this.costSession();
+      // A floor can say a limit was crossed, never that it was not: `limitNotes` says so.
+      const today = this.todayPriced();
+      const dailyFloor = today !== null && isFloor(today, 'total');
+      const sessionFloor = isFloor(this.sessionPriced(), 'total');
       const dailyLimit = this.dailySpendLimit();
       const sessionLimit = this.sessionSpendLimit();
 
@@ -714,12 +807,12 @@ export class SessionService {
       if (dailyOver) {
         this._costAlert.set({
           level: 'alert',
-          text: `Today's spend $${daily.toFixed(2)} exceeded your $${dailyLimit.toFixed(0)} daily limit.`,
+          text: `Today's spend ${dailyFloor ? 'of at least ' : ''}$${daily.toFixed(2)} exceeded your $${dailyLimit.toFixed(0)} daily limit.`,
         });
       } else if (sessionOver) {
         this._costAlert.set({
           level: 'warn',
-          text: `Session cost $${session.toFixed(2)} exceeded your $${sessionLimit.toFixed(0)} per-session limit.`,
+          text: `Session cost ${sessionFloor ? 'of at least ' : ''}$${session.toFixed(2)} exceeded your $${sessionLimit.toFixed(0)} per-session limit.`,
         });
       } else {
         this._costAlert.set(null);
@@ -791,12 +884,15 @@ export class SessionService {
       }
     });
 
-    // Aggregate reports: fetch once now, then refresh slowly.
+    // Aggregate reports: fetch once now, then refresh slowly. Prices are fixed for the
+    // life of the backend, so they are fetched again only if the first fetch failed.
+    this.refreshPrices();
     this.refreshUsage();
     this.refreshOptimizerStats();
     // Tied to the injector lifetime: an uncleared interval outlives the service
     // and, in tests, leaks across cases.
     const refreshTimer = setInterval(() => {
+      if (this.prices() === null) this.refreshPrices();
       this.refreshUsage();
       this.refreshOptimizerStats();
     }, USAGE_REFRESH_MS);

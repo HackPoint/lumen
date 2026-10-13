@@ -2,7 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Panel } from './panel';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
-import { FakeTauriBridge } from '../../tauri-bridge.fake';
+import { FakeTauriBridge, PRICE_TABLE } from '../../tauri-bridge.fake';
 
 /**
  * The panel is the tray popover: a compact read on the same session state, in a
@@ -374,5 +374,89 @@ describe('Panel', () => {
       vi.unstubAllGlobals();
       FakeResizeObserver.last = null;
     }
+  });
+
+  // ── what the cost tiles show ───────────────────────────────────────────────
+  //
+  // Driven through the bridge and read off the page, as a user sees it: a figure that is not
+  // the whole must say so, whatever the reason.
+
+  async function pricedPanel(): Promise<void> {
+    bridge = new FakeTauriBridge();
+    bridge.responses.set('lumen_prices', PRICE_TABLE);
+    TestBed.configureTestingModule({
+      providers: [{ provide: TauriBridge, useValue: bridge }, SessionService],
+    });
+    fixture = TestBed.createComponent(Panel);
+    fixture.detectChanges();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    fixture.detectChanges();
+  }
+
+  function liveTurn(t: Record<string, unknown>): void {
+    bridge.emit('daemon', JSON.stringify({
+      type: 'event',
+      turn: {
+        session_id: 's1', input_tokens: 0, output_tokens: 0,
+        cache_read_input_tokens: 0, cache_creation_input_tokens: 0, ...t,
+      },
+    }));
+    fixture.detectChanges();
+  }
+
+  /** Each cost tile's figure and the tag beside it ('' when none). */
+  function tiles(): Array<{ value: string; tag: string }> {
+    const el = fixture.nativeElement as HTMLElement;
+    return [...el.querySelectorAll('.tile')].map((tile) => ({
+      value: tile.querySelector('.tile__value')?.textContent?.trim() ?? '',
+      tag: tile.querySelector('.partial-tag')?.textContent?.trim() ?? '',
+    }));
+  }
+
+  it('marks a session cost holding a cache write of unknown duration as a floor', async () => {
+    // The fixture turn in lumen-core, as a transcript from before 1.9.0 records it: no split
+    // of its 2,799-token write by duration. At the 5-minute rate it is $0.0494; it was a
+    // 1-hour write, and cost $0.0599.
+    await pricedPanel();
+    liveTurn({
+      model: 'claude-opus-4-8', speed: 'standard', input_tokens: 3_197, output_tokens: 303,
+      cache_read_input_tokens: 16_685, cache_creation_input_tokens: 2_799,
+    });
+    expect(tiles()[0]).toEqual({ value: '$0.05', tag: 'at least' });
+  });
+
+  it('does not mark a session cost whose writes all recorded their duration', async () => {
+    await pricedPanel();
+    liveTurn({
+      model: 'claude-opus-4-8', speed: 'standard', input_tokens: 3_197, output_tokens: 303,
+      cache_read_input_tokens: 16_685, cache_creation_input_tokens: 2_799,
+      cache_creation_1h_input_tokens: 2_799,
+    });
+    expect(tiles()[0]).toEqual({ value: '$0.06', tag: '' });
+  });
+
+  it('marks the caching saving as a floor when a model in it has no price', async () => {
+    await pricedPanel();
+    liveTurn({
+      model: 'claude-opus-4-8', speed: 'standard', cache_read_input_tokens: 1_000_000,
+      cache_creation_1h_input_tokens: 0,
+    });
+    liveTurn({ model: '<synthetic>', speed: 'standard', cache_read_input_tokens: 10 });
+    expect(tiles()[1]).toEqual({ value: '$4.50', tag: 'at least' });
+  });
+
+  it('prices a fast turn at the fast-mode rate', async () => {
+    await pricedPanel();
+    liveTurn({
+      model: 'claude-opus-4-8', speed: 'fast', output_tokens: 1_000_000,
+      cache_creation_1h_input_tokens: 0,
+    });
+    expect(tiles()[0]).toEqual({ value: '$50.00', tag: '' });
+  });
+
+  it('marks a turn that recorded no speed, on a model with fast mode, as a floor', async () => {
+    await pricedPanel();
+    liveTurn({ model: 'claude-opus-4-8', output_tokens: 1_000_000, cache_creation_1h_input_tokens: 0 });
+    expect(tiles()[0]).toEqual({ value: '$25.00', tag: 'at least' });
   });
 });

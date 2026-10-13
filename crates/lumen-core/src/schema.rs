@@ -191,6 +191,12 @@ pub const MIGRATIONS: &[&str] = &[
     // its own CREATE TABLE IF NOT EXISTS, and the next open by this one drops it again. Nothing
     // in either reads it, so the round trip changes no figure.
     "DROP TABLE IF EXISTS sessions",
+    // ── 1.9.0: the speed a turn ran at ───────────────────────────────────────
+    // usage.speed, "standard" or "fast". Fast mode costs a premium on the models that have
+    // it, so a turn is priced at the rate of the speed it ran at. NULL on every turn ingested
+    // before 1.9.0, and on a transcript that does not record it: unknown, which is the truth,
+    // and a cost that holds such a turn on a model with fast mode is shown as a floor.
+    "ALTER TABLE turns ADD COLUMN speed TEXT",
 ];
 
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
@@ -227,7 +233,10 @@ CREATE TABLE IF NOT EXISTS turns (
     source_file                 TEXT,
     -- 1 when the turn came from a subagent transcript. Counted in cost, excluded
     -- from the context-fill gauge (a subagent's context is not the session's).
-    is_subagent                 INTEGER NOT NULL DEFAULT 0
+    is_subagent                 INTEGER NOT NULL DEFAULT 0,
+    -- 1.9.0: usage.speed, standard | fast | NULL when not recorded. Last, where the ALTER
+    -- in MIGRATIONS puts it on an older ledger, so the two agree on column order.
+    speed                       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS calibration (
@@ -1073,5 +1082,75 @@ mod tests {
         let again = crate::meter::connect_db(&path).expect("a second open must be a no-op");
         assert!(!has_sessions(&again));
         assert_eq!(rendered_rows(&again), before);
+    }
+
+    // ── 1.9.0: turns.speed ───────────────────────────────────────────────────
+
+    /// `turns` as every release through 1.8.0 created it, holding a turn. Hand-written: the
+    /// current DDL has the column.
+    const TURNS_THROUGH_1_8_0: &str = "\
+        CREATE TABLE turns ( \
+            message_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ts TEXT NOT NULL, \
+            model TEXT, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, \
+            cache_read_input_tokens INTEGER NOT NULL, \
+            cache_creation_input_tokens INTEGER NOT NULL, cache_1h INTEGER, cache_5m INTEGER, \
+            web_search_requests INTEGER, web_fetch_requests INTEGER, service_tier TEXT, \
+            source_file TEXT, is_subagent INTEGER NOT NULL DEFAULT 0); \
+        INSERT INTO turns (message_id, session_id, ts, model, input_tokens, output_tokens, \
+            cache_read_input_tokens, cache_creation_input_tokens) \
+            VALUES ('m-1','s-1','2026-09-01T10:00:00Z','claude-opus-4-8',1,2,3,4);";
+
+    #[tokio::test]
+    async fn a_ledger_from_before_1_9_0_gains_turns_speed_unknown_on_every_old_turn() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(TURNS_THROUGH_1_8_0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        init_schema(&pool).await.unwrap();
+
+        assert_eq!(
+            columns(&pool, "turns").await.last().map(String::as_str),
+            Some("speed")
+        );
+        let (id, speed): (String, Option<String>) =
+            sqlx::query_as("SELECT message_id, speed FROM turns")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (id.as_str(), speed),
+            ("m-1", None),
+            "an old turn's speed is unknown"
+        );
+
+        // A fresh ledger declares it in the same place.
+        let fresh_dir = TempDir::new().unwrap();
+        let fresh = pool_in(&fresh_dir).await;
+        init_schema(&fresh).await.unwrap();
+        assert_eq!(
+            columns(&fresh, "turns").await,
+            columns(&pool, "turns").await
+        );
+    }
+
+    #[test]
+    fn the_rusqlite_open_adds_turns_speed_too() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("1_8_0.db");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(TURNS_THROUGH_1_8_0)
+            .unwrap();
+        let conn = crate::meter::connect_db(&path).unwrap();
+        let speed: Option<String> = conn
+            .query_row(
+                "SELECT speed FROM turns WHERE message_id = 'm-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(speed, None);
     }
 }

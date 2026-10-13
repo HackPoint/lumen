@@ -60,9 +60,9 @@
              which is why it is not on Home. -->
         <section class="spend" aria-labelledby="spend-title">
             <h2 class="card__title" id="spend-title">Spend</h2>
-            <cost [totals]="s.totals()"></cost>
+            <cost [totals]="s.totals()" [priced]="s.sessionPriced()"></cost>
             @if (s.usage(); as u) {
-                <usage [report]="u"></usage>
+                <usage [report]="u" [prices]="s.prices()"></usage>
             }
         </section>
 
@@ -119,6 +119,10 @@
                 0 disables a spend alert. Resets to defaults on restart. An alert shows on Details,
                 beside the context gauge, and as a notification.
             </p>
+            <!-- A limit the spend cannot be checked against says so: the alert stays quiet then. -->
+            @for (note of s.limitNotes(); track note) {
+                <p class="limits__hint" role="status">{{ note }}</p>
+            }
         </section>
 
         <!-- Repeat reads: the settings file's switch. Saved to disk, unlike the thresholds above. -->

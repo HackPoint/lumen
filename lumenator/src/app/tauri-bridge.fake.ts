@@ -2,9 +2,49 @@ import { Observable, Subject } from 'rxjs';
 import type { TauriBridge } from './tauri-bridge';
 import type { RepeatReadsSetting } from './components/index';
 import type { BillingMode, BillingModeSetting } from './billing-mode.service';
+import type { ModelPrices, PriceRow, PriceTable } from './prices';
 
 /** The command behind `getVersion()` in `@tauri-apps/api/app`. */
 export const APP_VERSION_CMD = 'plugin:app|version';
+
+type Usd = [number, number, number, number, number];
+
+function prices([input, output, cacheWrite5m, cacheWrite1h, cacheRead]: Usd): ModelPrices {
+  return { input, output, cacheWrite5m, cacheWrite1h, cacheRead };
+}
+
+/**
+ * One row of the table `lumen_prices` serves: `[input, output, 5-minute write, 1-hour write,
+ * cache read]` in USD per million tokens, at standard speed and, for a model with fast mode, in
+ * it.
+ */
+export function priceRow(model: string, standard: Usd, fast?: Usd): PriceRow {
+  return {
+    provider: 'anthropic',
+    model,
+    prices: prices(standard),
+    fast: fast ? prices(fast) : null,
+    note: '',
+    source: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  };
+}
+
+/**
+ * A canned `lumen_prices` response, for specs to seed with
+ * `responses.set('lumen_prices', PRICE_TABLE)`. Test data in the backend's shape: the app
+ * itself holds no price and asks the backend, which serves `lumen_core::rates::PRICES`.
+ */
+export const PRICE_TABLE: PriceTable = {
+  asOf: '2026-10-13',
+  models: [
+    priceRow('claude-opus-4-8', [5, 25, 6.25, 10, 0.5], [10, 50, 12.5, 20, 1]),
+    priceRow('claude-opus-5-5', [4, 20, 5, 8, 0.2], [8, 40, 10, 16, 0.4]),
+    priceRow('claude-sonnet-4-6', [3, 15, 3.75, 6, 0.3]),
+    priceRow('claude-sonnet-5-5', [2, 10, 2.5, 4, 0.1]),
+    priceRow('claude-haiku-4-5', [1, 5, 1.25, 2, 0.1]),
+    { ...priceRow('claude-haiku-5-5', [0, 0, 0, 0, 0]), prices: null, note: 'Priced by prompt length.' },
+  ],
+};
 
 /**
  * Test double for {@link TauriBridge}.

@@ -334,8 +334,36 @@ The running **dollar total for the active session**, computed locally from:
 - Cache-read tokens × cache-read price
 - Cache-write tokens × cache-write price
 
-Prices are hard-coded to the published Anthropic rate table per model. Lumen cannot
-see your negotiated pricing or credits.
+Each model's tokens are priced at that model's list price, from Anthropic's published
+pricing page; the table is `PRICES` in `crates/lumen-core/src/rates.rs`, with the date it
+was last checked. A session that mixes models, such as a subagent on Haiku inside an Opus
+session, has each part priced at its own rate. Until 1.9.0 every token was priced at
+Opus-class rates whatever the model, which overstated a Sonnet session about 1.7 times and
+a Haiku one five times.
+
+No figure is shown as more complete than it is. One that is a floor, because part of it
+could not be priced or was priced low, is tagged **at least** (in `lumen dash` it reads
+`at least $…`), and hovering the tag says why:
+
+- A model the table has no price for (`<synthetic>`, an id from Bedrock, a model newer
+  than the table, or one Lumen cannot price, such as Claude Haiku 5.5, whose rate depends
+  on each request's prompt length) adds no dollars. Its tokens are still counted. With
+  nothing priced at all the figure shows `—` and is tagged **no price**; before the app has
+  loaded the price table, the tag says so instead.
+- Fast mode is priced at its own rate: each turn records the speed it ran at
+  (`usage.speed`), and a fast turn on Claude Opus 5.5, Opus 5 or Opus 4.8 costs the
+  fast-mode price. A turn ingested before 1.9.0 recorded no speed; on those three models it
+  is priced at the standard rate, and the figure is a floor.
+- A cache write recorded as a 1-hour write is priced at the 1-hour rate, and one recorded as
+  a 5-minute write at the 5-minute rate. A turn ingested before 1.9.0 recorded neither; its
+  writes are priced at the 5-minute rate, the lower of the two, and the figure is a floor.
+- A spend alert fires on a floor that is over its limit. When a floor is under the limit,
+  whether the limit was crossed is unknown, and the Alert Thresholds section on Settings
+  says so.
+- These are the first-party API's global-routing prices. Lumen does not record a turn's
+  inference region, so a turn run with US-only inference (1.1 times on the 4.6 and later
+  models) is priced at the global rate. It cannot see batch discounts, your negotiated
+  pricing or credits.
 
 #### Cost breakdown (output / fresh input / cache read / cache write)
 
@@ -345,7 +373,7 @@ for code generation, while cache reads dominate for long-running agentic session
 
 #### Saved by caching
 
-The dollar value of tokens that hit Claude Code's prompt cache, calculated as:
+The dollar value of tokens that hit Claude Code's prompt cache, calculated per model as:
 `cache_read_tokens × (input_price − cache_read_price)`.
 
 **This is reported by Claude Code, not caused by Lumen.** The label always reads
@@ -421,7 +449,8 @@ there is no honest way to recover it after the fact.
 #### Lumen optimized (caused)
 
 `SUM(saved_tokens)` across all `smart_read`, `recall_file`, and `compress_logs` calls
-that Lumen actually made. This number starts small and grows with every session.
+that Lumen actually made. This number starts small and grows with every session. It has no
+dollar figure: a read records no model, so there is no price to put on it.
 
 **This is the only number Lumen claims credit for.** It is small, verifiable, and
 derived directly from the database — not estimated, not extrapolated.

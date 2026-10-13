@@ -122,6 +122,30 @@ body {
   outline: none;
 }
 
+/* On a dollar figure that is not the whole: "at least" when part of it could not be
+   priced or was priced low, "no price" when none of it could be. Its tooltip says why.
+   Shared by every surface that shows dollars, so it looks the same wherever it is. */
+.partial-tag {
+  align-self: flex-start;
+  width: fit-content;
+  margin-top: 0.15rem;
+  padding: 0.02rem 0.3rem;
+  border: 1px solid var(--lumen-warn);
+  border-radius: 999px;
+  color: var(--lumen-warn);
+  font-family: var(--lumen-font-sans);
+  font-size: 0.58rem;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  cursor: help;
+}
+
+/* Beside a figure in a row, rather than under it. */
+.partial-tag--inline {
+  margin: 0 0 0 0.35rem;
+  vertical-align: middle;
+}
+
 /* Tooltip bubble — appended to document.body by LumenTooltip directive. */
 .lumen-tooltip {
   position: fixed;
