@@ -75,8 +75,10 @@ impl Problem {
             ),
             Problem::File(why) => format!(
                 "{} cannot be used ({why}): repeat reads are off, every read is in full. \
-                 Fix or delete the file (deleting it gives the default, on), or set \
-                 {REPEAT_READS_ENV} to on or off, which takes precedence over the file.",
+                 Fix or delete the file (deleting it gives the default, on), or choose a \
+                 setting with the Repeat reads switch on the Context tab of the main window \
+                 in the Lumen app, which rewrites it. Setting {REPEAT_READS_ENV} to on or off \
+                 takes precedence over the file.",
                 file.display()
             ),
         }
@@ -264,10 +266,8 @@ pub fn surface(problem: &Problem, file: &Path, min_interval: std::time::Duration
 
 /// Write the persisted setting for a ledger at `db`.
 ///
-/// Nothing in the app calls this yet: there is no toggle, so today the file is edited by hand
-/// or `LUMEN_REPEAT_READS` is set (the README and `lumen doctor` say so). It is the writer a
-/// toggle would use, kept beside the reader so the two agree on the format, and the tests
-/// round-trip it.
+/// The Repeat reads switch in the Lumen app (`set_repeat_reads_setting`) calls this.
+/// It sits beside the reader so the two agree on the format, and the tests round-trip it.
 ///
 /// Atomic (written beside, renamed into place) so a reader never sees half a file, and
 /// private to this user. Other keys in a valid existing file are kept. A file that cannot be
@@ -461,12 +461,17 @@ mod tests {
         assert!(said.contains("/data/lumen_settings.json"), "{said}");
         assert!(said.contains("delete the file"), "{said}");
         assert!(said.contains(REPEAT_READS_ENV), "{said}");
-        // There is no switch in the app to go back to: do not send anyone looking for one.
-        assert!(!said.contains("in the app"), "{said}");
+        // The main window's switch rewrites the file, so it repairs a file that cannot be used.
+        assert!(
+            said.contains("Repeat reads switch on the Context tab of the main window"),
+            "{said}"
+        );
+        // It writes the file, and the variable outranks the file: a bad value there is not
+        // something it can fix, so that message must not send anyone to it.
         assert!(
             !Problem::Env("x".into())
                 .describe(file)
-                .contains("in the app"),
+                .contains("Context tab"),
             "the same for the environment variable's message"
         );
     }
@@ -539,6 +544,22 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_holding_the_file_open_still_sees_the_whole_old_one_after_a_write() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ledger.db");
+        write_repeat_reads(&db, false).unwrap();
+        let before = std::fs::read_to_string(settings_path(&db)).unwrap();
+        let mut held = std::fs::File::open(settings_path(&db)).unwrap();
+        write_repeat_reads(&db, true).unwrap();
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, before);
+        assert_eq!(read_file_mode(&db), Mode::On);
     }
 
     #[test]

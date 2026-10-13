@@ -8,6 +8,7 @@ import {
 import { RouterLink, RouterLinkActive } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
 import { SessionService } from '../../session.service';
+import { RepeatReadsService } from '../../repeat-reads.service';
 import { RATE } from '../../components/index';
 import type { ChannelBreakdown, ToolBreakdown } from '../../components/index';
 import { LumenTooltip } from '../../directives/tooltip.directive';
@@ -76,11 +77,14 @@ export class Optimizer implements OnInit {
     );
 
     readonly s = inject(SessionService);
+    readonly rr = inject(RepeatReadsService);
 
     ngOnInit(): void {
         // Only the badge: this page's own figures already arrive through the daemon
         // stream, and the fault count is the one thing not on it.
         this.s.refreshFaultCount();
+        // The repeat reads card says whether the settings file turns them off, so it reads that file.
+        void this.rr.load();
     }
 
     // ── hero ──────────────────────────────────────────────────────────────────
@@ -154,6 +158,16 @@ export class Optimizer implements OnInit {
     readonly showMissed = computed(() =>
         this.s.currentChannel() === 'cli' && this.s.missedReads().calls > 0,
     );
+
+    // ── repeat reads (answers in none of the totals above) ────────────────────
+
+    /** The figures with the two sums the card needs. Null from a backend older than 1.8.0: no card then. */
+    readonly repeatCard = computed(() => {
+        const r = this.s.optimizerStats()?.repeatReads;
+        if (!r) return null;
+        const served = r.unchangedServed + r.deltasServed;
+        return { ...r, served, asked: served + r.freshRequests };
+    });
 
     // ── breakdown bar helpers ─────────────────────────────────────────────────
 

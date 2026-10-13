@@ -182,6 +182,50 @@ interface OptimizerReport {
     valueRounds?: number;
     /** Rounds each intercept costs — 1.604 measured. */
     pairMultiplier?: number;
+    /**
+     * What repeat reads have done so far. Counted apart from every figure above: the
+     * answers it counts are in none of the token totals. Optional because a backend
+     * older than 1.8.0 does not send it, and then the page shows nothing about it.
+     */
+    repeatReads?: RepeatReads;
+}
+
+/**
+ * Answers served by the repeat-reads feature, from `OptimizerReport.repeatReads`.
+ *
+ * `tokensNotResent` is counted against reading the whole file again, not against the
+ * outline Lumen would have sent with the feature off, and covers measured answers only.
+ */
+interface RepeatReads {
+    /** "Unchanged since an earlier read" answers. */
+    unchangedServed: number;
+    /** Answers that sent only what an edit changed. */
+    deltasServed: number;
+    /** Full tokens minus the tokens returned, over the served answers whose count was measured. */
+    tokensNotResent: number;
+    /** How many of the served answers carry a measured count, so the page can say when the figure covers fewer. */
+    measuredAnswers: number;
+    /** Full results asked for again with `fresh=true`, in the arm that got the feature. */
+    freshRequests: number;
+    /** Reads that got a full result because Lumen could not tell which conversation they came from. */
+    unidentifiedReads: number;
+}
+
+/**
+ * The repeat-reads switch as the settings file holds it, from `get_repeat_reads_setting`.
+ *
+ * This is the file and the default, never the server's effective mode: a
+ * `LUMEN_REPEAT_READS` value in a Claude Code MCP config outranks both and the app does
+ * not see it.
+ */
+interface RepeatReadsSetting {
+    on: boolean;
+    /** Where `on` comes from: no file at all (the default is on), or the file. */
+    source: 'default' | 'file';
+    /** Why the file could not be used, when it could not. `on` is false then. */
+    problem: string | null;
+    /** The settings file's path, for the text that names it. */
+    file: string;
 }
 
 export type {
@@ -196,6 +240,8 @@ export type {
     ChannelBreakdown,
     ToolBreakdown,
     OptimizerReport,
+    RepeatReads,
+    RepeatReadsSetting,
 };
 export { RATE };
 

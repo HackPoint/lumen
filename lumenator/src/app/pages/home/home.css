@@ -312,6 +312,105 @@
     overflow-wrap: anywhere;
 }
 
+/* ── Repeat reads switch. Same card as the alert thresholds; the difference worth seeing is that
+   this one is saved, which its note says. ── */
+.repeat {
+    width: 100%;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    padding: 0.8rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.repeat__title {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.repeat__intro,
+.repeat__note {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.7rem;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+    /* A path or an error from the OS is long and arbitrary; it wraps rather than widening the window. */
+    overflow-wrap: anywhere;
+}
+
+.repeat__note {
+    font-size: 0.64rem;
+    opacity: 0.8;
+}
+
+.repeat__toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    cursor: pointer;
+    width: fit-content;
+    padding: 0.1rem 0;
+}
+
+/* The checkbox is visually hidden, so keyboard focus has to show on the track. */
+.repeat__toggle-row:focus-within .toggle__track {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--lumen-brand) 25%, transparent);
+}
+
+.repeat__toggle-label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text);
+}
+
+.repeat__state {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.76rem;
+    line-height: 1.45;
+    color: var(--lumen-text);
+    overflow-wrap: anywhere;
+}
+
+.repeat__state--problem {
+    color: var(--lumen-warn);
+}
+
+.repeat__unknown {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.repeat__retry {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.74rem;
+    color: var(--lumen-text);
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border-strong);
+    border-radius: 8px;
+    padding: 0.28rem 0.7rem;
+    cursor: pointer;
+}
+
+.repeat__error {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--lumen-alert);
+    overflow-wrap: anywhere;
+}
+
 @keyframes fade-up {
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: none; }

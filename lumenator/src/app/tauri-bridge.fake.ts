@@ -1,5 +1,6 @@
 import { Observable, Subject } from 'rxjs';
 import type { TauriBridge } from './tauri-bridge';
+import type { RepeatReadsSetting } from './components/index';
 
 /** The command behind `getVersion()` in `@tauri-apps/api/app`. */
 export const APP_VERSION_CMD = 'plugin:app|version';
@@ -53,6 +54,14 @@ export class FakeTauriBridge implements TauriBridge {
    */
   getVersion(): Promise<string> {
     return this.invoke<string>(APP_VERSION_CMD);
+  }
+
+  getRepeatReadsSetting(): Promise<RepeatReadsSetting> {
+    return this.invoke<RepeatReadsSetting>('get_repeat_reads_setting');
+  }
+
+  setRepeatReadsSetting(on: boolean): Promise<RepeatReadsSetting> {
+    return this.invoke<RepeatReadsSetting>('set_repeat_reads_setting', { on });
   }
 
   isPermissionGranted(): Promise<boolean> {

@@ -423,6 +423,12 @@ the redirect, or the file was excluded. These are tracked as context (never as s
 so you can see the true adoption rate. A high "not optimized" count in Full mode
 suggests Claude is bypassing the redirect; see [Verify it's working](#verify-its-working).
 
+#### Repeat reads
+
+A card that counts what [repeat reads](#repeat-reads-on-by-default-since-180) answered short,
+apart from every figure above it, and says what its token figure is counted against. What it
+shows, and how to read it, is described under that heading.
+
 #### Mode banner (Full / Soft)
 
 A persistent badge on the Optimizer tab showing which mode the current (or most recent)
@@ -740,8 +746,11 @@ each `(session, request)` and answers a repeat with less. The built-in Read is n
 Claude Code already dedups it. It was an opt-in flag in 1.7.0 (`LUMEN_REPEAT_READS=on`); from
 1.8.0 it is on unless you turn it off.
 
-**Turning it off.** Either of these, and the environment variable wins when both are set:
+**Turning it off.** Any of these, and the environment variable wins when it says something:
 
+- the **Repeat reads** switch on the Context tab of the Lumen app's main window. It writes the
+  settings file below, so a change applies to the next Lumen read in every running Claude Code
+  session, with no restart, and it is still there after Lumen or Claude Code restarts.
 - the environment variable, in the `env` block of `~/.claude/settings.json` (or wherever Claude
   Code gets its environment): `"env": { "LUMEN_REPEAT_READS": "off" }`. It is read when Claude
   Code starts the server, so it applies from the next Claude Code session.
@@ -751,6 +760,14 @@ Claude Code already dedups it. It was an opt-in flag in 1.7.0 (`LUMEN_REPEAT_REA
   Windows `%APPDATA%\io.speedata.lumen\`; `LUMEN_DB` moves it with the ledger). The server reads
   it on every Lumen call (about 30 microseconds), so a change applies to the next call, with no
   restart. `lumen doctor` prints the path it is using and the state.
+
+The switch shows what the settings file says, or the default (on) when there is no file, and
+nothing else. It cannot see a `LUMEN_REPEAT_READS` in the environment Claude Code gives the server,
+which wins over the file, nor a `LUMEN_DB` there that points the server at a ledger elsewhere, whose
+own settings file is then the one that counts; its text says so. A file it cannot use is shown as
+off, with the reason, and switching on replaces it; the other keys of a file that is valid are kept.
+When the setting cannot be read, or a change cannot be saved, the window says that. It does not
+show on or off in the meantime.
 
 With it off every read is answered as it always was, nothing is remembered, and the `fresh`
 option is not advertised. Switching from off to on in the middle of a session leaves the
@@ -832,6 +849,33 @@ subagent, `agent_id`. Routes: `smart_read_unchanged`,
 The size of a delta is measured per delta served against the outline it replaces, headers and
 the `fresh=true` sentence included; it is not an overall saving. Overall effect, follow-up
 rate and the `fresh=true` rate are measured live, in the `ab` split.
+
+**What the Optimizer tab shows (1.8.0).** A Repeat reads card, below the other figures, counts
+what repeat reads have done over the ledger's lifetime. It is counted apart from the rest: these
+answers are in none of the token totals (Lumen optimized, Today, This week), the by-tool and
+by-channel breakdowns or the net value, and the card never calls anything a saving. (The
+provenance counts at the top of the tab, how many metered events have unverified token
+provenance, still include these rows: they count every row that carries a token count.)
+
+- *Unchanged answers served* and *Edits served as a delta*: how many repeat reads got the
+  one-sentence note and how many got a delta.
+- *Tokens not re-sent*: for those answers, the whole file's tokens minus the answer's, added up.
+  Read its baseline carefully: it is counted against reading the whole file again. With repeat
+  reads off a read returns the outline (for `recall_file`, the symbols asked for), which is
+  usually far smaller than the file, so this is more than repeat reads gain over having them off,
+  and it is not shown as a saving. It counts only answers whose token count was measured: when
+  that is fewer than all of them the card says how many, and when it is none the figure is a dash.
+- *Full result asked for again (`fresh=true`)*: n of m, where m is the unchanged answers, the
+  deltas and the `fresh` requests together, so it is how often the model did not take a repeat
+  answer. Only requests made while repeat reads were on are counted (under `ab`, the half that
+  takes the new path), so the figure stops moving when they are turned off.
+- When the settings file turns repeat reads off, the card says so, and that a
+  `LUMEN_REPEAT_READS` in a Claude Code MCP config would outrank the file unseen. It never says
+  what the server will do, for the same reason the switch cannot.
+- Reads answered in full because Lumen could not tell which conversation they came from (the plan
+  `unidentified`, counted while repeat reads were on): the count, with an **Open Setup** link
+  to the app's Setup screen, which runs Setup, after which Claude Code needs a restart. That
+  remedy is for the app install; on the plugin, update or reinstall it, as in the table above.
 
 ### Experimental: ranked outline (1.3.0, off by default)
 

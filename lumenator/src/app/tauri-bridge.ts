@@ -9,6 +9,7 @@ import {
   sendNotification,
 } from '@tauri-apps/plugin-notification';
 import { Observable } from 'rxjs';
+import type { RepeatReadsSetting } from './components/index';
 
 /**
  * The whole surface Lumen uses from the Tauri runtime, behind one injectable.
@@ -45,6 +46,16 @@ export class TauriBridge {
    */
   getVersion(): Promise<string> {
     return getVersion();
+  }
+
+  /** The repeat-reads switch as the settings file holds it (never the server's effective mode). */
+  getRepeatReadsSetting(): Promise<RepeatReadsSetting> {
+    return this.invoke<RepeatReadsSetting>('get_repeat_reads_setting');
+  }
+
+  /** Write the switch to the settings file; resolves to what the file says afterwards. */
+  setRepeatReadsSetting(on: boolean): Promise<RepeatReadsSetting> {
+    return this.invoke<RepeatReadsSetting>('set_repeat_reads_setting', { on });
   }
 
   isPermissionGranted(): Promise<boolean> {

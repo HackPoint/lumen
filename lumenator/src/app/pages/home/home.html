@@ -167,6 +167,73 @@
             <p class="limits__hint">0 disables a spend alert. Resets to defaults on restart.</p>
         </section>
 
+        <!-- Repeat reads: the settings file's switch. Saved to disk, unlike the thresholds above. -->
+        <section class="repeat" aria-label="Repeat reads">
+            <h2 class="repeat__title">Repeat reads</h2>
+            <p class="repeat__intro">
+                When Claude reads a file again in the same conversation, Lumen answers with a short note
+                that it is unchanged, or with only what an edit changed, instead of the whole result.
+            </p>
+
+            @if (rr.setting(); as st) {
+                <label class="repeat__toggle-row">
+                    <span class="toggle__track" [class.is-on]="st.on" aria-hidden="true">
+                        <span class="toggle__knob"></span>
+                    </span>
+                    <span class="repeat__toggle-label">Repeat reads</span>
+                    <input
+                        class="sr-only"
+                        type="checkbox"
+                        aria-label="Repeat reads"
+                        [checked]="st.on"
+                        [attr.aria-disabled]="rr.saving() ? 'true' : null"
+                        (change)="onRepeatReads($event)">
+                </label>
+
+                @if (st.problem; as why) {
+                    <p class="repeat__state repeat__state--problem">
+                        The settings file {{ st.file }} could not be read: {{ why }}.
+                        Repeat reads are off until it is fixed. Switching on again rewrites the file.
+                    </p>
+                } @else if (!st.on) {
+                    <p class="repeat__state">Off, as the settings file says. Every read returns its full result.</p>
+                } @else if (st.source === 'file') {
+                    <p class="repeat__state">On, as the settings file says.</p>
+                } @else {
+                    <p class="repeat__state">On by default. The settings file does not turn it off.</p>
+                }
+            } @else if (rr.readError(); as err) {
+                <div class="repeat__unknown" role="alert">
+                    <p class="repeat__state repeat__state--problem">
+                        The repeat reads setting could not be read: {{ err }}.
+                        Lumen does not know whether repeat reads are on or off.
+                    </p>
+                    <button type="button" class="repeat__retry" (click)="rr.load()">Retry</button>
+                </div>
+            } @else {
+                <p class="repeat__state">Reading the settings file…</p>
+            }
+
+            @if (rr.writeError(); as werr) {
+                <p class="repeat__error" role="alert">Not saved: {{ werr }}</p>
+            }
+
+            @if (rr.setting(); as st) {
+                <p class="repeat__note">
+                    A change applies to the next Lumen read in every running Claude Code session, with no restart.
+                    It is saved in {{ st.file }}, so unlike the alert thresholds above it survives a restart.
+                </p>
+                <p class="repeat__note">
+                    This shows the settings file, not what the server will do: a LUMEN_REPEAT_READS value in a
+                    Claude Code MCP config takes priority over the file, and a LUMEN_DB there that points at
+                    another ledger makes the server read that ledger's settings file instead. This window cannot
+                    see either. A session that started with repeat reads off is not told about the fresh option
+                    until Claude Code restarts; every unchanged note still tells the model to pass fresh=true,
+                    and it is honoured.
+                </p>
+            }
+        </section>
+
         <!-- Lumen has no separate settings window: this is where the settings are, and so where
              a build is identified when someone files a report. -->
         <section class="about" aria-labelledby="about-title">
