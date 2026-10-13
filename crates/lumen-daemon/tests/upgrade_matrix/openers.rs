@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use lumen_core::{meter, schema};
-use sqlx::sqlite::SqlitePoolOptions;
 
 /// The code paths that open the ledger and bring its schema up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,13 +23,11 @@ impl Opener {
         match self {
             Opener::Daemon => {
                 meter::restore_sidecar_write_bits(db);
-                let pool = SqlitePoolOptions::new()
-                    .connect(&url(db))
+                let pool = schema::open_pool(&url(db))
                     .await
                     .map_err(|e| e.to_string())?;
-                let init = schema::init_schema(&pool).await.map_err(|e| e.to_string());
                 pool.close().await;
-                init
+                Ok(())
             }
             Opener::Gui => {
                 let pool = lumen_stats::connect(&url(db)).await?;
