@@ -2,16 +2,26 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, provideRouter } from '@angular/router';
 import { Home } from './home';
 import { SessionService } from '../../session.service';
+import { RepeatReadsService } from '../../repeat-reads.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { APP_VERSION_CMD, FakeTauriBridge } from '../../tauri-bridge.fake';
+import type { RepeatReadsSetting } from '../../components/index';
 
 describe('Home', () => {
   let fixture: ComponentFixture<Home>;
   let bridge: FakeTauriBridge;
 
+  const SETTINGS_FILE = '/Users/me/.lumen/lumen_settings.json';
+
+  function setting(over: Partial<RepeatReadsSetting> = {}): RepeatReadsSetting {
+    return { on: true, source: 'default', problem: null, file: SETTINGS_FILE, ...over };
+  }
+
   async function build(seed?: (b: FakeTauriBridge) => void): Promise<Home> {
     bridge = new FakeTauriBridge();
     bridge.responses.set('lumen_setup_needed', false);
+    // No settings file: repeat reads are on by default.
+    bridge.responses.set('get_repeat_reads_setting', setting());
     seed?.(bridge);
     TestBed.configureTestingModule({
       providers: [
@@ -469,5 +479,246 @@ describe('Home', () => {
     expect(h.version()).toBeNull();
     expect(fixture.nativeElement.querySelector('.home__version')).toBeNull();
     expect(el<HTMLElement>('.about__version').textContent).toBe('unavailable');
+  });
+
+  // ── repeat reads switch ────────────────────────────────────────────────────
+  //
+  // The switch shows the settings file and the default, never the server's effective mode:
+  // a LUMEN_REPEAT_READS value in a Claude Code MCP config outranks the file, and the app
+  // cannot see it. Each state is asserted on the words shown and on the checkbox itself.
+
+  describe('repeat reads switch', () => {
+    const SECTION = 'section[aria-label="Repeat reads"]';
+    const BOX = `${SECTION} input[type="checkbox"]`;
+    const FILE_OFF = setting({ on: false, source: 'file' });
+    const FILE_ON = setting({ on: true, source: 'file' });
+    const CORRUPT = setting({
+      on: false,
+      source: 'file',
+      problem: 'not JSON: expected value at line 1 column 1',
+    });
+
+    /** What the section says, whitespace collapsed. */
+    function said(): string {
+      return (el<HTMLElement>(SECTION).textContent ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      fixture.detectChanges();
+    }
+
+    function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+      let resolve!: (v: T) => void;
+      const promise = new Promise<T>((r) => {
+        resolve = r;
+      });
+      return { promise, resolve };
+    }
+
+    async function open(seed?: (b: FakeTauriBridge) => void): Promise<void> {
+      await build(seed);
+      await settle();
+    }
+
+    it('reads the settings file when the window opens', async () => {
+      await open();
+      expect(bridge.countOf('get_repeat_reads_setting')).toBe(1);
+    });
+
+    it('shows on, and says it is the default, when there is no settings file', async () => {
+      await open();
+      expect(said()).toContain('On by default. The settings file does not turn it off.');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(true);
+    });
+
+    it('shows off, as the settings file says, when the file turns it off', async () => {
+      await open((b) => b.responses.set('get_repeat_reads_setting', FILE_OFF));
+      expect(said()).toContain('Off, as the settings file says. Every read returns its full result.');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(false);
+    });
+
+    it('shows on, as the settings file says, when the file turns it on', async () => {
+      await open((b) => b.responses.set('get_repeat_reads_setting', FILE_ON));
+      expect(said()).toContain('On, as the settings file says.');
+      expect(said()).not.toContain('by default');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(true);
+    });
+
+    it('says a settings file that could not be read is why repeat reads are off, and what fixes it', async () => {
+      await open((b) => b.responses.set('get_repeat_reads_setting', CORRUPT));
+      const words = said();
+      expect(words).toContain(`The settings file ${SETTINGS_FILE} could not be read`);
+      expect(words).toContain('not JSON: expected value at line 1 column 1');
+      expect(words).toContain('Repeat reads are off until it is fixed.');
+      expect(words).toContain('Switching on again rewrites the file.');
+      expect(words).not.toContain('On by default');
+      expect(words).not.toContain('as the settings file says');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(false);
+    });
+
+    it('says when a change applies, that it is saved, and that an environment value outranks it', async () => {
+      await open();
+      const words = said();
+      expect(words).toContain('applies to the next Lumen read in every running Claude Code session, with no restart');
+      expect(words).toContain(`saved in ${SETTINGS_FILE}, so unlike the alert thresholds above it survives a restart`);
+      expect(words).toContain('LUMEN_REPEAT_READS value in a Claude Code MCP config takes priority over the file');
+      expect(words).toContain('LUMEN_DB there that points at another ledger');
+      expect(words).toContain('This window cannot see either.');
+      expect(words).toContain('is not told about the fresh option until Claude Code restarts');
+    });
+
+    it('says the same about the environment when the file turns it off', async () => {
+      await open((b) => b.responses.set('get_repeat_reads_setting', FILE_OFF));
+      expect(said()).toContain('LUMEN_REPEAT_READS value in a Claude Code MCP config takes priority over the file');
+    });
+
+    it('writes the choice and shows what the file then says', async () => {
+      await open((b) => b.responses.set('set_repeat_reads_setting', FILE_OFF));
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(bridge.lastArgsOf('set_repeat_reads_setting')).toEqual({ on: false });
+      expect(el<HTMLInputElement>(BOX).checked).toBe(false);
+      expect(said()).toContain('Off, as the settings file says.');
+      expect(said()).not.toContain('Not saved');
+    });
+
+    it('rewrites a settings file that could not be read when it is switched on', async () => {
+      await open((b) => {
+        b.responses.set('get_repeat_reads_setting', CORRUPT);
+        b.responses.set('set_repeat_reads_setting', FILE_ON);
+      });
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(bridge.lastArgsOf('set_repeat_reads_setting')).toEqual({ on: true });
+      expect(said()).toContain('On, as the settings file says.');
+      expect(said()).not.toContain('could not be read');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(true);
+    });
+
+    it('puts the switch back, and shows why as text, when the write fails', async () => {
+      await open((b) => b.failures.add('set_repeat_reads_setting'));
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(el<HTMLInputElement>(BOX).checked).toBe(true);
+      expect(el<HTMLElement>(`${SECTION} [role="alert"]`).textContent).toContain(
+        'Not saved: fake: set_repeat_reads_setting failed',
+      );
+      expect(said()).toContain('On by default');
+    });
+
+    it('puts the switch back to off when switching on fails', async () => {
+      await open((b) => {
+        b.responses.set('get_repeat_reads_setting', FILE_OFF);
+        b.failures.add('set_repeat_reads_setting');
+      });
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(el<HTMLInputElement>(BOX).checked).toBe(false);
+      expect(said()).toContain('Not saved: fake: set_repeat_reads_setting failed');
+      expect(said()).toContain('Off, as the settings file says.');
+    });
+
+    it('shows the file as it is when the write did not leave it as asked', async () => {
+      await open((b) => b.responses.set('set_repeat_reads_setting', FILE_ON));
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(el<HTMLInputElement>(BOX).checked).toBe(true);
+      expect(said()).toContain('The settings file says repeat reads are on, not off.');
+    });
+
+    it('forgets the error once a later write takes', async () => {
+      await open((b) => b.failures.add('set_repeat_reads_setting'));
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      bridge.failures.delete('set_repeat_reads_setting');
+      bridge.responses.set('set_repeat_reads_setting', FILE_OFF);
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(said()).not.toContain('Not saved');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(false);
+    });
+
+    it('holds the switch still while the write is in flight, and keeps the keyboard focus on it', async () => {
+      const write = deferred<RepeatReadsSetting>();
+      let writes = 0;
+      await open((b) => {
+        b.setRepeatReadsSetting = () => {
+          writes += 1;
+          return write.promise;
+        };
+      });
+      const box = el<HTMLInputElement>(BOX);
+      box.focus();
+      box.click();
+      await settle();
+      expect(box.getAttribute('aria-disabled')).toBe('true');
+      expect(box.disabled).toBe(false);
+      expect(document.activeElement).toBe(box);
+      box.click();
+      await settle();
+      expect(writes).toBe(1);
+      expect(box.checked).toBe(false);
+      write.resolve(FILE_OFF);
+      await settle();
+      expect(box.hasAttribute('aria-disabled')).toBe(false);
+      expect(document.activeElement).toBe(box);
+      box.click();
+      await settle();
+      expect(writes).toBe(2);
+    });
+
+    it('claims nothing about on or off before the file has been read', async () => {
+      const read = deferred<RepeatReadsSetting>();
+      await build((b) => {
+        b.getRepeatReadsSetting = () => read.promise;
+      });
+      expect(said()).toContain('Reading the settings file…');
+      expect(fixture.nativeElement.querySelector(BOX)).toBeNull();
+      expect(said()).not.toMatch(/\bOn\b|\bOff\b/);
+    });
+
+    it('says it could not read the setting, and does not pretend on or off, when the read fails', async () => {
+      await open((b) => b.failures.add('get_repeat_reads_setting'));
+      expect(said()).toContain('fake: get_repeat_reads_setting failed');
+      expect(said()).toContain('Lumen does not know whether repeat reads are on or off.');
+      expect(fixture.nativeElement.querySelector(BOX)).toBeNull();
+      expect(said()).not.toMatch(/\bOn\b|\bOff\b/);
+    });
+
+    it('reads again from Retry, and shows what it finds', async () => {
+      await open((b) => b.failures.add('get_repeat_reads_setting'));
+      bridge.failures.delete('get_repeat_reads_setting');
+      bridge.responses.set('get_repeat_reads_setting', FILE_OFF);
+      el<HTMLButtonElement>(`${SECTION} button`).click();
+      await settle();
+      expect(bridge.countOf('get_repeat_reads_setting')).toBe(2);
+      expect(said()).toContain('Off, as the settings file says.');
+      expect(el<HTMLInputElement>(BOX).checked).toBe(false);
+    });
+
+    it('shows both failures when the file could not be read again before a write failed', async () => {
+      await open();
+      bridge.failures.add('get_repeat_reads_setting');
+      bridge.failures.add('set_repeat_reads_setting');
+      const box = el<HTMLInputElement>(BOX);
+      void TestBed.inject(RepeatReadsService).load();
+      box.click();
+      await settle();
+      expect(fixture.nativeElement.querySelector(BOX)).toBeNull();
+      expect(said()).toContain('fake: get_repeat_reads_setting failed');
+      expect(said()).toContain('Lumen does not know whether repeat reads are on or off.');
+      expect(said()).toContain('Not saved: fake: set_repeat_reads_setting failed');
+    });
+
+    it('does not show a write error left from before the window was opened again', async () => {
+      await open((b) => b.failures.add('set_repeat_reads_setting'));
+      el<HTMLInputElement>(BOX).click();
+      await settle();
+      expect(said()).toContain('Not saved');
+      await TestBed.inject(RepeatReadsService).load();
+      await settle();
+      expect(said()).not.toContain('Not saved');
+    });
   });
 });

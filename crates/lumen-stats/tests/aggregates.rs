@@ -1079,10 +1079,318 @@ async fn optimizer_this_week_starts_on_monday() {
     );
 }
 
+// ── Repeat reads ─────────────────────────────────────────────────────────────
+//
+// What the Optimizer page's repeat-reads card is told. The rows are the ones lumen-mcp writes:
+// the route that answered, and the arm and plan the gate recorded.
+
+type Text = Option<&'static str>;
+
+const TREAT: Text = Some("treatment");
+const CTRL: Text = Some("control");
+const MEAS: Text = Some("measured");
+
+/// A `smart_read` or `recall_file` row as the tools write it: route, A/B arm, plan, where the
+/// token count came from, and the counts. Arm and plan are NULL while the feature is off, and
+/// the source is NULL on a row from before provenance was recorded.
+type Gated = (&'static str, Text, Text, Text, Counts);
+
+/// An answer that was served, in the treatment arm, with the plan its route names.
+fn served(route: &'static str, source: Text, c: Counts) -> Gated {
+    let plan = if route.ends_with("_unchanged") {
+        "unchanged"
+    } else {
+        "delta"
+    };
+    (route, TREAT, Some(plan), source, c)
+}
+
+/// A call the ordinary route answered, whatever the arm and plan. Its counts matter only to the
+/// totals, so they are fixed.
+fn ordinary(route: &'static str, arm: Text, plan: &'static str) -> Gated {
+    (route, arm, Some(plan), MEAS, (200, 1000, 800))
+}
+
+async fn ledger(pool: &SqlitePool, rows: &[Gated]) {
+    for &(route, arm, plan, source, c) in rows {
+        let tool = if route.starts_with("recall_file") {
+            "mcp__lumen__recall_file"
+        } else {
+            "mcp__lumen__smart_read"
+        };
+        sqlx::query(
+            "INSERT INTO read_events(ts,tool,path,lines,tokens_returned,full_tokens,saved_tokens,
+                                     routed_via,channel,token_source,repeat_arm,repeat_plan)
+             VALUES(datetime('now'),?1,'/some/path.rs',100,?2,?3,?4,?5,'cli',?6,?7,?8)",
+        )
+        .bind(tool)
+        .bind(c.0)
+        .bind(c.1)
+        .bind(c.2)
+        .bind(route)
+        .bind(source)
+        .bind(arm)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("insert gated read_event");
+    }
+}
+
+async fn repeat_reads(pool: &SqlitePool) -> RepeatReads {
+    get_optimizer_stats(pool).await.unwrap().repeat_reads
+}
+
+/// The six figures, in the order the card shows them.
+fn reads(u: i64, d: i64, tokens: i64, measured: i64, fresh: i64, unidentified: i64) -> RepeatReads {
+    RepeatReads {
+        unchanged_served: u,
+        deltas_served: d,
+        tokens_not_resent: tokens,
+        measured_answers: measured,
+        fresh_requests: fresh,
+        unidentified_reads: unidentified,
+    }
+}
+
+#[tokio::test]
+async fn repeat_reads_on_an_empty_ledger_are_all_zero() {
+    let (_d, pool) = fixture().await;
+    assert_eq!(repeat_reads(&pool).await, reads(0, 0, 0, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_served_answer_is_found_by_its_route_in_each_of_the_four_routes() {
+    let (_d, pool) = fixture().await;
+    let rows = [
+        served("smart_read_unchanged", MEAS, (30, 1000, 970)),
+        served("recall_file_unchanged", MEAS, (30, 500, 470)),
+        served("smart_read_delta", MEAS, (120, 1500, 1380)),
+        served("recall_file_delta", MEAS, (90, 800, 710)),
+    ];
+    ledger(&pool, &rows).await;
+
+    assert_eq!(
+        repeat_reads(&pool).await,
+        reads(2, 2, 970 + 470 + 1380 + 710, 4, 0, 0)
+    );
+}
+
+#[tokio::test]
+async fn a_control_row_is_not_a_served_answer_however_its_plan_reads() {
+    let (_d, pool) = fixture().await;
+    // A control row records the plan the server WOULD have run, under the ordinary route: the
+    // model was given the outline and nothing was served.
+    let rows = [
+        ordinary("smart_read", CTRL, "unchanged"),
+        ordinary("recall_file", CTRL, "delta"),
+        served("smart_read_unchanged", MEAS, (30, 1000, 970)),
+        served("recall_file_delta", MEAS, (90, 700, 610)),
+    ];
+    ledger(&pool, &rows).await;
+
+    // Not 800 and 550 more: those are the ordinary savings, counted in the totals above the card.
+    assert_eq!(repeat_reads(&pool).await, reads(1, 1, 970 + 610, 2, 0, 0));
+}
+
+#[tokio::test]
+async fn only_a_measured_answer_adds_to_the_tokens_not_resent() {
+    let (_d, pool) = fixture().await;
+    let rows = [
+        served("smart_read_unchanged", MEAS, (30, 1000, 970)),
+        served("smart_read_unchanged", Some("estimated"), (30, 2000, 1970)),
+        served("recall_file_delta", None, (90, 800, 710)),
+        served("smart_read_delta", Some("unsupported"), (90, 400, 310)),
+    ];
+    ledger(&pool, &rows).await;
+
+    // Every answer served counts as served; one of the four carries a measured count.
+    assert_eq!(repeat_reads(&pool).await, reads(2, 2, 970, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn a_fresh_request_counts_only_while_repeat_reads_were_answering() {
+    let (_d, pool) = fixture().await;
+    let rows = [
+        ordinary("smart_read", TREAT, "fresh"),
+        ordinary("recall_file", TREAT, "fresh"),
+        // Nothing was being answered for this path...
+        ordinary("smart_read", CTRL, "fresh"),
+        // ...or the feature was off and the call recorded no arm at all.
+        ordinary("smart_read", None, "fresh"),
+    ];
+    ledger(&pool, &rows).await;
+
+    assert_eq!(repeat_reads(&pool).await, reads(0, 0, 0, 0, 2, 0));
+}
+
+#[tokio::test]
+async fn an_unidentified_read_counts_in_either_arm() {
+    let (_d, pool) = fixture().await;
+    let rows = [
+        ordinary("smart_read", TREAT, "unidentified"),
+        ordinary("recall_file", CTRL, "unidentified"),
+    ];
+    ledger(&pool, &rows).await;
+
+    // Which arm a path fell in says nothing about whether the install can name a conversation.
+    assert_eq!(repeat_reads(&pool).await, reads(0, 0, 0, 0, 0, 2));
+}
+
+#[tokio::test]
+async fn first_reads_and_every_fallback_are_none_of_the_four_figures() {
+    let (_d, pool) = fixture().await;
+    for plan in [
+        "first",
+        "rewind",
+        "resync",
+        "compaction",
+        "unverifiable",
+        "unchanged_not_smaller",
+        "delta_too_big",
+        "no_base",
+    ] {
+        let rows = [
+            ordinary("smart_read", TREAT, plan),
+            ordinary("recall_file", CTRL, plan),
+        ];
+        ledger(&pool, &rows).await;
+    }
+
+    assert_eq!(repeat_reads(&pool).await, RepeatReads::default());
+}
+
+#[tokio::test]
+async fn served_answers_are_in_none_of_the_totals_above_them() {
+    let (_d, pool) = fixture().await;
+    // With enough turns to price a round the net value is not zero, so a served row reaching it
+    // would show.
+    turns_for_cost(&pool, 200, 100_000, 1_000).await;
+    event(
+        &pool,
+        "datetime('now')",
+        "smart_read",
+        "cli",
+        (200, 1000, 800),
+    )
+    .await;
+    event(
+        &pool,
+        "datetime('now')",
+        "recall_file",
+        "vscode",
+        (100, 500, 400),
+    )
+    .await;
+    let before = get_optimizer_stats(&pool).await.unwrap();
+    assert!(before.net_value_usd != 0.0, "the fixture prices a round");
+
+    let rows = [
+        served("smart_read_unchanged", MEAS, (30, 1000, 970)),
+        served("recall_file_unchanged", MEAS, (30, 500, 470)),
+        served("smart_read_delta", MEAS, (120, 1500, 1380)),
+        served("recall_file_delta", MEAS, (90, 800, 710)),
+    ];
+    ledger(&pool, &rows).await;
+    let after = get_optimizer_stats(&pool).await.unwrap();
+
+    assert_eq!(
+        after.lifetime_optimized_tokens,
+        before.lifetime_optimized_tokens
+    );
+    assert_eq!(after.lifetime_full_tokens, before.lifetime_full_tokens);
+    assert_eq!(after.today_saved_tokens, before.today_saved_tokens);
+    assert_eq!(after.this_week_saved_tokens, before.this_week_saved_tokens);
+    assert_eq!(after.by_tool, before.by_tool);
+    assert_eq!(after.by_channel, before.by_channel);
+    assert_eq!(after.net_value_usd, before.net_value_usd);
+    assert_eq!(after.gross_value_usd, before.gross_value_usd);
+    assert_eq!(after.round_cost_usd, before.round_cost_usd);
+    assert_eq!(
+        after.repeat_reads,
+        reads(2, 2, 970 + 470 + 1380 + 710, 4, 0, 0)
+    );
+}
+
+/// Every kind of row the ledger can hold, in one, with each figure asserted exactly.
+#[tokio::test]
+async fn repeat_reads_over_a_ledger_holding_every_kind_of_row() {
+    let (_d, pool) = fixture().await;
+    let rows = [
+        // Served and measured: 970 + 1970 + 470 + 1380 + 710 tokens over five answers.
+        served("smart_read_unchanged", MEAS, (30, 1000, 970)),
+        served("smart_read_unchanged", MEAS, (30, 2000, 1970)),
+        served("recall_file_unchanged", MEAS, (30, 500, 470)),
+        served("smart_read_delta", MEAS, (120, 1500, 1380)),
+        served("recall_file_delta", MEAS, (90, 800, 710)),
+        // Served with no measured count: answers, but not tokens.
+        served("smart_read_unchanged", None, (30, 400, 370)),
+        served("recall_file_delta", Some("estimated"), (100, 600, 500)),
+        // The control arm: the plan that would have run, under the ordinary route.
+        ordinary("smart_read", CTRL, "unchanged"),
+        ordinary("recall_file", CTRL, "delta"),
+        // The whole result asked for again: while answering, in control, with the feature off.
+        ordinary("smart_read", TREAT, "fresh"),
+        ordinary("recall_file", TREAT, "fresh"),
+        ordinary("smart_read", CTRL, "fresh"),
+        ordinary("smart_read", None, "fresh"),
+        // Calls that could not be placed in a conversation.
+        ordinary("smart_read", TREAT, "unidentified"),
+        ordinary("recall_file", TREAT, "unidentified"),
+        ordinary("smart_read", CTRL, "unidentified"),
+        // First reads and fallbacks to the whole answer.
+        ordinary("smart_read", TREAT, "first"),
+        ordinary("smart_read", TREAT, "rewind"),
+        ordinary("smart_read", TREAT, "no_base"),
+    ];
+    ledger(&pool, &rows).await;
+    // Other tools carry no arm and no plan.
+    event(
+        &pool,
+        "datetime('now')",
+        "compress_logs",
+        "cli",
+        (100, 1000, 900),
+    )
+    .await;
+    event(
+        &pool,
+        "datetime('now')",
+        "builtin_read",
+        "cli",
+        (500, 500, 0),
+    )
+    .await;
+
+    assert_eq!(repeat_reads(&pool).await, reads(4, 3, 5500, 5, 2, 3));
+}
+
 // ── Wire format ──────────────────────────────────────────────────────────────
 //
 // The Angular frontend reads these exact keys. Renaming a Rust field without the
 // serde attribute would silently blank out a page rather than fail loudly.
+
+#[tokio::test]
+async fn repeat_reads_json_uses_camel_case_for_the_frontend() {
+    let (_d, pool) = fixture().await;
+    let v = serde_json::to_value(get_optimizer_stats(&pool).await.unwrap()).unwrap();
+    let r = v
+        .get("repeatReads")
+        .expect("missing camelCase key: repeatReads");
+    for key in [
+        "unchangedServed",
+        "deltasServed",
+        "tokensNotResent",
+        "measuredAnswers",
+        "freshRequests",
+        "unidentifiedReads",
+    ] {
+        assert!(
+            r.get(key).is_some(),
+            "missing camelCase key: repeatReads.{key}"
+        );
+    }
+}
 
 #[tokio::test]
 async fn optimizer_json_uses_camel_case_for_the_frontend() {

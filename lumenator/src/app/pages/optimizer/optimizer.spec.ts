@@ -5,7 +5,13 @@ import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { FakeTauriBridge } from '../../tauri-bridge.fake';
 import { RATE } from '../../components/index';
-import type { OptimizerReport, UsageReport, TokenAgg } from '../../components/index';
+import type {
+  OptimizerReport,
+  RepeatReads,
+  RepeatReadsSetting,
+  TokenAgg,
+  UsageReport,
+} from '../../components/index';
 
 /**
  * The optimizer page is where Lumen makes its central claim: "I saved you this
@@ -50,14 +56,36 @@ describe('Optimizer', () => {
     } as UsageReport;
   }
 
+  const SETTINGS_FILE = '/Users/me/.lumen/lumen_settings.json';
+
+  function setting(over: Partial<RepeatReadsSetting> = {}): RepeatReadsSetting {
+    return { on: true, source: 'default', problem: null, file: SETTINGS_FILE, ...over };
+  }
+
+  function repeats(over: Partial<RepeatReads> = {}): RepeatReads {
+    return {
+      unchangedServed: 0,
+      deltasServed: 0,
+      tokensNotResent: 0,
+      measuredAnswers: 0,
+      freshRequests: 0,
+      unidentifiedReads: 0,
+      ...over,
+    };
+  }
+
   /** Build the page with the given backend reports already resolved. */
   async function build(
     optimizerReport = report(),
     usageReport = usage(),
+    seed?: (b: FakeTauriBridge) => void,
   ): Promise<Optimizer> {
     bridge = new FakeTauriBridge();
     bridge.responses.set('get_optimizer_stats', optimizerReport);
     bridge.responses.set('get_usage', usageReport);
+    // No settings file: repeat reads are on by default.
+    bridge.responses.set('get_repeat_reads_setting', setting());
+    seed?.(bridge);
     TestBed.configureTestingModule({
       providers: [
         provideRouter([]),
@@ -67,15 +95,24 @@ describe('Optimizer', () => {
     });
     fixture = TestBed.createComponent(Optimizer);
     fixture.detectChanges();
-    // Let the constructor's two refresh calls resolve.
-    await Promise.resolve();
-    await Promise.resolve();
-    fixture.detectChanges();
+    await settle();
     return fixture.componentInstance;
+  }
+
+  /** Let the constructor's refreshes and the setting's read resolve, then render. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    fixture.detectChanges();
   }
 
   function text(): string {
     return (fixture.nativeElement as HTMLElement).textContent ?? '';
+  }
+
+  /** What one element renders, whitespace collapsed. */
+  function rendered(selector: string): string {
+    const el = (fixture.nativeElement as HTMLElement).querySelector(selector);
+    return (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
   }
 
   afterEach(() => TestBed.resetTestingModule());
@@ -356,11 +393,6 @@ describe('Optimizer', () => {
   describe('token provenance', () => {
     const data = { lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 };
 
-    function rendered(selector: string): string {
-      const el = (fixture.nativeElement as HTMLElement).querySelector(selector);
-      return (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
-    }
-
     it('says exact, and verifiable, when every count was measured', async () => {
       await build(report({ ...data, unverifiedProvenanceRows: 0, provenanceTotalRows: 7_192 }));
       expect(rendered('.hero__secondary'))
@@ -483,6 +515,304 @@ describe('Optimizer', () => {
       await build(r);
       expect(text()).not.toContain('NaN');
       expect(text()).toContain('Not enough recorded turns yet to price a round');
+    });
+  });
+
+  // ── Repeat reads ───────────────────────────────────────────────────────────
+  //
+  // The card counts answers that are in none of the totals above it. Every test reads what the
+  // card says on screen: the wording is the claim, and each state has to say what is true of it
+  // and nothing more.
+
+  describe('repeat reads card', () => {
+    const CARD = 'section[aria-label="Repeat reads"]';
+    const FILE_OFF = setting({ on: false, source: 'file' });
+    const CORRUPT = setting({
+      on: false,
+      source: 'file',
+      problem: 'not JSON: expected value at line 1 column 1',
+    });
+    const n = (v: number): string => v.toLocaleString();
+    // 1,540 answers served short and 60 requests for the full result: 1,600 repeat reads.
+    const SERVED = repeats({
+      unchangedServed: 1_200,
+      deltasServed: 340,
+      tokensNotResent: 4_125_000,
+      measuredAnswers: 1_540,
+      freshRequests: 60,
+    });
+    const BASELINE =
+      'Counted against reading the whole file again, not against the outline Lumen sends with repeat reads off.';
+    const ENV_CAVEAT =
+      'A LUMEN_REPEAT_READS value in a Claude Code MCP config takes priority over the settings file, and this window cannot see it.';
+    const OFF_FILE =
+      'Repeat reads are off now: the settings file says off, so every read returns its full result.';
+    const NONE_YET = 'No repeat read has been answered short yet.';
+
+    /** What the card says, whitespace collapsed. */
+    function said(): string {
+      expect(fixture.nativeElement.querySelector(CARD)).not.toBeNull();
+      return rendered(CARD);
+    }
+
+    /** One entry per figure: its name, its value and what it is counted against. */
+    function figures(): string[] {
+      return Array.from(
+        (fixture.nativeElement as HTMLElement).querySelectorAll(`${CARD} .repeat-card__row`),
+      ).map((r) => (r.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+      let resolve!: (v: T) => void;
+      const promise = new Promise<T>((r) => {
+        resolve = r;
+      });
+      return { promise, resolve };
+    }
+
+    const fileSays = (s: RepeatReadsSetting) => (b: FakeTauriBridge) =>
+      b.responses.set('get_repeat_reads_setting', s);
+    const cannotRead = (b: FakeTauriBridge) => b.failures.add('get_repeat_reads_setting');
+
+    it('reads the setting when the page opens', async () => {
+      await build(report({ repeatReads: repeats() }));
+      expect(bridge.countOf('get_repeat_reads_setting')).toBe(1);
+    });
+
+    // ── nothing counted ──────────────────────────────────────────────────────
+
+    it('says none yet, and what a repeat read is, with no figure in it', async () => {
+      await build(report({ repeatReads: repeats() }));
+      expect(said()).toContain(NONE_YET);
+      expect(said()).toContain(
+        'A repeat read is a file Claude reads again in the same conversation; Lumen can answer it '
+        + 'with a short note that the file is unchanged, or with only what an edit changed, and '
+        + 'those answers are counted here.',
+      );
+      expect(figures()).toEqual([]);
+      // Nothing to put a number on: no zero, no ratio, no price.
+      expect(said()).not.toMatch(/\d|NaN|[%$]/);
+      expect(said()).not.toContain('off now');
+    });
+
+    it('says repeat reads are off, as the settings file says, when it turns them off and none were counted', async () => {
+      await build(report({ repeatReads: repeats() }), usage(), fileSays(FILE_OFF));
+      expect(said()).toContain(OFF_FILE);
+      expect(said()).toContain(ENV_CAVEAT);
+      expect(said()).toContain(NONE_YET);
+      expect(figures()).toEqual([]);
+      expect(said()).not.toMatch(/\d|NaN|[%$]/);
+    });
+
+    // ── answers served ───────────────────────────────────────────────────────
+
+    it('shows the four figures, each with what it is counted against', async () => {
+      await build(report({ repeatReads: SERVED }));
+      expect(said()).toContain('Answered so far, for files Claude had already read in the same conversation.');
+      expect(figures()).toEqual([
+        `Unchanged answers served ${n(1_200)} A short note instead of the whole result.`,
+        `Edits served as a delta ${n(340)} Only what the edit changed.`,
+        `Tokens not re-sent ${n(4_125_000)} ${BASELINE}`,
+        `Full result asked for again (fresh=true) ${n(60)} of ${n(1_600)} `
+          + `${n(1_600)} = ${n(1_200)} unchanged + ${n(340)} deltas + ${n(60)} asked again.`,
+      ]);
+      expect(said()).not.toContain(NONE_YET);
+      expect(said()).not.toContain('off now');
+      expect(said()).not.toContain(ENV_CAVEAT);
+    });
+
+    it('says the answers are counted apart from the totals above, and which totals', async () => {
+      await build(report({ repeatReads: SERVED }));
+      expect(said()).toContain(
+        'Counted apart from the totals above: these answers are in none of the token totals, '
+        + 'the by-tool and by-channel breakdowns, or the net value.',
+      );
+    });
+
+    it('leaves every figure above it as it was', async () => {
+      const totals = {
+        lifetimeOptimizedTokens: 900,
+        lifetimeFullTokens: 1_000,
+        netValueUsd: 100,
+        grossValueUsd: 200,
+        roundCostUsd: 100,
+        valueRounds: 194,
+      };
+      const above = (): string[] =>
+        ['.hero__num', '.savings-card--caused .savings-card__num', '.period-row'].map(rendered);
+      await build(report(totals));
+      const before = above();
+      TestBed.resetTestingModule();
+      await build(report({ ...totals, repeatReads: SERVED }));
+      expect(above()).toEqual(before);
+      expect(before.slice(0, 2)).toEqual(['+$100', '900']);
+    });
+
+    it('never words a figure as a saving, and shows no dollars or percentage', async () => {
+      await build(report({ repeatReads: SERVED }));
+      expect(said()).not.toMatch(/\bsav/i);
+      expect(said()).not.toMatch(/[$%]/);
+    });
+
+    it('sits after the not-optimized block, below every total', async () => {
+      await build(
+        report({ currentChannel: 'cli', missedCalls: 3, missedFullTokens: 12_000, repeatReads: SERVED }),
+      );
+      const missed = fixture.nativeElement.querySelector('.missed') as HTMLElement;
+      const card = fixture.nativeElement.querySelector(CARD) as HTMLElement;
+      expect(missed.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('shows the figures when they arrive after the page opened', async () => {
+      const o = await build();
+      expect(fixture.nativeElement.querySelector(CARD)).toBeNull();
+      o.s.optimizerStats.set(report({ repeatReads: SERVED }));
+      fixture.detectChanges();
+      expect(figures()).toHaveLength(4);
+    });
+
+    // ── the token figure ─────────────────────────────────────────────────────
+
+    it('says how many answers the token figure covers when only some were measured', async () => {
+      await build(report({ repeatReads: { ...SERVED, measuredAnswers: 1_000 } }));
+      expect(figures()[2]).toBe(
+        `Tokens not re-sent ${n(4_125_000)} ${BASELINE} `
+        + `Covers the ${n(1_000)} of ${n(1_540)} answers whose token count was measured.`,
+      );
+    });
+
+    it('claims no token figure when no answer has a measured count', async () => {
+      await build(report({ repeatReads: repeats({ unchangedServed: 4 }) }));
+      expect(figures()[2]).toBe(
+        'Tokens not re-sent — None of these answers has a measured token count, so no figure is claimed.',
+      );
+    });
+
+    // ── asked for again ──────────────────────────────────────────────────────
+
+    it('shows "0 of m" when answers were served and none was asked for again', async () => {
+      await build(
+        report({ repeatReads: repeats({ unchangedServed: 5, tokensNotResent: 900, measuredAnswers: 5 }) }),
+      );
+      expect(figures()[3]).toBe(
+        'Full result asked for again (fresh=true) 0 of 5 5 = 5 unchanged + 0 deltas + 0 asked again.',
+      );
+    });
+
+    it('says "1 delta", not "1 deltas", when a single edit was served as one', async () => {
+      await build(
+        report({
+          repeatReads: repeats({ unchangedServed: 2, deltasServed: 1, tokensNotResent: 90, measuredAnswers: 3 }),
+        }),
+      );
+      expect(figures()[3]).toBe(
+        'Full result asked for again (fresh=true) 0 of 3 3 = 2 unchanged + 1 delta + 0 asked again.',
+      );
+    });
+
+    it('hides that figure when nothing was served, because there is nothing for it to be a share of', async () => {
+      await build(report({ repeatReads: repeats({ freshRequests: 3 }) }));
+      expect(said()).toContain(NONE_YET);
+      expect(figures()).toEqual([]);
+      expect(said()).not.toContain('fresh');
+    });
+
+    // ── reads Lumen could not place in a conversation ────────────────────────
+
+    it('says how many reads got a full result for want of a conversation, and links to Setup', async () => {
+      await build(report({ repeatReads: { ...SERVED, unidentifiedReads: 3 } }));
+      expect(said()).toContain(
+        '3 reads got a full result because Lumen could not tell which conversation they came from.',
+      );
+      expect(said()).toContain('Open Setup to run it again, then restart Claude Code.');
+      const link = fixture.nativeElement.querySelector(`${CARD} a[href="/setup"]`) as HTMLAnchorElement;
+      expect(link.textContent?.trim()).toBe('Open Setup');
+    });
+
+    it('says "1 read", not "1 reads", for a single one', async () => {
+      await build(report({ repeatReads: { ...SERVED, unidentifiedReads: 1 } }));
+      expect(said()).toContain(
+        '1 read got a full result because Lumen could not tell which conversation it came from.',
+      );
+    });
+
+    it('has no such line, and no link to Setup, when every read could be placed', async () => {
+      await build(report({ repeatReads: SERVED }));
+      expect(said()).not.toContain('could not tell which conversation');
+      expect(fixture.nativeElement.querySelector(`${CARD} a`)).toBeNull();
+    });
+
+    it('shows that line beside the none-yet text when nothing was served but reads went unplaced', async () => {
+      await build(report({ repeatReads: repeats({ unidentifiedReads: 4 }) }));
+      expect(said()).toContain(NONE_YET);
+      expect(said()).toContain('4 reads got a full result because Lumen could not tell');
+      expect(fixture.nativeElement.querySelector(`${CARD} a[href="/setup"]`)).not.toBeNull();
+    });
+
+    // ── answers served, and the setting is off now ───────────────────────────
+
+    it('labels the figures as what happened so far, and says repeat reads are off now, when the file turns them off', async () => {
+      await build(report({ repeatReads: SERVED }), usage(), fileSays(FILE_OFF));
+      expect(said()).toContain('Answered so far');
+      expect(said()).toContain(OFF_FILE);
+      expect(said()).toContain(ENV_CAVEAT);
+      expect(figures()).toHaveLength(4);
+    });
+
+    it('says a settings file that could not be read is why repeat reads are off now', async () => {
+      await build(report({ repeatReads: SERVED }), usage(), fileSays(CORRUPT));
+      expect(said()).toContain(
+        `Repeat reads are off now: the settings file ${SETTINGS_FILE} could not be read `
+        + '(not JSON: expected value at line 1 column 1). '
+        + 'The Repeat reads switch on the Context tab rewrites it.',
+      );
+      expect(said()).toContain(ENV_CAVEAT);
+      expect(said()).not.toContain('the settings file says off');
+    });
+
+    // ── the setting is not known ─────────────────────────────────────────────
+
+    it('says nothing about on or off until the setting has been read', async () => {
+      const read = deferred<RepeatReadsSetting>();
+      await build(report({ repeatReads: repeats() }), usage(), (b) => {
+        b.getRepeatReadsSetting = () => read.promise;
+      });
+      expect(said()).toContain(NONE_YET);
+      expect(said()).not.toMatch(/\b(on|off)\b/i);
+      expect(said()).not.toContain('could not be read');
+    });
+
+    it('says it could not read the setting, and claims nothing about it, when the read fails', async () => {
+      await build(report({ repeatReads: repeats() }), usage(), cannotRead);
+      expect(said()).toContain(
+        'The repeat reads setting could not be read, so nothing is said here about its current state. '
+        + 'The Context tab shows why.',
+      );
+      expect(said()).not.toMatch(/\b(on|off)\b/i);
+    });
+
+    it('still shows the figures when the setting could not be read, with no claim about it', async () => {
+      await build(report({ repeatReads: SERVED }), usage(), cannotRead);
+      expect(figures()).toHaveLength(4);
+      expect(said()).not.toContain('off now');
+      expect(said()).not.toContain('the settings file says');
+      expect(said()).not.toContain(ENV_CAVEAT);
+    });
+
+    // ── a backend that predates the figures ──────────────────────────────────
+
+    it('renders nothing from a backend that sends no repeat reads figures', async () => {
+      await build(report({ lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 }));
+      expect(fixture.nativeElement.querySelector(CARD)).toBeNull();
+      expect(text().toLowerCase()).not.toContain('repeat');
+      // The page is there; it is the card that is not.
+      expect(rendered('.savings-card--caused .savings-card__num')).toBe('900');
+    });
+
+    it('renders nothing from such a backend even when the setting is off', async () => {
+      await build(report(), usage(), fileSays(FILE_OFF));
+      expect(fixture.nativeElement.querySelector(CARD)).toBeNull();
+      expect(text().toLowerCase()).not.toContain('repeat');
     });
   });
 });
