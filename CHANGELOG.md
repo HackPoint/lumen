@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### A `recall_file` line range the file cannot satisfy no longer kills the server
+
+`recall_file` with a `start_line` five or more lines past the end of the file, or one far enough
+after its `end_line`, panicked on a slice out of range. The server exited (status 101) and answered
+nothing after that, so one bad guess, such as a line number from before the file shrank, took every
+Lumen tool away for the rest of the session.
+
+- A range the file cannot satisfy is now an error reply (invalid params, `-32602`) that says how many
+  lines the file has and what was asked for. An `end_line` past the last line is clamped to it, and a
+  number too big for the platform's integer no longer overflows the arithmetic.
+- A range the file can satisfy is answered exactly as before, byte for byte, and `start_line` 0 is
+  still read from the first line. Three requests that used to be answered now get the error instead,
+  because the answer was not what they asked for: a `start_line` one to four lines past the end (the
+  last lines of the file, or nothing, under the range asked for), a `start_line` slightly after the
+  `end_line` (a window around lines nobody named), and a range that starts at line 1 or later on an
+  empty file (a reply that cost tokens for a file that had none).
+- A panic anywhere in a request is now caught per request: the call is answered with an error
+  (`-32603`), the server keeps serving, and a `request_panic` fault is recorded with the tool's name
+  and the file and line it panicked at. The panic message is in the error reply and on stderr but not
+  in the fault, since it can quote the text being read and a report holds no file contents. `lumen
+  report` ranks it just below a fired fail-open guard. What the call had remembered for repeat reads
+  is dropped, since the model never received it. `LUMEN_CAPTURE=0` keeps the fault out of the spool,
+  as it does for the hooks.
+
 ### A transcript deleted before the daemon read it is not a fault
 
 The daemon opens a transcript after it has noticed it, from a watcher event or a directory
