@@ -13,7 +13,8 @@
 //! ```
 //!
 //! It is read on every `tools/call`, not once at startup: a setting change takes effect on the
-//! very next read, with no restart of Claude Code. The read is one small `open + read`.
+//! very next read, with no restart of Claude Code. The read is one stat and one small read,
+//! never more than 64 KiB.
 //!
 //! Anything that cannot be read as an answer is the safe side, which is OFF (every read in
 //! full, nothing stubbed) and is reported, not swallowed: [`Resolved::problem`] says what was
@@ -29,6 +30,10 @@ pub const REPEAT_READS_ENV: &str = "LUMEN_REPEAT_READS";
 pub const FILE_NAME: &str = "lumen_settings.json";
 /// The key in the file.
 pub const REPEAT_READS_KEY: &str = "repeat_reads";
+/// The most the settings file may hold. It is read on every call; a larger one is a mistake.
+pub const MAX_FILE_BYTES: u64 = 64 * 1024;
+/// The most characters of a bad value that a problem repeats back.
+const ECHO_MAX: usize = 64;
 
 /// Where the setting file is for a ledger at `db`.
 pub fn settings_path(db: &Path) -> PathBuf {
@@ -97,12 +102,41 @@ pub enum FileState {
     Unreadable(String),
 }
 
-/// Read the settings file at `path`.
+/// The text of the regular file at `path`, read to [`MAX_FILE_BYTES`], or why it cannot be used.
 pub fn read_file(path: &Path) -> FileState {
-    match std::fs::read_to_string(path) {
-        Ok(t) => FileState::Text(t),
+    let opened = std::fs::metadata(path).and_then(|m| {
+        if m.is_file() {
+            std::fs::File::open(path)
+        } else {
+            Err(std::io::Error::other("not a regular file"))
+        }
+    });
+    match opened.and_then(read_capped) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileState::Absent,
         Err(e) => FileState::Unreadable(e.to_string()),
+        Ok(bytes) if bytes.len() as u64 > MAX_FILE_BYTES => {
+            FileState::Unreadable(format!("larger than {MAX_FILE_BYTES} bytes"))
+        }
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(t) => FileState::Text(t),
+            Err(_) => FileState::Unreadable("stream did not contain valid UTF-8".to_string()),
+        },
+    }
+}
+
+/// At most one byte past the cap: enough to tell a file over it from one at it.
+fn read_capped(r: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    r.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// `s` as it is, or its first [`ECHO_MAX`] characters and an ellipsis.
+fn bounded(s: &str) -> String {
+    match s.char_indices().nth(ECHO_MAX) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s.to_string(),
     }
 }
 
@@ -118,7 +152,7 @@ fn parse_env(v: Option<&str>) -> Option<Result<Mode, String>> {
         "on" | "1" | "true" => Ok(Mode::On),
         "off" | "0" | "false" => Ok(Mode::Off),
         "ab" => Ok(Mode::Ab),
-        _ => Err(t.to_string()),
+        _ => Err(bounded(t)),
     })
 }
 
@@ -137,7 +171,8 @@ fn parse_file(state: &FileState) -> Result<Option<bool>, String> {
         None => Ok(None),
         Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
         Some(other) => Err(format!(
-            "{REPEAT_READS_KEY} must be true or false, not {other}"
+            "{REPEAT_READS_KEY} must be true or false, not {}",
+            bounded(&other.to_string())
         )),
     }
 }
@@ -212,7 +247,7 @@ fn with_env(file: &FileState) -> Resolved {
         Err(std::env::VarError::NotUnicode(raw)) => Resolved {
             mode: Mode::Off,
             source: Source::Env,
-            problem: Some(Problem::Env(raw.to_string_lossy().into_owned())),
+            problem: Some(Problem::Env(bounded(&raw.to_string_lossy()))),
         },
     }
 }
@@ -512,5 +547,107 @@ mod tests {
         let db = dir.path().join("not").join("yet").join("ledger.db");
         write_repeat_reads(&db, false).unwrap();
         assert_eq!(read_file_mode(&db), Mode::Off);
+    }
+
+    fn padded_to(len: usize) -> String {
+        let bare = r#"{"repeat_reads":false,"pad":""}"#.len();
+        format!(
+            r#"{{"repeat_reads":false,"pad":"{}"}}"#,
+            "x".repeat(len - bare)
+        )
+    }
+
+    #[test]
+    fn a_file_at_the_cap_is_read_and_one_byte_over_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let cap = MAX_FILE_BYTES as usize;
+        std::fs::write(&path, padded_to(cap)).unwrap();
+        assert_eq!(resolve(None, &read_file(&path)).mode, Mode::Off);
+        assert!(
+            resolve(None, &read_file(&path)).problem.is_none(),
+            "a file at the cap is a setting"
+        );
+        std::fs::write(&path, padded_to(cap + 1)).unwrap();
+        let r = resolve(None, &read_file(&path));
+        assert_eq!(r.mode, Mode::Off);
+        assert!(
+            matches!(&r.problem, Some(Problem::File(why)) if why.contains("larger than")),
+            "{r:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_file_should_be_is_a_problem_and_never_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(read_file(&path)).unwrap());
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(FileState::Unreadable(why)) => {
+                assert!(why.contains("not a regular file"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reader_that_never_ends_is_read_only_up_to_the_cap() {
+        struct Endless(u64);
+        impl std::io::Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 > MAX_FILE_BYTES + 1 {
+                    return Err(std::io::Error::other("read past the cap"));
+                }
+                buf.fill(b'x');
+                self.0 += buf.len() as u64;
+                Ok(buf.len())
+            }
+        }
+        let bytes = read_capped(Endless(0)).unwrap();
+        assert_eq!(bytes.len() as u64, MAX_FILE_BYTES + 1);
+    }
+
+    #[test]
+    fn a_wrong_typed_value_is_echoed_short_and_a_short_one_whole() {
+        let prefix = "repeat_reads must be true or false, not ";
+        let long = "y".repeat(10_000);
+        let why = parse_file(&text(&format!(r#"{{"repeat_reads":"{long}"}}"#))).unwrap_err();
+        assert_eq!(why, format!("{prefix}\"{}…", "y".repeat(63)));
+        let why = parse_file(&text(&format!(r#"{{"repeat_reads":[{long:?}]}}"#))).unwrap_err();
+        assert_eq!(
+            why.chars().count(),
+            prefix.chars().count() + 64 + 1,
+            "{why}"
+        );
+        let short = parse_file(&text(r#"{"repeat_reads":"yes"}"#)).unwrap_err();
+        assert_eq!(short, format!("{prefix}\"yes\""));
+    }
+
+    #[test]
+    fn an_echo_keeps_64_characters_and_cuts_the_65th() {
+        assert_eq!(bounded(&"é".repeat(64)), "é".repeat(64));
+        assert_eq!(bounded(&"é".repeat(65)), format!("{}…", "é".repeat(64)));
+    }
+
+    #[test]
+    fn an_env_value_that_means_nothing_is_echoed_short_and_a_short_one_whole() {
+        for long in ["z".repeat(10_000), "é".repeat(10_000)] {
+            let first_64: String = long.chars().take(64).collect();
+            assert_eq!(
+                resolve(Some(&long), &FileState::Absent).problem,
+                Some(Problem::Env(format!("{first_64}…")))
+            );
+        }
+        assert_eq!(
+            resolve(Some("bogus"), &FileState::Absent).problem,
+            Some(Problem::Env("bogus".into()))
+        );
     }
 }
