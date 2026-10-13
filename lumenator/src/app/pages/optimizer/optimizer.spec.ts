@@ -338,30 +338,25 @@ describe('Optimizer', () => {
   // ── What moved to Details, and what left (1.9.0) ───────────────────────────
   //
   // The token ratio, the by-tool and by-channel breakdowns and the provenance counts are on
-  // Details now. The net value hero is on no screen until the savings engine replaces it.
+  // Details now. The net value hero is gone: what Lumen saved is the savings summary's, on Home.
 
   describe('since 1.9.0', () => {
     const full = report({
       lifetimeOptimizedTokens: 1_000_000,
       lifetimeFullTokens: 1_200_000,
-      netValueUsd: 275.93,
-      grossValueUsd: 386.72,
-      roundCostUsd: 110.79,
-      valueRounds: 194,
-      pairMultiplier: 1.604,
       unverifiedProvenanceRows: 3,
       provenanceTotalRows: 10,
       byTool: [{ tool: 'mcp__lumen__smart_read', calls: 2, savedTokens: 900, fullTokens: 1_000 }],
       byChannel: [{ channel: 'cli', calls: 2, savedTokens: 900, fullTokens: 1_000 }],
     });
 
-    it('shows no net value card, and no dollar figure built on the rounds assumption', async () => {
+    it('shows no net value card', async () => {
       await build(full);
       const present = ['.hero__num', '.hero__ring', '.hero__label', '.hero__sub']
         .filter((sel) => fixture.nativeElement.querySelector(sel) !== null);
       expect(present).toEqual([]);
       const said = text().replace(/\s+/g, ' ');
-      for (const words of ['net value', 'break-even', '+$276', '194 rounds', 'price a round']) {
+      for (const words of ['net value', 'break-even', 'price a round']) {
         expect(said, words).not.toContain(words);
       }
     });

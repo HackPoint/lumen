@@ -19,6 +19,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod data;
 mod doctor;
+mod savings;
 mod ui;
 
 #[derive(Parser)]
@@ -47,8 +48,15 @@ enum Cmd {
         #[arg(long)]
         no_anim: bool,
     },
-    /// What Lumen saved, in detail. A placeholder until the savings engine lands.
+    /// What Lumen saved, in detail: each period, how it is measured, the best and worst calls.
     Report {
+        /// Print the whole summary, every call line included, as the app receives it.
+        #[arg(long)]
+        json: bool,
+        /// The summary as it stood at this time (unix milliseconds or ISO-8601). For tests and
+        /// for reproducing a figure; the default is now.
+        #[arg(long, hide = true, value_name = "TIME")]
+        as_of: Option<String>,
         #[command(flatten)]
         legacy: LegacyFaultFlags,
     },
@@ -142,7 +150,10 @@ enum Route {
         moved: bool,
     },
     /// `lumen report` with no fault flag: the savings detail.
-    SavingsDetail,
+    SavingsDetail {
+        json: bool,
+        as_of: Option<String>,
+    },
     /// The fault report. `moved` is set for the pre-1.9.0 spelling, `lumen report <flags>`.
     Faults {
         args: FaultArgs,
@@ -163,9 +174,13 @@ fn route(cli: Cli) -> Route {
             no_anim: no_anim || cli.no_anim,
             moved: false,
         },
-        Some(Cmd::Report { legacy }) => match legacy.into_fault_args() {
+        Some(Cmd::Report {
+            json,
+            as_of,
+            legacy,
+        }) => match legacy.into_fault_args() {
             Some(args) => Route::Faults { args, moved: true },
-            None => Route::SavingsDetail,
+            None => Route::SavingsDetail { json, as_of },
         },
         Some(Cmd::Faults(args)) => Route::Faults { args, moved: false },
         Some(Cmd::Show) => Route::Show,
@@ -173,26 +188,45 @@ fn route(cli: Cli) -> Route {
     }
 }
 
-/// The one line bare `lumen` prints.
-///
-/// A placeholder until the savings engine lands. The engine replaces this function's body and
-/// nothing else prints a headline, so the line cannot say one thing here and another elsewhere.
-/// It claims no figure, because nothing has computed one yet. It names `lumen dash` because
-/// until 1.9.0 bare `lumen` was the dashboard, and someone who typed it for that has to be told
-/// where it went.
-fn headline_line() -> String {
-    "Lumen: no savings computed yet (lumen report for detail, lumen dash for the live dashboard)"
-        .to_string()
+/// The one line bare `lumen` prints, from the savings summary: the tray menu's line is made
+/// from the same summary by the same module, so the two cannot disagree. It names `lumen dash`
+/// because until 1.9.0 bare `lumen` was the dashboard.
+fn headline_line() -> (String, i32) {
+    match savings::summary(lumen_core::repeat::now_ms()) {
+        Ok(s) => (lumen_core::savings::text::headline_line(&s), 0),
+        Err(e) => (savings::headline_error(&e), 1),
+    }
 }
 
-/// What `lumen report` prints until the savings engine lands: a stub, and it says so, with
-/// where the two things it and bare `lumen` used to show have gone.
-fn savings_detail() -> String {
-    "lumen report: the savings detail is not computed yet. This command is a placeholder \
-     until Lumen's savings engine lands.\n\
-     The fault report moved to `lumen faults` (see `lumen faults --help`), and the live \
-     dashboard to `lumen dash`.\n"
-        .to_string()
+/// `lumen report`: the savings detail, or with `--json` the summary itself.
+fn savings_detail(json: bool, as_of: Option<&str>) -> i32 {
+    let at = match as_of.map(savings::parse_as_of) {
+        Some(Ok(t)) => t,
+        Some(Err(e)) => {
+            eprintln!("lumen report: --as-of: {e}");
+            return 2;
+        }
+        None => lumen_core::repeat::now_ms(),
+    };
+    let s = match savings::summary(at) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("lumen report: {e}");
+            return 1;
+        }
+    };
+    if json {
+        match serde_json::to_string_pretty(&s) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("lumen report: cannot serialize the summary: {e}");
+                return 1;
+            }
+        }
+    } else {
+        print!("{}", savings::render_detail(&s));
+    }
+    0
 }
 
 /// True when `--no-anim` was given to a command it does nothing for. Said rather than ignored,
@@ -208,13 +242,11 @@ fn main() {
     }
     let code = match route(cli) {
         Route::Headline => {
-            println!("{}", headline_line());
-            0
+            let (line, code) = headline_line();
+            println!("{line}");
+            code
         }
-        Route::SavingsDetail => {
-            print!("{}", savings_detail());
-            0
-        }
+        Route::SavingsDetail { json, as_of } => savings_detail(json, as_of.as_deref()),
         // Decided by the command, never by the terminal: `lumen faults > issue.md` has a
         // non-TTY stdout, and only the dashboard trades itself for a one-shot line then.
         Route::Faults { args, moved } => {
@@ -452,23 +484,13 @@ mod tests {
     }
 
     #[test]
-    fn the_headline_is_one_line_and_claims_no_figure() {
-        let line = headline_line();
+    fn a_headline_that_cannot_be_made_says_why_in_one_line_and_names_both_commands() {
+        let line = savings::headline_error("no ledger at /x");
         assert!(!line.contains('\n'), "{line:?}");
-        assert!(!line.chars().any(|c| c.is_ascii_digit()), "{line:?}");
+        assert!(!line.contains('$'), "{line:?}");
         assert!(line.contains("lumen report"), "{line:?}");
         // Bare `lumen` was the dashboard until 1.9.0: the line says where it went.
         assert!(line.contains("lumen dash"), "{line:?}");
-    }
-
-    #[test]
-    fn the_savings_detail_says_it_is_a_stub_and_where_the_fault_report_went() {
-        let said = savings_detail();
-        assert!(said.contains("placeholder"), "{said}");
-        assert!(said.contains("not computed yet"), "{said}");
-        assert!(said.contains("`lumen faults`"), "{said}");
-        assert!(said.contains("`lumen dash`"), "{said}");
-        assert!(!said.chars().any(|c| c.is_ascii_digit()), "{said}");
     }
 
     #[test]
@@ -528,7 +550,20 @@ mod tests {
 
     #[test]
     fn report_with_no_flag_is_the_savings_detail() {
-        assert_eq!(routed(&["report"]), Route::SavingsDetail);
+        assert_eq!(
+            routed(&["report"]),
+            Route::SavingsDetail {
+                json: false,
+                as_of: None
+            }
+        );
+        assert_eq!(
+            routed(&["report", "--json", "--as-of", "1791806400000"]),
+            Route::SavingsDetail {
+                json: true,
+                as_of: Some("1791806400000".into())
+            }
+        );
     }
 
     #[test]

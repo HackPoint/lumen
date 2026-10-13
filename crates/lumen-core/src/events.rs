@@ -13,7 +13,12 @@
 //! record. What distinguishes a rewind is depth counted in real prompts: each record's depth
 //! is its parent's, plus one when it is a real prompt. A real prompt whose parent is shallower
 //! than the tip of the conversation has branched back past turns the model had already seen.
-//! Sidechains (subagents) are separate conversations and are skipped.
+//! Sidechains (subagents) are separate conversations: their tree is not tracked, so no rewind is
+//! read from one. A compaction inside one is recorded, as [`Kind::SubagentCompaction`], from 1.9.0:
+//! it ends what that subagent holds and nothing of the main conversation's, so it has a kind of
+//! its own, and the repeat-read gate, which answers for whole sessions, does not read it
+//! ([`crate::repeat::event_since`]). The savings engine reads it for the subagent whose
+//! transcript recorded it.
 
 use std::collections::HashMap;
 
@@ -26,6 +31,8 @@ pub enum Kind {
     /// The tracker for a transcript was lost while it was being tailed, so whatever happened
     /// since it last saw the file is unknown. Treated as an event: the safe direction.
     Resync,
+    /// A compaction in a sidechain: a subagent's own context was summarised.
+    SubagentCompaction,
 }
 
 impl Kind {
@@ -34,6 +41,7 @@ impl Kind {
             Kind::Compaction => "compaction",
             Kind::Rewind => "rewind",
             Kind::Resync => "resync",
+            Kind::SubagentCompaction => "subagent_compaction",
         }
     }
 }
@@ -120,10 +128,20 @@ impl Tracker {
     pub fn feed(&mut self, line: &str) -> Option<Event> {
         let h: Head = serde_json::from_str(line).ok()?;
         let uuid = h.uuid.clone()?;
-        if h.sidechain {
-            return None;
-        }
         let ty = h.ty.as_deref().unwrap_or("");
+        let boundary = ty == "system" && h.subtype.as_deref() == Some("compact_boundary");
+        if h.sidechain {
+            // Not part of the main tree, so not tracked; only its compactions are kept.
+            if !boundary {
+                return None;
+            }
+            return Some(Event {
+                kind: Kind::SubagentCompaction,
+                session_id: h.session?,
+                uuid,
+                ts_ms: h.timestamp.as_deref().and_then(parse_ts_ms),
+            });
+        }
 
         let prompt = ty == "user" && !h.meta && is_prompt(line);
         let parent_depth = h.parent.as_ref().and_then(|p| self.depth.get(p).copied());
@@ -141,7 +159,7 @@ impl Tracker {
             };
         self.tip = depth;
 
-        let kind = if ty == "system" && h.subtype.as_deref() == Some("compact_boundary") {
+        let kind = if boundary {
             Kind::Compaction
         } else if rewound {
             Kind::Rewind
@@ -388,6 +406,46 @@ mod tests {
             prompt("u3", Some("a2")),
         ]);
         assert!(ev.is_empty(), "{ev:?}");
+    }
+
+    /// A subagent's transcript is all sidechain. Its compaction ends what the subagent holds and
+    /// is recorded under a kind of its own; nothing else in it is an event.
+    #[test]
+    fn a_compaction_in_a_sidechain_is_a_subagent_compaction() {
+        let side = |ty: &str, u: &str, p: Option<&str>, extra: &str| {
+            rec(ty, u, p, &format!(r#","isSidechain":true{extra}"#))
+        };
+        let ev = run(&[
+            side("user", "s1", None, r#","message":{"content":"task"}"#),
+            side(
+                "assistant",
+                "s2",
+                Some("s1"),
+                r#","message":{"content":[]}"#,
+            ),
+            side(
+                "user",
+                "s3",
+                Some("s1"),
+                r#","message":{"content":"again"}"#,
+            ),
+            side(
+                "system",
+                "sc",
+                Some("s3"),
+                r#","subtype":"compact_boundary""#,
+            ),
+        ]);
+        assert_eq!(
+            ev,
+            [Event {
+                kind: Kind::SubagentCompaction,
+                session_id: "s".into(),
+                uuid: "sc".into(),
+                ts_ms: Some(1_780_330_445_157)
+            }]
+        );
+        assert_eq!(Kind::SubagentCompaction.as_str(), "subagent_compaction");
     }
 
     #[test]

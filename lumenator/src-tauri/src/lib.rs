@@ -390,6 +390,8 @@ pub fn run() {
             // does not reproduce on the maintainer's machine.
             let restored = health::clear_hidden_status_item_prefs();
 
+            // No savings line yet: the refresh below adds it once the summary is computed, off
+            // the startup path.
             let menu = match health::build_tray_menu_items(app) {
                 Ok(m) => Some(m),
                 // Was three `?`, which aborted Tauri startup entirely and left nothing running.
@@ -504,6 +506,11 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connect_daemon(handle));
 
+            // The tray's savings line, kept in step with the summary, in the menu just built.
+            if let Some(menu) = menu.clone() {
+                tauri::async_runtime::spawn(refresh_tray_savings(app.handle().clone(), menu));
+            }
+
             // One reachability gate, covering a failed menu, a failed build and (after the
             // check scheduled on Ready) an invisible icon — identically. Previously each case
             // was handled where it happened, or not at all.
@@ -519,6 +526,7 @@ pub fn run() {
             get_usage,
             get_sessions,
             get_optimizer_stats,
+            lumen_savings_summary,
             get_context_report,
             lumen_prices,
             get_fault_report,
@@ -857,6 +865,172 @@ async fn get_sessions() -> Result<Vec<lumen_stats::SessionSummary>, String> {
 async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
     let pool = lumen_stats::connect_default().await?;
     lumen_stats::get_optimizer_stats(&pool).await
+}
+
+/// What Lumen saved: the savings engine's summary of the ledger (`lumen_core::savings`), for the
+/// headline, Details and "How it's measured". The frontend renders it and computes nothing; the
+/// CLI's `lumen report --json` is the same document from the same rows.
+#[tauri::command]
+async fn lumen_savings_summary() -> Result<lumen_core::savings::SavingsSummary, String> {
+    savings_summary_now().await
+}
+
+/// The summary as of now, on a pool of its own.
+async fn savings_summary_now() -> Result<lumen_core::savings::SavingsSummary, String> {
+    let pool = lumen_stats::connect_default().await?;
+    savings_summary_with(&pool).await
+}
+
+/// The summary as of now, from `pool`. The facts beside the ledger are the ones the CLI reads:
+/// the billing choice in Lumen's settings file, and whether settings.json registers the identity
+/// hook.
+async fn savings_summary_with(
+    pool: &sqlx::SqlitePool,
+) -> Result<lumen_core::savings::SavingsSummary, String> {
+    use lumen_core::savings::{BillingView, Facts, Uncalibrated};
+    let billing_mode = match lumen_core::meter::db_path() {
+        Some(db) => BillingView::of(&lumen_core::settings::billing_mode_for(&db)),
+        None => BillingView::Unreadable,
+    };
+    let identity_hook_registered =
+        tauri::async_runtime::spawn_blocking(setup::identity_hook_registered_now)
+            .await
+            .map_err(|e| format!("identity hook check failed: {e}"))?;
+    let facts = Facts {
+        billing_mode,
+        identity_hook_registered,
+    };
+    let spool = lumen_core::faults::spool_path();
+    lumen_stats::savings_summary(
+        pool,
+        lumen_core::repeat::now_ms(),
+        spool.as_deref(),
+        &facts,
+        &Uncalibrated,
+    )
+    .await
+}
+
+/// How often the tray looks at the ledger for its savings line: a call shows within two minutes.
+const TRAY_SAVINGS_REFRESH: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// However still the ledger, the summary is made again at least this often, because it reads the
+/// clock too: a new week starts empty, a session stops running, seven days pass with no call.
+const TRAY_SAVINGS_RECOMPUTE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// What the summary would read differently: the newest row of each table, and the fault spool's
+/// size and time. `None` when it cannot be told, which makes the summary again.
+async fn savings_inputs(
+    pool: &sqlx::SqlitePool,
+) -> Option<([Option<i64>; 4], Option<(u64, std::time::SystemTime)>)> {
+    let rows = match lumen_stats::savings_fingerprint(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::warn!("TRAY: cannot tell whether the ledger changed: {e}");
+            return None;
+        }
+    };
+    let spool = lumen_core::faults::spool_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
+    Some((rows, spool))
+}
+
+/// Keep the tray menu's savings line in step with the summary: put in under the version line,
+/// reworded when it changes, and taken out (not shown empty or stale) when the summary has
+/// nothing to say or cannot be made.
+///
+/// One pool for the life of the loop, and the summary made again only when the ledger changed or
+/// [`TRAY_SAVINGS_RECOMPUTE`] has passed: at ten times a heavy user's ledger a summary is the
+/// better part of a second of work, and a still ledger needs none of it.
+async fn refresh_tray_savings(app: tauri::AppHandle, menu: tauri::menu::Menu<tauri::Wry>) {
+    let mut shown: Option<(tauri::menu::MenuItem<tauri::Wry>, String)> = None;
+    let mut pool: Option<sqlx::SqlitePool> = None;
+    let mut made: Option<(
+        ([Option<i64>; 4], Option<(u64, std::time::SystemTime)>),
+        std::time::Instant,
+    )> = None;
+    loop {
+        if pool.is_none() {
+            pool = match lumen_stats::connect_default().await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    log::warn!("TRAY: no savings line: {e}");
+                    shown = show_savings_line(&app, &menu, shown, None);
+                    None
+                }
+            };
+        }
+        if let Some(p) = &pool {
+            let inputs = savings_inputs(p).await;
+            let fresh = match (&made, &inputs) {
+                (Some((was, at)), Some(now)) => was == now && at.elapsed() < TRAY_SAVINGS_RECOMPUTE,
+                _ => false,
+            };
+            if !fresh {
+                let line = savings_summary_with(p)
+                    .await
+                    .map(|s| lumen_core::savings::text::tray_line(&s))
+                    .unwrap_or_else(|e| {
+                        log::warn!("TRAY: no savings line: {e}");
+                        None
+                    });
+                shown = show_savings_line(&app, &menu, shown, line);
+                made = inputs.map(|i| (i, std::time::Instant::now()));
+            }
+        }
+        tokio::time::sleep(TRAY_SAVINGS_REFRESH).await;
+    }
+}
+
+/// The menu with `line` as its savings line, or none, from what `shown` it had. Returns what it
+/// shows now. A step that fails is logged and leaves the menu as it was.
+fn show_savings_line(
+    app: &tauri::AppHandle,
+    menu: &tauri::menu::Menu<tauri::Wry>,
+    shown: Option<(tauri::menu::MenuItem<tauri::Wry>, String)>,
+    line: Option<String>,
+) -> Option<(tauri::menu::MenuItem<tauri::Wry>, String)> {
+    match (shown, line) {
+        (Some((item, was)), Some(now)) if was == now => Some((item, was)),
+        (Some((item, was)), Some(now)) => match item.set_text(&now) {
+            Ok(()) => Some((item, now)),
+            Err(e) => {
+                log::warn!("TRAY: could not reword the savings line: {e}");
+                Some((item, was))
+            }
+        },
+        (Some((item, was)), None) => match menu.remove(&item) {
+            Ok(()) => None,
+            Err(e) => {
+                log::warn!("TRAY: could not take the savings line out: {e}");
+                Some((item, was))
+            }
+        },
+        (None, Some(now)) => {
+            let item = match tauri::menu::MenuItem::with_id(
+                app,
+                health::TRAY_SAVINGS_ID,
+                &now,
+                false,
+                None::<&str>,
+            ) {
+                Ok(item) => item,
+                Err(e) => {
+                    log::warn!("TRAY: could not make the savings line: {e}");
+                    return None;
+                }
+            };
+            match menu.insert(&item, health::TRAY_SAVINGS_POSITION) {
+                Ok(()) => Some((item, now)),
+                Err(e) => {
+                    log::warn!("TRAY: could not add the savings line: {e}");
+                    None
+                }
+            }
+        }
+        (None, None) => None,
+    }
 }
 
 /// The price of every model Lumen knows, for the frontend to price each model's tokens with.
@@ -2037,6 +2211,31 @@ mod tests {
         assert!(
             invoked.iter().any(|n| n == needed),
             "the prompt needs {needed}, and the scan found only {invoked:?}"
+        );
+        assert!(
+            registered_commands().iter().any(|n| n == needed),
+            "the window asks {needed}, which no handler answers"
+        );
+    }
+
+    /// The window's savings figures are the engine's, through this one command; the session
+    /// service swallows a failure, so a rename on either side would leave the figures blank
+    /// without a sound.
+    #[test]
+    fn the_window_asks_the_savings_summary_of_a_command_the_backend_answers() {
+        let mut files = Vec::new();
+        frontend_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app"),
+            &mut files,
+        );
+        let invoked: Vec<String> = files
+            .iter()
+            .flat_map(|f| invoked_commands(&std::fs::read_to_string(f).unwrap()))
+            .collect();
+        let needed = "lumen_savings_summary";
+        assert!(
+            invoked.iter().any(|n| n == needed),
+            "the window needs {needed}, and the scan found only {invoked:?}"
         );
         assert!(
             registered_commands().iter().any(|n| n == needed),

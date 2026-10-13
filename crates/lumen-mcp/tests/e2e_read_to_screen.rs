@@ -12,15 +12,16 @@
 //       -> a row in SQLite
 //         -> lumen_stats::get_optimizer_stats  — the Optimizer screen's numbers
 //         -> lumen_stats::get_context_report   — the Hotspots screen's numbers
+//         -> lumen_stats::savings_summary      — the savings headline's numbers
 //
 // Nothing is stubbed between those points. A break anywhere along it — a renamed column,
-// a migration that does not run, a serde rename, an arithmetic slip in the dollar figure —
+// a migration that does not run, a serde rename, a call the savings summary loses —
 // fails here rather than on a user's screen.
 //
 // Every case is isolated to a tempdir via LUMEN_DB. Nothing here may touch the real
 // ledger, and the fixture asserts that rather than trusting it.
 
-use lumen_stats::{connect, get_context_report, get_optimizer_stats};
+use lumen_stats::{connect, get_context_report, get_optimizer_stats, savings_summary};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
@@ -122,23 +123,6 @@ impl Fixture {
     }
 }
 
-/// Enough main-agent turns for the cost side of the dollar figure to be computable.
-async fn seed_turns(pool: &sqlx::SqlitePool, n: i64, ctx: i64, out: i64) {
-    for i in 0..n {
-        sqlx::query(
-            "INSERT INTO turns(message_id,session_id,ts,model,input_tokens,output_tokens,
-                               cache_read_input_tokens,cache_creation_input_tokens)
-             VALUES(?1,'s','2026-07-29T00:00:00Z','claude-opus-5',0,?2,?3,0)",
-        )
-        .bind(format!("t{i}"))
-        .bind(out)
-        .bind(ctx)
-        .execute(pool)
-        .await
-        .expect("seed turn");
-    }
-}
-
 /// The whole chain: a real read produces the Optimizer screen's numbers.
 #[tokio::test]
 async fn a_real_read_reaches_the_optimizer_screen() {
@@ -152,7 +136,6 @@ async fn a_real_read_reaches_the_optimizer_screen() {
     );
 
     let pool = f.pool().await;
-    seed_turns(&pool, 200, 100_000, 1_000).await;
     let o = get_optimizer_stats(&pool).await.unwrap();
 
     // The row exists and is attributed to the tool, not to a bypassed read.
@@ -168,24 +151,33 @@ async fn a_real_read_reaches_the_optimizer_screen() {
         "an outline must return fewer tokens than the file it summarises"
     );
 
-    // And the dollar figure the screen leads with is computed, not left at zero.
-    assert!(o.round_cost_usd > 0.0, "a round must have been priced");
-    assert!(o.gross_value_usd > 0.0);
-    assert!(
-        (o.net_value_usd - (o.gross_value_usd - o.round_cost_usd)).abs() < 1e-9,
-        "net must be gross less cost: {} vs {} - {}",
-        o.net_value_usd,
-        o.gross_value_usd,
-        o.round_cost_usd
-    );
+    // And the savings summary the headline renders counts it. The call came with no hook record,
+    // so it names no conversation and no turn read it: its tokens are counted, and with no
+    // derived pairs on this ledger to model one from, it carries no dollars rather than a guess.
+    let s = savings_summary(
+        &pool,
+        lumen_core::repeat::now_ms(),
+        None,
+        &lumen_core::savings::Facts {
+            billing_mode: lumen_core::savings::BillingView::Api,
+            identity_hook_registered: None,
+        },
+        &lumen_core::savings::Uncalibrated,
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.all_time.counts.calls, 1);
     assert_eq!(
-        o.value_rounds, 194.0,
-        "R must reach the screen, not be hidden"
+        s.all_time.tokens_saved.value, o.lifetime_optimized_tokens,
+        "uncalibrated, the summary's tokens are the ledger's"
     );
-    assert!(
-        o.pair_multiplier > 1.0,
-        "an intercept costs more than one round"
+    assert_eq!(s.ledger.recent[0].pair.basis, "noSession");
+    assert_eq!(
+        (s.all_time.measured, s.all_time.modelled),
+        (None, None),
+        "nothing to price it by, so no dollar figure"
     );
+    assert_eq!(s.all_time.unpriced.no_session, 1);
 
     // Provenance: an in-process tokenizer has no fallback, so nothing is unverified.
     assert_eq!(
@@ -480,13 +472,29 @@ async fn an_untouched_install_claims_nothing() {
     let f = fixture();
     let pool = f.pool().await;
 
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    assert_eq!(o.net_value_usd, 0.0);
-    assert_eq!(o.gross_value_usd, 0.0);
+    let s = savings_summary(
+        &pool,
+        lumen_core::repeat::now_ms(),
+        None,
+        &lumen_core::savings::Facts {
+            billing_mode: lumen_core::savings::BillingView::Unset,
+            identity_hook_registered: None,
+        },
+        &lumen_core::savings::Uncalibrated,
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        o.round_cost_usd, 0.0,
-        "with no turns to average, no round can be priced and none must be claimed"
+        (s.all_time.measured, s.all_time.modelled),
+        (None, None),
+        "no dollar figure where nothing was priced"
     );
+    assert_eq!(s.all_time.tokens_saved.value, 0);
+    assert_eq!(
+        s.all_time.data_quality,
+        lumen_core::savings::DataQuality::Empty
+    );
+    assert_eq!(s.status, lumen_core::savings::Status::NoData);
 
     let r = get_context_report(&pool).await.unwrap();
     assert_eq!(r.total_tokens_read, 0);

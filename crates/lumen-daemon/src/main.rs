@@ -1311,6 +1311,52 @@ mod tests {
         );
     }
 
+    /// A subagent's transcript (`<session>/subagents/agent-<id>.jsonl`, every record a
+    /// sidechain) records its compaction, under its own kind and its own file, so the savings
+    /// summary can end that subagent's rounds there. Until 1.9.0 sidechains were skipped whole.
+    #[tokio::test]
+    async fn a_subagent_transcripts_compaction_is_recorded_under_its_own_kind_and_file() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let subdir = dir.path().join("sess").join("subagents");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let jsonl = subdir.join("agent-a0223eddc41f13056.jsonl");
+        let side = |ty: &str, u: &str, p: &str, extra: &str| {
+            let p = if p.is_empty() {
+                "null".to_string()
+            } else {
+                format!("\"{p}\"")
+            };
+            format!(
+                r#"{{"type":"{ty}","uuid":"{u}","parentUuid":{p},"isSidechain":true,"agentId":"a0223eddc41f13056","sessionId":"sess","timestamp":"2026-06-01T16:14:05.157Z"{extra}}}"#
+            )
+        };
+        let lines = [
+            side("user", "s1", "", r#","message":{"content":"task"}"#),
+            side("assistant", "s2", "s1", r#","message":{"content":[]}"#),
+            side("system", "sc", "s2", r#","subtype":"compact_boundary""#),
+        ];
+        write_jsonl(
+            &jsonl,
+            &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let (tx, _rx) = broadcast::channel(4);
+        ingest_from(&pool, &jsonl, 0, &tx, false).await.unwrap();
+        let rows: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT session_id, kind, source_file FROM session_events")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "sess".to_string(),
+                "subagent_compaction".to_string(),
+                jsonl.to_string_lossy().to_string()
+            )]
+        );
+    }
+
     // ── A transcript tailed without its tracker is resynced, not trusted ───────
 
     fn tree_line(ty: &str, u: &str, p: &str, extra: &str) -> String {

@@ -182,7 +182,7 @@ fn the_json_has_every_section_and_a_stable_key_order() {
         "corpus",
         "builds",
         "latency",
-        "model",
+        "savings",
         "environment",
     ];
     let mut last = 0;
@@ -197,7 +197,7 @@ fn the_json_has_every_section_and_a_stable_key_order() {
     assert_eq!(v["label"], "smoke");
     assert_eq!(v["pre_release"], true);
     assert_eq!(v["tokenizer"]["is_proxy_for_claude"], true);
-    assert_eq!(v["model"]["status"], "modelled");
+    assert_eq!(v["savings"]["dollars"], "none");
     assert!(
         v["environment"]["os"]
             .as_str()
@@ -290,9 +290,10 @@ fn the_latency_section_has_every_series_and_only_measured_or_stated_gaps() {
 }
 
 #[test]
-fn the_summary_labels_dollars_modelled_and_has_no_headline_percentage() {
+fn the_summary_gives_no_dollar_figure_and_no_headline_percentage() {
     let s = &output().summary;
-    assert!(s.contains("MODELLED"));
+    assert!(s.contains("No dollar figure"));
+    assert!(!s.contains('$'), "a dollar figure in the summary");
     assert!(s.contains("proxy for Claude's tokenizer"));
     assert!(s.contains("usage mix"));
     assert!(!s.contains("% saved") && !s.contains("% savings"));

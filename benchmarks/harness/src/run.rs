@@ -11,7 +11,7 @@ use crate::env;
 use crate::latency::{self, BuildLatency, LatencyConfig, MIN_RUNS, Subject};
 use crate::report::{
     BuildInfo, CorpusInfo, LatencySection, Results, SAMPLES_NOTE, SCHEMA, TokensSection,
-    build_info, corpus_info, is_release_label, model, percentile_note, summary, tokenizer_info,
+    build_info, corpus_info, is_release_label, percentile_note, savings, summary, tokenizer_info,
 };
 use crate::tokens::{self, FileResult, Prepared, TSV_HEADER};
 use crate::util::{Ctx, Res};
@@ -161,7 +161,6 @@ pub fn execute(plan: &Plan) -> Res<Output> {
         .map(tokens::prepare)
         .collect::<Res<Vec<_>>>()?;
 
-    let vpt = lumen_core::econ::Econ::default().value_per_token();
     let mut tsv = String::from(TSV_HEADER);
     let mut infos: Vec<BuildInfo> = Vec::new();
     let mut versions: Vec<String> = Vec::new();
@@ -173,7 +172,7 @@ pub fn execute(plan: &Plan) -> Res<Output> {
             let section = TokensSection {
                 digest: tokens::digest(&files),
                 files: files.len(),
-                aggregates: tokens::aggregate(&files, vpt),
+                aggregates: tokens::aggregate(&files),
             };
             tsv.push_str(&table);
             infos.push(build_info(build, &version, Some(section)));
@@ -240,7 +239,7 @@ pub fn execute(plan: &Plan) -> Res<Output> {
         corpus,
         builds: infos,
         latency,
-        model: model(),
+        savings: savings(),
         environment,
     };
     let summary = summary(&results);

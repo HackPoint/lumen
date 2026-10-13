@@ -4,6 +4,7 @@ import { TauriBridge } from './tauri-bridge';
 import { FakeTauriBridge, PRICE_TABLE as SHARED_PRICES } from './tauri-bridge.fake';
 import type { OptimizerReport, UsageReport, TokenAgg } from './components';
 import { figureTag, isFloor } from './prices';
+import { recordedPeriod, savingsSummary } from './savings-summary.fake';
 
 /**
  * SessionService is the whole frontend data layer: it folds daemon frames into
@@ -873,28 +874,32 @@ describe('SessionService', () => {
     expect((s as unknown as Record<string, unknown>)['lifetimeOptimizedUsd']).toBeUndefined();
   });
 
-  it('computes effectiveness as saved over full', async () => {
-    const s = build((b) =>
+  it('takes the effectiveness from the savings summary and computes none of its own', async () => {
+    const s = build((b) => {
       b.responses.set(
         'get_optimizer_stats',
         optimizer({ lifetimeOptimizedTokens: 750, lifetimeFullTokens: 1_000 }),
-      ),
-    );
+      );
+      b.responses.set(
+        'lumen_savings_summary',
+        savingsSummary({ allTime: recordedPeriod(600, null, { sharePct: 60 }) }),
+      );
+    });
     await Promise.resolve();
     await Promise.resolve();
-    expect(s.effectivenessPct()).toBeCloseTo(75, 10);
+    // The engine's share (losses included), not the optimizer report's 75%.
+    expect(s.effectivenessPct()).toBe(60);
   });
 
-  it('reports zero effectiveness rather than dividing by zero', async () => {
-    const s = build((b) =>
-      b.responses.set(
-        'get_optimizer_stats',
-        optimizer({ lifetimeOptimizedTokens: 500, lifetimeFullTokens: 0 }),
-      ),
-    );
+  it('reports zero effectiveness before there is a summary, or when nothing was read', async () => {
+    const none = build();
+    await Promise.resolve();
+    expect(none.effectivenessPct()).toBe(0);
+    TestBed.resetTestingModule();
+    const empty = build((b) => b.responses.set('lumen_savings_summary', savingsSummary()));
     await Promise.resolve();
     await Promise.resolve();
-    expect(s.effectivenessPct()).toBe(0);
+    expect(empty.effectivenessPct()).toBe(0);
   });
 
   it('surfaces missed reads separately from savings', async () => {
@@ -1155,10 +1160,11 @@ describe('SessionService', () => {
 
   // ── refresh plumbing ──────────────────────────────────────────────────────
 
-  it('fetches both aggregate reports on construction', () => {
+  it('fetches the aggregate reports and the savings summary on construction', () => {
     build();
     expect(bridge.countOf('get_usage')).toBe(1);
     expect(bridge.countOf('get_optimizer_stats')).toBe(1);
+    expect(bridge.countOf('lumen_savings_summary')).toBe(1);
   });
 
   it('refreshes both aggregate reports every minute, and stops once destroyed', () => {

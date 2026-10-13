@@ -374,11 +374,12 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
 /// aborted Tauri startup outright, leaving a process with no window, no tray and no way in —
 /// and the fallback added in 1.5.1 wrapped only the *builder* result, so it covered none of
 /// them.
+///
+/// Built with no savings line: the summary is computed off the startup path, and the refresh in
+/// `lib.rs` (`refresh_tray_savings`) inserts the line into this menu once there is one.
 pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
     let mut built: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
-    // No savings line yet: nothing computes one until the savings engine lands, and a line
-    // with no figure behind it would be a claim. The engine passes its summary here.
     for entry in tray_menu_entries(&ui_version(app.package_info()), None) {
         built.push(match entry {
             TrayEntry::Item { id, text, enabled } => {
@@ -390,6 +391,9 @@ pub fn build_tray_menu_items(app: &tauri::App) -> tauri::Result<tauri::menu::Men
     let items: Vec<&dyn IsMenuItem<tauri::Wry>> = built.iter().map(Box::as_ref).collect();
     Menu::with_items(app, &items)
 }
+
+/// Where the savings line goes in the menu `tray_menu_entries` lays out: under the version line.
+pub const TRAY_SAVINGS_POSITION: usize = 1;
 
 /// The tray menu item that opens the main window. Matched by the menu-event handler in `lib.rs`.
 pub const TRAY_SHOW_ID: &str = "show";
@@ -438,9 +442,10 @@ pub enum TrayEntry {
 /// disabled item is how every platform's tray (the macOS menu bar, the Windows notification
 /// area, the Linux indicator) shows a line that does nothing.
 ///
-/// `savings` is the second line, such as "Saved ≈ $X this week · working", made by the savings
-/// summary. With `None` there is no such line at all, not an empty or placeholder one: until
-/// something has computed a saving, the menu says nothing about savings.
+/// `savings` is the second line, such as "Saved ≈ $X this week · working":
+/// `lumen_core::savings::text::tray_line` of the savings summary, the same module bare `lumen`
+/// prints its line with. With `None` there is no such line at all, not an empty or placeholder
+/// one: until a summary has something to say, the menu says nothing about savings.
 pub fn tray_menu_entries(version: &str, savings: Option<&str>) -> Vec<TrayEntry> {
     let mut entries = vec![TrayEntry::Item {
         id: TRAY_VERSION_ID,
@@ -855,6 +860,50 @@ mod tests {
         assert_ne!(TRAY_SAVINGS_ID, TRAY_SHOW_ID);
         assert_ne!(TRAY_SAVINGS_ID, TRAY_QUIT_ID);
         assert_ne!(TRAY_SAVINGS_ID, TRAY_VERSION_ID);
+    }
+
+    /// The line the refresh puts in the menu is the engine's own, so the tray and bare `lumen`
+    /// cannot word the same summary differently; a summary with nothing to say adds no line.
+    #[test]
+    fn the_savings_line_is_the_engines_tray_line() {
+        use lumen_core::savings::{summarize, BillingView, Clock, Facts, Ledger, Uncalibrated};
+        let clock = Clock {
+            now_ms: 1_791_979_200_000,
+            week_start_ms: 1_791_763_200_000,
+            week_start: "2026-10-12".into(),
+        };
+        let facts = Facts {
+            billing_mode: BillingView::Api,
+            identity_hook_registered: Some(true),
+        };
+        let nothing = summarize(&Ledger::default(), &clock, &facts, &Uncalibrated);
+        let line = lumen_core::savings::text::tray_line(&nothing);
+        assert_eq!(line, None, "no data, no line");
+        assert_eq!(
+            tray_menu_entries("9.8.7", line.as_deref()),
+            tray_menu_entries("9.8.7", None)
+        );
+
+        let idle = summarize(
+            &Ledger {
+                recent_turns: 3,
+                ..Default::default()
+            },
+            &clock,
+            &facts,
+            &Uncalibrated,
+        );
+        let line = lumen_core::savings::text::tray_line(&idle).expect("a line");
+        assert_eq!(line, "No Lumen calls this week \u{b7} not working");
+        // Where the refresh inserts it into the live menu is where the menu's layout puts it.
+        assert_eq!(
+            tray_menu_entries("9.8.7", Some(&line))[TRAY_SAVINGS_POSITION],
+            TrayEntry::Item {
+                id: TRAY_SAVINGS_ID,
+                text: line.clone(),
+                enabled: false,
+            }
+        );
     }
 
     #[test]

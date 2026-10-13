@@ -927,10 +927,10 @@ async fn returned_the_file_instead(pool: &SqlitePool, tool: &str, c: Counts) {
 }
 
 /// A call answered with the file, because the view it would have sent cost as much, is a
-/// refusal and not a saving, whichever tool made it. It must leave every total, the per-tool and
-/// per-channel breakdowns and the dollar figures exactly as they were: counting its zero or
-/// negative saving would lower the figure the Optimizer screen leads with, and counting its call
-/// would charge it a round it did not cost.
+/// refusal and not a saving, whichever tool made it. It must leave every token total and the
+/// per-tool and per-channel breakdowns exactly as they were: counting its zero or negative saving
+/// would lower the figure the Optimizer screen leads with. (The savings engine does count it, as
+/// the loss it is: `lumen_core::savings`.)
 #[tokio::test]
 async fn a_call_that_returned_the_file_instead_changes_no_saving() {
     assert!(
@@ -946,15 +946,12 @@ async fn a_call_that_returned_the_file_instead_changes_no_saving() {
         (100, 1000, 900),
     )
     .await;
-    // The cost side needs 200 turns to be computed at all.
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
     let mut before = get_optimizer_stats(&pool).await.unwrap();
     assert_eq!(
         (before.lifetime_optimized_tokens, before.by_tool.len()),
         (900, 1),
         "premise: the real saving is counted"
     );
-    assert!(before.round_cost_usd > 0.0 && before.net_value_usd != 0.0);
 
     // compress_logs gives back the log itself (zero saved); the others give the file behind a note
     // that costs a little more (a small negative saving).
@@ -967,7 +964,7 @@ async fn a_call_that_returned_the_file_instead_changes_no_saving() {
     before.provenance_total_rows += 3;
     assert_eq!(
         after, before,
-        "a would_inflate row reached a saving, a breakdown or the net value"
+        "a would_inflate row reached a saving or a breakdown"
     );
 }
 
@@ -1499,9 +1496,6 @@ async fn first_reads_and_every_fallback_are_none_of_the_four_figures() {
 #[tokio::test]
 async fn served_answers_are_in_none_of_the_totals_above_them() {
     let (_d, pool) = fixture().await;
-    // With enough turns to price a round the net value is not zero, so a served row reaching it
-    // would show.
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
     event(
         &pool,
         "datetime('now')",
@@ -1519,7 +1513,6 @@ async fn served_answers_are_in_none_of_the_totals_above_them() {
     )
     .await;
     let before = get_optimizer_stats(&pool).await.unwrap();
-    assert!(before.net_value_usd != 0.0, "the fixture prices a round");
 
     let rows = [
         served("smart_read_unchanged", MEAS, (30, 1000, 970)),
@@ -1539,9 +1532,6 @@ async fn served_answers_are_in_none_of_the_totals_above_them() {
     assert_eq!(after.this_week_saved_tokens, before.this_week_saved_tokens);
     assert_eq!(after.by_tool, before.by_tool);
     assert_eq!(after.by_channel, before.by_channel);
-    assert_eq!(after.net_value_usd, before.net_value_usd);
-    assert_eq!(after.gross_value_usd, before.gross_value_usd);
-    assert_eq!(after.round_cost_usd, before.round_cost_usd);
     assert_eq!(
         after.repeat_reads,
         reads(2, 2, 970 + 470 + 1380 + 710, 4, 0, 0)
@@ -1918,161 +1908,5 @@ async fn context_report_json_uses_camel_case_for_the_frontend() {
     let f = &j["topFiles"][0];
     for k in ["totalTokens", "sharePct", "unchangedRereads"] {
         assert!(f.get(k).is_some(), "missing camelCase key topFiles[].{k}");
-    }
-}
-
-// ── Net dollar value ─────────────────────────────────────────────────────────
-
-/// Populate enough turns for the cost side to be computable.
-async fn turns_for_cost(pool: &SqlitePool, n: i64, ctx: i64, out: i64) {
-    for i in 0..n {
-        turn(
-            pool,
-            &format!("nv{i}"),
-            "s",
-            "datetime('now')",
-            "claude-opus-5",
-            (0, out, ctx, 0),
-        )
-        .await;
-    }
-}
-
-/// With too few turns to average, the cost side is unknown — and a gross figure with no
-/// cost against it is exactly the overstatement the dollar headline replaces.
-#[tokio::test]
-async fn net_value_is_zero_when_there_are_too_few_turns_to_price_a_round() {
-    let (_d, pool) = fixture().await;
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (100, 5_000, 4_900),
-    )
-    .await;
-    turns_for_cost(&pool, 10, 300_000, 1_000).await;
-
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    assert_eq!(o.round_cost_usd, 0.0);
-    assert_eq!(
-        o.gross_value_usd, 0.0,
-        "a gross figure with no cost beside it is the overstatement being removed"
-    );
-    assert_eq!(o.net_value_usd, 0.0);
-}
-
-#[tokio::test]
-async fn net_value_prices_saved_tokens_against_the_rounds_they_cost() {
-    let (_d, pool) = fixture().await;
-    // One call saving 100,000 tokens.
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (1_000, 101_000, 100_000),
-    )
-    .await;
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
-
-    let o = get_optimizer_stats(&pool).await.unwrap();
-
-    // gross = 100_000 x (6.25 + 0.5 x 194) / 1e6
-    let want_gross = 100_000.0 * (6.25 + 0.5 * 194.0) / 1e6;
-    assert!(
-        (o.gross_value_usd - want_gross).abs() < 1e-9,
-        "gross {} vs {want_gross}",
-        o.gross_value_usd
-    );
-
-    // cost = 1 call x ((100_000 x 0.5 + 1_000 x 25) / 1e6) x 1.604
-    let want_cost = ((100_000.0 * 0.5 + 1_000.0 * 25.0) / 1e6) * 1.604;
-    assert!(
-        (o.round_cost_usd - want_cost).abs() < 1e-9,
-        "cost {} vs {want_cost}",
-        o.round_cost_usd
-    );
-    assert!((o.net_value_usd - (want_gross - want_cost)).abs() < 1e-9);
-    assert_eq!(o.value_rounds, 194.0, "R must be surfaced, not hidden");
-    assert_eq!(o.pair_multiplier, 1.604);
-}
-
-/// A call that saves almost nothing must come out negative. This is the whole reason the
-/// headline changed: the token ratio would still have looked like a win.
-#[tokio::test]
-async fn a_call_that_saves_little_comes_out_negative() {
-    let (_d, pool) = fixture().await;
-    // 300 tokens saved out of 400 — an effectiveness ratio of 75%, and a loss.
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (100, 400, 300),
-    )
-    .await;
-    turns_for_cost(&pool, 200, 400_000, 1_200).await;
-
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    let ratio = 1.0
-        - (o.lifetime_full_tokens - o.lifetime_optimized_tokens) as f64
-            / o.lifetime_full_tokens as f64;
-    assert!(
-        ratio > 0.7,
-        "premise: the token ratio looks good ({ratio:.2})"
-    );
-    assert!(
-        o.net_value_usd < 0.0,
-        "and yet the call is a loss: net {}",
-        o.net_value_usd
-    );
-}
-
-/// Subagent turns carry their own context and must not price the main agent's rounds.
-#[tokio::test]
-async fn subagent_turns_do_not_price_the_round() {
-    let (_d, pool) = fixture().await;
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (100, 5_000, 4_900),
-    )
-    .await;
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
-    for i in 0..200 {
-        subagent_turn(
-            &pool,
-            &format!("sa{i}"),
-            "s",
-            "datetime('now')",
-            (0, 1_000, 1, 0),
-        )
-        .await;
-    }
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    let want = ((100_000.0 * 0.5 + 1_000.0 * 25.0) / 1e6) * 1.604;
-    assert!(
-        (o.round_cost_usd - want).abs() < 1e-9,
-        "subagent rows with a 1-token context dragged the round cost to {}",
-        o.round_cost_usd
-    );
-}
-
-#[tokio::test]
-async fn net_value_fields_are_camel_case_for_the_frontend() {
-    let (_d, pool) = fixture().await;
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    let j = serde_json::to_value(&o).unwrap();
-    for k in [
-        "netValueUsd",
-        "grossValueUsd",
-        "roundCostUsd",
-        "valueRounds",
-        "pairMultiplier",
-    ] {
-        assert!(j.get(k).is_some(), "missing camelCase key {k}");
     }
 }

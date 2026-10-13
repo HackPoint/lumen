@@ -1,27 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import type { SavingsSummary } from '../../savings-summary';
 
-/**
- * One period of the savings summary the headline shows.
- *
- * The shape the savings engine is to fill. Nothing produces it yet, and nothing here computes
- * one: the headline only lays out what it is given.
- */
-export interface SavingsPeriod {
-    /** Tokens Lumen kept out of Claude Code's context, net of any it added. Signed: a loss is negative. */
-    tokens: number;
-    /** The same in dollars, net and signed. Null when it cannot be priced, which is said, never shown as $0. */
-    usd: number | null;
-    /** True when `usd` rests on a model rather than a measurement; the figure is labelled so. */
-    usdModelled: boolean;
-    /** How many recorded events the figures cover. 0 means nothing was recorded in the period. */
-    events: number;
-}
-
-/** What the headline shows: this week (local, from Monday) and all time. */
-export interface SavingsSummary {
-    week: SavingsPeriod;
-    allTime: SavingsPeriod;
-}
+// The summary is the engine's: `lumen_savings_summary`, typed in `savings-summary.ts`. Re-exported
+// so what imported it from here keeps compiling.
+export type { SavingsPeriod, SavingsSummary } from '../../savings-summary';
 
 /**
  * The top of Home: how much Lumen saved, this week and all time, in tokens and in dollars, net.
@@ -43,7 +25,9 @@ export class SavingsHeadline {
     readonly summary = input<SavingsSummary | null>(null);
 
     /** Nothing recorded at all. Only said once a summary says so, never assumed from its absence. */
-    readonly nothingRecorded = computed(() => this.summary()?.allTime.events === 0);
+    readonly nothingRecorded = computed(
+        () => this.summary()?.allTime.dataQuality.state === 'empty',
+    );
 
     readonly periods = computed(() => {
         const s = this.summary();
@@ -61,15 +45,21 @@ export class SavingsHeadline {
         return abs === '0' ? '0' : `${n < 0 ? '−' : '+'}${abs}`;
     }
 
+    /** `1 call`, `1,473 calls`. */
+    fmtCount(n: number): string {
+        return `${n.toLocaleString('en-US')} ${n === 1 ? 'call' : 'calls'}`;
+    }
+
     /**
      * `+$1.23`, `−$1.23`, or `—` when it could not be priced. Whole dollars from $100, as the
-     * Optimizer's figure was. A value that rounds to nothing carries no sign, so it cannot read as
-     * a gain or a loss that did not happen.
+     * Optimizer's figure was. The sign is the value's, never the rounding's, as the engine's own
+     * text says it (`lumen_core::savings::text::usd_signed`): a loss under half a cent reads
+     * `−$0.00`, and only zero itself reads `$0.00`.
      */
     fmtUsd(n: number | null): string {
         if (n === null) return '—';
         const abs = Math.abs(n);
         const digits = abs >= 100 ? abs.toFixed(0) : abs.toFixed(2);
-        return Number(digits) === 0 ? '$0.00' : `${n < 0 ? '−' : '+'}$${digits}`;
+        return n === 0 ? '$0.00' : `${n < 0 ? '−' : '+'}$${digits}`;
     }
 }

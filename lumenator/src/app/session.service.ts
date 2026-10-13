@@ -8,6 +8,7 @@ import type {
 } from './components';
 import { aggTokens, isFloor, price, shortfalls } from './prices';
 import type { ModelTokens, PriceTable, Priced } from './prices';
+import type { SavingsSummary } from './savings-summary';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
 const CONTEXT_TIERS = [200_000, 500_000, 1_000_000] as const;
@@ -539,13 +540,18 @@ export class SessionService {
         .catch(() => { /* not in Tauri / db not ready — ignore */ });
   }
 
-  /** Net dollar value of interception. 0 when the backend cannot price a round. */
-  readonly netValueUsd = computed(() => this.optimizerStats()?.netValueUsd ?? 0);
-  readonly grossValueUsd = computed(() => this.optimizerStats()?.grossValueUsd ?? 0);
-  readonly roundCostUsd = computed(() => this.optimizerStats()?.roundCostUsd ?? 0);
-  readonly valueRounds = computed(() => this.optimizerStats()?.valueRounds ?? 0);
-  /** True once the backend has enough turns to price a round at all. */
-  readonly netValuePriced = computed(() => (this.optimizerStats()?.roundCostUsd ?? 0) > 0);
+  /**
+   * What Lumen saved, from `lumen_savings_summary`: the engine's summary, which this service
+   * passes on and never computes from. Null until the first fetch resolves.
+   */
+  readonly savingsSummary = signal<SavingsSummary | null>(null);
+
+  /** Re-fetch the savings summary. */
+  refreshSavingsSummary(): void {
+    this.bridge.invoke<SavingsSummary>('lumen_savings_summary')
+        .then((s) => this.savingsSummary.set(s))
+        .catch(() => { /* not in Tauri / db not ready — ignore */ });
+  }
 
   // ── Context diagnostics ───────────────────────────────────────────────────
   //
@@ -752,14 +758,10 @@ export class SessionService {
   );
 
   /**
-   * Overall optimizer effectiveness: saved / full over all lumen routes (0–100).
-   * 0 when no lumen calls recorded yet.
+   * Share of the tokens the files held that Lumen's calls kept out of context, all time, in
+   * percent: the savings summary's own figure, losses included. 0 until there is one.
    */
-  readonly effectivenessPct = computed(() => {
-    const r = this.optimizerStats();
-    if (!r || r.lifetimeFullTokens === 0) return 0;
-    return (r.lifetimeOptimizedTokens / r.lifetimeFullTokens) * 100;
-  });
+  readonly effectivenessPct = computed(() => this.savingsSummary()?.allTime.sharePct ?? 0);
 
   /**
    * CLI-only: reads that bypassed Lumen (model used built-in Read instead).
@@ -900,12 +902,14 @@ export class SessionService {
     this.refreshPrices();
     this.refreshUsage();
     this.refreshOptimizerStats();
+    this.refreshSavingsSummary();
     // Tied to the injector lifetime: an uncleared interval outlives the service
     // and, in tests, leaks across cases.
     const refreshTimer = setInterval(() => {
       if (this.prices() === null) this.refreshPrices();
       this.refreshUsage();
       this.refreshOptimizerStats();
+      this.refreshSavingsSummary();
     }, USAGE_REFRESH_MS);
     inject(DestroyRef).onDestroy(() => clearInterval(refreshTimer));
   }

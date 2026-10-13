@@ -55,9 +55,10 @@ larger numbers, not the same ones.
 **1,573 intercepted reads, 11.03M tokens saved.**
 
 The dollar value this section gave is withdrawn (1.6.0). It was priced through the `Econ`
-model the UI headline uses, whose rounds-remaining input `R` is one assumed constant
-(`DEFAULT_ROUNDS_REMAINING`, 65) rather than derived per call, so the figure was that
-assumption multiplied out. The test still prints it; it is not published as a measurement.
+model, whose rounds-remaining input `R` was one assumed constant rather than derived per call,
+so the figure was that assumption multiplied out. From 1.9.0 `lumen report` derives `R` and the
+round's cost for each call from the ledger's own turns (`lumen_core::savings`); this page quotes
+no dollar figure, because that one is this machine's.
 
 The missed-optimization baseline — what the un-intercepted reads cost — is **3,500,277 tokens**.
 The raw figure is 6,931,572, and **half of that is binary files** whose token count came from a

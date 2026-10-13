@@ -63,8 +63,9 @@ You may rebuild the SVG/markup; keep these three inputs. Internal computeds
 **`<lumen-savings-headline>`** — selector `lumen-savings-headline`
 ```
 summary = input<SavingsSummary | null>(null)
-// SavingsSummary = { week, allTime }, each a SavingsPeriod:
-//   { tokens (signed), usd (signed, null = not priced), usdModelled, events }
+// SavingsSummary (src/app/savings-summary.ts) = { week, allTime, … }, each a SavingsPeriod:
+//   { tokensSaved (signed), measured (the bold "at least" dollars, null = none measured),
+//     modelled (shown beside it, never in it), unpriced (calls with tokens and no dollars), … }
 ```
 Null renders nothing. Fed by the savings summary; the headline computes nothing.
 

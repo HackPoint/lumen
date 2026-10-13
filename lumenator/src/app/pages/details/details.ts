@@ -48,10 +48,14 @@ export class Details {
     /** True once at least one lumen-optimized read has been recorded. */
     readonly hasData = computed(() => this.s.lifetimeOptimizedTokens() > 0);
 
-    /** Effectiveness %, rounded to one decimal. 0 when no data yet (never NaN). */
+    /**
+     * The savings summary's share, rounded to one decimal, and signed: a negative share means the
+     * calls returned more than the files held, and is shown as that, never as zero. 0 before
+     * there is one.
+     */
     readonly effectPct = computed(() => {
         const p = this.s.effectivenessPct();
-        return isFinite(p) && p > 0 ? Math.round(p * 10) / 10 : 0;
+        return isFinite(p) ? Math.round(p * 10) / 10 : 0;
     });
 
     readonly maxToolSaved = computed(() =>

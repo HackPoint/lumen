@@ -14,9 +14,13 @@ The optimizer's effectiveness is computed from the ledger where it is displayed,
 written into copy as a constant. This layer used to say "Every intercepted read is ~87%
 cheaper", and the model was told "~5-10% token cost". A ratio measured on one machine's
 files is not a property of the product, and the model routes on what it is told, so an
-inflated constant biases its choices as well as the reader's. The dollar value rests on an
-assumed rounds-remaining constant (`DEFAULT_ROUNDS_REMAINING` in `econ.rs`); until that is
-derived per call, no dollar figure is published outside the app.
+inflated constant biases its choices as well as the reader's. The dollar value is derived per
+call from the user's own ledger (`lumen_core::savings`), at the price of the model that consumed
+the tokens, and shown as a band. The figure shown is the measured one, a floor, said as "at
+least"; what may be worth more (an `R` that may be too long) is shown beside it, labelled
+modelled, and never added to it; a call with no turn of its own to price it by has tokens and no
+dollars, never a price borrowed from other calls. No dollar figure is published outside the app
+and the CLI, which compute it from the reader's own ledger.
 
 ## Layer 3 — Absolute numbers, side by side, never merged
 Show two clearly distinct figures:

@@ -2802,11 +2802,13 @@ dependencies = [
  "crossterm",
  "dirs 7.0.0",
  "lumen-core",
+ "lumen-stats",
  "ratatui",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tungstenite",
 ]
 
@@ -2865,6 +2867,7 @@ dependencies = [
 name = "lumen-stats"
 version = "1.8.0"
 dependencies = [
+ "futures-util",
  "lumen-core",
  "serde",
  "serde_json",

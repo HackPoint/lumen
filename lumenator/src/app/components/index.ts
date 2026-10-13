@@ -207,21 +207,6 @@ interface OptimizerReport {
      */
     provenanceTotalRows: number;
     /**
-     * Net dollar value of interception: the avoided tokens priced, less the extra rounds
-     * they cost. The headline from 1.4.0 on.
-     *
-     * The token ratio it replaces flattered the product — a smaller reply that forces
-     * another round is a loss however good the ratio looks. Optional so a 1.3.x backend
-     * still renders.
-     */
-    netValueUsd?: number;
-    grossValueUsd?: number;
-    roundCostUsd?: number;
-    /** Rounds a saving keeps paying for. Surfaced because the result is most sensitive to it. */
-    valueRounds?: number;
-    /** Rounds each intercept costs — 1.604 measured. */
-    pairMultiplier?: number;
-    /**
      * What repeat reads have done so far. Counted apart from every figure above: the
      * answers it counts are in none of the token totals. Optional because a backend
      * older than 1.8.0 does not send it, and then the page shows nothing about it.

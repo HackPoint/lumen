@@ -10,15 +10,23 @@
                 <div class="headline__period">
                     <h2 class="headline__label">{{ row.label }}</h2>&ngsp;
                     <p class="headline__figure">
-                        <strong class="headline__tokens" [class.is-loss]="row.period.tokens < 0">{{ fmtTokens(row.period.tokens) }}</strong>&ngsp;<span class="headline__unit">tokens saved, net</span>
+                        <strong class="headline__tokens" [class.is-loss]="row.period.tokensSaved.value < 0">{{ fmtTokens(row.period.tokensSaved.value) }}</strong>&ngsp;<span class="headline__unit">tokens saved, net</span>
                     </p>&ngsp;
+                    <!-- The bold figure is the measured one, a floor. The modelled dollars and the calls
+                         with no dollars stand beside it, never in it. -->
                     <p class="headline__figure">
                         <strong class="headline__usd"
-                                [class.is-loss]="row.period.usd !== null && row.period.usd < 0">{{ fmtUsd(row.period.usd) }}</strong>&ngsp;<span class="headline__unit">saved, net</span>
-                        @if (row.period.usd === null) {
-                            &ngsp;<span class="headline__tag">not priced</span>
-                        } @else if (row.period.usdModelled) {
-                            &ngsp;<span class="headline__tag">modelled</span>
+                                [class.is-loss]="row.period.measured !== null && row.period.measured.net.value < 0">{{ fmtUsd(row.period.measured?.net?.value ?? null) }}</strong>&ngsp;<span class="headline__unit">saved, net</span>
+                        @if (row.period.measured === null) {
+                            &ngsp;<span class="headline__tag">none measured</span>
+                        } @else {
+                            &ngsp;<span class="headline__tag">at least</span>
+                        }
+                        @if (row.period.modelled !== null) {
+                            &ngsp;<span class="headline__tag">{{ fmtUsd(row.period.modelled.value.value) }} modelled</span>
+                        }
+                        @if (row.period.unpriced.calls > 0) {
+                            &ngsp;<span class="headline__tag">{{ fmtCount(row.period.unpriced.calls) }} unpriced</span>
                         }
                     </p>
                 </div>

@@ -7,6 +7,7 @@ import { APP_VERSION_CMD, FakeTauriBridge } from '../../tauri-bridge.fake';
 import type { RepeatReadsSetting } from '../../components/index';
 import type { BillingModeSetting } from '../../billing-mode.service';
 import type { SavingsSummary } from '../../components/savings-headline/savings-headline';
+import { recordedPeriod, savingsSummary } from '../../savings-summary.fake';
 
 describe('Home', () => {
   let fixture: ComponentFixture<Home>;
@@ -321,10 +322,11 @@ describe('Home', () => {
 
     it('shows the headline the summary gives it', async () => {
       const h = await build();
-      const summary: SavingsSummary = {
-        week: { tokens: 1_200, usd: 0.5, usdModelled: false, events: 3 },
-        allTime: { tokens: -400, usd: -1.25, usdModelled: true, events: 9 },
-      };
+      const summary: SavingsSummary = savingsSummary({
+        week: recordedPeriod(1_200, 0.5),
+        allTime: recordedPeriod(-400, -1.25),
+        status: { state: 'working' },
+      });
       h.savings.set(summary);
       fixture.detectChanges();
       expect(text()).toContain('This week');

@@ -251,11 +251,12 @@ Open Lumen → click **"Install CLI"** — this symlinks the bundled binary into
 ### Run
 
 ```bash
-lumen          # one line: what Lumen saved (a placeholder until the savings summary lands),
-               # naming lumen report and lumen dash
+lumen          # one line: what Lumen saved this week and all time, net, and whether it is
+               # working; names lumen report and lumen dash
 lumen dash     # live terminal dashboard; --no-anim turns the ring animation off
                # press q or Ctrl-C to quit; piped, it prints one line and exits
-lumen report   # the savings in detail (a placeholder until the savings summary lands)
+lumen report   # the savings in detail: each period with its band, how it is measured, the
+               # calls that gained and lost most (--json: the whole summary, per call)
 lumen faults   # render a fault report, and file it with --yes (see Filing a fault report)
 lumen doctor   # everything a bug report needs, in one paste
 lumen show     # ask a running Lumen to show its window (macOS)
@@ -422,19 +423,45 @@ model spends an extra round calling a Lumen tool instead. The honest question is
 the tokens saved are worth more than the round they cost:
 
 ```text
-value of saving S tokens = S × (cache_write + cache_read × R) / 1e6
-cost of the extra round  = (context × cache_read + output × output_rate) / 1e6 × pairs
+value of saving S tokens = S × (one-time price + Σ cache-read price over the R rounds that follow)
+cost of an extra round   = the turn that read the result, priced as it ran
+net                      = value − extra rounds × that cost, signed
 ```
 
-`R` is how many rounds the saving keeps paying for, bounded by the next compaction. Every
-other input comes from the call itself.
+From 1.9.0 every term is derived per call, from your own ledger, by one engine
+(`lumen_core::savings`) that the app, `lumen`, `lumen report` and the tray all read. The turn that
+read a call's result is found in the call's own conversation (a subagent's call in the subagent's
+transcript), and its model, speed, region and cache duration price both the saving and the extra
+round: a dollar is always the price of the model that consumed the tokens.
 
-**No dollar figure is published here.** This section used to quote one for the author's
-machine, and it rested on `R`: not derived per call, but one assumed constant, 65 rounds
-(`DEFAULT_ROUNDS_REMAINING` in `crates/lumen-core/src/econ.rs`), and the value side of the
-formula is linear in it. Until `R` is derived per call, a dollar total
-is that assumption multiplied out, which is why 1.9.0 no longer shows it. The token ratio is
-measured.
+- **What a call saved** is what a built-in Read would have put in context, less what the call
+  returned. A Read returns at most 25,000 tokens of a file (Claude Code's documented default, and
+  a file over 256 KB is refused whole, after which the model reads a page), so a larger file
+  counts as 25,000. Until the calibration table lands the counts are `cl100k_base` tokens, a
+  proxy for Claude's, and the cap is applied to those.
+- **`R`** is the turns after the one that read the result, up to the first compaction or rewind
+  the daemon recorded in that transcript, or the first turn whose prompt is smaller than the one
+  before it: context was taken out there (a compaction, a rewind, cleared tool results), whether
+  or not the ledger recorded it, and the result may have gone with it. That end is labelled
+  inferred.
+- **The figure shown, in bold, as "at least"** is the measured one: every call priced at the turn
+  that read it, less every extra round it cost, and the blocked Reads the escape valve let
+  through, each priced at the turn that retried it. Where a conversation began before the daemon
+  recorded compactions and shows no shrink to end `R`, `R` may be too long, so the saving is
+  taken at `R = 0` (the price of putting the tokens in context once) and its rounds in full.
+- **Modelled**, beside it and never added to it: what those calls are worth beyond `R = 0`.
+- **Tokens only**: a call with no session to find its turns in (most rows before 1.1.5), no turn
+  that read it, or a model with no price. Its tokens count; its dollars are not guessed from
+  other calls'.
+- **Extra rounds**: a call that may have followed a blocked Read, which the ledger does not
+  record, is charged one, labelled modelled. A blocked Read counts once per session, agent and
+  file; where the ledger cannot tell whose Read a fault was (before 1.9.0, and before the meter
+  recorded agents in 1.8.0), the faults are counted as one block per agent that could have read
+  the file then (the main agent and each subagent with a turn within five minutes), never more
+  than the faults, so the cost is never understated.
+
+Every figure is a band, low to high, and the central one is the conservative one. `lumen report`
+prints the rules in full.
 
 **Tool calls and built-in `Read` events are measured to the token.**
 
@@ -545,10 +572,10 @@ caching savings display.
 ## How much you save
 
 Until 1.9.0 the hero metric on the Optimizer screen was the **net dollar value** of
-interception: what the tokens Lumen avoided are worth, less what the extra round cost. It was
-computed from your own ledger with one assumed input, how many rounds a saving keeps paying
-for, so no figure is quoted here; [Effectiveness %](#effectiveness--on-details) says why. 1.9.0
-takes it off the screen until the savings summary on Home replaces it.
+interception: what the tokens Lumen avoided are worth, less what the extra round cost, computed
+with one assumed input, how many rounds a saving keeps paying for. 1.9.0 derives that input
+per call ([Effectiveness %](#effectiveness--on-details) says how), and `lumen` and `lumen report`
+show the result for your own ledger. No figure is quoted here: yours depends on your sessions.
 
 The token ratio — **84% fewer tokens per intercepted read** on the author's machine — is
 on the Details screen. It is real and measured to the token, but on its own it is not a

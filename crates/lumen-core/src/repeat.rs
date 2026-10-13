@@ -809,6 +809,10 @@ pub fn now_ms() -> i64 {
 ///
 /// `Err` when the ledger cannot say (no ledger, or no events table): the caller treats that
 /// as "possibly", the same as a yes.
+///
+/// The kinds are named: a subagent's compaction (`subagent_compaction`, recorded from 1.9.0)
+/// ends nothing of the main conversation's, and this is asked for a whole session, so it reads
+/// exactly what it read before that kind existed.
 pub fn event_since(
     db: &std::path::Path,
     session: &str,
@@ -818,6 +822,7 @@ pub fn event_since(
     let conn = crate::meter::open_read_only(db)?;
     conn.query_row(
         "SELECT kind FROM session_events WHERE session_id = ?1 AND ts_ms >= ?2 \
+         AND kind IN ('compaction', 'rewind', 'resync') \
          ORDER BY ts_ms LIMIT 1",
         rusqlite::params![session, since_ms],
         |r| r.get(0),
@@ -1095,5 +1100,31 @@ mod tests {
         s.put("one", "k", a_base());
         assert_eq!(s.enter(Some("one")), 0);
         assert!(s.get("one", "k").is_some());
+    }
+
+    /// A subagent's compaction, recorded from 1.9.0, ends nothing of the main conversation's, and
+    /// the gate asks for whole sessions: it must not answer a main-agent repeat read in full.
+    #[test]
+    fn a_subagent_compaction_does_not_reach_the_session_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("l.db");
+        let conn = crate::meter::connect_db(&db).unwrap();
+        conn.execute(
+            "INSERT INTO session_events(session_id,kind,uuid,ts_ms,source_file) \
+             VALUES('s','subagent_compaction','u1',2000,'/p/s/subagents/agent-a.jsonl')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(event_since(&db, "s", 1000).unwrap(), None);
+        conn.execute(
+            "INSERT INTO session_events(session_id,kind,uuid,ts_ms,source_file) \
+             VALUES('s','compaction','u2',3000,'/p/s.jsonl')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            event_since(&db, "s", 1000).unwrap().as_deref(),
+            Some("compaction")
+        );
     }
 }

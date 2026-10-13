@@ -64,7 +64,11 @@
                      reply that forces another round can still cost more than it saved. -->
                 <p class="effect">
                     Intercepted reads returned
-                    <strong class="effect__pct">{{ effectPct() }}% fewer tokens</strong>
+                    @if (effectPct() >= 0) {
+                        <strong class="effect__pct">{{ effectPct() }}% fewer tokens</strong>
+                    } @else {
+                        <strong class="effect__pct is-loss">{{ -effectPct() }}% more tokens</strong>
+                    }
                     than the files they read, across every one recorded.
                 </p>
 

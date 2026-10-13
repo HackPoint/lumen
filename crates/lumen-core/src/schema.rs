@@ -179,7 +179,7 @@ pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS faults (\
         ts TEXT NOT NULL, kind TEXT NOT NULL, variant TEXT NOT NULL DEFAULT '-', \
         path TEXT, lines INTEGER, detail TEXT, session_id TEXT, \
-        version TEXT, channel TEXT NOT NULL DEFAULT 'unknown')",
+        version TEXT, channel TEXT NOT NULL DEFAULT 'unknown', agent_id TEXT)",
     "CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant)",
     // ── 1.9.0: the sessions table is gone ────────────────────────────────────
     // Every DDL from the first release to 1.8.0 created `sessions`, and no release ever wrote a
@@ -206,14 +206,25 @@ pub const MIGRATIONS: &[&str] = &[
     // is shown as a floor. A 1.8.0 build that writes to the ledger afterwards names its columns,
     // so its turns get NULL here too.
     "ALTER TABLE turns ADD COLUMN inference_geo TEXT",
+    // ── 1.9.0: whose Read a fault was ────────────────────────────────────────
+    // agent_id — the subagent the hook event belonged to; NULL for the main agent, and on every
+    //            fault recorded before 1.9.0. The intercept blocks a path once per context, a
+    //            subagent's apart from its parent's, so the savings summary counts a block per
+    //            session, agent and path; without this, a subagent's block and its parent's on
+    //            the same file could not be told apart.
+    "ALTER TABLE faults ADD COLUMN agent_id TEXT",
 ];
 
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
 /// error, and the next open runs it again.
 pub const BACKFILLS: &[&str] = &[
     // Mark the turns ingested from a subagent path. Idempotent, so safe to re-run on every open.
+    // Either separator: a ledger written on Windows holds backslashes, and the savings summary
+    // reads a turn's subagent from this column alone (LIKE has no escape character here, so the
+    // backslash is literal).
     "UPDATE turns SET is_subagent = 1 \
-     WHERE is_subagent = 0 AND source_file LIKE '%/subagents/%'",
+     WHERE is_subagent = 0 \
+       AND (source_file LIKE '%/subagents/%' OR source_file LIKE '%\\subagents\\%')",
 ];
 
 /// Column count of `read_events` on a current database — DDL plus every ALTER in
@@ -332,7 +343,10 @@ CREATE TABLE IF NOT EXISTS faults (
     session_id TEXT,
     -- Version that produced the fault, so a fixed regression stops matching.
     version    TEXT,
-    channel    TEXT NOT NULL DEFAULT 'unknown'
+    channel    TEXT NOT NULL DEFAULT 'unknown',
+    -- 1.9.0: the subagent the hook event belonged to; NULL for the main agent and before.
+    -- Declared where the ALTER in MIGRATIONS adds it on an older database.
+    agent_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant);
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch
@@ -495,6 +509,11 @@ mod tests {
         for (id, file) in [
             ("main", "/h/.claude/projects/-p/abc.jsonl"),
             ("sub", "/h/.claude/projects/-p/abc/subagents/agent-1.jsonl"),
+            (
+                "win",
+                r"C:\Users\me\.claude\projects\C--p\abc\subagents\agent-2.jsonl",
+            ),
+            ("winmain", r"C:\Users\me\.claude\projects\C--p\abc.jsonl"),
         ] {
             sqlx::query(
                 "INSERT INTO turns (message_id, session_id, ts, input_tokens, \
@@ -518,8 +537,13 @@ mod tests {
                 .unwrap();
         assert_eq!(
             flagged,
-            vec![("main".to_string(), 0), ("sub".to_string(), 1)],
-            "the subagent row must be backfilled from its source_file"
+            vec![
+                ("main".to_string(), 0),
+                ("sub".to_string(), 1),
+                ("win".to_string(), 1),
+                ("winmain".to_string(), 0),
+            ],
+            "the subagent row must be backfilled from its source_file, under either separator"
         );
     }
 

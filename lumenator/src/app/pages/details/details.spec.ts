@@ -5,6 +5,8 @@ import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { FakeTauriBridge } from '../../tauri-bridge.fake';
 import type { OptimizerReport } from '../../components/index';
+import type { SavingsSummary } from '../../savings-summary';
+import { recordedPeriod, savingsSummary } from '../../savings-summary.fake';
 
 /**
  * Details holds what Home and the Optimizer screen gave up in 1.9.0: Claude Code's context
@@ -30,9 +32,10 @@ describe('Details', () => {
     } as OptimizerReport;
   }
 
-  async function build(r: OptimizerReport = report()): Promise<Details> {
+  async function build(r: OptimizerReport = report(), summary?: SavingsSummary): Promise<Details> {
     bridge = new FakeTauriBridge();
     bridge.responses.set('get_optimizer_stats', r);
+    if (summary) bridge.responses.set('lumen_savings_summary', summary);
     TestBed.configureTestingModule({
       providers: [provideRouter([]), { provide: TauriBridge, useValue: bridge }, SessionService],
     });
@@ -160,16 +163,33 @@ describe('Details', () => {
       expect(fixture.nativeElement.querySelector('.provenance')).toBeNull();
     });
 
-    it('shows the token ratio, rounded to one decimal', async () => {
-      const d = await build(report({ lifetimeOptimizedTokens: 6_666, lifetimeFullTokens: 10_000 }));
+    it('shows the savings summary\'s share, rounded to one decimal', async () => {
+      const d = await build(
+        report({ lifetimeOptimizedTokens: 6_666, lifetimeFullTokens: 10_000 }),
+        savingsSummary({ allTime: recordedPeriod(6_666, null, { sharePct: 66.66 }) }),
+      );
       expect(d.effectPct()).toBe(66.7);
       expect(rendered('.effect')).toBe(
         'Intercepted reads returned 66.7% fewer tokens than the files they read, across every one recorded.',
       );
     });
 
-    it('never shows NaN or a negative ratio', async () => {
-      const d = await build(report({ lifetimeOptimizedTokens: 500, lifetimeFullTokens: 0 }));
+    it('shows a share below zero as more tokens, never as zero', async () => {
+      const d = await build(
+        report({ lifetimeOptimizedTokens: 100, lifetimeFullTokens: 1_000 }),
+        savingsSummary({ allTime: recordedPeriod(-50, null, { sharePct: -5 }) }),
+      );
+      expect(d.effectPct()).toBe(-5);
+      expect(rendered('.effect')).toBe(
+        'Intercepted reads returned 5% more tokens than the files they read, across every one recorded.',
+      );
+    });
+
+    it('never shows NaN, and shows nothing for a share there is not', async () => {
+      const d = await build(
+        report({ lifetimeOptimizedTokens: 500, lifetimeFullTokens: 0 }),
+        savingsSummary({ allTime: recordedPeriod(500, null, { sharePct: null }) }),
+      );
       expect(d.effectPct()).toBe(0);
       expect(text()).not.toContain('NaN');
     });

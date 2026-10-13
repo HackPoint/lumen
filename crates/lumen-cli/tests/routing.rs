@@ -120,22 +120,30 @@ fn every_old_fault_flag_alone_routes_to_the_fault_report() {
 }
 
 #[test]
-fn lumen_report_alone_is_the_savings_detail_stub_and_files_nothing() {
+fn lumen_report_alone_is_the_savings_detail_and_files_nothing() {
     let o = lumen(&["report"]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let out = stdout(&o);
-    assert!(out.contains("not computed yet"), "{out}");
+    // An empty sandbox has recorded nothing, and the detail says so, and how it would measure.
+    assert!(out.contains("nothing recorded"), "{out}");
+    assert!(out.contains("How it is measured"), "{out}");
     assert!(
-        out.contains("lumen faults"),
-        "it says where the fault report went: {out}"
-    );
-    assert!(
-        out.contains("lumen dash"),
-        "and where the dashboard went: {out}"
+        !out.contains('$'),
+        "no dollar figure where nothing was priced: {out}"
     );
     // Not a fault report: nothing was rendered or read for one.
     assert!(!out.contains("no faults recorded"), "{out}");
     assert!(!stderr(&o).contains("no faults recorded"), "{}", stderr(&o));
+}
+
+#[test]
+fn lumen_report_json_is_the_summary_the_app_receives() {
+    let o = lumen(&["report", "--json", "--as-of", "2026-10-14T12:00:00Z"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("JSON on stdout");
+    assert_eq!(v["asOf"], "2026-10-14T12:00:00Z");
+    assert_eq!(v["allTime"]["dataQuality"]["state"], "empty");
+    assert_eq!(v["status"]["state"], "noData");
 }
 
 #[test]
@@ -163,7 +171,7 @@ fn an_old_lumen_no_anim_still_opens_the_dashboard_and_says_where_it_moved() {
 fn no_anim_given_to_another_command_is_said_to_do_nothing() {
     let o = lumen(&["--no-anim", "report"]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert!(stdout(&o).contains("not computed yet"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("How it is measured"), "{}", stdout(&o));
     let said = stderr(&o);
     assert_eq!(said.lines().count(), 1, "{said}");
     assert!(

@@ -5,8 +5,9 @@
 // server-side and unknown locally, so nothing here is a "% of limit" or
 // "remaining". Usage carries no dollars: every token sum comes split by model, and the
 // frontend prices each model's share at that model's rates, from the table it gets
-// from `lumen_prices` (lumen_core::rates::PRICES). The one exception is the optimizer's
-// net value, below, which has no model to price by.
+// from `lumen_prices` (lumen_core::rates::PRICES). What Lumen saved, in tokens and dollars, is
+// not computed here: `savings_summary` loads the rows and `lumen_core::savings` does the rest,
+// for the app exactly as for the CLI.
 //
 // Every struct is the wire format the Angular frontend consumes. The
 // `rename_all = "camelCase"` attributes are load-bearing: renaming a field here
@@ -15,6 +16,9 @@
 use lumen_core::repeat::{
     ARM_TREATMENT, PLAN_FRESH, PLAN_UNIDENTIFIED, ROUTE_DELTA, ROUTE_RECALL_DELTA,
     ROUTE_RECALL_UNCHANGED, ROUTE_UNCHANGED,
+};
+use lumen_core::savings::{
+    self, BlockedReadRow, BoundaryRow, Clock, Ledger, SavingsSummary, load as sql,
 };
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -391,9 +395,9 @@ pub async fn get_sessions(pool: &SqlitePool) -> Result<Vec<SessionSummary>, Stri
 // Savings CAUSED by Lumen. Distinct from "caching saved", which is REPORTED by
 // Claude Code and stored in the turns table's cache_read column.
 //
-// saved_tokens is exact BPE measured per call. A read event records no model, so these
-// tokens carry no dollar figure of their own; the net value below prices them at the
-// savings model's assumed rates.
+// saved_tokens is a cl100k_base count per call. A read event records no model, so these
+// tokens carry no dollar figure here; `savings_summary` prices each call at the model of the
+// turn that read it.
 //
 // builtin_read rows have saved_tokens=0 and represent CLI-only "missed
 // optimizations" — surfaced honestly but NEVER counted as savings.
@@ -419,7 +423,7 @@ pub struct ToolBreakdown {
 /// What repeat reads did, counted apart from everything else in [`OptimizerReport`].
 ///
 /// A served answer is a row whose route is one of the four repeat routes. None of them is in
-/// [`LUMEN_ROUTES`], so the token totals, the breakdowns and the net value above do not include
+/// [`LUMEN_ROUTES`], so the token totals and the breakdowns above do not include
 /// these rows; the provenance counts, which take every row that carries a count, do.
 ///
 /// Served rows are found by route and by nothing else. In the A/B experiment a control row
@@ -485,24 +489,6 @@ pub struct OptimizerReport {
     /// `unsupported` have none and are in neither figure.
     pub provenance_total_rows: i64,
 
-    /// Net dollar value of interception: what the avoided tokens are worth, less what the
-    /// extra rounds cost.
-    ///
-    /// The headline from 1.4.0 on. The token ratio it replaces flattered the product — a
-    /// smaller reply that forces another round is a loss however good the ratio looks.
-    pub net_value_usd: f64,
-    pub gross_value_usd: f64,
-    pub round_cost_usd: f64,
-    /// Rounds a saving is assumed to keep paying for.
-    ///
-    /// Surfaced because the result is more sensitive to it than to anything else: the sign
-    /// holds across its plausible range but the magnitude moves by an order of magnitude,
-    /// so a UI that hid it would overstate its own precision. A per-call value needs the
-    /// transcript replay in `scripts/lumen_percall.py`; this is a measured constant.
-    pub value_rounds: f64,
-    /// Rounds each intercept actually costs. Measured at 1.604 — 60.4% of `smart_read`
-    /// calls are followed by a `recall_file` on the same file.
-    pub pair_multiplier: f64,
     /// Repeat reads, lifetime. Counted apart from every figure above.
     pub repeat_reads: RepeatReads,
 }
@@ -660,51 +646,6 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
     .await
     .map_err(|e| e.to_string())?;
 
-    // ── Net dollar value ─────────────────────────────────────────────────────
-    //
-    // Value of the tokens Lumen avoided, less the cost of the extra rounds interception
-    // forced. Computed here rather than in the frontend because it needs the context and
-    // output means from `turns`, and because one place computing it means one place to
-    // correct when per-call R lands.
-    //
-    // The context mean comes from this installation's own turns, excluding subagents:
-    // their context is not the context an interception adds to.
-    let (ctx_mean, out_mean, turn_count): (Option<f64>, Option<f64>, i64) = sqlx::query_as(
-        "SELECT AVG(cache_read_input_tokens), AVG(output_tokens), COUNT(*)
-         FROM turns WHERE COALESCE(is_subagent,0) = 0",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // Lumen-route calls and the tokens they avoided.
-    let (lumen_calls, lumen_saved): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(saved_tokens),0) FROM read_events
-         WHERE routed_via IN ('smart_read','recall_file','compress_logs','ranked_outline')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // A saved token avoids one cache write and a cache read on each remaining round.
-    //
-    // Both sides are priced at the Opus-class rates lumen_core::econ assumes, not per
-    // model: a read event records no model, and the means below pool every model's turns.
-    let value_per_token = (6.25 + 0.5 * VALUE_ROUNDS) / 1e6;
-    let gross = lumen_saved as f64 * value_per_token;
-
-    // With too few turns to average, the cost side is unknown — and reporting a gross
-    // figure with no cost against it is exactly the overstatement this replaces. Zero
-    // both, so the UI shows nothing rather than something flattering.
-    let round_cost = match (ctx_mean, out_mean) {
-        (Some(c), Some(o)) if turn_count >= 200 => {
-            let one_round = (c * 0.5 + o * 25.0) / 1e6;
-            lumen_calls as f64 * one_round * PAIR_MULTIPLIER
-        }
-        _ => 0.0,
-    };
-    let gross = if round_cost == 0.0 { 0.0 } else { gross };
-
     let repeat_reads = repeat_reads(pool).await?;
 
     Ok(OptimizerReport {
@@ -720,11 +661,6 @@ pub async fn get_optimizer_stats(pool: &SqlitePool) -> Result<OptimizerReport, S
         unmeasurable_calls,
         unverified_provenance_rows,
         provenance_total_rows,
-        net_value_usd: gross - round_cost,
-        gross_value_usd: gross,
-        round_cost_usd: round_cost,
-        value_rounds: VALUE_ROUNDS,
-        pair_multiplier: PAIR_MULTIPLIER,
         repeat_reads,
     })
 }
@@ -772,17 +708,162 @@ async fn repeat_reads(pool: &SqlitePool) -> Result<RepeatReads, String> {
     })
 }
 
-/// Rounds over which a saved token keeps paying, bounded by the next compaction.
-///
-/// Measured at a per-call median of 194–249 by replaying transcripts; the lower end is
-/// used so the published figure is the conservative one. Not the 65 assumed before 1.3.1,
-/// which was a session-length median rather than call-weighted — calls concentrate in long
-/// sessions.
-const VALUE_ROUNDS: f64 = 194.0;
+// ── Savings ──────────────────────────────────────────────────────────────────
+//
+// The app's loader for `lumen_core::savings`: the engine's own SQL (`savings::load`), run through
+// sqlx, into the engine's own rows. Nothing is computed here. The CLI runs the same statements
+// through rusqlite, and `crates/lumen-cli/tests/savings_parity.rs` holds the two summaries to the
+// same bytes.
 
-/// Rounds one intercept costs. 60.4% of `smart_read` calls are followed by a
-/// `recall_file` on the same file, so an intercept averages more than a single round.
-const PAIR_MULTIPLIER: f64 = 1.604;
+fn db_err(e: sqlx::Error) -> String {
+    e.to_string()
+}
+
+/// The engine's rows and clock at `now_ms`, read through `pool`. `spool` is the fault spool whose
+/// pending blocked Reads count too (`None` reads only the table).
+pub async fn load_savings_ledger(
+    pool: &SqlitePool,
+    now_ms: i64,
+    spool: Option<&std::path::Path>,
+) -> Result<(Ledger, Clock), String> {
+    let now_s = now_ms.div_euclid(1000);
+    let (week_start_s, week_start): (i64, String) = sqlx::query_as(sql::WEEK_SQL)
+        .bind(now_s)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+
+    let (packed,): (Option<String>,) = sqlx::query_as(sql::CALLS_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let calls = sql::parse_calls(packed.as_deref())?;
+
+    let mut blocked_reads: Vec<BlockedReadRow> = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(sql::BLOCKED_SQL)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .map(
+        |(ts, session_id, path, detail, agent_id, version)| BlockedReadRow {
+            ts,
+            session_id,
+            path,
+            detail,
+            agent_id,
+            version,
+        },
+    )
+    .collect();
+    let (spooled, spool_gap) = sql::spooled_blocked_reads(spool);
+    blocked_reads.extend(spooled);
+
+    let sessions = sql::sessions_json(&calls, &blocked_reads);
+    // Each chunk of sessions on a connection of its own, side by side, unpacked in chunk order.
+    let chunks = sql::session_chunks(&calls, &blocked_reads);
+    let packed: Vec<Vec<(String, String)>> =
+        futures_util::future::try_join_all(chunks.iter().map(|chunk| {
+            sqlx::query_as::<_, (String, String)>(sql::TURNS_SQL)
+                .bind(chunk)
+                .fetch_all(pool)
+        }))
+        .await
+        .map_err(db_err)?;
+    let (sessions_turns, classes) = sql::parse_chunks(packed)?;
+
+    let boundaries: Vec<BoundaryRow> =
+        sqlx::query_as::<_, (String, String, i64, Option<String>)>(sql::BOUNDARIES_SQL)
+            .bind(&sessions)
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?
+            .into_iter()
+            .map(|(session_id, kind, ts_ms, source_file)| BoundaryRow {
+                session_id,
+                kind,
+                ts_ms,
+                source_file,
+            })
+            .collect();
+
+    let (recent_turns,): (i64,) = sqlx::query_as(sql::RECENT_TURNS_SQL)
+        .bind(sql::recent_since(now_ms))
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let (events_from, subagent_events_from, meter_agents_from): (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ) = sqlx::query_as(sql::COVERAGE_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let (valve_sessions, valve_paths) = sql::valve_keys_json(&blocked_reads);
+    let (packed,): (Option<String>,) = sqlx::query_as(sql::VALVE_READS_SQL)
+        .bind(valve_sessions)
+        .bind(valve_paths)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let valve_reads = sql::parse_valve_reads(packed.as_deref())?;
+
+    Ok((
+        Ledger {
+            calls,
+            sessions: sessions_turns,
+            classes,
+            turns: Vec::new(),
+            boundaries,
+            blocked_reads,
+            recent_turns,
+            events_from,
+            subagent_events_from,
+            valve_reads,
+            meter_agents_from,
+            gaps: spool_gap.into_iter().collect(),
+        },
+        Clock {
+            now_ms,
+            week_start_ms: week_start_s * 1000,
+            week_start,
+        },
+    ))
+}
+
+/// The newest row of each table the summary reads (`savings::load::FINGERPRINT_SQL`): equal
+/// twice running, the ledger has not changed in between.
+pub async fn savings_fingerprint(pool: &SqlitePool) -> Result<[Option<i64>; 4], String> {
+    let (a, b, c, d): (Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
+        sqlx::query_as(sql::FINGERPRINT_SQL)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+    Ok([a, b, c, d])
+}
+
+/// What Lumen saved, as the app shows it: the engine's summary of the ledger `pool` holds, at
+/// `now_ms`.
+pub async fn savings_summary(
+    pool: &SqlitePool,
+    now_ms: i64,
+    spool: Option<&std::path::Path>,
+    facts: &savings::Facts,
+    cal: &dyn savings::Calibrator,
+) -> Result<SavingsSummary, String> {
+    let (ledger, clock) = load_savings_ledger(pool, now_ms, spool).await?;
+    Ok(savings::summarize(&ledger, &clock, facts, cal))
+}
 
 // ── Context diagnostics: where is the context actually going? ────────────────
 //

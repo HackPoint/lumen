@@ -178,6 +178,11 @@
     color: var(--lumen-text);
 }
 
+/* A share below zero: the calls returned more than the files held. Shown as the loss it is. */
+.effect__pct.is-loss {
+    color: var(--lumen-alert);
+}
+
 .provenance {
     width: 100%;
     margin: 0;

@@ -210,6 +210,9 @@ impl<'a> Run<'a> {
         if self.session.is_some() {
             rec.session_id = self.session.clone();
         }
+        // A subagent blocks and is let through in its own right: which one it was is what lets
+        // its block be counted apart from its parent's on the same file.
+        rec.agent_id = self.agent.clone();
         let Some(spool) = self.env.spool_path() else {
             self.say(
                 "lumen: no fault spool resolved (LUMEN_FAULT_SPOOL and LUMEN_DB unset, no home \
@@ -1448,5 +1451,13 @@ mod tests {
         assert_eq!(read(Some("agent-a")), 2);
         assert_eq!(read(Some("agent-a")), 0);
         assert_eq!(read(None), 0);
+        // Each release names whose Read it was, so the two blocks are counted apart: the
+        // subagent's fault carries its id, and the main agent's line is what it always was.
+        let recs = spool_lines(&tmp.path().join("faults.jsonl"));
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0]["variant"], "retry_escape_valve");
+        assert_eq!(recs[0]["agent_id"], "agent-a");
+        assert_eq!(recs[1]["variant"], "retry_escape_valve");
+        assert!(recs[1].get("agent_id").is_none(), "{:?}", recs[1]);
     }
 }

@@ -147,37 +147,13 @@ const INERT_REMEDY: &str = "how to fix it depends on how you installed Lumen. \
      server and no hooks, so there are no repeat reads to fix - install the Lumen app or the \
      plugin to get them. To turn repeat reads off instead, set LUMEN_REPEAT_READS=off";
 
-/// Whether a hook `matcher` selects `tool_name`. Claude Code reads a matcher made only of
-/// letters, digits, `_` and `|` as an exact name or a list of them, and anything else as a
-/// regular expression; the two spellings of "everything" and a trailing `.*` are the only
-/// regular expressions worth recognising here, since a wrongly raised finding sends the
-/// reader after something that is not broken.
-fn matcher_selects(matcher: &str, tool_name: &str) -> bool {
-    let m = matcher.trim();
-    if m.is_empty() || m == "*" || m == ".*" {
-        return true;
-    }
-    if let Some(prefix) = m.strip_suffix(".*") {
-        return tool_name.starts_with(prefix);
-    }
-    m.split('|').any(|name| name == tool_name)
-}
-
-/// The Lumen tools no PreToolUse hook in `settings` selects, as their short names.
+/// The Lumen tools no PreToolUse hook in `settings` selects, as their short names: the one
+/// predicate the app's Setup validator, its prompt and the savings summary also call
+/// (`lumen_core::identity_hook`), so a report and a prompt about the same file agree.
 pub fn identity_hook_missing(settings: &serde_json::Value) -> Vec<String> {
-    // No `hooks.PreToolUse` array is no entries: every Lumen tool is then reported as unhooked.
-    let none = Vec::new();
-    let entries = settings["hooks"]["PreToolUse"].as_array().unwrap_or(&none);
-    lumen_core::identity::TOOLS
-        .iter()
-        .filter(|tool| {
-            let full = format!("{}{tool}", lumen_core::identity::TOOL_PREFIX);
-            !entries.iter().any(|e| {
-                e["hooks"].as_array().is_some_and(|h| !h.is_empty())
-                    && matcher_selects(e["matcher"].as_str().unwrap_or(""), &full)
-            })
-        })
-        .map(|tool| tool.to_string())
+    lumen_core::identity_hook::missing(settings)
+        .into_iter()
+        .map(str::to_string)
         .collect()
 }
 
@@ -266,13 +242,12 @@ fn repeat_reads_inert(f: &Facts) -> Option<Finding> {
         Some(m) => m.clone(),
         None => Vec::new(),
     };
-    let seen = f.recent_repeat_plans;
-    let every_call_unidentified = seen.is_some_and(|(u, all)| all > 0 && u == all);
-    let some_call_identified = seen.is_some_and(|(u, all)| u < all);
-    if every_call_unidentified || (!missing.is_empty() && !some_call_identified) {
+    // The ledger's account wins over the file's, by the rule every surface shares.
+    let registered = f.identity_hook_missing.as_ref().map(Vec::is_empty);
+    if lumen_core::identity_hook::reaches_server(registered, f.recent_repeat_plans) == Some(false) {
         return Some(Finding::RepeatReadsInert {
             missing,
-            unidentified: seen,
+            unidentified: f.recent_repeat_plans,
         });
     }
     None
@@ -630,21 +605,7 @@ pub fn decide_repeat_reads(
 /// only, and `None` when the ledger cannot be opened or has no such column (a database from
 /// before 1.7.0), which the report says rather than reading as "none".
 fn recent_repeat_plans(db: &std::path::Path) -> Option<(u64, u64)> {
-    let conn =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let (unidentified, all): (i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(repeat_plan = ?1), 0), COUNT(*) FROM (
-                 SELECT repeat_plan FROM read_events
-                 WHERE routed_via IN ('smart_read', 'recall_file', 'compress_logs')
-                   AND repeat_plan IS NOT NULL
-                 ORDER BY rowid DESC LIMIT 50)",
-            [lumen_core::repeat::PLAN_UNIDENTIFIED],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok()?;
-    Some((u64::try_from(unidentified).ok()?, u64::try_from(all).ok()?))
+    lumen_core::identity_hook::recent_plans(db)
 }
 
 /// Collect what we can. Every field is optional because doctor's whole purpose is to run on a
@@ -1370,6 +1331,28 @@ mod tests {
         assert_eq!(identity_hook_missing(&serde_json::json!({})).len(), 3);
         let other = settings_with(serde_json::json!([entry("mcp__other__smart_read")]));
         assert_eq!(identity_hook_missing(&other).len(), 3);
+    }
+
+    /// The app's Setup validator and prompt never counted another tool's command, nor an entry
+    /// with no matcher, and until 1.9.0 this did, so the terminal said "registered" of a file the
+    /// window called missing. Both call one predicate now.
+    #[test]
+    fn another_tools_command_and_an_entry_with_no_matcher_are_not_lumens_hook() {
+        let foreign = |m: &str| serde_json::json!({ "matcher": m, "hooks": [{ "command": "/opt/other-tool.sh" }] });
+        let three: Vec<serde_json::Value> = lumen_core::identity::MATCHERS
+            .iter()
+            .map(|m| foreign(m))
+            .collect();
+        assert_eq!(
+            identity_hook_missing(&settings_with(serde_json::Value::from(three))),
+            ["smart_read", "recall_file", "compress_logs"]
+        );
+        let unmatched = serde_json::json!({ "hooks": { "PreToolUse": [
+            { "hooks": [{ "command": "/h/lumen_read_intercept.sh" }] }
+        ] } });
+        assert_eq!(identity_hook_missing(&unmatched).len(), 3);
+        // And what both read as registered, this reads so too.
+        assert!(identity_hook_missing(&settings_with(serde_json::json!([entry(".*")]))).is_empty());
     }
 
     /// settings.json alone cannot condemn a plugin install, whose hooks live in the plugin:
