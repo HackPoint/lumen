@@ -171,6 +171,11 @@ export class Session {
     return call(this.base, 'POST', `${this.p}/window`, { handle });
   }
 
+  /** The window's viewport as a PNG, as the platform's driver draws it. */
+  async screenshot() {
+    return Buffer.from(await call(this.base, 'GET', `${this.p}/screenshot`), 'base64');
+  }
+
   /** Run `script` in the page; a returned promise is awaited. */
   run(script, ...args) {
     return call(this.base, 'POST', `${this.p}/execute/sync`, { script, args });

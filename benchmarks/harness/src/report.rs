@@ -25,7 +25,7 @@ pub struct Results {
     pub corpus: Vec<CorpusInfo>,
     pub builds: Vec<BuildInfo>,
     pub latency: Option<LatencySection>,
-    pub model: Model,
+    pub savings: Savings,
     pub environment: Environment,
 }
 
@@ -101,69 +101,36 @@ pub struct LatencySection {
     pub builds: Vec<BuildLatency>,
 }
 
+/// What this document says about dollars: none, and why.
+///
+/// Until 1.9.0 every token table carried a "modelled $/call" column, priced at Opus-class rates
+/// with a fixed rounds-remaining figure. A saving's dollar value depends on the turn that read
+/// the call's result and on how many rounds followed it, which is what `lumen_core::savings`
+/// derives from a ledger's turns. A corpus run has no turns, so it has no dollar figure to give.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Rates {
-    pub input: f64,
-    pub output: f64,
-    pub cache_read: f64,
-    pub cache_write: f64,
+pub struct Savings {
+    pub dollars: String,
+    pub engine: String,
+    pub reason: String,
+    /// The engine's calibrator: whether these cl100k_base counts are converted to Claude's.
+    pub calibrated: bool,
+    pub calibration_note: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Model {
-    /// Every dollar figure in this document is this, never a measurement.
-    pub status: String,
-    pub source: String,
-    pub rates_usd_per_million_tokens: Rates,
-    pub rates_note: String,
-    pub context_tokens: f64,
-    pub output_tokens: f64,
-    pub rounds_remaining: f64,
-    pub inputs_source: String,
-    pub formula: String,
-    pub value_per_token_usd: f64,
-    pub extra_round_cost_usd: f64,
-    pub s_min_tokens: Option<f64>,
-}
-
-fn round9(x: f64) -> f64 {
-    (x * 1e9).round() / 1e9
-}
-
-/// The economics model, as the code in `lumen-core` defines it.
-pub fn model() -> Model {
-    let e = lumen_core::econ::Econ::default();
-    use lumen_core::rates;
-    Model {
-        status: "modelled".to_string(),
-        source: "crates/lumen-core/src/econ.rs (Econ::default) and crates/lumen-core/src/rates.rs"
+/// The savings section, from the engine itself.
+pub fn savings() -> Savings {
+    use lumen_core::savings::Calibrator;
+    let cal = lumen_core::savings::Uncalibrated.info();
+    Savings {
+        dollars: "none".to_string(),
+        engine: "lumen_core::savings (crates/lumen-core/src/savings)".to_string(),
+        reason: "A saving's dollar value is priced at the model of the turn that read the call's \
+                 result, over the rounds that followed it, and less the extra round the call \
+                 cost: the savings engine derives these from a ledger's turns. A corpus run has \
+                 no turns, so this document gives tokens only."
             .to_string(),
-        rates_usd_per_million_tokens: Rates {
-            input: round9(rates::INPUT * 1e6),
-            output: round9(rates::OUTPUT * 1e6),
-            cache_read: round9(rates::CACHE_READ * 1e6),
-            cache_write: round9(rates::CACHE_WRITE * 1e6),
-        },
-        rates_note:
-            "rates.rs labels these Sonnet 3.5 / 3.7 / 4 pricing. The harness does not check \
-                     them against a current price list; they are the model's inputs, not a quote."
-                .to_string(),
-        context_tokens: e.context_tokens,
-        output_tokens: e.output_tokens,
-        rounds_remaining: e.rounds_remaining,
-        inputs_source: format!(
-            "{}: means over 19,161 main-agent turns of the Lumen author's own sessions (econ.rs); \
-             another user's profile differs",
-            e.source.as_str()
-        ),
-        formula: "value of one saved token = (cache_write + cache_read x rounds_remaining) / 1e6 \
-                  dollars; one intercepted Read costs one extra round = (context x cache_read + \
-                  output x output_rate) / 1e6 dollars; a dollar figure below is the median saved \
-                  tokens of a call x the value of one token"
-            .to_string(),
-        value_per_token_usd: round9(e.value_per_token()),
-        extra_round_cost_usd: round9(e.round_cost()),
-        s_min_tokens: e.s_min().map(|s| s.round()),
+        calibrated: cal.calibrated,
+        calibration_note: cal.note,
     }
 }
 
@@ -281,10 +248,6 @@ fn dist_cell(d: Option<&Dist>) -> (String, String) {
     })
 }
 
-fn usd_cell(v: Option<f64>) -> String {
-    v.map_or("-".to_string(), |v| format!("${v:.4}"))
-}
-
 fn routes_cell(m: &BTreeMap<String, usize>) -> String {
     if m.is_empty() {
         return "-".to_string();
@@ -314,7 +277,7 @@ fn find_group<'a>(
         .map(|n| &n.stat)
 }
 
-/// One table: a row per group, `full` once, then median / p90 / modelled dollars per build.
+/// One table: a row per group, `full` once, then median and p90 per build.
 fn token_table(r: &Results, mode: Mode, by_language: bool) -> String {
     let tokens: Vec<(&BuildInfo, &Aggregates)> = r
         .builds
@@ -332,12 +295,12 @@ fn token_table(r: &Results, mode: Mode, by_language: bool) -> String {
     let mut s = String::new();
     let _ = write!(s, "| {axis} | n | full med | full p90 |");
     for (b, _) in &tokens {
-        let _ = write!(s, " {0} med | {0} p90 | {0} modelled $/call |", b.label);
+        let _ = write!(s, " {0} med | {0} p90 |", b.label);
     }
     s.push('\n');
     s.push_str("|---|---:|---:|---:|");
     for _ in &tokens {
-        s.push_str("---:|---:|---:|");
+        s.push_str("---:|---:|");
     }
     s.push('\n');
     let rows: Vec<(String, Option<&str>, Option<&str>)> = if by_language {
@@ -386,9 +349,9 @@ fn token_table(r: &Results, mode: Mode, by_language: bool) -> String {
                 Some(g) => {
                     let m = mode.of(g);
                     let (med, p90) = dist_cell(m.returned.as_ref());
-                    let _ = write!(s, " {med} | {p90} | {} |", usd_cell(m.modelled_usd_median));
+                    let _ = write!(s, " {med} | {p90} |");
                 }
-                None => s.push_str(" - | - | - |"),
+                None => s.push_str(" - | - |"),
             }
         }
         s.push('\n');
@@ -662,9 +625,9 @@ pub fn summary(r: &Results) -> String {
     let _ = writeln!(
         s,
         "- **MEASURED**: token counts (real `{}` tokenizer) and latencies (monotonic clock).\n\
-         - **MODELLED**: every dollar figure. `{}`. Not measured, not a bill.\n\
+         - **No dollar figure** (see the end).\n\
          - Tokenizer: `{}` is a proxy for Claude's tokenizer. {}\n",
-        r.tokenizer.name, r.model.source, r.tokenizer.name, r.tokenizer.caveat
+        r.tokenizer.name, r.tokenizer.name, r.tokenizer.caveat
     );
 
     s.push_str("## Builds\n\n| label | role | commit | profile | per-call identity | reports version |\n|---|---|---|---|---|---|\n");
@@ -738,9 +701,7 @@ pub fn summary(r: &Results) -> String {
             "\n## Tokens per call (MEASURED)\n\nMedian and p90 over files, of the tokens the call \
              returned. `full` is the file's own tokens (what a plain Read puts in context), over \
              every file of the group; `n` is the files the mode applies to (a file with no named \
-             item has no recall). The dollar column is MODELLED: the median tokens saved by the \
-             call, times the model's value of one saved token. It does not include the one extra \
-             round an intercepted Read costs (below).\n",
+             item has no recall).\n",
         );
         for by_language in [false, true] {
             let _ = writeln!(
@@ -870,30 +831,10 @@ pub fn summary(r: &Results) -> String {
         }
     }
 
-    let m = &r.model;
     let _ = write!(
         s,
-        "\n## Dollars (MODELLED)\n\nEvery dollar figure above is `{}`: a model's arithmetic on measured token counts, not a measured cost.\n\n\
-         - Source: {}\n- Rates, USD per million tokens: input {}, output {}, cache read {}, cache write {}. {}\n\
-         - Inputs: context {} tokens, output {} tokens, {} rounds remaining. {}\n\
-         - Value of one saved token: ${} (modelled). One extra round for an intercepted Read: ${} (modelled), which {} saved tokens pay for.\n\
-         - Formula: {}\n",
-        m.status,
-        m.source,
-        m.rates_usd_per_million_tokens.input,
-        m.rates_usd_per_million_tokens.output,
-        m.rates_usd_per_million_tokens.cache_read,
-        m.rates_usd_per_million_tokens.cache_write,
-        m.rates_note,
-        m.context_tokens,
-        m.output_tokens,
-        m.rounds_remaining,
-        m.inputs_source,
-        m.value_per_token_usd,
-        m.extra_round_cost_usd,
-        m.s_min_tokens
-            .map_or("an unknown number of".to_string(), |t| format!("{t:.0}")),
-        m.formula,
+        "\n## Dollars\n\nNone: {} Engine: {}. Calibration: {}\n",
+        r.savings.reason, r.savings.engine, r.savings.calibration_note
     );
     s
 }
@@ -920,16 +861,11 @@ mod tests {
     }
 
     #[test]
-    fn the_model_says_what_it_is() {
-        let m = model();
-        assert_eq!(m.status, "modelled");
-        assert_eq!(m.rates_usd_per_million_tokens.cache_read, 0.5);
-        assert_eq!(m.rates_usd_per_million_tokens.cache_write, 6.25);
-        assert_eq!(m.value_per_token_usd, 0.00003875);
-        assert!(
-            m.s_min_tokens
-                .is_some_and(|s| (5_000.0..6_000.0).contains(&s))
-        );
+    fn the_document_gives_no_dollar_figure_and_says_why() {
+        let m = savings();
+        assert_eq!(m.dollars, "none");
+        assert!(m.reason.contains("no turns"), "{}", m.reason);
+        assert!(m.engine.contains("lumen_core::savings"));
     }
 
     #[test]
@@ -1002,7 +938,7 @@ mod tests {
                 subjects: vec![],
                 builds: vec![lb("v1.7.0", base_block), lb("pre", cand_block)],
             }),
-            model: model(),
+            savings: savings(),
             environment: crate::env::probe(),
         }
     }

@@ -10,6 +10,7 @@ import {
 } from '@tauri-apps/plugin-notification';
 import { Observable } from 'rxjs';
 import type { RepeatReadsSetting } from './components/index';
+import type { BillingMode, BillingModeSetting } from './billing-mode.service';
 
 /**
  * The whole surface Lumen uses from the Tauri runtime, behind one injectable.
@@ -56,6 +57,16 @@ export class TauriBridge {
   /** Write the switch to the settings file; resolves to what the file says afterwards. */
   setRepeatReadsSetting(on: boolean): Promise<RepeatReadsSetting> {
     return this.invoke<RepeatReadsSetting>('set_repeat_reads_setting', { on });
+  }
+
+  /** How the user pays for Claude Code, as the settings file holds it. */
+  getBillingModeSetting(): Promise<BillingModeSetting> {
+    return this.invoke<BillingModeSetting>('get_billing_mode_setting');
+  }
+
+  /** Write the billing mode to the settings file; resolves to what the file says afterwards. */
+  setBillingModeSetting(mode: BillingMode): Promise<BillingModeSetting> {
+    return this.invoke<BillingModeSetting>('set_billing_mode_setting', { mode });
   }
 
   isPermissionGranted(): Promise<boolean> {

@@ -9,8 +9,12 @@
 //! a temp dir never sees a developer's real setting):
 //!
 //! ```json
-//! { "repeat_reads": false }
+//! { "repeat_reads": false, "billing_mode": "subscription" }
 //! ```
+//!
+//! `billing_mode` is how the user pays for Claude Code, asked once in the app (1.9.0). It is
+//! read and validated like `repeat_reads`, from the same capped read, but it decides nothing
+//! here: a bad value in it is reported where it is read and leaves repeat reads alone.
 //!
 //! It is read on every `tools/call`, not once at startup: a setting change takes effect on the
 //! very next read, with no restart of Claude Code. The read is one stat and one small read,
@@ -30,10 +34,34 @@ pub const REPEAT_READS_ENV: &str = "LUMEN_REPEAT_READS";
 pub const FILE_NAME: &str = "lumen_settings.json";
 /// The key in the file.
 pub const REPEAT_READS_KEY: &str = "repeat_reads";
+/// The key for how the user pays for Claude Code.
+pub const BILLING_MODE_KEY: &str = "billing_mode";
 /// The most the settings file may hold. It is read on every call; a larger one is a mistake.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// The most characters of a bad value that a problem repeats back.
 const ECHO_MAX: usize = 64;
+
+/// Held by every writer from its read of the file to its rename, so two writers in this process
+/// take turns.
+///
+/// Each writer reads the file, changes its own key and writes the whole object back. The app
+/// runs the Repeat reads switch and the billing choice on separate blocking tasks, and without
+/// this two of them at once could each write back the other's old value: a lost
+/// `repeat_reads: false` turns repeat reads back on with nothing said. Only the app writes the
+/// file; across processes each write is still whole (it is renamed into place) and the last
+/// one wins.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Numbers each temporary file this process writes, so no two writes share one.
+static WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The writers' turn. A writer that panicked holding it cannot have left half a file, since the
+/// file is only ever replaced by a rename, so a poisoned lock is taken as it stands.
+fn write_turn() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Where the setting file is for a ledger at `db`.
 pub fn settings_path(db: &Path) -> PathBuf {
@@ -76,9 +104,9 @@ impl Problem {
             Problem::File(why) => format!(
                 "{} cannot be used ({why}): repeat reads are off, every read is in full. \
                  Fix or delete the file (deleting it gives the default, on), or choose a \
-                 setting with the Repeat reads switch on the Context tab of the main window \
-                 in the Lumen app, which rewrites it. Setting {REPEAT_READS_ENV} to on or off \
-                 takes precedence over the file.",
+                 setting with the Repeat reads switch on the Settings screen of the main \
+                 window in the Lumen app, which rewrites it. Setting {REPEAT_READS_ENV} to on \
+                 or off takes precedence over the file.",
                 file.display()
             ),
         }
@@ -158,17 +186,28 @@ fn parse_env(v: Option<&str>) -> Option<Result<Mode, String>> {
     })
 }
 
-/// The setting file's meaning: `Ok(None)` when it says nothing about repeat reads.
-fn parse_file(state: &FileState) -> Result<Option<bool>, String> {
+/// The file's top-level object: `Ok(None)` when there is no file, `Err` when it cannot be used.
+/// Every key is read through this, so each says the same about a file that is not a setting.
+fn parse_object(
+    state: &FileState,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
     let text = match state {
         FileState::Absent => return Ok(None),
         FileState::Unreadable(why) => return Err(format!("unreadable: {why}")),
         FileState::Text(t) => t,
     };
     let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
-    let obj = v
-        .as_object()
-        .ok_or_else(|| "not a JSON object".to_string())?;
+    match v {
+        serde_json::Value::Object(obj) => Ok(Some(obj)),
+        _ => Err("not a JSON object".to_string()),
+    }
+}
+
+/// The setting file's meaning: `Ok(None)` when it says nothing about repeat reads.
+fn parse_file(state: &FileState) -> Result<Option<bool>, String> {
+    let Some(obj) = parse_object(state)? else {
+        return Ok(None);
+    };
     match obj.get(REPEAT_READS_KEY) {
         None => Ok(None),
         Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
@@ -254,6 +293,65 @@ fn with_env(file: &FileState) -> Resolved {
     }
 }
 
+/// How the user pays for Claude Code, which decides what a saving is worth to them: on the API a
+/// token not sent is money not spent, on a subscription it is room under the plan's limits.
+///
+/// There is no default. The file says nothing until the user has answered the app's question,
+/// and "not asked yet" is a state of its own (`Ok(None)` from [`billing_mode_for`]), never a
+/// guess at one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingMode {
+    /// A Claude Pro or Max plan.
+    Subscription,
+    /// The API, paid per token.
+    Api,
+}
+
+impl BillingMode {
+    /// The spelling in the file and between the app's window and its backend.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BillingMode::Subscription => "subscription",
+            BillingMode::Api => "api",
+        }
+    }
+
+    /// The mode `s` spells, exactly; anything else is not one. Exact because the file is
+    /// written by the app, and a near miss is more likely a mistake than a choice.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "subscription" => Some(BillingMode::Subscription),
+            "api" => Some(BillingMode::Api),
+            _ => None,
+        }
+    }
+}
+
+/// What the file says about billing mode: `Ok(None)` when nothing (not asked yet), `Err(why)`
+/// when the file cannot be used or the value is not a mode. An unknown value is rejected and
+/// repeated back short, as a bad `repeat_reads` is.
+pub fn parse_billing_mode(state: &FileState) -> Result<Option<BillingMode>, String> {
+    let Some(obj) = parse_object(state)? else {
+        return Ok(None);
+    };
+    let Some(value) = obj.get(BILLING_MODE_KEY) else {
+        return Ok(None);
+    };
+    match value.as_str().and_then(BillingMode::parse) {
+        Some(mode) => Ok(Some(mode)),
+        None => Err(format!(
+            "{BILLING_MODE_KEY} must be \"subscription\" or \"api\", not {}",
+            bounded(&value.to_string())
+        )),
+    }
+}
+
+/// The billing mode for a ledger at `db`, read now, through the same capped read as the
+/// repeat-reads switch.
+pub fn billing_mode_for(db: &Path) -> Result<Option<BillingMode>, String> {
+    parse_billing_mode(&read_file(&settings_path(db)))
+}
+
 /// Say what is wrong: one fault row (at most one per `min_interval` per variant, so a
 /// per-call check does not write a row per read) and, the first time, one line on stderr.
 pub fn surface(problem: &Problem, file: &Path, min_interval: std::time::Duration) {
@@ -274,6 +372,7 @@ pub fn surface(problem: &Problem, file: &Path, min_interval: std::time::Duration
 /// used is replaced: choosing the setting is the repair.
 pub fn write_repeat_reads(db: &Path, on: bool) -> std::io::Result<()> {
     let path = settings_path(db);
+    let _turn = write_turn();
     let mut obj = match read_file(&path) {
         FileState::Text(t) => match serde_json::from_str::<serde_json::Value>(&t) {
             Ok(serde_json::Value::Object(o)) => o,
@@ -282,14 +381,57 @@ pub fn write_repeat_reads(db: &Path, on: bool) -> std::io::Result<()> {
         FileState::Absent | FileState::Unreadable(_) => serde_json::Map::new(),
     };
     obj.insert(REPEAT_READS_KEY.to_string(), serde_json::Value::Bool(on));
+    write_object(&path, obj)
+}
+
+/// Write the billing mode for a ledger at `db`. The Billing mode setting in the Lumen app
+/// (`set_billing_mode_setting`) calls this.
+///
+/// Other keys are kept, as [`write_repeat_reads`] keeps them. Unlike that writer, this one
+/// leaves a file that cannot be used alone and returns why: replacing it would drop whatever it
+/// said about repeat reads, and a file that cannot be used means repeat reads are off, so a
+/// file holding only this key would turn them back on, which nobody chose here. The Repeat
+/// reads switch is the repair for such a file.
+pub fn write_billing_mode(db: &Path, mode: BillingMode) -> std::io::Result<()> {
+    let path = settings_path(db);
+    let _turn = write_turn();
+    // Not naming the path: every caller says which file it was writing.
+    let existing = parse_object(&read_file(&path)).map_err(|why| {
+        std::io::Error::other(format!(
+            "the settings file cannot be used ({why}), so it is left as it is"
+        ))
+    })?;
+    // No file yet: this is the first key in a new one.
+    let mut obj = match existing {
+        Some(obj) => obj,
+        None => serde_json::Map::new(),
+    };
+    obj.insert(
+        BILLING_MODE_KEY.to_string(),
+        serde_json::Value::String(mode.as_str().to_string()),
+    );
+    write_object(&path, obj)
+}
+
+/// Write `obj` as the settings file at `path`: atomic (written beside, renamed into place) so
+/// a reader never sees half a file, and private to this user. The caller holds [`write_turn`].
+///
+/// The temporary name carries the process id and a number of its own: with the process id
+/// alone, two writes at once wrote the same file, and one renamed it away before the other
+/// could, which then failed.
+fn write_object(
+    path: &Path,
+    obj: serde_json::Map<String, serde_json::Value>,
+) -> std::io::Result<()> {
     let body = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
         .map_err(std::io::Error::other)?;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let seq = WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()));
     write_private(&tmp, body.as_bytes())?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
+    if let Err(e) = std::fs::rename(&tmp, path) {
         if let Err(rm) = std::fs::remove_file(&tmp) {
             eprintln!("lumen: cannot remove {}: {rm}", tmp.display());
         }
@@ -463,7 +605,7 @@ mod tests {
         assert!(said.contains(REPEAT_READS_ENV), "{said}");
         // The main window's switch rewrites the file, so it repairs a file that cannot be used.
         assert!(
-            said.contains("Repeat reads switch on the Context tab of the main window"),
+            said.contains("Repeat reads switch on the Settings screen of the main window"),
             "{said}"
         );
         // It writes the file, and the variable outranks the file: a bad value there is not
@@ -471,7 +613,7 @@ mod tests {
         assert!(
             !Problem::Env("x".into())
                 .describe(file)
-                .contains("Context tab"),
+                .contains("Settings screen"),
             "the same for the environment variable's message"
         );
     }
@@ -669,6 +811,229 @@ mod tests {
         assert_eq!(
             resolve(Some("bogus"), &FileState::Absent).problem,
             Some(Problem::Env("bogus".into()))
+        );
+    }
+
+    // ── billing mode ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn each_billing_mode_is_read_as_itself() {
+        for (body, mode) in [
+            (
+                r#"{"billing_mode":"subscription"}"#,
+                BillingMode::Subscription,
+            ),
+            (r#"{"billing_mode":"api"}"#, BillingMode::Api),
+            (
+                r#"{"repeat_reads":false,"billing_mode":"api"}"#,
+                BillingMode::Api,
+            ),
+        ] {
+            assert_eq!(parse_billing_mode(&text(body)), Ok(Some(mode)), "{body}");
+        }
+    }
+
+    #[test]
+    fn no_file_or_no_key_is_not_asked_yet() {
+        assert_eq!(parse_billing_mode(&FileState::Absent), Ok(None));
+        for body in [
+            "{}",
+            r#"{"repeat_reads":true}"#,
+            r#"{"Billing_Mode":"api"}"#,
+        ] {
+            assert_eq!(parse_billing_mode(&text(body)), Ok(None), "{body}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_or_wrong_typed_billing_mode_is_rejected_and_repeated_back() {
+        for (body, echoed) in [
+            (r#"{"billing_mode":"pro"}"#, r#""pro""#),
+            (r#"{"billing_mode":"API"}"#, r#""API""#),
+            (r#"{"billing_mode":" api"}"#, r#"" api""#),
+            (r#"{"billing_mode":""}"#, r#""""#),
+            (r#"{"billing_mode":true}"#, "true"),
+            (r#"{"billing_mode":1}"#, "1"),
+            (r#"{"billing_mode":null}"#, "null"),
+            (r#"{"billing_mode":["api"]}"#, r#"["api"]"#),
+        ] {
+            let why = parse_billing_mode(&text(body)).unwrap_err();
+            assert_eq!(
+                why,
+                format!(r#"billing_mode must be "subscription" or "api", not {echoed}"#),
+                "{body}"
+            );
+        }
+        let long = "z".repeat(10_000);
+        let why =
+            parse_billing_mode(&text(&format!(r#"{{"billing_mode":"{long}"}}"#))).unwrap_err();
+        assert!(why.ends_with(&format!("\"{}…", "z".repeat(63))), "{why}");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_used_is_an_error_for_billing_mode_too() {
+        for body in ["{not json", "", "[]", "\"api\""] {
+            assert!(parse_billing_mode(&text(body)).is_err(), "{body:?}");
+        }
+        assert!(
+            parse_billing_mode(&FileState::Unreadable("permission denied".into()))
+                .unwrap_err()
+                .starts_with("unreadable:")
+        );
+    }
+
+    #[test]
+    fn a_settings_file_over_the_cap_gives_no_billing_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ledger.db");
+        let path = settings_path(&db);
+        let bare = r#"{"billing_mode":"api","pad":""}"#.len();
+        let padded = |len: usize| {
+            format!(
+                r#"{{"billing_mode":"api","pad":"{}"}}"#,
+                "x".repeat(len - bare)
+            )
+        };
+        std::fs::write(&path, padded(MAX_FILE_BYTES as usize)).unwrap();
+        assert_eq!(billing_mode_for(&db), Ok(Some(BillingMode::Api)));
+        std::fs::write(&path, padded(MAX_FILE_BYTES as usize + 1)).unwrap();
+        let why = billing_mode_for(&db).unwrap_err();
+        assert!(why.contains("larger than"), "{why}");
+    }
+
+    #[test]
+    fn a_bad_billing_mode_leaves_repeat_reads_alone_and_the_other_way_round() {
+        let r = resolve(
+            None,
+            &text(r#"{"repeat_reads":false,"billing_mode":"pro"}"#),
+        );
+        assert_eq!(
+            (r.mode, r.source, r.problem),
+            (Mode::Off, Source::File, None)
+        );
+        assert_eq!(
+            parse_billing_mode(&text(r#"{"repeat_reads":"yes","billing_mode":"api"}"#)),
+            Ok(Some(BillingMode::Api))
+        );
+    }
+
+    #[test]
+    fn what_the_billing_writer_writes_the_reader_reads_and_other_keys_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("not").join("yet").join("ledger.db");
+        assert_eq!(billing_mode_for(&db), Ok(None));
+        write_billing_mode(&db, BillingMode::Subscription).unwrap();
+        assert_eq!(billing_mode_for(&db), Ok(Some(BillingMode::Subscription)));
+        write_repeat_reads(&db, false).unwrap();
+        write_billing_mode(&db, BillingMode::Api).unwrap();
+        assert_eq!(billing_mode_for(&db), Ok(Some(BillingMode::Api)));
+        assert_eq!(read_file_mode(&db), Mode::Off, "repeat reads kept");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings_path(&db)).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "repeat_reads": false, "billing_mode": "api" })
+        );
+        let left: Vec<_> = std::fs::read_dir(settings_path(&db).parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, vec![FILE_NAME.to_string()]);
+    }
+
+    #[test]
+    fn the_billing_writer_repairs_a_bad_value_but_leaves_an_unusable_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ledger.db");
+        let path = settings_path(&db);
+        std::fs::write(&path, r#"{"billing_mode":"pro","theme":"dark"}"#).unwrap();
+        write_billing_mode(&db, BillingMode::Api).unwrap();
+        assert_eq!(billing_mode_for(&db), Ok(Some(BillingMode::Api)));
+        // A file that cannot be used turns repeat reads off; replacing it with this key alone
+        // would turn them back on. It is left byte for byte, and the error says why.
+        for body in ["{broken", "[]"] {
+            std::fs::write(&path, body).unwrap();
+            let err = write_billing_mode(&db, BillingMode::Subscription).unwrap_err();
+            assert!(err.to_string().contains("left as it is"), "{err}");
+            assert!(err.to_string().contains("cannot be used"), "{err}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+            assert_eq!(read_file_mode(&db), Mode::Off);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_billing_writer_writes_a_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ledger.db");
+        write_billing_mode(&db, BillingMode::Api).unwrap();
+        let mode = std::fs::metadata(settings_path(&db))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+
+    #[test]
+    fn each_billing_mode_spells_back_as_it_parses() {
+        for m in [BillingMode::Subscription, BillingMode::Api] {
+            assert_eq!(BillingMode::parse(m.as_str()), Some(m));
+        }
+    }
+
+    /// The app writes both keys from blocking tasks that can run at once (the Repeat reads
+    /// switch and the billing choice). Each writer reads the file, changes its key and writes
+    /// it back, so two at once could each keep the other's old value, and both used the same
+    /// temporary name, so one could rename the other's file away and fail. Measured before the
+    /// fix: of 2,000 rounds, 395 lost `repeat_reads: false` (repeat reads silently back on)
+    /// and 1,931 had a writer fail.
+    #[test]
+    fn two_writers_at_once_lose_neither_key_and_neither_fails() {
+        use std::sync::{Arc, Barrier};
+        const ROUNDS: usize = 300;
+        let (mut lost_repeat, mut lost_billing, mut failed) = (0, 0, Vec::new());
+        for _ in 0..ROUNDS {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("ledger.db");
+            let start = Arc::new(Barrier::new(2));
+            let (db_a, start_a) = (db.clone(), Arc::clone(&start));
+            let a = std::thread::spawn(move || {
+                start_a.wait();
+                write_repeat_reads(&db_a, false)
+            });
+            let (db_b, start_b) = (db.clone(), Arc::clone(&start));
+            let b = std::thread::spawn(move || {
+                start_b.wait();
+                write_billing_mode(&db_b, BillingMode::Api)
+            });
+            for result in [a.join().unwrap(), b.join().unwrap()] {
+                if let Err(e) = result {
+                    failed.push(e.to_string());
+                }
+            }
+            if read_file_mode(&db) != Mode::Off {
+                lost_repeat += 1;
+            }
+            if billing_mode_for(&db) != Ok(Some(BillingMode::Api)) {
+                lost_billing += 1;
+            }
+            let left: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                left,
+                vec![FILE_NAME.to_string()],
+                "a temporary file was left"
+            );
+        }
+        assert_eq!(
+            (lost_repeat, lost_billing, failed.len()),
+            (0, 0, 0),
+            "of {ROUNDS} rounds: repeat_reads lost, billing_mode lost, writers failed \
+             (first failure: {:?})",
+            failed.first()
         );
     }
 }

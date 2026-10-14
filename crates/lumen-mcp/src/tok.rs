@@ -1,5 +1,5 @@
-// lumen-tok — reads text from stdin, prints exact BPE token count to stdout.
-// Used by hook scripts for honest, non-estimated token metering.
+// lumen-tok — reads text from stdin, prints its cl100k_base token count to stdout.
+// Used by hook scripts so a metered count is a tokenizer's, never a bytes/4 guess.
 //
 // Usage: cat file.rs | lumen-tok
 //        echo "some text" | lumen-tok

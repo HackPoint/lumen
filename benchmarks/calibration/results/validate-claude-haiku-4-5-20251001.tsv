@@ -1,0 +1,16 @@
+time	kind	id	attempt	model_id	input	cache_creation	cache_read	total	reply
+2026-10-14T00:34:04Z	baseline	-	1	claude-haiku-4-5-20251001	771	0	0	771	OK
+2026-10-14T00:34:10Z	baseline	-	2	claude-haiku-4-5-20251001	771	0	0	771	OK
+2026-10-14T00:34:15Z	baseline	-	3	claude-haiku-4-5-20251001	771	0	0	771	OK
+2026-10-14T00:34:21Z	baseline	-	4	claude-haiku-4-5-20251001	771	0	0	771	OK
+2026-10-14T00:34:27Z	baseline	-	5	claude-haiku-4-5-20251001	771	0	0	771	OK
+2026-10-14T00:34:33Z	validate	rust-02	1	claude-haiku-4-5-20251001	2610	0	0	2610	OK
+2026-10-14T00:34:39Z	validate	rust-02	2	claude-haiku-4-5-20251001	2610	0	0	2610	OK
+2026-10-14T00:34:45Z	validate	prose-03	1	claude-haiku-4-5-20251001	2244	0	0	2244	OK
+2026-10-14T00:34:51Z	validate	prose-03	2	claude-haiku-4-5-20251001	2244	0	0	2244	OK
+2026-10-14T00:34:57Z	validate	tiny:x	1	claude-haiku-4-5-20251001	773	0	0	773	OK
+2026-10-14T00:35:03Z	validate	tiny:x	2	claude-haiku-4-5-20251001	773	0	0	773	OK
+2026-10-14T00:35:08Z	validate	tiny:hello world	1	claude-haiku-4-5-20251001	774	0	0	774	OK
+2026-10-14T00:35:13Z	validate	tiny:hello world	2	claude-haiku-4-5-20251001	774	0	0	774	OK
+2026-10-14T00:35:19Z	validate	rust-02+prose-03	1	claude-haiku-4-5-20251001	4083	0	0	4083	OK
+2026-10-14T00:35:25Z	validate	rust-02+prose-03	2	claude-haiku-4-5-20251001	4083	0	0	4083	OK

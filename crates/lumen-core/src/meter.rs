@@ -987,12 +987,23 @@ mod tests {
         let tables: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' \
-                 AND name IN ('turns','sessions','calibration','read_events')",
+                 AND name IN ('turns','calibration','read_events')",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(tables, 4);
+        assert_eq!(tables, 3);
+        let sessions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'sessions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sessions, 0,
+            "the dropped sessions table must not be created"
+        );
     }
 
     #[test]

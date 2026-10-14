@@ -1,0 +1,282 @@
+<main class="home">
+    <div class="home__inner">
+        <header class="home__head">
+            <lumen-firefly class="home__logo" mode="logo" state="full"></lumen-firefly>
+            <p class="brand__tag">Context &amp; cost for Claude Code</p>
+        </header>
+
+        <lumen-tab-nav />
+
+        <!-- How the user pays for Claude Code. Saved in the settings file; Home asks it once. -->
+        <section class="card" aria-labelledby="billing-title">
+            <h2 class="card__title" id="billing-title">Billing mode</h2>
+            <p class="card__intro">
+                How you pay for Claude Code. Lumen uses it to say what a saving is worth to you.
+            </p>
+
+            @if (billing.setting(); as b) {
+                <div class="billing" role="radiogroup" aria-labelledby="billing-title">
+                    @for (c of billingChoices; track c.mode) {
+                        <label class="billing__choice">
+                            <input
+                                class="billing__radio"
+                                type="radio"
+                                name="billing-mode"
+                                [value]="c.mode"
+                                [checked]="b.mode === c.mode"
+                                [attr.aria-disabled]="billing.saving() ? 'true' : null"
+                                (change)="onBillingMode($event, c.mode)">
+                            <span class="billing__label">{{ c.label }}</span>
+                        </label>
+                    }
+                </div>
+
+                @if (b.problem; as why) {
+                    <p class="card__state card__state--problem">
+                        The settings file {{ b.file }} holds no billing mode Lumen can use: {{ why }}.
+                        Choosing one replaces a bad value. A file that is not a JSON object is left as
+                        it is; the Repeat reads switch below rewrites it.
+                    </p>
+                } @else if (b.mode === null) {
+                    <p class="card__state">Not chosen yet.</p>
+                }
+            } @else if (billing.readError(); as err) {
+                <div class="card__unknown" role="alert">
+                    <p class="card__state card__state--problem">
+                        The billing mode could not be read: {{ err }}.
+                    </p>
+                    <button type="button" class="card__retry" (click)="billing.load()">Retry</button>
+                </div>
+            } @else {
+                <p class="card__state">Reading the settings file…</p>
+            }
+
+            @if (billing.writeError(); as werr) {
+                <p class="card__error" role="alert">Not saved: {{ werr }}</p>
+            }
+        </section>
+
+        <!-- Claude Code's spend: what the thresholds below are compared with. Not a Lumen saving,
+             which is why it is not on Home. -->
+        <section class="spend" aria-labelledby="spend-title">
+            <h2 class="card__title" id="spend-title">Spend</h2>
+            <cost [totals]="s.totals()" [priced]="s.sessionPriced()"></cost>
+            @if (s.usage(); as u) {
+                <usage [report]="u" [prices]="s.prices()"></usage>
+            }
+        </section>
+
+        <!-- D4+D5: alert settings (in-memory signals only — no localStorage). -->
+        <section class="limits" aria-label="Alert settings">
+            <h2 class="limits__title">Alert Thresholds</h2>
+
+            <div class="limits__fields">
+                <label class="limits__field">
+                    <span class="limits__label">Daily spend</span>
+                    <div class="limits__input-wrap">
+                        <span class="limits__currency" aria-hidden="true">$</span>
+                        <input
+                            class="limits__input"
+                            type="number"
+                            min="0"
+                            step="1"
+                            aria-label="Daily spend limit in dollars"
+                            [value]="s.dailySpendLimit()"
+                            (change)="onDailyLimit($event)">
+                    </div>
+                </label>
+                <label class="limits__field">
+                    <span class="limits__label">Per session</span>
+                    <div class="limits__input-wrap">
+                        <span class="limits__currency" aria-hidden="true">$</span>
+                        <input
+                            class="limits__input"
+                            type="number"
+                            min="0"
+                            step="1"
+                            aria-label="Per-session spend limit in dollars"
+                            [value]="s.sessionSpendLimit()"
+                            (change)="onSessionLimit($event)">
+                    </div>
+                </label>
+            </div>
+
+            <!-- D5: native notification toggle -->
+            <label class="limits__toggle-row">
+                <span class="toggle__track" [class.is-on]="s.nativeNotify()" aria-hidden="true">
+                    <span class="toggle__knob"></span>
+                </span>
+                <span class="limits__toggle-label">Native notifications</span>
+                <input
+                    class="sr-only"
+                    type="checkbox"
+                    aria-label="Enable native OS notifications"
+                    [checked]="s.nativeNotify()"
+                    (change)="onNativeNotify($event)">
+            </label>
+
+            <p class="limits__hint">
+                0 disables a spend alert. Resets to defaults on restart. An alert shows on Details,
+                beside the context gauge, and as a notification.
+            </p>
+            <!-- A limit the spend cannot be checked against says so: the alert stays quiet then. -->
+            @for (note of s.limitNotes(); track note) {
+                <p class="limits__hint" role="status">{{ note }}</p>
+            }
+        </section>
+
+        <!-- Repeat reads: the settings file's switch. Saved to disk, unlike the thresholds above. -->
+        <section class="repeat" aria-label="Repeat reads">
+            <h2 class="repeat__title">Repeat reads</h2>
+            <p class="repeat__intro">
+                When Claude reads a file again in the same conversation, Lumen answers with a short note
+                that it is unchanged, or with only what an edit changed, instead of the whole result.
+            </p>
+
+            @if (rr.setting(); as st) {
+                <label class="repeat__toggle-row">
+                    <span class="toggle__track" [class.is-on]="st.on" aria-hidden="true">
+                        <span class="toggle__knob"></span>
+                    </span>
+                    <span class="repeat__toggle-label">Repeat reads</span>
+                    <input
+                        class="sr-only"
+                        type="checkbox"
+                        aria-label="Repeat reads"
+                        [checked]="st.on"
+                        [attr.aria-disabled]="rr.saving() ? 'true' : null"
+                        (change)="onRepeatReads($event)">
+                </label>
+
+                @if (st.problem; as why) {
+                    <p class="repeat__state repeat__state--problem">
+                        The settings file {{ st.file }} could not be read: {{ why }}.
+                        Repeat reads are off until it is fixed. Switching on again rewrites the file.
+                    </p>
+                } @else if (!st.on) {
+                    <p class="repeat__state">Off, as the settings file says. Every read returns its full result.</p>
+                } @else if (st.source === 'file') {
+                    <p class="repeat__state">On, as the settings file says.</p>
+                } @else {
+                    <p class="repeat__state">On by default. The settings file does not turn it off.</p>
+                }
+            } @else if (rr.readError(); as err) {
+                <div class="repeat__unknown" role="alert">
+                    <p class="repeat__state repeat__state--problem">
+                        The repeat reads setting could not be read: {{ err }}.
+                        Lumen does not know whether repeat reads are on or off.
+                    </p>
+                    <button type="button" class="repeat__retry" (click)="rr.load()">Retry</button>
+                </div>
+            } @else {
+                <p class="repeat__state">Reading the settings file…</p>
+            }
+
+            @if (rr.writeError(); as werr) {
+                <p class="repeat__error" role="alert">Not saved: {{ werr }}</p>
+            }
+
+            @if (rr.setting(); as st) {
+                <p class="repeat__note">
+                    A change applies to the next Lumen read in every running Claude Code session, with no restart.
+                    It is saved in {{ st.file }}, so unlike the alert thresholds above it survives a restart.
+                </p>
+                <p class="repeat__note">
+                    This shows the settings file, not what the server will do: a LUMEN_REPEAT_READS value in a
+                    Claude Code MCP config takes priority over the file, and a LUMEN_DB there that points at
+                    another ledger makes the server read that ledger's settings file instead. This window cannot
+                    see either. A session that started with repeat reads off is not told about the fresh option
+                    until Claude Code restarts; every unchanged note still tells the model to pass fresh=true,
+                    and it is honoured.
+                </p>
+            }
+        </section>
+
+        <!-- One row until there is something to show: a maintenance affordance, so the explanation
+             lives in the tooltip rather than in a permanent block of prose. -->
+        <section class="fr" aria-labelledby="fr-title">
+            <div class="fr__bar">
+                <span class="fr__label" id="fr-title">
+                    Report a fault
+                    <span class="fr__info"
+                          [lumenTooltip]="'Routing, ingest and schema faults Lumen recorded on this machine. The report is metadata only — file names, line counts and content hashes, never file contents. Nothing is sent until you choose to file it.'">&#9432;</span>
+                </span>
+
+                @if (s.faultCount() > 0) {
+                    <span class="fr__count">{{ s.faultCount() }} recorded</span>
+                }
+
+                <span class="fr__actions">
+                    <button class="fr__btn" type="button" (click)="preview()"
+                            [disabled]="reportLoading()">
+                        {{ reportLoading() ? 'Checking…' : 'Check for faults' }}
+                    </button>
+
+                    @if (report()) {
+                        <button class="fr__btn fr__btn--primary" type="button" (click)="file()"
+                                [disabled]="filing() || alreadyFiled()">
+                            {{ filing() ? 'Filing…'
+                               : published() ? 'Filed'
+                               : alreadyFiled() ? 'Opened'
+                               : 'File issue' }}
+                        </button>
+                        <button class="fr__btn fr__btn--ghost" type="button" (click)="dismiss()"
+                                [disabled]="filing()">Dismiss</button>
+                    }
+                </span>
+            </div>
+
+            @if (reportNone()) {
+                <p class="fr__note">No faults recorded. Nothing to report.</p>
+            }
+
+            @if (reportError()) {
+                <p class="fr__error" role="alert">{{ reportError() }}</p>
+            }
+
+            @if (filed(); as f) {
+                <!-- A handoff opened a prefilled form and published nothing, so it must
+                     not be reported as filed. -->
+                @if (f.handoff) {
+                    <p class="fr__note">
+                        Opened a prefilled form in your browser — <strong>submit it there</strong>
+                        to file. Nothing has been posted yet.
+                        <a [href]="f.url" target="_blank" rel="noreferrer noopener">{{ f.url }}</a>
+                    </p>
+                } @else {
+                    <p class="fr__note fr__note--filed">
+                        {{ f.commented ? 'Commented on the existing issue' : 'Filed' }}
+                        via <code>{{ f.route }}</code>:
+                        <a [href]="f.url" target="_blank" rel="noreferrer noopener">{{ f.url }}</a>
+                    </p>
+                }
+                <!-- Which routes were passed over. A silent fallback hides that the
+                     preferred one is broken. -->
+                @for (step of f.fellBack; track step) {
+                    <p class="fr__note">Fell back — {{ step }}</p>
+                }
+            }
+
+            @if (report(); as r) {
+                <div class="fr__preview">
+                    <p class="fr__note">
+                        {{ r.kinds }} fault {{ r.kinds === 1 ? 'group' : 'groups' }},
+                        {{ r.occurrences }} {{ r.occurrences === 1 ? 'occurrence' : 'occurrences' }}
+                        · would file to <code>{{ r.repo }}</code> · this is the exact text
+                        that will be filed
+                    </p>
+                    <pre class="fr__body">{{ r.body }}</pre>
+                </div>
+            }
+        </section>
+
+        <!-- Where a build is identified when someone files a report, beside the button that files it. -->
+        <section class="about" aria-labelledby="about-title">
+            <h2 id="about-title" class="about__title">About</h2>
+            <dl class="about__list">
+                <dt class="about__term">Version</dt>
+                <dd class="about__version">{{ aboutVersion() }}</dd>
+            </dl>
+        </section>
+    </div>
+</main>

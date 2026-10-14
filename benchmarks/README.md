@@ -104,26 +104,28 @@ above the floor. A let-through Read on Windows cost 7.6% more than in 1.7.0 (2.7
 run), and the floor was 4.0% apart in that run (0.5% in the first), so that runner was the
 noisier one. Read the sizes from a shared runner as one draw, not as a constant.
 
-## MEASURED and MODELLED
+## What is measured
 
 | | what | how |
 |---|---|---|
 | MEASURED | token counts | the reply text of the real server, counted with the meter's tokenizer |
 | MEASURED | latencies | a monotonic clock around the real binary |
-| MODELLED | every dollar figure | the economics model in `crates/lumen-core/src/econ.rs`, applied to measured token counts |
 
-A dollar figure is never a measurement and is always labelled `modelled`. The model's rates are
-`rates.rs`: USD per million tokens, input 5, output 25, cache read 0.5, cache write 6.25, which
-that file labels "Sonnet 3.5 / 3.7 / 4 pricing". The harness does not check them against a
-current price list. The model's other inputs (context size, output per round, rounds remaining)
-are `Econ::default()`, averages over the author's own sessions; another person's profile differs.
-The value of one saved token is `(cache_write + cache_read x rounds_remaining) / 1e6` dollars,
-and a "$/call" cell is the median saved tokens of that call times that value.
+No dollar figure. Until 1.9.0 each token table had a "modelled $/call" column, priced at
+Opus-class rates with a fixed rounds-remaining figure from the author's own sessions. What a
+saved token is worth depends on the turn that read the call's result, on its model, and on how
+many rounds followed it before a compaction; `lumen_core::savings` derives all three from a
+ledger's turns, and a corpus run has none. The results' `savings` section says so, and whether
+the engine's token counts are calibrated to Claude's.
 
 ## The tokenizer is a proxy
 
 Tokens are counted with `lumen_core::tokenizer::count_tokens`: `cl100k_base`, the same tokenizer
-the meter uses. It is not Claude's tokenizer. Counts compare one way of reading a file with
+the meter uses. It is not Claude's tokenizer: on raw file text Claude Opus 4.7 and later count
+about 1.59× as many tokens (1.44–1.70×), and earlier models about 1.24× as many
+(1.14–1.31×), from the 10th to the 90th percentile of 60 samples measured against Claude's
+own usage data ([calibration](calibration/README.md), calibration of 2026-10-14; a `Read`'s line
+numbers are not in these ratios). Counts compare one way of reading a file with
 another; they are not a bill and not the number of tokens Claude would charge. The harness also
 re-counts every reply it receives and stops if the server's own figure disagrees, and it
 cross-checks each reply against the row the server wrote to its ledger.
@@ -291,8 +293,8 @@ lower-median file by line count among those with a representative item and an ed
 listed in the JSON and the summary. Hooks only ever see source files, and the repository is
 Rust, so latency does not depend on the other corpora.
 
-Latency varies, and on a shared machine it varies more than 20%. Tokens are exact; latency is
-not, and this section says how far. All runs below are the full latency run (42 series medians
+Latency varies, and on a shared machine it varies more than 20%. Token counts are the same on
+every run; latency is not, and this section says how far. All runs below are the full latency run (42 series medians
 across both builds, 45 in this release's run) on one Apple M4 laptop that other work was using, so
 its load average ranged from about 4 to 25 across them ("the committed run" is the first run
 committed here, from the harness's development; this release's run replaced it):
@@ -377,8 +379,6 @@ file), and say whether it ran on mains or battery. Do not quote a latency figure
 - cl100k_base is a proxy (see above).
 - Latency is warm-start: the ledger file, the page cache and the tokenizer's tables are warm.
   The first call after boot is slower.
-- The dollar figures are a model of the author's usage with unverified rates; they say what a
-  saved token is worth under that model, not what anyone was charged.
 - Ubuntu and Windows: only the latency part runs there (`--latency-only`: `run.ps1` on Windows,
   or the Benchmarks workflow). The committed runs are from GitHub-hosted runners, which are shared
   virtual machines with 4 logical cores. Compare a platform's two builds with each other, not one

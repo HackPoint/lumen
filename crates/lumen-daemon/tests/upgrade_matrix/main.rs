@@ -9,10 +9,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+// 1.8.0's schema.rs, copied verbatim into releases, names `crate::busy`; this is that name. Only
+// its retry on a busy ledger is used, which shapes no table, column or row.
+use lumen_core::busy;
 use lumen_core::meter::{HookReadEvent, RankedMeta, insert_hook_event_at, insert_read_event_at};
 
 use openers::Opener;
-use releases::Fixture;
+use releases::{Fixture, Release};
 use snapshot::{
     Snapshot, assert_nothing_invented, assert_old_rows_survive, assert_same_schema,
     assert_unchanged, integrity_check, take,
@@ -23,6 +26,19 @@ const HOOK_WITHOUT: &str = "/probe/Zoë ünï/hook without agent.rs";
 const MCP_WITH: &str = "/probe/Zoë ünï/mcp with agent.rs";
 const MCP_WITHOUT: &str = "/probe/Zoë ünï/mcp without agent.rs";
 const AGENT: &str = "agent-7f3a";
+
+/// Tables a release dropped. A fresh ledger lacks them too, so comparing with one already
+/// catches a drop that did not run; naming them also catches the table put back in DDL.
+const DROPPED: &[&str] = &["sessions"];
+
+fn assert_dropped_tables_gone(what: &str, snap: &Snapshot) {
+    for table in DROPPED {
+        assert!(
+            !snap.tables.contains_key(*table),
+            "{what}: {table} was dropped, and is still there"
+        );
+    }
+}
 
 fn place(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let db = dir.join(name);
@@ -121,6 +137,7 @@ async fn cell(fixture: Fixture, opener: Opener) {
         .await
         .unwrap_or_else(|e| panic!("{what}: the upgrade failed: {e}"));
     let upgraded = take(&db).await;
+    assert_dropped_tables_gone(&what, &upgraded);
     assert_same_schema(&what, &upgraded, &fresh);
     assert_ne!(
         old.facts, upgraded.facts,
@@ -175,6 +192,11 @@ macro_rules! column {
             }
 
             #[tokio::test]
+            async fn v1_8_0() {
+                cell(Fixture::V1_8_0, $opener).await;
+            }
+
+            #[tokio::test]
             async fn long_lived() {
                 cell(Fixture::LongLived, $opener).await;
             }
@@ -190,6 +212,7 @@ column!(rusqlite_path, Opener::Rusqlite);
 async fn a_fresh_ledger_is_the_same_whichever_path_creates_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = fresh(dir.path(), Opener::Daemon).await;
+    assert_dropped_tables_gone("a fresh ledger", &daemon);
     for opener in [Opener::Gui, Opener::Rusqlite] {
         let other = fresh(dir.path(), opener).await;
         assert_same_schema(&format!("{opener:?} against Daemon"), &other, &daemon);
@@ -213,9 +236,10 @@ async fn each_fixture_has_the_schema_of_the_release_it_stands_for() {
             fixture.newest().read_events_columns(),
             "{fixture:?}: read_events columns"
         );
-        assert!(
-            read_events.columns.iter().all(|c| c.name != "agent_id"),
-            "{fixture:?} already has the 1.8.0 column it exists to be upgraded without"
+        assert_eq!(
+            read_events.columns.iter().any(|c| c.name == "agent_id"),
+            matches!(fixture.newest(), Release::V1_8_0),
+            "{fixture:?}: read_events.agent_id, which 1.8.0 added"
         );
     }
 }
@@ -223,8 +247,103 @@ async fn each_fixture_has_the_schema_of_the_release_it_stands_for() {
 #[tokio::test]
 async fn a_long_lived_ledger_ends_at_the_schema_of_the_last_release_that_opened_it() {
     let long_lived = old_ledger(Fixture::LongLived).await;
-    let v1_7_0 = old_ledger(Fixture::V1_7_0).await;
-    assert_same_schema("LongLived against V1_7_0", &long_lived, &v1_7_0);
+    let v1_8_0 = old_ledger(Fixture::V1_8_0).await;
+    assert_same_schema("LongLived against V1_8_0", &long_lived, &v1_8_0);
+}
+
+/// An install still on 1.8.0, an app not yet updated or a hook from it, can open the ledger after
+/// this build has upgraded it. 1.8.0's DDL creates `sessions` again, empty; nothing reads it and no
+/// other row changes, and the next open by this build drops it again.
+#[tokio::test]
+async fn a_ledger_opened_by_1_8_0_after_the_upgrade_has_sessions_back_empty_until_the_next_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = place(dir.path(), "ledger.db", &Fixture::V1_8_0.build().await);
+    for opener in [Opener::Daemon, Opener::Gui, Opener::Rusqlite] {
+        let what = format!("1.8.0 between two opens via {opener:?}");
+        opener
+            .open(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: the upgrade failed: {e}"));
+        let upgraded = take(&db).await;
+        assert_dropped_tables_gone(&what, &upgraded);
+
+        Release::V1_8_0.open(&db).await;
+        let reopened = take(&db).await;
+        assert!(
+            reopened.tables.contains_key("sessions"),
+            "{what}: 1.8.0 did not create sessions again, which is what this test is about"
+        );
+        assert_old_rows_survive(&what, &upgraded, &reopened, &upgraded, true);
+        assert_nothing_invented(&what, &upgraded, &reopened);
+        assert_eq!(integrity_check(&db).await, ["ok"], "{what}");
+
+        opener
+            .open(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: the open after 1.8.0 failed: {e}"));
+        assert_unchanged(
+            &format!("{what}, opened again"),
+            &upgraded,
+            &take(&db).await,
+        );
+    }
+}
+
+/// The turn 1.8.0's daemon writes, its INSERT as it was at the tag. It names its columns, so the
+/// ones this build added take their default.
+const TURN_INSERT_1_8_0: &str = "INSERT OR IGNORE INTO turns
+             (message_id, session_id, ts, model,
+              input_tokens, output_tokens,
+              cache_read_input_tokens, cache_creation_input_tokens, source_file,
+              is_subagent)
+             VALUES (?,?,?,?,?,?,?,?,?,?)";
+
+/// A daemon still on 1.8.0 can ingest into the ledger after this build has upgraded it. Its turn
+/// lands, with no speed and no region, NULL: unknown, which is what pricing reads it as. Nothing
+/// is filled in when this build opens the ledger again.
+#[tokio::test]
+async fn a_turn_1_8_0_writes_after_the_upgrade_has_no_speed_or_region() {
+    for opener in [Opener::Daemon, Opener::Gui, Opener::Rusqlite] {
+        let what = format!("1.8.0 writing after an upgrade via {opener:?}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = place(dir.path(), "ledger.db", &Fixture::V1_8_0.build().await);
+        opener
+            .open(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: the upgrade failed: {e}"));
+
+        Release::V1_8_0.open(&db).await;
+        let mut conn = snapshot::connect(&db).await;
+        sqlx::query(TURN_INSERT_1_8_0)
+            .bind("msg-from-1.8.0")
+            .bind("s-1.8.0")
+            .bind("2026-10-13T12:00:00Z")
+            .bind("claude-opus-4-8")
+            .bind(1_i64)
+            .bind(2_i64)
+            .bind(3_i64)
+            .bind(4_i64)
+            .bind("f.jsonl")
+            .bind(0_i64)
+            .execute(&mut conn)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: 1.8.0's insert failed: {e}"));
+        drop(conn);
+
+        opener
+            .open(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: the open after 1.8.0 failed: {e}"));
+        let snap = take(&db).await;
+        let row = snap.tables["turns"]
+            .rows
+            .iter()
+            .find(|r| r["message_id"] == "'msg-from-1.8.0'")
+            .unwrap_or_else(|| panic!("{what}: the turn did not land"));
+        assert_eq!(row["speed"], "NULL", "{what}");
+        assert_eq!(row["inference_geo"], "NULL", "{what}");
+        assert_eq!(integrity_check(&db).await, ["ok"], "{what}");
+    }
 }
 
 #[tokio::test]
@@ -302,6 +421,7 @@ async fn race(fixture: Fixture) {
             opened.unwrap_or_else(|e| panic!("{what}: {opener:?} failed beside the others: {e}"));
         }
         let upgraded = take(&db).await;
+        assert_dropped_tables_gone(&what, &upgraded);
         assert_same_schema(&what, &upgraded, &fresh);
         assert_old_rows_survive(&what, &old, &upgraded, &fresh, true);
         assert_nothing_invented(&what, &old, &upgraded);
@@ -328,6 +448,7 @@ races! {
     v1_5_0: Fixture::V1_5_0;
     v1_6_0: Fixture::V1_6_0;
     v1_7_0: Fixture::V1_7_0;
+    v1_8_0: Fixture::V1_8_0;
     long_lived: Fixture::LongLived;
 }
 
@@ -390,6 +511,7 @@ async fn daemon_binary(fixture: Fixture) {
     drop(daemon);
 
     let upgraded = take(&db).await;
+    assert_dropped_tables_gone(&what, &upgraded);
     assert_same_schema(&what, &upgraded, &fresh);
     assert_old_rows_survive(&what, &old, &upgraded, &fresh, true);
     assert_nothing_invented(&what, &old, &upgraded);
@@ -415,5 +537,6 @@ binaries! {
     v1_5_0: Fixture::V1_5_0;
     v1_6_0: Fixture::V1_6_0;
     v1_7_0: Fixture::V1_7_0;
+    v1_8_0: Fixture::V1_8_0;
     long_lived: Fixture::LongLived;
 }

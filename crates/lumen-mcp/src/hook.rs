@@ -28,6 +28,7 @@ use lumen_core::{
     coverage::{DEFAULT_LINE_THRESHOLD, INTERCEPTED_SOURCE_EXTS, LOG_EXTS, ext_of},
     faults::{self, FaultRecord},
     identity,
+    intercept::{BlockKind, block_line},
     meter::{self, HookReadEvent, METER_WRITE_FAILED},
     repeat,
     tokenizer::count_tokens,
@@ -210,6 +211,9 @@ impl<'a> Run<'a> {
         if self.session.is_some() {
             rec.session_id = self.session.clone();
         }
+        // A subagent blocks and is let through in its own right: which one it was is what lets
+        // its block be counted apart from its parent's on the same file.
+        rec.agent_id = self.agent.clone();
         let Some(spool) = self.env.spool_path() else {
             self.say(
                 "lumen: no fault spool resolved (LUMEN_FAULT_SPOOL and LUMEN_DB unset, no home \
@@ -705,39 +709,46 @@ const RETRY: &str = "If the lumen tools are unavailable to you (server down, per
 /// returning more tokens than the legacy outlines they replaced. The model routes on
 /// this text, so an inflated number biased routing, not just perception. Each tool
 /// reports what it actually saved, per call.
+///
+/// The first line is [`block_line`]'s, which the daemon reads back out of the transcript to count
+/// the block (`lumen_core::intercept`): change it there, not here.
 fn redirect_message(path: &str, lines: i64, is_log: bool) -> String {
     if is_log {
         format!(
-            "Lumen intercept: {path} is {lines} lines (log/output file).\n\
+            "{}\n\
              Before reading the full file, call:\n  \
              lumen:compress_logs(path=\"{path}\")\n\
              This collapses repeated lines and stack frames deterministically. Analyze the\n\
              compressed output; the full file is still readable via smart_read(mode=\"full\")\n\
-             if needed.\n\n{RETRY}"
+             if needed.\n\n{RETRY}",
+            block_line(path, lines, BlockKind::Log)
         )
     } else {
         format!(
-            "Lumen intercept: {path} is {lines} lines.\n\
+            "{}\n\
              Instead of reading the full file, call:\n  \
              1. lumen:smart_read(path=\"{path}\") → structural outline with line ranges\n  \
              2. lumen:recall_file(path=\"{path}\", names=[\"<item>\"]) → fetch only what you need\n\
              Each call reports the tokens it saved in _meta.saved_tokens.\n\
-             Use smart_read(mode=\"full\") only if you truly need every line.\n\n{RETRY}"
+             Use smart_read(mode=\"full\") only if you truly need every line.\n\n{RETRY}",
+            block_line(path, lines, BlockKind::Redirect)
         )
     }
 }
 
 /// What the model is told when it reads, whole, a file that smart_read or recall_file has
-/// already answered for. No figures, for the reason given on [`redirect_message`].
+/// already answered for. No figures, for the reason given on [`redirect_message`]; its first line
+/// is [`block_line`]'s, for the reason given there.
 fn served_message(path: &str, lines: i64) -> String {
     format!(
-        "Lumen intercept: {path} is {lines} lines, and smart_read or recall_file has already\n\
+        "{}\n\
          answered for it in this session. Reading it whole puts every line in context again.\n\
          Fetch only what you need, using the item names from the outline you already have:\n  \
          lumen:recall_file(path=\"{path}\", names=[\"<item>\"])\n  \
          lumen:recall_file(path=\"{path}\", start_line=N, end_line=M)\n\n\
          If you do need the whole file (to Edit it, for example), retry this exact Read once\n\
-         more — it will be allowed through."
+         more — it will be allowed through.",
+        block_line(path, lines, BlockKind::Served)
     )
 }
 
@@ -849,6 +860,31 @@ mod tests {
         );
         let retry = hook("intercept", &payload, &var, tmp.path());
         assert_eq!((retry.exit, retry.stderr.len()), (0, 0), "{retry:?}");
+    }
+
+    /// The daemon counts a block by reading its message back out of the transcript
+    /// (`lumen_core::intercept::parse_block`). Every message this hook blocks with must read back
+    /// as the block it is, with the path and the count it named.
+    #[test]
+    fn every_message_the_intercept_blocks_with_reads_back_as_its_block() {
+        use lumen_core::intercept::{ParsedBlock, parse_block};
+        for path in ["/p/x.rs", "/p/dir is odd/a is 3 lines.rs", "C:\\a b\\y.log"] {
+            for (message, kind) in [
+                (redirect_message(path, 412, false), BlockKind::Redirect),
+                (redirect_message(path, 412, true), BlockKind::Log),
+                (served_message(path, 412), BlockKind::Served),
+            ] {
+                assert_eq!(
+                    parse_block(&format!("PreToolUse:Read hook error: [lumen]: {message}")),
+                    Some(ParsedBlock {
+                        path,
+                        lines: 412,
+                        kind
+                    }),
+                    "{message}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1448,5 +1484,13 @@ mod tests {
         assert_eq!(read(Some("agent-a")), 2);
         assert_eq!(read(Some("agent-a")), 0);
         assert_eq!(read(None), 0);
+        // Each release names whose Read it was, so the two blocks are counted apart: the
+        // subagent's fault carries its id, and the main agent's line is what it always was.
+        let recs = spool_lines(&tmp.path().join("faults.jsonl"));
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0]["variant"], "retry_escape_valve");
+        assert_eq!(recs[0]["agent_id"], "agent-a");
+        assert_eq!(recs[1]["variant"], "retry_escape_valve");
+        assert!(recs[1].get("agent_id").is_none(), "{:?}", recs[1]);
     }
 }

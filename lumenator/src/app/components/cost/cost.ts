@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import { RATE } from '../index';
 import type { CostTotals } from '../index';
+import { figureTag, fmtUsd } from '../../prices';
+import type { Figure, FigureTag, Priced } from '../../prices';
 import { LumenTooltip } from '../../directives/tooltip.directive';
 
 @Component({
@@ -11,18 +12,31 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
     changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class Cost {
-    /** Cumulative token totals for the active session (or all sessions). */
+    /** Cumulative token totals for the active session (or all sessions), for the hit rate. */
     readonly totals = input.required<CostTotals>();
 
-    // --- real cost in USD ---
-    readonly costInput = computed(() => this.totals().input * RATE.input);
-    readonly costOutput = computed(() => this.totals().output * RATE.output);
-    readonly costCacheRead = computed(() => this.totals().cacheRead * RATE.cacheRead);
-    readonly costCacheWrite = computed(() => this.totals().cacheWrite * RATE.cacheWrite);
+    /**
+     * The same tokens priced, each model's at that model's rates and speed. Priced by the
+     * caller from the `lumen_prices` table: this component has no price of its own.
+     */
+    readonly priced = input.required<Priced>();
 
-    readonly totalCost = computed(
-        () => this.costInput() + this.costOutput() + this.costCacheRead() + this.costCacheWrite(),
-    );
+    // --- real cost in USD ---
+    readonly costInput = computed(() => this.priced().input);
+    readonly costOutput = computed(() => this.priced().output);
+    readonly costCacheRead = computed(() => this.priced().cacheRead);
+    readonly costCacheWrite = computed(() => this.priced().cacheWrite);
+
+    readonly totalCost = computed(() => this.priced().total);
+
+    /**
+     * The tag a figure here carries when it is not the whole ('at least' or 'no price'), with
+     * the reason; null when it is exact. Each figure has its own, since a write of unknown
+     * duration, say, makes the cache-write cost a floor but not the output cost.
+     */
+    tag(figure: Figure): FigureTag | null {
+        return figureTag(this.priced(), figure);
+    }
 
     /**
      * Whether a formatted figure needs a reduced size to fit its column.
@@ -41,9 +55,9 @@ export class Cost {
     }
 
     // --- the savings story ---
-    // What the cache-read tokens WOULD have cost at full input price, vs what they did cost.
-    readonly cacheReadFullPrice = computed(() => this.totals().cacheRead * RATE.input);
-    readonly cacheSavings = computed(() => this.cacheReadFullPrice() - this.costCacheRead());
+    // What the cache-read tokens WOULD have cost at their model's full input price, less
+    // what they did cost.
+    readonly cacheSavings = computed(() => this.priced().cacheSavings);
 
     // hit rate = cacheRead / (cacheRead + cacheWrite + fresh input)
     readonly cacheHitRate = computed(() => {
@@ -53,5 +67,9 @@ export class Cost {
     });
 
     readonly fmt = (n: number) => '$' + n.toFixed(2);
+    /** A figure from this panel, or a dash when none of its tokens has a price. */
+    money(figure: Figure): string {
+        return fmtUsd(this.priced(), figure);
+    }
     readonly fmtPct = (n: number) => Math.round(n * 100) + '%';
 }

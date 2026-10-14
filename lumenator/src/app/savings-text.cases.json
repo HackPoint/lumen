@@ -1,0 +1,1046 @@
+{
+  "about": "How the savings figures read, in the terminal, the tray and the app. Read by the Rust test of lumen_core::savings::text (crates/lumen-core/tests/frontend_savings_text.rs) and by the TypeScript tests of savings-text.ts and the headline (lumenator/src/app/savings-text.spec.ts, components/savings-headline/savings-headline.spec.ts), so the window cannot show another figure, sign or label than `lumen` and the tray. Each state's summary names only what the text reads (gross and extraRounds default to net and 0); the tests fill the rest in as an empty summary has it. `app` is what each period's headline box says: the share line (wherever dollars are at API prices), the token figure and its unit, the dollar line in three pieces with the bold figure in the middle (null: none measured), what it is at, the tags beside it, whether it recorded nothing, and why its data is partial. ≈ is followed by a no-break space.",
+  "usd": [
+    {
+      "x": 0,
+      "signed": "$0.00",
+      "plus": "$0.00",
+      "phrase": "at least $0.00 saved, net"
+    },
+    {
+      "x": 0.004,
+      "signed": "$0.00",
+      "plus": "+$0.00",
+      "phrase": "at least $0.00 saved, net"
+    },
+    {
+      "x": -0.004,
+      "signed": "−$0.00",
+      "plus": "−$0.00",
+      "phrase": "net loss under half a cent"
+    },
+    {
+      "x": -0.005,
+      "signed": "−$0.01",
+      "plus": "−$0.01",
+      "phrase": "net loss of at most $0.01"
+    },
+    {
+      "x": 0.005,
+      "signed": "$0.01",
+      "plus": "+$0.01",
+      "phrase": "at least $0.01 saved, net"
+    },
+    {
+      "x": 0.125,
+      "signed": "$0.12",
+      "plus": "+$0.12",
+      "phrase": "at least $0.12 saved, net"
+    },
+    {
+      "x": 0.375,
+      "signed": "$0.38",
+      "plus": "+$0.38",
+      "phrase": "at least $0.38 saved, net"
+    },
+    {
+      "x": -0.125,
+      "signed": "−$0.12",
+      "plus": "−$0.12",
+      "phrase": "net loss of at most $0.12"
+    },
+    {
+      "x": 1.5,
+      "signed": "$1.50",
+      "plus": "+$1.50",
+      "phrase": "at least $1.50 saved, net"
+    },
+    {
+      "x": -0.42,
+      "signed": "−$0.42",
+      "plus": "−$0.42",
+      "phrase": "net loss of at most $0.42"
+    },
+    {
+      "x": 99.995,
+      "signed": "$100.00",
+      "plus": "+$100.00",
+      "phrase": "at least $100.00 saved, net"
+    },
+    {
+      "x": 100,
+      "signed": "$100",
+      "plus": "+$100",
+      "phrase": "at least $100 saved, net"
+    },
+    {
+      "x": -100,
+      "signed": "−$100",
+      "plus": "−$100",
+      "phrase": "net loss of at most $100"
+    },
+    {
+      "x": 102.5,
+      "signed": "$102",
+      "plus": "+$102",
+      "phrase": "at least $102 saved, net"
+    },
+    {
+      "x": 103.5,
+      "signed": "$104",
+      "plus": "+$104",
+      "phrase": "at least $104 saved, net"
+    },
+    {
+      "x": 182,
+      "signed": "$182",
+      "plus": "+$182",
+      "phrase": "at least $182 saved, net"
+    },
+    {
+      "x": 250.4,
+      "signed": "$250",
+      "plus": "+$250",
+      "phrase": "at least $250 saved, net"
+    },
+    {
+      "x": 999.5,
+      "signed": "$1,000",
+      "plus": "+$1,000",
+      "phrase": "at least $1,000 saved, net"
+    },
+    {
+      "x": 12345.6,
+      "signed": "$12,346",
+      "plus": "+$12,346",
+      "phrase": "at least $12,346 saved, net"
+    },
+    {
+      "x": -1234.5,
+      "signed": "−$1,234",
+      "plus": "−$1,234",
+      "phrase": "net loss of at most $1,234"
+    },
+    {
+      "x": -1234567.4,
+      "signed": "−$1,234,567",
+      "plus": "−$1,234,567",
+      "phrase": "net loss of at most $1,234,567"
+    },
+    {
+      "x": 1e-06,
+      "signed": "$0.00",
+      "plus": "+$0.00",
+      "phrase": "at least $0.00 saved, net"
+    },
+    {
+      "x": -1e-06,
+      "signed": "−$0.00",
+      "plus": "−$0.00",
+      "phrase": "net loss under half a cent"
+    }
+  ],
+  "tokens": [
+    {
+      "n": 0,
+      "signed": "0",
+      "figure": "≈\u00a00",
+      "phrase": "≈\u00a00 tokens saved, net"
+    },
+    {
+      "n": 999,
+      "signed": "999",
+      "figure": "≈\u00a0999",
+      "phrase": "≈\u00a0999 tokens saved, net"
+    },
+    {
+      "n": 1000,
+      "signed": "1,000",
+      "figure": "≈\u00a01,000",
+      "phrase": "≈\u00a01,000 tokens saved, net"
+    },
+    {
+      "n": 12345,
+      "signed": "12,345",
+      "figure": "≈\u00a012,345",
+      "phrase": "≈\u00a012,345 tokens saved, net"
+    },
+    {
+      "n": -800,
+      "signed": "−800",
+      "figure": "≈\u00a0800",
+      "phrase": "≈\u00a0800 more tokens, net"
+    },
+    {
+      "n": 1234567,
+      "signed": "1,234,567",
+      "figure": "≈\u00a01,234,567",
+      "phrase": "≈\u00a01,234,567 tokens saved, net"
+    },
+    {
+      "n": -1000000,
+      "signed": "−1,000,000",
+      "figure": "≈\u00a01,000,000",
+      "phrase": "≈\u00a01,000,000 more tokens, net"
+    }
+  ],
+  "share": [
+    {
+      "pct": 0,
+      "text": "0% fewer"
+    },
+    {
+      "pct": 0.04,
+      "text": "0.0% fewer"
+    },
+    {
+      "pct": -0.4,
+      "text": "0.4% more"
+    },
+    {
+      "pct": 2.25,
+      "text": "2.2% fewer"
+    },
+    {
+      "pct": 9.96,
+      "text": "10.0% fewer"
+    },
+    {
+      "pct": 10,
+      "text": "10% fewer"
+    },
+    {
+      "pct": -40,
+      "text": "40% more"
+    },
+    {
+      "pct": 61.7,
+      "text": "62% fewer"
+    },
+    {
+      "pct": 62.5,
+      "text": "62% fewer"
+    },
+    {
+      "pct": 100,
+      "text": "100% fewer"
+    }
+  ],
+  "states": [
+    {
+      "name": "api",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 12345,
+          "sharePct": 61.7,
+          "net": 1.5,
+          "calls": 10,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 1234567,
+          "sharePct": 58.25,
+          "net": 250.4,
+          "calls": 900,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a012,345",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.50",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a01,234,567",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$250",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net · all time: ≈\u00a01,234,567 tokens saved, net; at least $250 saved, net · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Saved at least $1.50 this week · working"
+    },
+    {
+      "name": "subscription",
+      "summary": {
+        "billingMode": "subscription",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 12345,
+          "sharePct": 61.7,
+          "net": 1.5,
+          "calls": 10,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 1234567,
+          "sharePct": 58.25,
+          "net": 250.4,
+          "calls": 900,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": "≈\u00a062% fewer tokens from file and tool reads this week",
+          "tokens": "≈\u00a012,345",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.50",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": "≈\u00a058% fewer tokens from file and tool reads all time",
+          "tokens": "≈\u00a01,234,567",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$250",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net at API prices · all time: ≈\u00a058% fewer tokens from file and tool reads; ≈\u00a01,234,567 tokens saved, net; at least $250 saved, net at API prices · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "This week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net at API prices · working"
+    },
+    {
+      "name": "unset",
+      "summary": {
+        "billingMode": "unset",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 12345,
+          "sharePct": 61.7,
+          "net": 1.5,
+          "calls": 10,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 1234567,
+          "sharePct": 58.25,
+          "net": 250.4,
+          "calls": 900,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": "≈\u00a062% fewer tokens from file and tool reads this week",
+          "tokens": "≈\u00a012,345",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.50",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": "≈\u00a058% fewer tokens from file and tool reads all time",
+          "tokens": "≈\u00a01,234,567",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$250",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net at API prices · all time: ≈\u00a058% fewer tokens from file and tool reads; ≈\u00a01,234,567 tokens saved, net; at least $250 saved, net at API prices · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "This week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net at API prices · working"
+    },
+    {
+      "name": "unreadable",
+      "summary": {
+        "billingMode": "unreadable",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 12345,
+          "sharePct": 61.7,
+          "net": 1.5,
+          "calls": 10,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 1234567,
+          "sharePct": 58.25,
+          "net": 250.4,
+          "calls": 900,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": "≈\u00a062% fewer tokens from file and tool reads this week",
+          "tokens": "≈\u00a012,345",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.50",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": "≈\u00a058% fewer tokens from file and tool reads all time",
+          "tokens": "≈\u00a01,234,567",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$250",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net at API prices · all time: ≈\u00a058% fewer tokens from file and tool reads; ≈\u00a01,234,567 tokens saved, net; at least $250 saved, net at API prices · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "This week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $1.50 saved, net at API prices · working"
+    },
+    {
+      "name": "netNegative",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "notWorking",
+          "reason": "Lumen cost more than it saved: net loss of at most $0.42 this week"
+        },
+        "recommendation": {
+          "code": "smallSavings",
+          "text": "This week's losing calls saved fewer tokens than the extra round each cost. LUMEN_LINE_THRESHOLD (300 lines by default) is the size from which a Read is sent to Lumen; a higher one sends only larger files."
+        },
+        "week": {
+          "tokensSaved": -800,
+          "sharePct": -40,
+          "net": -0.42,
+          "gross": 0.1,
+          "extraRounds": 0.52,
+          "calls": 3,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 300,
+          "sharePct": 1.5,
+          "net": -3,
+          "gross": 1.25,
+          "extraRounds": 4.25,
+          "calls": 20,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a0800",
+          "tokensUnit": "more tokens, net",
+          "usdLead": "net loss of at most",
+          "usd": "$0.42",
+          "usdTail": null,
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a0300",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "net loss of at most",
+          "usd": "$3.00",
+          "usdTail": null,
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a0800 more tokens, net; net loss of at most $0.42 · all time: ≈\u00a0300 tokens saved, net; net loss of at most $3.00 · not working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Net loss of at most $0.42 this week · not working"
+    },
+    {
+      "name": "nearZeroNegative",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "notWorking",
+          "reason": "Lumen may have cost more than it saved: net loss under half a cent this week"
+        },
+        "week": {
+          "tokensSaved": -32,
+          "sharePct": -17.8,
+          "net": -0.004,
+          "calls": 1,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 5000,
+          "sharePct": 40,
+          "net": 0.004,
+          "calls": 2,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a032",
+          "tokensUnit": "more tokens, net",
+          "usdLead": "net loss",
+          "usd": "under half a cent",
+          "usdTail": null,
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a05,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$0.00",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a032 more tokens, net; net loss under half a cent · all time: ≈\u00a05,000 tokens saved, net; at least $0.00 saved, net · not working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Net loss under half a cent this week · not working"
+    },
+    {
+      "name": "partial",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 4000,
+          "sharePct": 50,
+          "net": 0.2,
+          "calls": 4,
+          "unpricedCalls": 2,
+          "dataQuality": {
+            "state": "partial",
+            "reason": "2 rows with no session recorded, so tokens and no dollars"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 9000,
+          "sharePct": 45,
+          "net": 0.6,
+          "calls": 9,
+          "unpricedCalls": 5,
+          "dataQuality": {
+            "state": "partial",
+            "reason": "5 rows with no session recorded, so tokens and no dollars"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a04,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$0.20",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [
+            "2 calls unpriced"
+          ],
+          "empty": false,
+          "partial": "2 rows with no session recorded, so tokens and no dollars"
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a09,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$0.60",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [
+            "5 calls unpriced"
+          ],
+          "empty": false,
+          "partial": "5 rows with no session recorded, so tokens and no dollars"
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a04,000 tokens saved, net; at least $0.20 saved, net (2 calls unpriced) · all time: ≈\u00a09,000 tokens saved, net; at least $0.60 saved, net (5 calls unpriced) · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Saved at least $0.20 this week (2 calls unpriced) · working"
+    },
+    {
+      "name": "modelledUnpriced",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 10,
+          "sharePct": 1,
+          "net": 2,
+          "modelled": 182,
+          "calls": 1480,
+          "unpricedCalls": 1473,
+          "dataQuality": {
+            "state": "partial",
+            "reason": "1,473 rows with no session recorded, so tokens and no dollars"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 10,
+          "sharePct": 1,
+          "net": null,
+          "modelled": 5,
+          "calls": 3,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a010",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$2.00",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [
+            "+$182 modelled",
+            "1,473 calls unpriced"
+          ],
+          "empty": false,
+          "partial": "1,473 rows with no session recorded, so tokens and no dollars"
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a010",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": null,
+          "usd": null,
+          "usdTail": null,
+          "basis": null,
+          "beside": [
+            "+$5.00 modelled"
+          ],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a010 tokens saved, net; at least $2.00 saved, net (+$182 modelled; 1,473 calls unpriced) · all time: ≈\u00a010 tokens saved, net; no dollars measured (+$5.00 modelled) · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Saved at least $2.00 this week (+$182 modelled; 1,473 calls unpriced) · working"
+    },
+    {
+      "name": "blocksOnly",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "notWorking",
+          "reason": "in the last 7 days the Read intercept blocked 219 reads (230 escape-valve faults), and no Lumen tool was called: the blocks saved nothing, about $0.85 in extra rounds"
+        },
+        "recommendation": {
+          "code": "blocksWithoutSavings",
+          "text": "The Read intercept is blocking Reads that are then let through, so each block costs a round and saves nothing, about $0.85 in extra rounds. Run `lumen doctor` to see whether Claude Code reaches Lumen's MCP server; until it does, LUMEN_HOOK_ENABLED=0 in the env block of ~/.claude/settings.json turns the intercept off."
+        },
+        "week": {
+          "tokensSaved": 0,
+          "sharePct": null,
+          "net": -0.85,
+          "gross": 0,
+          "extraRounds": 0.85,
+          "calls": 0,
+          "blockedReads": 219,
+          "dataQuality": {
+            "state": "complete"
+          },
+          "blockedReadsFromFaults": 219
+        },
+        "allTime": {
+          "tokensSaved": 50000,
+          "sharePct": 30,
+          "net": 1.2,
+          "calls": 12,
+          "blockedReads": 219,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a00",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "net loss of at most",
+          "usd": "$0.85",
+          "usdTail": null,
+          "basis": null,
+          "beside": [
+            "219 blocked Reads"
+          ],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a050,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.20",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a00 tokens saved, net; net loss of at most $0.85 (219 blocked Reads) · all time: ≈\u00a050,000 tokens saved, net; at least $1.20 saved, net · not working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Net loss of at most $0.85 this week (219 blocked Reads) · not working"
+    },
+    {
+      "name": "blocksPartlyFromFaults",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "notWorking",
+          "reason": "in the last 7 days the Read intercept blocked 207 reads, and up to 12 more where no agent is known (230 escape-valve faults), and no Lumen tool was called: the blocks saved nothing, up to $0.85 in extra rounds"
+        },
+        "recommendation": {
+          "code": "blocksWithoutSavings",
+          "text": "The Read intercept is blocking Reads that are then let through, so each block costs a round and saves nothing, up to $0.85 in extra rounds. Run `lumen doctor` to see whether Claude Code reaches Lumen's MCP server; until it does, LUMEN_HOOK_ENABLED=0 in the env block of ~/.claude/settings.json turns the intercept off."
+        },
+        "week": {
+          "tokensSaved": 0,
+          "sharePct": null,
+          "net": -0.85,
+          "gross": 0,
+          "extraRounds": 0.85,
+          "calls": 0,
+          "blockedReads": 219,
+          "dataQuality": {
+            "state": "complete"
+          },
+          "blockedReadsFromTranscripts": 200,
+          "blockedReadsFromFaults": 7,
+          "blockedReadsBounded": 12
+        },
+        "allTime": {
+          "tokensSaved": 50000,
+          "sharePct": 30,
+          "net": 1.2,
+          "calls": 12,
+          "blockedReads": 219,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a00",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "net loss of at most",
+          "usd": "$0.85",
+          "usdTail": null,
+          "basis": null,
+          "beside": [
+            "219 blocked Reads: 200 recorded, 7 from faults, 12 bounded"
+          ],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a050,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.20",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a00 tokens saved, net; net loss of at most $0.85 (219 blocked Reads: 200 recorded, 7 from faults, 12 bounded) · all time: ≈\u00a050,000 tokens saved, net; at least $1.20 saved, net · not working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Net loss of at most $0.85 this week (219 blocked Reads: 200 recorded, 7 from faults, 12 bounded) · not working"
+    },
+    {
+      "name": "weekEmpty",
+      "summary": {
+        "billingMode": "subscription",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "dataQuality": {
+            "state": "empty"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 7000,
+          "sharePct": 35,
+          "net": 0.3,
+          "calls": 5,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": null,
+          "tokensUnit": null,
+          "usdLead": null,
+          "usd": null,
+          "usdTail": null,
+          "basis": null,
+          "beside": [],
+          "empty": true,
+          "partial": null
+        },
+        "allTime": {
+          "share": "≈\u00a035% fewer tokens from file and tool reads all time",
+          "tokens": "≈\u00a07,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$0.30",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: no Lumen activity · all time: ≈\u00a035% fewer tokens from file and tool reads; ≈\u00a07,000 tokens saved, net; at least $0.30 saved, net at API prices · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "No Lumen activity this week · working"
+    },
+    {
+      "name": "halfEven",
+      "summary": {
+        "billingMode": "subscription",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 1000,
+          "sharePct": 62.5,
+          "net": 0.125,
+          "calls": 1,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 40000,
+          "sharePct": 2.25,
+          "net": 102.5,
+          "calls": 50,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": "≈\u00a062% fewer tokens from file and tool reads this week",
+          "tokens": "≈\u00a01,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$0.12",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": "≈\u00a02.2% fewer tokens from file and tool reads all time",
+          "tokens": "≈\u00a040,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$102",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a01,000 tokens saved, net; at least $0.12 saved, net at API prices · all time: ≈\u00a02.2% fewer tokens from file and tool reads; ≈\u00a040,000 tokens saved, net; at least $102 saved, net at API prices · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "This week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a01,000 tokens saved, net; at least $0.12 saved, net at API prices · working"
+    },
+    {
+      "name": "grossNotNetThousands",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": 2500000,
+          "sharePct": 70,
+          "net": 12345.6,
+          "gross": 20000.25,
+          "extraRounds": 7654.65,
+          "calls": 400,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": 9876543,
+          "sharePct": 71.25,
+          "net": 1234567.4,
+          "gross": 2000000,
+          "extraRounds": 765432.6,
+          "calls": 9000,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a02,500,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$12,346",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a09,876,543",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1,234,567",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a02,500,000 tokens saved, net; at least $12,346 saved, net · all time: ≈\u00a09,876,543 tokens saved, net; at least $1,234,567 saved, net · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Saved at least $12,346 this week · working"
+    },
+    {
+      "name": "empty",
+      "summary": {
+        "billingMode": "unset",
+        "status": {
+          "state": "noData"
+        },
+        "week": {
+          "dataQuality": {
+            "state": "empty"
+          }
+        },
+        "allTime": {
+          "dataQuality": {
+            "state": "empty"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": null,
+          "tokensUnit": null,
+          "usdLead": null,
+          "usd": null,
+          "usdTail": null,
+          "basis": null,
+          "beside": [],
+          "empty": true,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": null,
+          "tokensUnit": null,
+          "usdLead": null,
+          "usd": null,
+          "usdTail": null,
+          "basis": null,
+          "beside": [],
+          "empty": true,
+          "partial": null
+        }
+      },
+      "cli": "Lumen: no Lumen activity recorded yet · no data (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": null
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+/* No box of its own, so nothing takes a gap in Home's column before there is a summary. */
+:host {
+  display: contents;
+}
+
+.status {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-family: var(--lumen-font-sans);
+}
+
+.status__line {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--lumen-text);
+}
+
+/* The status language: green working, red not working, dim with no data. */
+.status__dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--lumen-text-dim);
+  transform: translateY(-0.05rem);
+}
+
+.status__line[data-state='working'] .status__dot {
+  background: var(--lumen-ok);
+}
+
+.status__line[data-state='notWorking'] .status__dot {
+  background: var(--lumen-alert);
+}
+
+.status__rec {
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--lumen-border-strong);
+  border-left: 3px solid var(--lumen-warn);
+  border-radius: 6px;
+  background: var(--lumen-bg-secondary);
+}
+
+.status__rec-title {
+  margin: 0 0 0.3rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--lumen-text-dim);
+}
+
+.status__rec-text,
+.status__action {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--lumen-text);
+  overflow-wrap: anywhere;
+}
+
+.status__action {
+  margin-top: 0.4rem;
+  color: var(--lumen-text-dim);
+}
+
+code {
+  font-family: var(--lumen-font-mono);
+  font-size: 0.7rem;
+  padding: 0 0.2rem;
+  border-radius: 3px;
+  background: var(--lumen-track);
+  color: var(--lumen-text);
+}
+
+.status__btn {
+  margin-top: 0.5rem;
+  font-family: var(--lumen-font-sans);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--lumen-text);
+  background: transparent;
+  border: 1px solid var(--lumen-border-strong);
+  border-radius: 6px;
+  padding: 0.28rem 0.7rem;
+  cursor: pointer;
+}
+
+.status__btn:hover {
+  background: var(--lumen-track);
+}
+
+.status__btn:focus-visible {
+  outline: 2px solid var(--lumen-save);
+  outline-offset: 2px;
+}

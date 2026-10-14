@@ -60,6 +60,28 @@ model = input('')
 You may rebuild the SVG/markup; keep these three inputs. Internal computeds
 (percent/status/color/marker) may be restyled but keep their semantics.
 
+**`<lumen-savings-headline>`** — selector `lumen-savings-headline`
+```
+summary = input<SavingsSummary | null>(null)
+error   = input<string | null>(null)   // why the latest fetch failed
+// SavingsSummary (src/app/savings-summary.ts) = { week, allTime, … }, each a SavingsPeriod:
+//   { tokensSaved (signed), measured (the bold "at least" dollars, null = none measured),
+//     modelled (shown beside it, never in it), unpriced (calls with tokens and no dollars), … }
+```
+Null with no error renders nothing; null with an error says it could not be read, with no
+figure; a summary with an error keeps its figures, marked not up to date as of its `asOf`. Fed
+by the savings summary; the headline computes nothing. Every phrase comes from
+`src/app/savings-text.ts`, which says each figure as `lumen` and the tray do
+(`lumen_core::savings::text`), held to it by `savings-text.cases.json`: change wording there and
+in the Rust module together, never in a template.
+
+**`<lumen-savings-status>`** — selector `lumen-savings-status`
+```
+summary = input<SavingsSummary | null>(null)
+```
+The status line ("Status: working" / "not working: <reason>" / "no data") and at most one
+recommendation with its step (Run Setup, `lumen doctor`). Null renders nothing.
+
 **`<cost>`** — selector `cost`
 ```
 totals = input.required<{ input, output, cacheRead, cacheWrite }>()
@@ -106,9 +128,30 @@ Exposes cost computeds (totalCost, cacheSavings, cacheHitRate, fmt…). Restyle 
    proportional to `trayPercent()`, color = `trayStatus()`. This is an intentional
    departure from the old ring gauge — the firefly is glanceable and brand-coherent
    for the compact popover surface.
-3. **Full window** — route `/` (Home), 800×600. Uses the **ring gauge** as the
-   hero. The ring is the precise, number-annotated readout and is appropriate for
-   the full-window context where the user has space to read detail.
+3. **Full window** — 800×600, tabs Home · Optimizer · Details · Why · Settings
+   (Why only while it has a recommendation). Since 1.9.0 its first screen answers
+   three questions only — how much did I save, is it working, what should I do:
+   - **Home** (route `/`). The hero is the **savings headline**
+     (`<lumen-savings-headline>`): tokens saved and $ saved, net and signed, this
+     week and all time, both bold, for every billing mode: the dollars are the
+     measured net, a floor ("at least $X saved, net"; a loss "net loss of at
+     most $X"), and "at API prices" unless the user pays per token, after the
+     share of tokens ("≈ 92% fewer tokens from file and tool reads"). Modelled dollars and
+     unpriced calls stand beside the figure as tags, never in it. Under it,
+     `<lumen-savings-status>`: the "is it working" line and the "what to do"
+     recommendation. With no data each renders nothing (or a neutral sentence
+     once a summary says nothing was recorded), never a zero dressed as a figure.
+     The Setup and billing prompts sit above the tabs.
+   - **How it's measured** (route `/method`, not a tab): reached from the
+     headline and from Details. The rules, the price table and its date,
+     calibration, every count and band, and the per-call ledger as tables.
+   - **Details** (route `/details`). Uses the **ring gauge** as its hero, with the
+     window selector and the alert banner, then the Optimizer's token ratio,
+     breakdowns and provenance counts. The ring is the precise, number-annotated
+     readout of Claude Code's context fill, which is not a saving, so it is not on
+     Home.
+   - **Settings** (route `/settings`): billing mode, spend and its alert
+     thresholds, the Repeat reads switch, Report a fault, About.
 
 ### Ring vs Firefly — recorded design decision
 
@@ -118,13 +161,16 @@ serve different purposes at different densities:
 | Surface | Indicator | Why |
 | --- | --- | --- |
 | Tray popover (compact) | Firefly battery | Brand mark, glanceable at a glance, no text needed |
-| Full window (spacious) | Ring gauge | Precise %, numeric display, room for the data |
+| Full window, Home | Savings headline | Home answers what Lumen saved; context fill is not that |
+| Full window, Details (spacious) | Ring gauge | Precise %, numeric display, room for the data |
 | Menu-bar icon | Firefly silhouette | OS-native size, status color only |
 
 Do not "fix" this inconsistency. It is a deliberate density-appropriate choice.
 
 ## 8. Brand direction
 
-Dark, minimal, calm (Linear / Vercel / CleanShot calibre). The radial gauge is the
-hero. Green/amber/red is the status language. Motion subtle and purposeful.
+Dark, minimal, calm (Linear / Vercel / CleanShot calibre). The savings headline is
+Home's hero, bold, monospace and signed: a loss reads as a loss in the alert colour.
+The radial gauge is the hero of the context readout on Details. Green/amber/red is
+the status language. Motion subtle and purposeful.
 Light theme follows `prefers-color-scheme`. Monospace/tabular numerals for money.

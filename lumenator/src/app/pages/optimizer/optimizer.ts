@@ -5,75 +5,68 @@ import {
     computed,
     inject,
 } from '@angular/core';
-import { RouterLink, RouterLinkActive } from '@angular/router';
+import { RouterLink } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
 import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identity-hook-prompt';
+import { TabNav } from '../../components/tab-nav/tab-nav';
 import { SessionService } from '../../session.service';
 import { RepeatReadsService } from '../../repeat-reads.service';
-import { RATE } from '../../components/index';
-import type { ChannelBreakdown, ToolBreakdown } from '../../components/index';
+import { aggTokens, figureTag, price } from '../../prices';
 import { LumenTooltip } from '../../directives/tooltip.directive';
 
+/**
+ * How far a cl100k_base count is from Claude's own: the pooled rows of
+ * lumen_core::calibration for the two tokenizers it found, measured by
+ * benchmarks/calibration against Claude's usage data on raw file text. A Rust test holds
+ * this text to those rows, so a re-run that moves a ratio fails until the sentence moves
+ * with it.
+ */
+export const CALIBRATION_NOTE =
+    'On raw file text, Claude Opus 4.7 and later count about 1.59× as many tokens (1.44–1.70×), '
+    + 'and earlier models about 1.24× as many (1.14–1.31×): the 10th to 90th percentile of '
+    + "60 samples measured against Claude's own usage data (calibration of 2026-10-14). A Read's "
+    + 'line numbers are not in these ratios.';
+
+/**
+ * What Lumen caused, beside what Claude Code's cache did, and whether Lumen is working.
+ *
+ * Until 1.9.0 this screen led with a net dollar value of interception. It is gone until the
+ * savings engine replaces it with its own figures; the token ratio, the by-tool and by-channel
+ * breakdowns and the provenance counts it carried are on Details.
+ */
 @Component({
     selector: 'optimizer',
-    imports: [RouterLink, RouterLinkActive, Firefly, IdentityHookPrompt, LumenTooltip],
+    imports: [RouterLink, Firefly, IdentityHookPrompt, TabNav, LumenTooltip],
     templateUrl: './optimizer.html',
     styleUrl: './optimizer.css',
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Optimizer implements OnInit {
     /**
-     * The headline, in dollars, with its sign.
-     *
-     * Dollars rather than the token ratio because a ratio cannot be wrong in the
-     * direction that matters: returning 87% fewer tokens still loses money if the round
-     * it forced cost more than the tokens it avoided. The ratio stays on the page, below
-     * this, as the input it is.
-     */
-    readonly netUsd = computed(() => this.s.netValueUsd());
-    /** A dash until a round can be priced: an unpriced $0.00 would read as a result. */
-    readonly netLabel = computed(() => {
-        if (!this.s.netValuePriced()) return '—';
-        const v = this.netUsd();
-        const abs = Math.abs(v);
-        const s = abs >= 100 ? abs.toFixed(0) : abs.toFixed(2);
-        return `${v < 0 ? '−' : '+'}$${s}`;
-    });
-    /** Break-even is reported as break-even, not rounded into a win — once there is a figure. */
-    readonly netIsBreakEven = computed(() => this.s.netValuePriced() && Math.abs(this.netUsd()) < 1);
-    readonly netColor = computed(() =>
-        !this.s.netValuePriced() || this.netIsBreakEven()
-            ? '#8b949e'
-            : this.netUsd() > 0 ? '#3fb950' : '#f85149',
-    );
-    readonly netSub = computed(() => {
-        if (!this.s.netValuePriced()) {
-            return 'Not enough recorded turns yet to price a round, so no net figure is claimed.';
-        }
-        const r = this.s.valueRounds();
-        return `Tokens avoided are worth $${this.s.grossValueUsd().toFixed(2)}; `
-             + `the extra rounds cost $${this.s.roundCostUsd().toFixed(2)}. `
-             + `Assumes a saving keeps paying for ${r} rounds — the figure is most `
-             + `sensitive to that.`;
-    });
-
-    /**
      * Wording for the effectiveness claim, qualified when provenance is unknown.
      *
-     * The old copy said "measured to the token, never estimated" unconditionally.
-     * That was false on any install whose baked tokenizer path had died: the hook
-     * substituted bytes/4 without recording that it had. The claim is now made only
-     * over data that can support it.
+     * An earlier copy claimed every count measured, unconditionally. That was false on
+     * any install whose baked tokenizer path had died: the hook substituted bytes/4
+     * without recording that it had. The claim is now made only over data that can
+     * support it.
+     *
+     * Until 1.9.0 it also called the count exact: the copy before 1.9.0 read "Counted
+     * to the token by a local tokenizer, never estimated." It was exact only in
+     * cl100k_base's units. The note now says what counted it and how far that is from
+     * Claude's own count, quoting the pooled row of lumen_core::calibration (a Rust test
+     * holds this text to that row).
      */
     readonly provenanceNote = computed(() =>
-        this.s.unverifiedProvenanceRows() === 0
-            ? 'Counted to the token by a local tokenizer, never estimated.'
-            : 'Counts are exact for Lumen tool calls; some older events have unverified provenance.',
+        (this.s.unverifiedProvenanceRows() === 0
+            ? "Counted with cl100k_base, a local stand-in for Claude's tokenizer."
+            : "Lumen tool calls are counted with cl100k_base, a local stand-in for Claude's "
+              + 'tokenizer; some older events have unverified provenance.')
+        + ' ' + CALIBRATION_NOTE,
     );
 
     readonly savingsNote = computed(() =>
         this.s.unverifiedProvenanceRows() === 0
-            ? 'caused · measured · verifiable · grows with use'
+            ? 'caused · counted locally · verifiable · grows with use'
             : 'caused · partly unverified · grows with use',
     );
 
@@ -81,20 +74,11 @@ export class Optimizer implements OnInit {
     readonly rr = inject(RepeatReadsService);
 
     ngOnInit(): void {
-        // Only the badge: this page's own figures already arrive through the daemon
-        // stream, and the fault count is the one thing not on it.
-        this.s.refreshFaultCount();
-        // The repeat reads card says whether the settings file turns them off, so it reads that file.
+        // This page's own figures arrive through the daemon stream, and the navigation reads
+        // the fault count. The repeat reads card says whether the settings file turns them
+        // off, so it reads that file.
         void this.rr.load();
     }
-
-    // ── hero ──────────────────────────────────────────────────────────────────
-
-    /** Effectiveness %, rounded to one decimal. 0 when no data yet (never NaN). */
-    readonly effectPct = computed(() => {
-        const p = this.s.effectivenessPct();
-        return isFinite(p) && p > 0 ? Math.round(p * 10) / 10 : 0;
-    });
 
     /** True once at least one lumen-optimized read has been recorded. */
     readonly hasData = computed(() => this.s.lifetimeOptimizedTokens() > 0);
@@ -128,30 +112,27 @@ export class Optimizer implements OnInit {
         }
     });
 
-    /** Hero accent color follows the gauge status palette. */
-    readonly heroColor = computed(() => {
-        const p = this.effectPct();
-        if (p >= 80) return 'var(--lumen-ok)';
-        if (p >= 50) return 'var(--lumen-warn)';
-        return 'var(--lumen-text-dim)';
-    });
-
     // ── D2: caching savings (REPORTED by Claude Code, NOT caused by Lumen) ────
     //
-    // Derived from the same usage signal used by the Usage component.
-    // Formula: allTime.cacheRead * (RATE.input − RATE.cacheRead)
-    // This is the price differential — what those tokens WOULD have cost at
-    // full input price versus the discounted cache-read price.
+    // Derived from the same usage signal used by the Usage component, each model's
+    // cache reads at that model's prices: input price less cache-read price, which is
+    // what those tokens WOULD have cost at full price versus what they did cost.
     //
-    // NEVER merged with lifetimeOptimizedUsd (D2 is reported; E5 is caused).
+    // NEVER merged with the optimizer's figures (D2 is reported; E5 is caused).
 
     readonly cacheSavedTokens = computed(() =>
         this.s.usage()?.allTime?.cacheRead ?? 0,
     );
 
-    readonly cacheSavedUsd = computed(() =>
-        this.cacheSavedTokens() * (RATE.input - RATE.cacheRead),
-    );
+    readonly cacheSavedPriced = computed(() => {
+        const all = this.s.usage()?.allTime;
+        return price(all ? aggTokens(all) : [], this.s.prices());
+    });
+
+    readonly cacheSavedUsd = computed(() => this.cacheSavedPriced().cacheSavings);
+
+    /** What the saving carries when it is not the whole ('at least' or 'no price'), and why. */
+    readonly cacheSavedTag = computed(() => figureTag(this.cacheSavedPriced(), 'savings'));
 
     // ── missed reads (CLI only) ───────────────────────────────────────────────
 
@@ -169,37 +150,6 @@ export class Optimizer implements OnInit {
         const served = r.unchangedServed + r.deltasServed;
         return { ...r, served, asked: served + r.freshRequests };
     });
-
-    // ── breakdown bar helpers ─────────────────────────────────────────────────
-
-    readonly maxToolSaved = computed(() =>
-        Math.max(1, ...this.s.optimizedByTool().map((r) => r.savedTokens)),
-    );
-
-    readonly maxChanSaved = computed(() =>
-        Math.max(1, ...this.s.optimizedByChannel().map((r) => r.savedTokens)),
-    );
-
-    barPct(val: number, max: number): number {
-        return max > 0 ? Math.round((val / max) * 100) : 0;
-    }
-
-    toolLabel(row: ToolBreakdown): string {
-        switch (row.tool) {
-            case 'mcp__lumen__smart_read':    return 'smart_read';
-            case 'mcp__lumen__recall_file':   return 'recall_file';
-            case 'mcp__lumen__compress_logs': return 'compress_logs';
-            default:                           return row.tool;
-        }
-    }
-
-    chanLabel(row: ChannelBreakdown): string {
-        switch (row.channel) {
-            case 'cli':     return 'CLI (Full mode)';
-            case 'vscode':  return 'VS Code (Soft mode)';
-            default:        return row.channel;
-        }
-    }
 
     // ── formatting ────────────────────────────────────────────────────────────
 

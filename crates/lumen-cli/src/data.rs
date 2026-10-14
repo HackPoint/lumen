@@ -4,7 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lumen_core::{meter::db_path, rates};
+use lumen_core::meter::db_path;
+use lumen_core::rates::{self, Spend, Tokens};
 use serde::Deserialize;
 
 #[derive(Default)]
@@ -18,14 +19,12 @@ pub struct AppState {
     /// windows open the gauge follows whichever is newest, so it has to say which.
     pub project: String,
     pub window: u64,
-    pub session_input: i64,
-    pub session_output: i64,
-    pub session_cache_read: i64,
-    pub session_cache_write: i64,
-    pub today_input: i64,
-    pub today_output: i64,
-    pub today_cache_read: i64,
-    pub today_cache_write: i64,
+    /// The session's tokens by model, speed and region, so each part is priced at its own rate.
+    /// None when they could not be read: shown as a dash, never as zero or as an earlier
+    /// session's figure.
+    pub session: Option<Spend>,
+    /// Today's tokens by model, speed and region, None when they could not be read.
+    pub today: Option<Spend>,
     pub saved_tokens: i64,
     pub full_tokens: i64,
     pub daemon_connected: bool,
@@ -65,6 +64,82 @@ struct Session {
     #[serde(default)]
     project: Option<String>,
     ts: String,
+    /// The sums above per model. Absent from daemons older than 1.9.0, and null when the
+    /// daemon could not split them.
+    #[serde(default)]
+    by_model: Option<Vec<ModelTokens>>,
+}
+
+/// One model's share of a snapshot session, at one speed in one region.
+#[derive(Deserialize)]
+struct ModelTokens {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    speed: Option<String>,
+    /// Absent from a daemon that did not send it: the region is then not known.
+    #[serde(default)]
+    inference_geo: Option<String>,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    #[serde(default)]
+    cache_write_1h: i64,
+    /// Absent from a daemon that did not send it, and then every write not recorded as a
+    /// 1-hour one is of unknown duration.
+    #[serde(default)]
+    cache_write_unknown: Option<i64>,
+}
+
+impl ModelTokens {
+    fn tokens(&self) -> Tokens {
+        Tokens {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            cache_write_1h: self.cache_write_1h,
+            cache_write_unknown: match self.cache_write_unknown {
+                Some(unknown) => unknown,
+                None => self.cache_write - self.cache_write_1h,
+            },
+        }
+    }
+}
+
+impl Session {
+    /// The session's tokens by model, speed and region. Without a split all of them go under no
+    /// model, which has no price: a session can mix models, so pricing the sums at the
+    /// session's latest model would be a guess.
+    fn spend(&self) -> Spend {
+        let mut spend = Spend::default();
+        match &self.by_model {
+            Some(rows) => {
+                for row in rows {
+                    spend.add(
+                        row.model.as_deref().unwrap_or(""),
+                        row.speed.as_deref(),
+                        row.inference_geo.as_deref(),
+                        row.tokens(),
+                    );
+                }
+            }
+            None => spend.add(
+                "",
+                None,
+                None,
+                Tokens::of_turn(
+                    self.input,
+                    self.output,
+                    self.cache_read,
+                    self.cache_write,
+                    None,
+                ),
+            ),
+        }
+        spend
+    }
 }
 
 #[derive(Deserialize)]
@@ -74,6 +149,16 @@ struct Turn {
     output_tokens: i64,
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
+    /// The part of the cache write at the 1-hour rate; null or absent when the duration
+    /// was not recorded.
+    #[serde(default)]
+    cache_creation_1h_input_tokens: Option<i64>,
+    /// "standard" or "fast"; null or absent when not recorded.
+    #[serde(default)]
+    speed: Option<String>,
+    /// "us", "global" or "not_available"; null or absent when not recorded.
+    #[serde(default)]
+    inference_geo: Option<String>,
     /// Subagent turns cost money but carry their own context — see
     /// lumen_core::project. Absent on older daemons, defaulting to false.
     #[serde(default)]
@@ -84,11 +169,15 @@ struct Turn {
 
 // ── Background data loop ──────────────────────────────────────────────────────
 
+/// How often, at most, today's spend is re-read while the daemon is connected.
+const TODAY_EVERY: Duration = Duration::from_secs(5);
+
 pub fn run(state: Arc<Mutex<AppState>>) {
     loop {
         match tungstenite::connect("ws://127.0.0.1:9999") {
             Ok((mut ws, _)) => {
                 state.lock().unwrap().daemon_connected = true;
+                let mut today_read: Option<Instant> = None;
                 loop {
                     let msg = match ws.read() {
                         Ok(m) => m,
@@ -101,6 +190,14 @@ pub fn run(state: Arc<Mutex<AppState>>) {
                         && let Ok(text) = msg.into_text()
                     {
                         apply_msg(&text, &state);
+                    }
+                    // The daemon sends a session's sums, never a day's, so TODAY is read from
+                    // the ledger. It used to be left at zero while connected, and shown as
+                    // $0.0000.
+                    if today_read.is_none_or(|t| t.elapsed() >= TODAY_EVERY) {
+                        let today = today_spend();
+                        state.lock().unwrap().today = today;
+                        today_read = Some(Instant::now());
                     }
                 }
                 state.lock().unwrap().daemon_connected = false;
@@ -149,21 +246,33 @@ fn apply_msg(text: &str, state: &Arc<Mutex<AppState>>) {
                 // Cost is scoped to the session the gauge is showing, so the two
                 // agree. Summing every session made "SESSION" actually mean "all
                 // sessions", which read as inflated next to one window's context.
-                if let Some(latest) = sessions.iter().max_by_key(|x| &x.ts) {
-                    s.session_input = latest.input;
-                    s.session_output = latest.output;
-                    s.session_cache_read = latest.cache_read;
-                    s.session_cache_write = latest.cache_write;
-                }
+                // A ledger with no sessions yet: the first turn starts one at zero, which
+                // is a complete figure.
+                s.session = Some(match sessions.iter().max_by_key(|x| &x.ts) {
+                    Some(latest) => latest.spend(),
+                    None => Spend::default(),
+                });
             }
         }
         "event" => {
             if let Some(t) = env.turn {
-                // Cost counts every turn, subagents included — it is real spend.
-                s.session_input += t.input_tokens;
-                s.session_output += t.output_tokens;
-                s.session_cache_read += t.cache_read_input_tokens;
-                s.session_cache_write += t.cache_creation_input_tokens;
+                // Cost counts every turn, subagents included — it is real spend, and at
+                // the subagent's own model's rate. Added only to a session whose earlier
+                // spend is known: a turn on top of an unread total is not the total.
+                if let Some(session) = s.session.as_mut() {
+                    session.add(
+                        &t.model,
+                        t.speed.as_deref(),
+                        t.inference_geo.as_deref(),
+                        Tokens::of_turn(
+                            t.input_tokens,
+                            t.output_tokens,
+                            t.cache_read_input_tokens,
+                            t.cache_creation_input_tokens,
+                            t.cache_creation_1h_input_tokens,
+                        ),
+                    );
+                }
 
                 if let Some(p) = t.project.as_deref()
                     && !p.is_empty()
@@ -240,41 +349,12 @@ fn poll_db_at(path: &std::path::Path, state: &Arc<Mutex<AppState>>) {
     let peak_fill = peak.max(fill_raw).max(0) as u64;
     let window = rates::resolve_window(&model, peak_fill);
 
-    let sess = conn
-        .query_row(
-            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(cache_read_input_tokens),0),
-                    COALESCE(SUM(cache_creation_input_tokens),0)
-             FROM turns WHERE session_id = ?1",
-            rusqlite::params![session_id],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .unwrap_or((0, 0, 0, 0));
-
-    let today = conn
-        .query_row(
-            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(cache_read_input_tokens),0),
-                    COALESCE(SUM(cache_creation_input_tokens),0)
-             FROM turns WHERE ts >= date('now')",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .unwrap_or((0, 0, 0, 0));
+    let session = spend_of(
+        &conn,
+        "WHERE session_id = ?1",
+        rusqlite::params![session_id],
+    );
+    let today = spend_of(&conn, TODAY, []);
 
     let opt = conn
         .query_row(
@@ -289,18 +369,67 @@ fn poll_db_at(path: &std::path::Path, state: &Arc<Mutex<AppState>>) {
     s.peak_fill = peak_fill;
     s.window = window;
     s.model = model;
-    s.session_input = sess.0;
-    s.session_output = sess.1;
-    s.session_cache_read = sess.2;
-    s.session_cache_write = sess.3;
-    s.today_input = today.0;
-    s.today_output = today.1;
-    s.today_cache_read = today.2;
-    s.today_cache_write = today.3;
+    // A sum that could not be read is shown as a dash. A zero would pass for a measurement,
+    // and the last figure shown may belong to another session.
+    s.session = session.ok();
+    s.today = today.ok();
     s.saved_tokens = opt.0;
     s.full_tokens = opt.1;
     s.no_data = false;
     s.last_update = Some(Instant::now());
+}
+
+/// The turns of today, UTC, which is what `ts` is in.
+const TODAY: &str = "WHERE ts >= date('now')";
+
+/// Today's spend from the ledger, or None when it cannot be read.
+fn today_spend() -> Option<Spend> {
+    let conn = lumen_core::meter::connect_db(&db_path()?).ok()?;
+    spend_of(&conn, TODAY, []).ok()
+}
+
+/// The turns `where_clause` selects, summed by model, speed and region.
+fn spend_of(
+    conn: &rusqlite::Connection,
+    where_clause: &'static str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Spend> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT model, speed, inference_geo,
+                COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                COALESCE(SUM(cache_read_input_tokens),0),
+                COALESCE(SUM(cache_creation_input_tokens),0), COALESCE(SUM(cache_1h),0),
+                -- A turn that recorded no split has a write of unknown duration.
+                COALESCE(SUM(CASE WHEN cache_1h IS NULL
+                                  THEN cache_creation_input_tokens ELSE 0 END),0)
+         FROM turns {where_clause} GROUP BY model, speed, inference_geo"
+    ))?;
+    let rows = stmt.query_map(params, |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            Tokens {
+                input: r.get(3)?,
+                output: r.get(4)?,
+                cache_read: r.get(5)?,
+                cache_write: r.get(6)?,
+                cache_write_1h: r.get(7)?,
+                cache_write_unknown: r.get(8)?,
+            },
+        ))
+    })?;
+    let mut spend = Spend::default();
+    for row in rows {
+        let (model, speed, geo, tokens) = row?;
+        spend.add(
+            model.as_deref().unwrap_or(""),
+            speed.as_deref(),
+            geo.as_deref(),
+            tokens,
+        );
+    }
+    Ok(spend)
 }
 
 pub fn read_db_oneshot() -> Option<OneshotData> {
@@ -350,6 +479,14 @@ mod tests {
 
     fn state() -> Arc<Mutex<AppState>> {
         Arc::default()
+    }
+
+    /// State as a client has it once connected: the daemon sends its snapshot first, and a
+    /// live turn is only ever added to a session whose earlier spend that snapshot gave.
+    fn connected() -> Arc<Mutex<AppState>> {
+        let st = state();
+        apply_msg(r#"{"type":"snapshot","sessions":[]}"#, &st);
+        st
     }
 
     /// A snapshot envelope with one session per supplied tuple:
@@ -415,10 +552,31 @@ mod tests {
             &st,
         );
         let s = st.lock().unwrap();
-        assert_eq!(s.session_input, 10, "only the active session's tokens");
-        assert_eq!(s.session_output, 20);
-        assert_eq!(s.session_cache_read, 30);
-        assert_eq!(s.session_cache_write, 40);
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().input,
+            10,
+            "only the active session's tokens"
+        );
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().output,
+            20
+        );
+        assert_eq!(
+            s.session
+                .as_ref()
+                .expect("session spend")
+                .tokens()
+                .cache_read,
+            30
+        );
+        assert_eq!(
+            s.session
+                .as_ref()
+                .expect("session spend")
+                .tokens()
+                .cache_write,
+            40
+        );
     }
 
     #[test]
@@ -472,17 +630,148 @@ mod tests {
         assert_eq!(s.fill, 0);
     }
 
+    // ── per-model spend ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_snapshot_keeps_each_models_share_of_the_session() {
+        let st = state();
+        apply_msg(
+            r#"{"type":"snapshot","sessions":[{"session_id":"s1","input":11,"output":22,
+               "cache_read":33,"cache_write":44,"fill":5000,"ts":"2026-01-01T10:00:00Z",
+               "by_model":[
+                 {"model":"claude-opus-4-8","speed":"standard","inference_geo":"us",
+                  "input":10,"output":20,"cache_read":30,"cache_write":40,
+                  "cache_write_1h":25,"cache_write_unknown":0},
+                 {"model":"claude-haiku-4-5-20251001","speed":null,"input":1,"output":2,
+                  "cache_read":3,"cache_write":4,"cache_write_1h":0,
+                  "cache_write_unknown":4}]}]}"#,
+            &st,
+        );
+        let s = st.lock().unwrap();
+        let mut want = Spend::default();
+        want.add(
+            "claude-opus-4-8",
+            Some("standard"),
+            Some("us"),
+            Tokens {
+                input: 10,
+                output: 20,
+                cache_read: 30,
+                cache_write: 40,
+                cache_write_1h: 25,
+                cache_write_unknown: 0,
+            },
+        );
+        want.add(
+            "claude-haiku-4-5-20251001",
+            None,
+            None,
+            Tokens::of_turn(1, 2, 3, 4, None),
+        );
+        assert_eq!(s.session, Some(want));
+        let p = s.session.as_ref().expect("session spend").priced();
+        assert!(!p.is_partial());
+        assert_eq!(
+            p.duration_unknown, 4,
+            "the Haiku write recorded no duration"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_with_no_split_leaves_the_session_unpriced_rather_than_guessing() {
+        // A daemon older than 1.9.0 sends sums only. The session's model is known, but a
+        // subagent may have run another, so pricing the sums at it would be a guess.
+        let st = state();
+        apply_msg(
+            &snapshot_full(
+                "s1",
+                1_000,
+                1_000,
+                "claude-opus-4-8",
+                "2026-01-01T10:00:00Z",
+            )
+            .replace(r#""input":0"#, r#""input":500"#),
+            &st,
+        );
+        let s = st.lock().unwrap();
+        let spend = s.session.as_ref().expect("session spend");
+        assert_eq!(spend.tokens().input, 500, "the tokens are still counted");
+        assert!(!spend.priced().has_figure(), "but not priced");
+    }
+
+    #[test]
+    fn an_event_counts_its_tokens_against_its_own_model_speed_and_region() {
+        let st = connected();
+        apply_msg(&event("claude-opus-4-8", 0, 1_000_000, 0, 0), &st);
+        apply_msg(&subagent_event(0, 0, 0), &st);
+        apply_msg(
+            r#"{"type":"event","turn":{"model":"claude-haiku-4-5","input_tokens":0,
+                "output_tokens":1000000,"cache_read_input_tokens":0,
+                "cache_creation_input_tokens":300,"cache_creation_1h_input_tokens":200,
+                "speed":"standard","is_subagent":true}}"#,
+            &st,
+        );
+        apply_msg(
+            r#"{"type":"event","turn":{"model":"claude-opus-4-8","input_tokens":0,
+                "output_tokens":1000000,"cache_read_input_tokens":0,
+                "cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,
+                "speed":"fast","inference_geo":"global"}}"#,
+            &st,
+        );
+        apply_msg(
+            r#"{"type":"event","turn":{"model":"claude-opus-4-8","input_tokens":0,
+                "output_tokens":1000000,"cache_read_input_tokens":0,
+                "cache_creation_input_tokens":0,"cache_creation_1h_input_tokens":0,
+                "speed":"fast","inference_geo":"us"}}"#,
+            &st,
+        );
+        let s = st.lock().unwrap();
+        assert_eq!(
+            s.model, "claude-opus-4-8",
+            "the subagent's model is not the session's"
+        );
+        let p = s.session.as_ref().expect("session spend").priced();
+        // $25 of Opus output at standard speed, $50 of it in fast mode and $55 of it in fast
+        // mode US-only, $5 of Haiku output, and Haiku's cache write: 100 at $1.25/M and 200 at
+        // $2/M.
+        let want = 25.0 + 50.0 + 55.0 + 5.0 + (100.0 * 1.25 + 200.0 * 2.0) / 1e6;
+        assert!((p.cost.total() - want).abs() < 1e-9, "{p:?}");
+    }
+
+    #[test]
+    fn a_turn_before_the_first_snapshot_does_not_start_a_figure_that_misses_the_rest() {
+        // Before the snapshot the session's earlier spend is unknown, so a turn on top of it
+        // would show part of the session as all of it.
+        let st = state();
+        apply_msg(&event("claude-opus-4-8", 0, 1_000, 0, 0), &st);
+        assert_eq!(st.lock().unwrap().session, None);
+    }
+
     // ── apply_msg: event frames ──────────────────────────────────────────────
 
     #[test]
     fn an_event_accumulates_cost_and_replaces_fill() {
-        let st = state();
+        let st = connected();
         apply_msg(&event("claude-sonnet-4", 10, 20, 5_000, 40), &st);
         apply_msg(&event("claude-sonnet-4", 1, 2, 9_000, 4), &st);
         let s = st.lock().unwrap();
-        assert_eq!(s.session_input, 11, "input accumulates");
-        assert_eq!(s.session_output, 22);
-        assert_eq!(s.session_cache_write, 44);
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().input,
+            11,
+            "input accumulates"
+        );
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().output,
+            22
+        );
+        assert_eq!(
+            s.session
+                .as_ref()
+                .expect("session spend")
+                .tokens()
+                .cache_write,
+            44
+        );
         assert_eq!(s.fill, 9_000, "fill is replaced by the latest turn");
     }
 
@@ -527,7 +816,7 @@ mod tests {
         // Subagent transcripts reuse the parent's sessionId, so their turns arrive
         // on the same session. Their tokens are real spend; their small fresh
         // context is not this session's context.
-        let st = state();
+        let st = connected();
         apply_msg(&event("claude-opus-4-8", 10, 20, 300_000, 5), &st);
         apply_msg(&subagent_event(4_000, 7, 9), &st);
 
@@ -537,9 +826,23 @@ mod tests {
             "the gauge must not dip to the subagent's 4,000"
         );
         assert_eq!(s.peak_fill, 300_000);
-        assert_eq!(s.session_input, 17, "but the cost includes both turns");
-        assert_eq!(s.session_output, 29);
-        assert_eq!(s.session_cache_read, 304_000);
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().input,
+            17,
+            "but the cost includes both turns"
+        );
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().output,
+            29
+        );
+        assert_eq!(
+            s.session
+                .as_ref()
+                .expect("session spend")
+                .tokens()
+                .cache_read,
+            304_000
+        );
     }
 
     #[test]
@@ -595,7 +898,7 @@ mod tests {
 
     #[test]
     fn malformed_json_is_ignored_without_panicking() {
-        let st = state();
+        let st = connected();
         for bad in [
             "",
             "not json",
@@ -610,7 +913,7 @@ mod tests {
         }
         let s = st.lock().unwrap();
         assert_eq!(s.fill, 0);
-        assert_eq!(s.session_input, 0);
+        assert_eq!(s.session.as_ref().expect("session spend").tokens().input, 0);
         assert!(s.model.is_empty());
     }
 
@@ -831,10 +1134,31 @@ mod tests {
         assert!(!s.no_data);
         assert_eq!(s.fill, 7_000, "gauge tracks the newest turn");
         assert_eq!(s.model, "claude-sonnet-4");
-        assert_eq!(s.session_input, 30, "session totals are summed");
-        assert_eq!(s.session_output, 300);
-        assert_eq!(s.session_cache_read, 8_000);
-        assert_eq!(s.session_cache_write, 11);
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().input,
+            30,
+            "session totals are summed"
+        );
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().output,
+            300
+        );
+        assert_eq!(
+            s.session
+                .as_ref()
+                .expect("session spend")
+                .tokens()
+                .cache_read,
+            8_000
+        );
+        assert_eq!(
+            s.session
+                .as_ref()
+                .expect("session spend")
+                .tokens()
+                .cache_write,
+            11
+        );
         assert!(s.last_update.is_some());
     }
 
@@ -857,10 +1181,217 @@ mod tests {
         poll_db_at(&path, &st);
         let s = st.lock().unwrap();
         assert_eq!(
-            s.session_input, 5,
+            s.session.as_ref().expect("session spend").tokens().input,
+            5,
             "another session's tokens must not leak into the active one"
         );
-        assert_eq!(s.session_output, 6);
+        assert_eq!(
+            s.session.as_ref().expect("session spend").tokens().output,
+            6
+        );
+    }
+
+    #[test]
+    fn poll_prices_each_model_and_the_one_hour_writes_from_the_db() {
+        let (_d, path) = db_with(&[
+            (
+                "m1",
+                "s1",
+                "2026-01-01T10:00:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "m2",
+                "s1",
+                "2026-01-01T11:00:00Z",
+                "claude-haiku-4-5",
+                0,
+                1_000_000,
+                0,
+                3_000_000,
+            ),
+        ]);
+        let conn = connect_db(&path).unwrap();
+        conn.execute(
+            "UPDATE turns SET cache_1h = 1000000 WHERE message_id = 'm2'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let st = state();
+        poll_db_at(&path, &st);
+        let p = st
+            .lock()
+            .unwrap()
+            .session
+            .as_ref()
+            .expect("session spend")
+            .priced();
+        // $15 of Sonnet output, $5 of Haiku output, Haiku writes: 2M at $1.25/M, 1M at $2/M.
+        assert!(
+            (p.cost.total() - (15.0 + 5.0 + 2.5 + 2.0)).abs() < 1e-9,
+            "{p:?}"
+        );
+        // Sonnet's turn recorded no split, but wrote nothing; Haiku's recorded one.
+        assert_eq!(p.duration_unknown, 0);
+    }
+
+    #[test]
+    fn poll_prices_each_speed_and_region_apart_and_keeps_what_was_not_recorded_a_floor() {
+        // What `lumen dash` reads with the daemon down. A turn ingested before 1.9.0 recorded
+        // neither its speed, its region nor its write's split: priced at the standard, global
+        // and 5-minute rates, and each makes the figure a floor. A fast turn costs the
+        // fast-mode price, and a US-only one 1.1 times the price. Three Sonnet turns at one
+        // speed differ only in region, so they are summed apart or priced wrong.
+        let (_d, path) = db_with(&[
+            (
+                "pre-1.9.0",
+                "s1",
+                "2026-01-01T10:00:00Z",
+                "claude-opus-4-8",
+                0,
+                1_000_000,
+                0,
+                2_000_000,
+            ),
+            (
+                "fast",
+                "s1",
+                "2026-01-01T11:00:00Z",
+                "claude-opus-4-8",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "us",
+                "s1",
+                "2026-01-01T12:00:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "global",
+                "s1",
+                "2026-01-01T12:10:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            (
+                "not-available",
+                "s1",
+                "2026-01-01T12:20:00Z",
+                "claude-sonnet-4-6",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+        ]);
+        let conn = connect_db(&path).unwrap();
+        conn.execute_batch(
+            "UPDATE turns SET speed = 'fast', inference_geo = 'global', cache_1h = 0, \
+                              cache_5m = 0 WHERE message_id = 'fast'; \
+             UPDATE turns SET speed = 'standard', inference_geo = 'us', cache_1h = 0, \
+                              cache_5m = 0 WHERE message_id = 'us'; \
+             UPDATE turns SET speed = 'standard', inference_geo = 'global', cache_1h = 0, \
+                              cache_5m = 0 WHERE message_id = 'global'; \
+             UPDATE turns SET speed = 'standard', inference_geo = 'not_available', \
+                              cache_1h = 0, cache_5m = 0 WHERE message_id = 'not-available';",
+        )
+        .unwrap();
+        drop(conn);
+
+        let st = state();
+        poll_db_at(&path, &st);
+        let p = st
+            .lock()
+            .unwrap()
+            .session
+            .as_ref()
+            .expect("session spend")
+            .priced();
+        // $25 of standard output and 2M writes at $6.25/M, $50 of fast output, $15 of Sonnet
+        // output at 1.1 times, and $15 of it twice at the price: once routed globally, once
+        // with no region reported.
+        assert!(
+            (p.cost.total() - (25.0 + 12.5 + 50.0 + 16.5 + 15.0 + 15.0)).abs() < 1e-9,
+            "{p:?}"
+        );
+        assert_eq!(p.duration_unknown, 2_000_000, "{p:?}");
+        let pre_1_9_0 = Tokens::of_turn(0, 1_000_000, 0, 2_000_000, None);
+        assert_eq!(
+            p.speed_unknown, pre_1_9_0,
+            "the pre-1.9.0 turn, and only it, recorded no speed"
+        );
+        let mut no_region = pre_1_9_0;
+        no_region.add(&Tokens::of_turn(0, 1_000_000, 0, 0, Some(0)));
+        assert_eq!(
+            p.geo_unknown, no_region,
+            "the pre-1.9.0 turn and the not_available one, and only they, have no known region"
+        );
+        assert_eq!(
+            p.shortfalls(rates::Figure::Total),
+            vec![
+                rates::Shortfall::SpeedUnknown,
+                rates::Shortfall::GeoUnknown,
+                rates::Shortfall::DurationUnknown
+            ]
+        );
+    }
+
+    #[test]
+    fn poll_shows_an_unreadable_sum_as_unknown_not_as_an_earlier_session() {
+        // The sums query fails (a ledger missing a column it reads); the turn itself is read.
+        let (_d, path) = db_with(&[(
+            "m1",
+            "new-session",
+            "2026-01-01T10:00:00Z",
+            "claude-opus-4-8",
+            0,
+            1_000,
+            0,
+            0,
+        )]);
+        let conn = connect_db(&path).unwrap();
+        conn.execute_batch("ALTER TABLE turns DROP COLUMN cache_1h")
+            .unwrap();
+        drop(conn);
+
+        let st = state();
+        {
+            // What the previous session showed.
+            let mut earlier = Spend::default();
+            earlier.add(
+                "claude-opus-4-8",
+                Some("standard"),
+                Some("global"),
+                Tokens::of_turn(0, 999, 0, 0, Some(0)),
+            );
+            let mut s = st.lock().unwrap();
+            s.session = Some(earlier.clone());
+            s.today = Some(earlier);
+        }
+        poll_db_at(&path, &st);
+        let s = st.lock().unwrap();
+        assert!(!s.no_data, "the gauge still has its turn");
+        assert_eq!(
+            s.session, None,
+            "unknown, not the previous session's figure"
+        );
+        assert_eq!(s.today, None);
     }
 
     #[test]

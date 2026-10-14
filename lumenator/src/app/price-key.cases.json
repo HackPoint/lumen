@@ -1,0 +1,110 @@
+{
+  "about": "Model ids, the price key each must resolve to, and whether the price table prices it. Read by the Rust test of lumen_core::rates::price_key and price_for (crates/lumen-core/tests/frontend_prices.rs) and by the TypeScript test of priceKey (lumenator/src/app/prices.spec.ts), so the two cannot drift.",
+  "cases": [
+    {
+      "id": "claude-opus-4-8",
+      "key": "claude-opus-4-8",
+      "priced": true
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "key": "claude-haiku-4-5",
+      "priced": true
+    },
+    {
+      "id": "claude-opus-4-5-20251101",
+      "key": "claude-opus-4-5",
+      "priced": true
+    },
+    {
+      "id": "claude-sonnet-4-6[1m]",
+      "key": "claude-sonnet-4-6",
+      "priced": true
+    },
+    {
+      "id": "Claude-Opus-4-8",
+      "key": "claude-opus-4-8",
+      "priced": true
+    },
+    {
+      "id": " claude-opus-4-8 ",
+      "key": "claude-opus-4-8",
+      "priced": true
+    },
+    {
+      "id": "claude-opus-5-5",
+      "key": "claude-opus-5-5",
+      "priced": true
+    },
+    {
+      "id": "claude-opus-5",
+      "key": "claude-opus-5",
+      "priced": true
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "key": "claude-sonnet-5-5",
+      "priced": true
+    },
+    {
+      "id": "claude-fable-5",
+      "key": "claude-fable-5",
+      "priced": true
+    },
+    {
+      "id": "claude-opus-4-8]",
+      "key": "claude-opus-4-8]",
+      "priced": false
+    },
+    {
+      "id": "claude-opus-4-8-fast",
+      "key": "claude-opus-4-8-fast",
+      "priced": false
+    },
+    {
+      "id": "claude-opus-5-55",
+      "key": "claude-opus-5-55",
+      "priced": false
+    },
+    {
+      "id": "claude-opus-5-7",
+      "key": "claude-opus-5-7",
+      "priced": false
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "key": "claude-haiku-5-5",
+      "priced": false
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "key": "claude-sonnet-4-5",
+      "priced": false
+    },
+    {
+      "id": "us.anthropic.claude-opus-4-8-v1:0",
+      "key": "us.anthropic.claude-opus-4-8-v1:0",
+      "priced": false
+    },
+    {
+      "id": "claude-opus-4-5@20251101",
+      "key": "claude-opus-4-5@20251101",
+      "priced": false
+    },
+    {
+      "id": "<synthetic>",
+      "key": "<synthetic>",
+      "priced": false
+    },
+    {
+      "id": "gpt-4",
+      "key": "gpt-4",
+      "priced": false
+    },
+    {
+      "id": "",
+      "key": "",
+      "priced": false
+    }
+  ]
+}

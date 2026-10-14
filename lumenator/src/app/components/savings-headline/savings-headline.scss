@@ -1,0 +1,174 @@
+/* No box of its own: with no summary it renders nothing, and a host with a box would still take
+   a gap in Home's column. */
+:host {
+  display: contents;
+}
+
+.headline {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* minmax(0, 1fr): a column may be narrower than its widest figure, which the no-break space
+   after ≈ keeps whole, rather than pushing the other card off a narrow window. Below 480 px the
+   cards stack, so each figure has the full width. */
+.headline__periods {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.8rem;
+}
+
+@media (max-width: 480px) {
+  .headline__periods {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.headline__period {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.9rem 1rem;
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+  font-family: var(--lumen-font-sans);
+}
+
+.headline__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.headline__label {
+  margin: 0;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--lumen-text-dim);
+}
+
+.headline__share,
+.headline__figure,
+.headline__beside,
+.headline__quiet,
+.headline__partial,
+.headline__stale {
+  margin: 0;
+}
+
+.headline__share {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--lumen-text);
+}
+
+.headline__seen {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+
+/* The two figures are the screen's answer, so they are the boldest and largest thing on it.
+   Monospace and tabular, as money is everywhere else. */
+.headline__tokens,
+.headline__usd {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-family: var(--lumen-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--lumen-save);
+}
+
+/* A loss in the alert colour: shown, not softened. */
+.headline__tokens.is-loss,
+.headline__usd.is-loss {
+  color: var(--lumen-alert);
+}
+
+.headline__unit,
+.headline__floor,
+.headline__basis {
+  font-size: 0.72rem;
+  color: var(--lumen-text-dim);
+}
+
+.headline__floor,
+.headline__basis {
+  font-weight: 600;
+  color: var(--lumen-text);
+}
+
+.headline__beside {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.headline__tag {
+  padding: 0 0.4rem;
+  border: 1px solid var(--lumen-border-strong);
+  border-radius: 999px;
+  font-size: 0.64rem;
+  color: var(--lumen-text-dim);
+}
+
+.headline__quiet,
+.headline__partial {
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--lumen-text-dim);
+}
+
+/* Amber, as every other "this is not the whole" tag is. */
+.headline__partial {
+  color: var(--lumen-warn);
+}
+
+.headline__stale {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--lumen-warn);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--lumen-warn);
+}
+
+.headline__none {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  font-size: 0.82rem;
+  color: var(--lumen-text-dim);
+  text-align: center;
+  background: var(--lumen-bg-secondary);
+  border: 1px solid var(--lumen-border);
+  border-radius: var(--lumen-radius-sm);
+}
+
+/* The theme's full text colour: dim text at this size falls under 4.5:1 on the light page. */
+.headline__how {
+  align-self: flex-end;
+  font-size: 0.72rem;
+  color: var(--lumen-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.headline__how:hover {
+  text-decoration-thickness: 2px;
+}
+
+.headline__how:focus-visible {
+  outline: 2px solid var(--lumen-save);
+  outline-offset: 2px;
+  border-radius: 2px;
+}

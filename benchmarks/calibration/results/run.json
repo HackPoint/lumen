@@ -1,0 +1,140 @@
+{
+  "as_of": "2026-10-14",
+  "claude_code": "2.1.296",
+  "models": {
+    "claude-opus-5-5": {
+      "model_id": "claude-opus-5-5",
+      "as_of": "2026-10-13",
+      "baseline": 955,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-sonnet-5-5": {
+      "model_id": "claude-sonnet-5-5",
+      "as_of": "2026-10-13",
+      "baseline": 959,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-haiku-5-5": {
+      "model_id": "claude-haiku-5-5",
+      "as_of": "2026-10-13",
+      "baseline": 957,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-fable-5": {
+      "model_id": "claude-fable-5",
+      "as_of": "2026-10-14",
+      "baseline": 950,
+      "baseline_sends": 9,
+      "samples": 59,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [
+        "log-05"
+      ],
+      "first_two_sends_agreed": 59
+    },
+    "claude-opus-5": {
+      "model_id": "claude-opus-5",
+      "as_of": "2026-10-14",
+      "baseline": 950,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-sonnet-5": {
+      "model_id": "claude-sonnet-5",
+      "as_of": "2026-10-14",
+      "baseline": 1002,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-opus-4-8": {
+      "model_id": "claude-opus-4-8",
+      "as_of": "2026-10-14",
+      "baseline": 954,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-opus-4-7": {
+      "model_id": "claude-opus-4-7",
+      "as_of": "2026-10-14",
+      "baseline": 1000,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-opus-4-6": {
+      "model_id": "claude-opus-4-6",
+      "as_of": "2026-10-14",
+      "baseline": 736,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-sonnet-4-6": {
+      "model_id": "claude-sonnet-4-6",
+      "as_of": "2026-10-14",
+      "baseline": 738,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-opus-4-5": {
+      "model_id": "claude-opus-4-5-20251101",
+      "as_of": "2026-10-14",
+      "baseline": 871,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    },
+    "claude-haiku-4-5": {
+      "model_id": "claude-haiku-4-5-20251001",
+      "as_of": "2026-10-14",
+      "baseline": 771,
+      "baseline_sends": 9,
+      "samples": 60,
+      "needed_a_third_send": [],
+      "dropped": [],
+      "fell_back_to_another_model": [],
+      "first_two_sends_agreed": 60
+    }
+  }
+}

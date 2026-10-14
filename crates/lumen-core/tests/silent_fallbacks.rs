@@ -304,6 +304,13 @@ const ALLOWED: &[Allowed] = &[
     ),
     allow(
         "crates/lumen-daemon/src/main.rs",
+        OrDefault,
+        "by_session.remove(s)",
+        "Unreachable: every session the snapshot's first query returns has rows in the second, \
+         read in the same transaction.",
+    ),
+    allow(
+        "crates/lumen-daemon/src/main.rs",
         NumberForError,
         "fill.unwrap_or(0)",
         "SQL NULL, not an error: a session of subagent turns only has no main-agent fill.",

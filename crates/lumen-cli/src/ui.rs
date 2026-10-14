@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use lumen_core::rates;
+use lumen_core::rates::{self, Figure, Priced, Shortfall};
 
 use crate::data::AppState;
 
@@ -188,26 +188,16 @@ fn render_cost_panel(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let session_cost = rates::session_cost(
-        state.session_input,
-        state.session_output,
-        state.session_cache_read,
-        state.session_cache_write,
-    );
-    let today_cost = rates::session_cost(
-        state.today_input,
-        state.today_output,
-        state.today_cache_read,
-        state.today_cache_write,
-    );
-    let cache_savings = rates::caching_savings(state.session_cache_read);
+    // Each model's tokens at that model's prices and speed. None when they could not be read.
+    let session = state.session.as_ref().map(|s| s.priced());
+    let today = state.today.as_ref().map(|s| s.priced());
 
     let mut lines: Vec<Line> = vec![
         Line::from(""),
         Line::from(vec![
             Span::raw(" SESSION  "),
             Span::styled(
-                format!("${:.4}", session_cost),
+                usd(session.as_ref(), Figure::Total),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -217,10 +207,18 @@ fn render_cost_panel(f: &mut Frame, area: Rect, state: &AppState) {
         Line::from(vec![
             Span::raw(" TODAY    "),
             Span::styled(
-                format!("${:.4}", today_cost),
+                usd(today.as_ref(), Figure::Total),
                 Style::default().fg(Color::White),
             ),
         ]),
+    ];
+    for note in shortfall_notes(&[session.as_ref(), today.as_ref()]) {
+        lines.push(Line::from(Span::styled(
+            note,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.extend([
         Line::from(""),
         Line::from(Span::styled(
             " ─────────────────",
@@ -238,10 +236,10 @@ fn render_cost_panel(f: &mut Frame, area: Rect, state: &AppState) {
                 .add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            format!(" ${:.4}", cache_savings),
+            format!(" {}", usd(session.as_ref(), Figure::CachingSavings)),
             Style::default().fg(Color::DarkGray),
         )),
-    ];
+    ]);
 
     if state.saved_tokens > 0 {
         let eff_pct = if state.full_tokens > 0 {
@@ -310,9 +308,60 @@ fn fmt_i64(n: i64) -> String {
     fmt_u64(n.max(0) as u64)
 }
 
+/// `figure` in dollars. A dash when its tokens could not be read or none of them has a
+/// price; "at least" when some were left out or priced low, since it is then a floor.
+fn usd(priced: Option<&Priced>, figure: Figure) -> String {
+    let Some(p) = priced.filter(|p| p.has_figure()) else {
+        return "–".to_string();
+    };
+    let amount = p.amount(figure);
+    if p.is_floor(figure) {
+        format!("at least ${amount:.4}")
+    } else {
+        format!("${amount:.4}")
+    }
+}
+
+/// One line for each reason a figure above is a floor or a dash, said once.
+fn shortfall_notes(figures: &[Option<&Priced>]) -> Vec<String> {
+    let mut unread = false;
+    let mut models: Vec<String> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    for figure in figures {
+        let Some(p) = figure else {
+            unread = true;
+            continue;
+        };
+        for shortfall in p
+            .shortfalls(Figure::Total)
+            .into_iter()
+            .chain(p.shortfalls(Figure::CachingSavings))
+        {
+            match shortfall {
+                Shortfall::NoPrice(names) => models.extend(names),
+                other => others.push(other.describe()),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if unread {
+        out.push(" –: not read from the ledger".to_string());
+    }
+    if !models.is_empty() {
+        models.sort_unstable();
+        models.dedup();
+        out.push(format!(" {}", Shortfall::NoPrice(models).describe()));
+    }
+    others.sort_unstable();
+    others.dedup();
+    out.extend(others.into_iter().map(|o| format!(" {o}")));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lumen_core::rates::{Spend, Tokens};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -359,14 +408,52 @@ mod tests {
         AppState {
             fill: 50_000,
             window: 200_000,
-            model: "claude-sonnet-4".into(),
-            session_input: 1_000,
-            session_output: 2_000,
-            session_cache_read: 3_000,
-            session_cache_write: 4_000,
+            model: "claude-sonnet-4-6".into(),
+            session: Some(spend(
+                "claude-sonnet-4-6",
+                tokens(1_000, 2_000, 3_000, 4_000),
+            )),
             daemon_connected: true,
             ..AppState::default()
         }
+    }
+
+    fn healthy_zeroed() -> AppState {
+        AppState {
+            fill: 50_000,
+            window: 200_000,
+            daemon_connected: true,
+            ..AppState::default()
+        }
+    }
+
+    fn tokens(input: i64, output: i64, cache_read: i64, cache_write: i64) -> Tokens {
+        Tokens {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: 0,
+            cache_write_unknown: 0,
+        }
+    }
+
+    const STD: Option<&str> = Some("standard");
+    const GLOBAL: Option<&str> = Some("global");
+
+    /// One model's tokens at standard speed, routed globally, every cache write's duration
+    /// recorded.
+    fn spend(model: &str, t: Tokens) -> Spend {
+        let mut s = Spend::default();
+        s.add(model, STD, GLOBAL, t);
+        s
+    }
+
+    /// The SESSION line of a rendered screen.
+    fn session_line(out: &str) -> &str {
+        out.lines()
+            .find(|l| l.contains("SESSION"))
+            .expect("a SESSION line")
     }
 
     // ── fmt_u64 / fmt_i64 ────────────────────────────────────────────────────
@@ -459,7 +546,7 @@ mod tests {
         assert!(out.contains("context monitor"));
         assert!(out.contains("Context Fill"), "gauge panel title");
         assert!(out.contains("Cost"), "cost panel title");
-        assert!(out.contains("claude-sonnet-4"), "model label");
+        assert!(out.contains("claude-sonnet-4-6"), "model label");
         assert!(out.contains("25%"), "50k of 200k is 25%:\n{out}");
         assert!(out.contains("50,000"), "fill is thousands-separated");
         assert!(out.contains("200,000"), "window is thousands-separated");
@@ -559,16 +646,218 @@ mod tests {
     #[test]
     fn the_cost_panel_prices_the_session_and_today() {
         let mut st = healthy();
-        st.today_input = 10_000;
-        st.today_output = 20_000;
+        st.today = Some(spend("claude-sonnet-4-6", tokens(10_000, 20_000, 0, 0)));
         let out = text(&draw(&st, true, 100, 24));
         assert!(out.contains("SESSION"), "{out}");
         assert!(out.contains("TODAY"));
-        let expected = rates::session_cost(1_000, 2_000, 3_000, 4_000);
+        let expected = st.session.as_ref().unwrap().priced().cost.total();
         assert!(
             out.contains(&format!("${expected:.4}")),
             "expected ${expected:.4} in:\n{out}"
         );
+        // 10K input at $3/M and 20K output at $15/M.
+        assert!(out.contains("$0.3300"), "{out}");
+        assert!(
+            !out.contains("at least"),
+            "every figure here is exact:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_sonnet_session_is_priced_at_sonnet_rates() {
+        let st = AppState {
+            model: "claude-sonnet-4-6".into(),
+            session: Some(spend("claude-sonnet-4-6", tokens(0, 1_000_000, 0, 0))),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        let line = out
+            .lines()
+            .find(|l| l.contains("SESSION"))
+            .expect("a SESSION line");
+        assert!(
+            line.contains("$15.0000"),
+            "1M Sonnet 4.6 output tokens cost $15:\n{out}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_gets_no_dollar_figure() {
+        let st = AppState {
+            model: "<synthetic>".into(),
+            session: Some(spend("<synthetic>", tokens(0, 1_000_000, 0, 0))),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        let line = out
+            .lines()
+            .find(|l| l.contains("SESSION"))
+            .expect("a SESSION line");
+        assert!(!line.contains('$'), "no price, so no dollar figure:\n{out}");
+        assert!(out.contains("no price for <synthetic>"), "{out}");
+    }
+
+    #[test]
+    fn a_session_that_mixes_models_prices_each_at_its_own_rate() {
+        // A subagent on Haiku inside an Opus session.
+        let mut session = spend("claude-opus-4-8", tokens(0, 1_000_000, 0, 0));
+        session.add(
+            "claude-haiku-4-5-20251001",
+            STD,
+            GLOBAL,
+            tokens(0, 1_000_000, 0, 0),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        assert!(session_line(&out).contains("$30.0000"), "{out}");
+        assert!(!out.contains("at least"), "{out}");
+    }
+
+    #[test]
+    fn a_figure_that_leaves_a_model_out_says_it_is_a_floor_and_which() {
+        let mut session = spend("claude-opus-4-8", tokens(0, 1_000_000, 0, 0));
+        session.add("<synthetic>", None, None, tokens(0, 5, 0, 0));
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        assert!(session_line(&out).contains("at least $25.0000"), "{out}");
+        assert!(out.contains("no price for <synthetic>"), "{out}");
+    }
+
+    #[test]
+    fn a_cache_write_with_no_recorded_duration_is_shown_as_a_floor() {
+        // The fixture turn in lumen-core: $0.0599 with its write's 1-hour split, $0.0494
+        // priced at the 5-minute rate without it, which must not pass for the whole.
+        let mut session = Spend::default();
+        session.add(
+            "claude-opus-4-8",
+            STD,
+            GLOBAL,
+            Tokens::of_turn(3_197, 303, 16_685, 2_799, None),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        assert!(session_line(&out).contains("at least $0.0494"), "{out}");
+        let p = st.session.as_ref().unwrap().priced();
+        assert_eq!(
+            shortfall_notes(&[Some(&p)]),
+            vec![format!(" {}", Shortfall::DurationUnknown.describe())],
+            "and says why"
+        );
+    }
+
+    #[test]
+    fn a_fast_turn_is_priced_at_the_fast_mode_rate() {
+        let mut session = Spend::default();
+        session.add(
+            "claude-opus-4-8",
+            Some("fast"),
+            GLOBAL,
+            tokens(0, 1_000_000, 0, 0),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        assert!(session_line(&out).contains("$50.0000"), "{out}");
+    }
+
+    #[test]
+    fn a_turn_with_no_recorded_speed_on_a_model_with_fast_mode_is_a_floor() {
+        let mut session = Spend::default();
+        session.add("claude-opus-4-8", None, GLOBAL, tokens(0, 1_000_000, 0, 0));
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        assert!(session_line(&out).contains("at least $25.0000"), "{out}");
+        assert!(out.contains("speed not recorded"), "and says why:\n{out}");
+    }
+
+    #[test]
+    fn a_us_only_turn_is_priced_at_1_1_times() {
+        let mut session = Spend::default();
+        session.add(
+            "claude-opus-4-8",
+            STD,
+            Some("us"),
+            tokens(0, 1_000_000, 0, 0),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 24));
+        assert!(session_line(&out).contains("$27.5000"), "{out}");
+        assert!(!out.contains("at least"), "{out}");
+    }
+
+    #[test]
+    fn a_turn_whose_region_is_not_known_is_a_floor() {
+        // The real transcript line: Opus 4.8, standard speed, inference_geo "not_available".
+        let mut session = Spend::default();
+        session.add(
+            "claude-opus-4-8",
+            STD,
+            Some("not_available"),
+            tokens(0, 1_000_000, 0, 0),
+        );
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        assert!(session_line(&out).contains("at least $25.0000"), "{out}");
+        assert!(
+            out.contains("inference region not known"),
+            "and says why:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_sum_that_could_not_be_read_is_a_dash_not_zero() {
+        let st = AppState {
+            session: None,
+            today: None,
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        let line = session_line(&out);
+        assert!(line.contains('–') && !line.contains('$'), "{out}");
+        assert!(out.contains("not read from the ledger"), "{out}");
+    }
+
+    #[test]
+    fn caching_savings_are_priced_at_the_consuming_models_rates() {
+        // Sonnet 4.6: a cache hit is $0.30/M against $3/M fresh, so 1M reads saved $2.70.
+        let st = AppState {
+            session: Some(spend("claude-sonnet-4-6", tokens(0, 0, 1_000_000, 0))),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        assert!(out.contains("$2.7000"), "{out}");
+    }
+
+    #[test]
+    fn caching_savings_that_leave_a_model_out_are_a_floor() {
+        let mut session = spend("claude-opus-4-8", tokens(0, 0, 1_000_000, 0));
+        session.add("<synthetic>", STD, GLOBAL, tokens(0, 0, 10, 0));
+        let st = AppState {
+            session: Some(session),
+            ..healthy_zeroed()
+        };
+        let out = text(&draw(&st, true, 100, 30));
+        assert!(out.contains("at least $4.5000"), "{out}");
     }
 
     #[test]
