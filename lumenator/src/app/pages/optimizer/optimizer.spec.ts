@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { Optimizer } from './optimizer';
+import { CALIBRATION_NOTE, Optimizer } from './optimizer';
 import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { FakeTauriBridge, PRICE_TABLE } from '../../tauri-bridge.fake';
@@ -297,36 +297,53 @@ describe('Optimizer', () => {
 
   // ── Token provenance ───────────────────────────────────────────────────────
   //
-  // "Never estimated" and "verifiable" are said only over a ledger that supports them.
-  // These read the rendered page, not the signals behind it: the sentence on screen is
-  // the claim, and it is what has to change when the data cannot back it.
+  // "Counted with cl100k_base" and "verifiable" are said only over a ledger that
+  // supports them. These read the rendered page, not the signals behind it: the sentence
+  // on screen is the claim, and it is what has to change when the data cannot back it.
+  //
+  // Neither state calls a count exact. Until 1.9.0 the first said "Counted to the token
+  // by a local tokenizer, never estimated.", which was true only in cl100k_base's units;
+  // both now say what counted it and how far that is from Claude's own count.
 
   describe('token provenance', () => {
     const data = { lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 };
 
-    it('says exact, and verifiable, when every count was measured', async () => {
+    it('says what counted it, and verifiable, when every count was measured', async () => {
       await build(report({ ...data, unverifiedProvenanceRows: 0, provenanceTotalRows: 7_192 }));
       expect(rendered('.savings-provenance'))
-        .toBe('Counted to the token by a local tokenizer, never estimated.');
+        .toBe("Counted with cl100k_base, a local stand-in for Claude's tokenizer. "
+          + CALIBRATION_NOTE);
       expect(rendered('.savings-card--caused .savings-card__note'))
-        .toBe('caused · measured · verifiable · grows with use');
+        .toBe('caused · counted locally · verifiable · grows with use');
       expect(text()).not.toContain('unverified');
     });
 
     it('qualifies the claim, and is not verifiable, when some counts were not measured', async () => {
       await build(report({ ...data, unverifiedProvenanceRows: 2_584, provenanceTotalRows: 7_192 }));
       expect(rendered('.savings-provenance'))
-        .toBe('Counts are exact for Lumen tool calls; some older events have unverified provenance.');
+        .toBe("Lumen tool calls are counted with cl100k_base, a local stand-in for Claude's "
+          + 'tokenizer; some older events have unverified provenance. ' + CALIBRATION_NOTE);
       expect(rendered('.savings-card--caused .savings-card__note'))
         .toBe('caused · partly unverified · grows with use');
-      expect(text()).not.toContain('never estimated');
+      expect(text()).not.toContain('Counted with');
     });
 
     it('qualifies the claim over a single unverified count', async () => {
-      // The boundary: one row is enough to make "never estimated" false.
+      // The boundary: one row is enough to make the unqualified sentence false.
       await build(report({ ...data, unverifiedProvenanceRows: 1, provenanceTotalRows: 1 }));
       expect(rendered('.savings-card--caused .savings-card__note')).toContain('partly unverified');
-      expect(text()).not.toContain('never estimated');
+      expect(text()).not.toContain('Counted with');
+    });
+
+    it('never calls a count exact, in either state', async () => {
+      for (const unverifiedProvenanceRows of [0, 3]) {
+        TestBed.resetTestingModule();
+        await build(report({ ...data, unverifiedProvenanceRows, provenanceTotalRows: 7 }));
+        const page = text().toLowerCase();
+        for (const claim of ['to the token', 'never estimated', 'exact']) {
+          expect(page).not.toContain(claim);
+        }
+      }
     });
 
     it('makes no claim about counts before there are any', async () => {
@@ -538,14 +555,14 @@ describe('Optimizer', () => {
       await build(report({ repeatReads: { ...SERVED, measuredAnswers: 1_000 } }));
       expect(figures()[2]).toBe(
         `Tokens not re-sent ${n(4_125_000)} ${BASELINE} `
-        + `Covers the ${n(1_000)} of ${n(1_540)} answers whose token count was measured.`,
+        + `Covers the ${n(1_000)} of ${n(1_540)} answers whose tokens the tokenizer counted.`,
       );
     });
 
     it('claims no token figure when no answer has a measured count', async () => {
       await build(report({ repeatReads: repeats({ unchangedServed: 4 }) }));
       expect(figures()[2]).toBe(
-        'Tokens not re-sent — None of these answers has a measured token count, so no figure is claimed.',
+        'Tokens not re-sent — None of these answers has a token count from the tokenizer, so no figure is claimed.',
       );
     });
 

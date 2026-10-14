@@ -211,13 +211,13 @@
                             </dd>
                             <dd class="repeat-card__what">
                                 @if (c.measuredAnswers === 0) {
-                                    None of these answers has a measured token count, so no figure is claimed.
+                                    None of these answers has a token count from the tokenizer, so no figure is claimed.
                                 } @else {
                                     Counted against reading the whole file again, not against the outline Lumen
                                     sends with repeat reads off.
                                     @if (c.measuredAnswers < c.served) {
                                         Covers the {{ fmtTokens(c.measuredAnswers) }} of {{ fmtTokens(c.served) }}
-                                        answers whose token count was measured.
+                                        answers whose tokens the tokenizer counted.
                                     }
                                 }
                             </dd>

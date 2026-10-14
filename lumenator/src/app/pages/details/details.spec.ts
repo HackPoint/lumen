@@ -221,7 +221,7 @@ describe('Details', () => {
       );
     });
 
-    it('never claims the counts were measured to the token: that sentence is the Optimizer screen\'s', async () => {
+    it('never calls the counts exact: the sentence on how they were counted is the Optimizer screen\'s', async () => {
       await build(report({ lifetimeOptimizedTokens: 900, lifetimeFullTokens: 1_000 }));
       expect(text()).not.toContain('never estimated');
     });

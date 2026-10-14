@@ -15,6 +15,19 @@ import { aggTokens, figureTag, price } from '../../prices';
 import { LumenTooltip } from '../../directives/tooltip.directive';
 
 /**
+ * How far a cl100k_base count is from Claude's own: the pooled rows of
+ * lumen_core::calibration for the two tokenizers it found, measured by
+ * benchmarks/calibration against Claude's usage data on raw file text. A Rust test holds
+ * this text to those rows, so a re-run that moves a ratio fails until the sentence moves
+ * with it.
+ */
+export const CALIBRATION_NOTE =
+    'On raw file text, Claude Opus 4.7 and later count about 1.59× as many tokens (1.44–1.70×), '
+    + 'and earlier models about 1.24× as many (1.14–1.31×): the 10th to 90th percentile of '
+    + "60 samples measured against Claude's own usage data (calibration of 2026-10-14). A Read's "
+    + 'line numbers are not in these ratios.';
+
+/**
  * What Lumen caused, beside what Claude Code's cache did, and whether Lumen is working.
  *
  * Until 1.9.0 this screen led with a net dollar value of interception. It is gone until the
@@ -32,20 +45,28 @@ export class Optimizer implements OnInit {
     /**
      * Wording for the effectiveness claim, qualified when provenance is unknown.
      *
-     * The old copy said "measured to the token, never estimated" unconditionally.
-     * That was false on any install whose baked tokenizer path had died: the hook
-     * substituted bytes/4 without recording that it had. The claim is now made only
-     * over data that can support it.
+     * An earlier copy claimed every count measured, unconditionally. That was false on
+     * any install whose baked tokenizer path had died: the hook substituted bytes/4
+     * without recording that it had. The claim is now made only over data that can
+     * support it.
+     *
+     * Until 1.9.0 it also called the count exact: the copy before 1.9.0 read "Counted
+     * to the token by a local tokenizer, never estimated." It was exact only in
+     * cl100k_base's units. The note now says what counted it and how far that is from
+     * Claude's own count, quoting the pooled row of lumen_core::calibration (a Rust test
+     * holds this text to that row).
      */
     readonly provenanceNote = computed(() =>
-        this.s.unverifiedProvenanceRows() === 0
-            ? 'Counted to the token by a local tokenizer, never estimated.'
-            : 'Counts are exact for Lumen tool calls; some older events have unverified provenance.',
+        (this.s.unverifiedProvenanceRows() === 0
+            ? "Counted with cl100k_base, a local stand-in for Claude's tokenizer."
+            : "Lumen tool calls are counted with cl100k_base, a local stand-in for Claude's "
+              + 'tokenizer; some older events have unverified provenance.')
+        + ' ' + CALIBRATION_NOTE,
     );
 
     readonly savingsNote = computed(() =>
         this.s.unverifiedProvenanceRows() === 0
-            ? 'caused · measured · verifiable · grows with use'
+            ? 'caused · counted locally · verifiable · grows with use'
             : 'caused · partly unverified · grows with use',
     );
 

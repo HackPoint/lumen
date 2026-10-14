@@ -1,4 +1,5 @@
 pub mod busy;
+pub mod calibration;
 pub mod compress;
 pub mod coverage;
 pub mod econ;
@@ -44,7 +45,7 @@ mod tests {
         let n = count_tokens("Hello, world!");
         assert!(n > 0 && n < 10); // a few tokens, stable
 
-        // chars/4 would say ~3; real BPE gives a precise count
+        // chars/4 would say ~3; BPE gives the tokenizer's own count
         assert_eq!(count_tokens("Hello, world!"), count_tokens("Hello, world!")); // deterministic
     }
 }

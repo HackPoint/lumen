@@ -1,0 +1,453 @@
+{
+  "claude_code": "2.1.296",
+  "models": {
+    "claude-opus-5-5": {
+      "baseline_totals": [
+        955,
+        955,
+        955,
+        955,
+        955
+      ],
+      "pair": {
+        "rust-02": [
+          3188,
+          3188
+        ],
+        "prose-03": [
+          2914,
+          2914
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-sonnet-5-5": {
+      "baseline_totals": [
+        959,
+        959,
+        959,
+        959,
+        959
+      ],
+      "pair": {
+        "rust-02": [
+          3192,
+          3192
+        ],
+        "prose-03": [
+          2918,
+          2918
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-haiku-5-5": {
+      "baseline_totals": [
+        957,
+        957,
+        957,
+        957,
+        957
+      ],
+      "pair": {
+        "rust-02": [
+          3190,
+          3190
+        ],
+        "prose-03": [
+          2916,
+          2916
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-fable-5": {
+      "baseline_totals": [
+        952,
+        952,
+        952,
+        952,
+        952
+      ],
+      "pair": {
+        "rust-02": [
+          3185,
+          3185
+        ],
+        "prose-03": [
+          2911,
+          2911
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-opus-5": {
+      "baseline_totals": [
+        952,
+        952,
+        952,
+        952,
+        952
+      ],
+      "pair": {
+        "rust-02": [
+          3185,
+          3185
+        ],
+        "prose-03": [
+          2911,
+          2911
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-sonnet-5": {
+      "baseline_totals": [
+        1004,
+        1004,
+        1004,
+        1004,
+        1004
+      ],
+      "pair": {
+        "rust-02": [
+          3237,
+          3237
+        ],
+        "prose-03": [
+          2963,
+          2963
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-opus-4-8": {
+      "baseline_totals": [
+        956,
+        956,
+        956,
+        956,
+        956
+      ],
+      "pair": {
+        "rust-02": [
+          3189,
+          3189
+        ],
+        "prose-03": [
+          2915,
+          2915
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-opus-4-7": {
+      "baseline_totals": [
+        1002,
+        1002,
+        1002,
+        1002,
+        1002
+      ],
+      "pair": {
+        "rust-02": [
+          3235,
+          3235
+        ],
+        "prose-03": [
+          2961,
+          2961
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          4,
+          4
+        ]
+      },
+      "additivity": {
+        "a": 2233,
+        "b": 1959,
+        "a_newline_b": 4192,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-opus-4-6": {
+      "baseline_totals": [
+        736,
+        736,
+        736,
+        736,
+        736
+      ],
+      "pair": {
+        "rust-02": [
+          2575,
+          2575
+        ],
+        "prose-03": [
+          2209,
+          2209
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          3,
+          3
+        ]
+      },
+      "additivity": {
+        "a": 1839,
+        "b": 1473,
+        "a_newline_b": 3312,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-sonnet-4-6": {
+      "baseline_totals": [
+        738,
+        738,
+        738,
+        738,
+        738
+      ],
+      "pair": {
+        "rust-02": [
+          2577,
+          2577
+        ],
+        "prose-03": [
+          2211,
+          2211
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          3,
+          3
+        ]
+      },
+      "additivity": {
+        "a": 1839,
+        "b": 1473,
+        "a_newline_b": 3312,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-opus-4-5-20251101": {
+      "baseline_totals": [
+        871,
+        871,
+        871,
+        871,
+        871
+      ],
+      "pair": {
+        "rust-02": [
+          2710,
+          2710
+        ],
+        "prose-03": [
+          2344,
+          2344
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          3,
+          3
+        ]
+      },
+      "additivity": {
+        "a": 1839,
+        "b": 1473,
+        "a_newline_b": 3312,
+        "a_plus_b_minus_together": 0
+      }
+    },
+    "claude-haiku-4-5-20251001": {
+      "baseline_totals": [
+        771,
+        771,
+        771,
+        771,
+        771
+      ],
+      "pair": {
+        "rust-02": [
+          2610,
+          2610
+        ],
+        "prose-03": [
+          2244,
+          2244
+        ]
+      },
+      "tiny_deltas": {
+        "x": [
+          2,
+          2
+        ],
+        "hello world": [
+          3,
+          3
+        ]
+      },
+      "additivity": {
+        "a": 1839,
+        "b": 1473,
+        "a_newline_b": 3312,
+        "a_plus_b_minus_together": 0
+      }
+    }
+  },
+  "isolation": [
+    {
+      "models": [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5"
+      ],
+      "transcripts_new": 0,
+      "transcripts_written": 4,
+      "calibration_records_found": 0
+    },
+    {
+      "models": [
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5-20251101",
+        "claude-haiku-4-5-20251001"
+      ],
+      "transcripts_new": 0,
+      "transcripts_written": 3,
+      "calibration_records_found": 0
+    }
+  ]
+}

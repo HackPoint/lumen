@@ -121,7 +121,11 @@ the engine's token counts are calibrated to Claude's.
 ## The tokenizer is a proxy
 
 Tokens are counted with `lumen_core::tokenizer::count_tokens`: `cl100k_base`, the same tokenizer
-the meter uses. It is not Claude's tokenizer. Counts compare one way of reading a file with
+the meter uses. It is not Claude's tokenizer: on raw file text Claude Opus 4.7 and later count
+about 1.59× as many tokens (1.44–1.70×), and earlier models about 1.24× as many
+(1.14–1.31×), from the 10th to the 90th percentile of 60 samples measured against Claude's
+own usage data ([calibration](calibration/README.md), calibration of 2026-10-14; a `Read`'s line
+numbers are not in these ratios). Counts compare one way of reading a file with
 another; they are not a bill and not the number of tokens Claude would charge. The harness also
 re-counts every reply it receives and stops if the server's own figure disagrees, and it
 cross-checks each reply against the row the server wrote to its ledger.
@@ -289,8 +293,8 @@ lower-median file by line count among those with a representative item and an ed
 listed in the JSON and the summary. Hooks only ever see source files, and the repository is
 Rust, so latency does not depend on the other corpora.
 
-Latency varies, and on a shared machine it varies more than 20%. Tokens are exact; latency is
-not, and this section says how far. All runs below are the full latency run (42 series medians
+Latency varies, and on a shared machine it varies more than 20%. Token counts are the same on
+every run; latency is not, and this section says how far. All runs below are the full latency run (42 series medians
 across both builds, 45 in this release's run) on one Apple M4 laptop that other work was using, so
 its load average ranged from about 4 to 25 across them ("the committed run" is the first run
 committed here, from the harness's development; this release's run replaced it):

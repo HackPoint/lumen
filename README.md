@@ -437,8 +437,8 @@ round: a dollar is always the price of the model that consumed the tokens.
 - **What a call saved** is what a built-in Read would have put in context, less what the call
   returned. A Read returns at most 25,000 tokens of a file (Claude Code's documented default, and
   a file over 256 KB is refused whole, after which the model reads a page), so a larger file
-  counts as 25,000. Until the calibration table lands the counts are `cl100k_base` tokens, a
-  proxy for Claude's, and the cap is applied to those.
+  counts as 25,000. Until the engine applies the calibration table (below), the counts are
+  `cl100k_base` tokens, a proxy for Claude's, and the cap is applied to those.
 - **`R`** is the turns after the one that read the result, up to the first compaction or rewind
   the daemon recorded in that transcript, or the first turn whose prompt is smaller than the one
   before it: context was taken out there (a compaction, a rewind, cleared tool results), whether
@@ -463,14 +463,27 @@ round: a dollar is always the price of the model that consumed the tokens.
 Every figure is a band, low to high, and the central one is the conservative one. `lumen report`
 prints the rules in full.
 
-**Tool calls and built-in `Read` events are measured to the token.**
+**Tool calls and built-in `Read` events are counted with a stand-in for Claude's tokenizer.**
 
-`smart_read`, `recall_file` and `compress_logs` count tokens in-process with a BPE
-tokenizer (`cl100k_base`, not Claude's own) and have no estimation path, so their figures
-are exact in its units.
+`smart_read`, `recall_file` and `compress_logs` count tokens in-process with `cl100k_base`,
+OpenAI's BPE tokenizer, because Claude's is not available offline. Every figure is a
+tokenizer's count, never a guess, but it is a count in `cl100k_base`'s units, and Claude
+counts the same text differently. Measured against Claude's own usage data on 60 samples of
+raw file text from public repositories ([benchmarks/calibration](benchmarks/calibration/README.md),
+Claude Code 2.1.296, calibration of 2026-10-14), Claude Opus 4.7 and every later model measured
+count about 1.59× as many tokens (1.44–1.70×), and earlier models about 1.24× as many
+(1.14–1.31×); the earlier models measured are Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5.
+Each band is the 10th to the 90th percentile of the samples; by kind of file the median on the
+later models runs from 1.44× for logs to 1.70× for shell scripts. The samples are raw text: a
+`Read` also sends a line number on every line and a tool-result wrapper, which are not in these
+ratios. Every sample came out higher in Claude's count than in `cl100k_base`'s, on every model
+measured, but the samples are English and include no CSS, HTML, YAML, SQL or non-Latin text.
+`lumen_core::calibration` turns a count into an estimate of Claude's with its band. The usage figures elsewhere in the app (context fill, consumption windows, cache
+reads) are not counted by Lumen: they are the provider's own, read from Claude Code's
+transcripts.
 
 Since 1.6.0 built-in `Read` events are counted by `lumen-mcp hook meter`, with the same
-tokenizer, and it has no estimation path either: a file that is not text is recorded as 0
+tokenizer, and it never falls back to a guess either: a file that is not text is recorded as 0
 tokens with provenance `unsupported`, and a meter that cannot write its row records a fault
 instead of a guess. Before 1.6.0 a shell hook shelled out to `lumen-tok` and fell back to
 `bytes ÷ 4` when it could not; before 1.1.5 it did so **silently**, and on installs set up
@@ -487,7 +500,8 @@ that Lumen actually made. This number starts small and grows with every session.
 dollar figure: a read records no model, so there is no price to put on it.
 
 **This is the only number Lumen claims credit for.** It is small, verifiable, and
-derived directly from the database — not estimated, not extrapolated.
+derived directly from the database: a sum of `cl100k_base` counts, with nothing guessed or
+extrapolated. It is in `cl100k_base`'s units; see above for how far those are from Claude's.
 
 #### Saved by caching (reported)
 
@@ -578,14 +592,19 @@ per call ([Effectiveness %](#effectiveness--on-details) says how), and `lumen` a
 show the result for your own ledger. No figure is quoted here: yours depends on your sessions.
 
 The token ratio — **84% fewer tokens per intercepted read** on the author's machine — is
-on the Details screen. It is real and measured to the token, but on its own it is not a
-result: a smaller reply that forces a second round is a loss however good the ratio looks.
+on the Details screen. It is a ratio of two `cl100k_base` counts, not of Claude's, and on its
+own it is not a result: a smaller reply that forces a second round is a loss however good the
+ratio looks.
 
 Every intercepted read reports `full_tokens` vs `returned_tokens`, counted with the
-`cl100k_base` BPE tokenizer. That is a real tokenizer but not the one Claude bills with, so
-the counts are exact in its units and an approximation of Claude's. No estimation, no
-extrapolation, and no scaling up — 96.6% of that saving rests on a real tokenizer count
-rather than a bytes/4 guess, which is asserted by a test rather than asserted here.
+`cl100k_base` BPE tokenizer. That is a real tokenizer but not the one Claude bills with: the
+counts are deterministic in its units and approximate Claude's, which come out higher: on raw
+file text Claude Opus 4.7 and later count about 1.59× as many tokens (1.44–1.70×), and earlier
+models about 1.24× as many (1.14–1.31×), from the 10th to the 90th percentile of the 60 samples
+in the [calibration](benchmarks/calibration/README.md) (calibration of 2026-10-14; a `Read`'s
+line numbers are not in these ratios). Nothing is guessed, extrapolated or scaled up — 96.6% of
+that saving rests on a tokenizer count rather than a bytes/4 guess, which is asserted by a test
+rather than asserted here.
 
 **→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
 measurement, including the things that would make the figure above dishonest: **8 of 1,608
@@ -963,7 +982,7 @@ rows: they count every row that carries a token count.)
   Read its baseline carefully: it is counted against reading the whole file again. With repeat
   reads off a read returns the outline (for `recall_file`, the symbols asked for), which is
   usually far smaller than the file, so this is more than repeat reads gain over having them off,
-  and it is not shown as a saving. It counts only answers whose token count was measured: when
+  and it is not shown as a saving. It counts only answers whose tokens the tokenizer counted: when
   that is fewer than all of them the card says how many, and when it is none the figure is a dash.
 - *Full result asked for again (`fresh=true`)*: n of m, where m is the unchanged answers, the
   deltas and the `fresh` requests together, so it is how often the model did not take a repeat

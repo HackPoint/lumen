@@ -33,12 +33,18 @@ imply the caching number is Lumen's doing.
 
 ## Hard rules
 - Never present "Saved by caching" as a Lumen achievement.
-- Never estimate optimizer savings — only measured full_tokens − returned_tokens.
+- Never guess optimizer savings — only counted full_tokens − returned_tokens: no bytes/4,
+  no extrapolation.
+- Say what a token figure is. Lumen counts with `cl100k_base`, a local stand-in for
+  Claude's tokenizer, so its counts are deterministic but are not Claude's: quote them
+  with the calibration (`lumen_core::calibration`, `benchmarks/calibration`) and its
+  error, never as exact. "Measured" is for provider usage data, which Claude Code's
+  transcripts carry as the API reported it.
 - builtin_read = "not optimized (read in full)" — context, never counted as savings.
 - Channel honesty: CLI = "Full mode" (interception on); VS Code = "Soft mode"
   (tools available, not enforced; bypassed reads invisible). State this plainly.
 - The one-line pitch: "Lumen shows you the whole truth about your tokens, and gives
-  you verifiable optimization — measured to the token, never inflated."
+  you verifiable optimization — counted on every call, never inflated."
 
 ## What NOT to say
 - ✗ "Lumen saved you $X" where X includes caching.
