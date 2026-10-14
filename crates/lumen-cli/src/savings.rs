@@ -176,20 +176,21 @@ fn period(out: &mut String, title: &str, when: &str, p: &Period, billing: Billin
         ));
     }
     out.push_str(&format!(
-        "  {} calls, {} blocked Reads let through ({} escape-valve faults{}); {} with a derived R \
-         and C, {} with an unverified count\n",
+        "  {} calls, {} blocked Reads ({} recorded in transcripts, {} from escape-valve faults{}; \
+         {} escape-valve faults); {} with a derived R and C, {} with an unverified count\n",
         c.calls,
         c.blocked_reads,
-        c.valve_faults,
+        c.blocked_reads_from_transcripts,
+        c.blocked_reads_from_faults,
         if c.blocked_reads_bounded > 0 {
             format!(
-                "; {} of the blocks bounded, one per agent that could have read the path, none \
-                 known",
+                ", {} bounded, one per agent that could have read the path, none known",
                 c.blocked_reads_bounded
             )
         } else {
             String::new()
         },
+        c.valve_faults,
         c.derived_pairs,
         c.unverified_provenance_rows
     ));
@@ -237,7 +238,11 @@ fn line(l: &CallLine) -> String {
             l.path.as_deref().unwrap_or("")
         ),
         LineKind::BlockedRead => format!(
-            "blocked Read, then let through: {}",
+            "blocked Read{}: {}",
+            match l.extra_round_basis {
+                "blockedReadRecorded" => ", from its transcript",
+                _ => ", then let through",
+            },
             l.path.as_deref().unwrap_or("")
         ),
     };

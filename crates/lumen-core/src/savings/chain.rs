@@ -517,12 +517,11 @@ pub(super) fn agent_of(source_file: Option<&str>, is_subagent: bool) -> Option<&
     if !sub {
         return None;
     }
-    let id = source_file
-        .and_then(|f| f.rsplit(['/', '\\']).next())
-        .and_then(|name| name.strip_prefix("agent-"))
-        .map(|name| name.strip_suffix(".jsonl").unwrap_or(name))
-        .filter(|id| !id.is_empty());
-    Some(id.unwrap_or(""))
+    Some(
+        source_file
+            .and_then(crate::project::agent_file_id)
+            .unwrap_or(""),
+    )
 }
 
 pub(super) struct Chains<'a> {
@@ -821,6 +820,35 @@ impl<'a> Chains<'a> {
         let Some(turn) = i.checked_sub(1).and_then(|j| chain.turns.get(j)) else {
             return Outcome::NoPair(Why::NoFollowingTurn);
         };
+        self.round(turn)
+    }
+
+    /// The round a block a transcript records cost: the first turn of the blocked agent's own
+    /// chain after the block's result, the one that read the block's message.
+    pub fn blocked_at(&self, session: &str, agent: Option<&str>, block_ms: i64) -> Outcome {
+        let Some(chain) = self.chains.get(&(session, agent)) else {
+            return Outcome::NoPair(match agent {
+                Some(_) => Why::SubagentNotInLedger,
+                None => Why::NoFollowingTurn,
+            });
+        };
+        let i = chain.turns.partition_point(|t| t.ts_ms <= block_ms);
+        match chain.turns.get(i) {
+            Some(turn) => self.round(turn),
+            None => Outcome::NoPair(Why::NoFollowingTurn),
+        }
+    }
+
+    /// The time of the latest turn of `session` by `agent` the ledger holds, as of the clock.
+    pub fn last_turn_ms(&self, session: &str, agent: Option<&str>) -> Option<i64> {
+        self.chains
+            .get(&(session, agent))
+            .and_then(|c| c.turns.last())
+            .map(|t| t.ts_ms)
+    }
+
+    /// One extra round, priced as `turn` ran.
+    fn round(&self, turn: &Turn) -> Outcome {
         let price =
             self.classes[turn.class as usize]
                 .prices

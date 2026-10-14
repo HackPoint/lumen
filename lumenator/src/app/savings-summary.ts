@@ -56,8 +56,15 @@ export interface Unpriced {
 export interface SavingsCounts {
     /** Lumen calls. */
     calls: number;
-    /** Reads the intercept blocked and its escape valve then let through: a round for nothing. */
+    /**
+     * Reads the intercept blocked, each a round: those a transcript records, and those inferred
+     * from escape-valve faults where none does. The next two and `blockedReadsBounded` split them.
+     */
     blockedReads: number;
+    /** Recorded in the transcript of the agent that tried the Read: on evidence, exactly. */
+    blockedReadsFromTranscripts: number;
+    /** Inferred from escape-valve faults no transcript record accounts for, on evidence. */
+    blockedReadsFromFaults: number;
     /** Calls whose R and C came from their own turn chain. */
     derivedPairs: number;
     unverifiedProvenanceRows: number;
@@ -72,7 +79,10 @@ export interface SavingsCounts {
     roundsUnrecordedRows: number;
     /** Derived pairs whose R a collapse ended: inferred from the prompt shrinking, not recorded. */
     roundsCollapseRows: number;
-    /** The escape-valve faults behind the blocked Reads: one on every later Read of a blocked path. */
+    /**
+     * The escape-valve faults behind the blocked Reads: one on every later Read of a blocked path.
+     * Where a transcript records the block, they corroborate it.
+     */
     valveFaults: number;
     /**
      * Blocked Reads counted because faults no evidence attributes could stand for them: one per
@@ -216,8 +226,10 @@ export interface CallLine {
         | 'freshAfterStub'
         | 'inlineText'
         | 'blockNotRecorded'
+        | 'blockRecorded'
         | 'blockedRead'
-        | 'blockedReadBounded';
+        | 'blockedReadBounded'
+        | 'blockedReadRecorded';
     extraRoundEvidenced: boolean;
     /** `measured` when the line has dollars (all in the measured figure); `none`: tokens only. */
     dollars: 'measured' | 'none';

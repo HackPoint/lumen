@@ -456,20 +456,29 @@ round: a dollar is always the price of the model that consumed the tokens.
   or not the ledger recorded it, and the result may have gone with it. That end is labelled
   inferred.
 - **The figure shown, in bold, as "at least"** is the measured one: every call priced at the turn
-  that read it, less every extra round it cost, and the blocked Reads the escape valve let
-  through, each priced at the turn that retried it. Where a conversation began before the daemon
+  that read it, less every extra round it cost, and the Reads the intercept blocked, each priced
+  at the turn that read the block (or, where only an escape-valve fault records it, the turn that
+  retried it). Where a conversation began before the daemon
   recorded compactions and shows no shrink to end `R`, `R` may be too long, so the saving is
   taken at `R = 0` (the price of putting the tokens in context once) and its rounds in full.
 - **Modelled**, beside it and never added to it: what those calls are worth beyond `R = 0`.
 - **Tokens only**: a call with no session to find its turns in (most rows before 1.1.5), no turn
   that read it, or a model with no price. Its tokens count; its dollars are not guessed from
   other calls'.
-- **Extra rounds**: a call that may have followed a blocked Read, which the ledger does not
-  record, is charged one, labelled modelled. A blocked Read counts once per session, agent and
-  file; where the ledger cannot tell whose Read a fault was (before 1.9.0, and before the meter
-  recorded agents in 1.8.0), the faults are counted as one block per agent that could have read
-  the file then (the main agent and each subagent with a turn within five minutes), never more
-  than the faults, so the cost is never understated.
+- **Extra rounds**: each Read the intercept blocked is one, on evidence. The hook writes no row
+  for a block, but the transcript of the agent that tried the Read records it (the Read, then an
+  error holding the block's message), and the daemon reads every transcript for them, from its
+  first line, recording which it has read and how far. Where a transcript does not record the
+  block of a file (it was deleted before the daemon read it), the escape valve's faults stand for
+  it: once per session, agent and file, and where the ledger cannot tell whose Read a fault was
+  (before 1.9.0, and before the meter recorded agents in 1.8.0), one block per agent that could
+  have read the file then (the main agent and each subagent with a turn within five minutes),
+  never more than the faults, so the cost is never understated. Where a transcript does record
+  the block, the faults on that file are its later Reads and add nothing, but for an agent whose
+  transcript was not read through. A call that may have followed a blocked Read is charged one,
+  labelled modelled, unless a transcript read through the call records a block of the same file in
+  the same conversation before it: then that block, counted on its own, is the call's round, and
+  it answers for that one call only.
 
 Every figure is a band, low to high, and the central one is the conservative one. `lumen report`
 prints the rules in full.

@@ -683,3 +683,123 @@ async fn a_listed_transcript_that_is_gone_when_opened_is_not_a_fault() {
         "a transcript that was gone when the daemon opened it was filed as a fault: {faults:#?}"
     );
 }
+
+/// A record of a Read, or of its result, in the shape Claude Code writes them.
+fn read_records(id: &str, session: &str, secs: u32, path: &str, result: &str) -> [String; 2] {
+    let ts = |s: u32| format!("2026-10-13T09:{:02}:{:02}.250Z", s / 60, s % 60);
+    [
+        serde_json::json!({
+            "type": "assistant", "uuid": format!("a-{id}"), "sessionId": session,
+            "timestamp": ts(secs), "cwd": "/r",
+            "message": {
+                "id": format!("msg-{id}"), "model": "claude-sonnet-4-6", "role": "assistant",
+                "content": [{"type": "tool_use", "id": id, "name": "Read",
+                             "input": {"file_path": path}}],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 100,
+                          "cache_creation_input_tokens": 0}
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "user", "uuid": format!("r-{id}"), "sessionId": session,
+            "timestamp": ts(secs + 1), "cwd": "/r",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": id, "is_error": true,
+                 "content": format!("PreToolUse:Read hook error: [lumen-mcp hook intercept]: {result}")}
+            ]}
+        })
+        .to_string(),
+    ]
+}
+
+fn recorded_blocks(db: &std::path::Path) -> Vec<String> {
+    let Ok(conn) = lumen_core::meter::connect_db(db) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT tool_use_id FROM intercept_blocks ORDER BY ts_ms")
+    else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| r.get(0))
+        .and_then(|rows| rows.collect())
+        .unwrap_or_default()
+}
+
+/// A Read the intercept blocked, in a transcript already on disk when the daemon starts and in
+/// one line appended while it runs, reaches the ledger and the savings summary the app shows, as
+/// a block the transcript records.
+#[tokio::test]
+async fn a_blocked_read_in_a_transcript_reaches_the_savings_summary() {
+    let block = |path: &str| {
+        format!(
+            "{}\nInstead of reading the full file, call:\n",
+            lumen_core::intercept::block_line(
+                path,
+                812,
+                lumen_core::intercept::BlockKind::Redirect
+            )
+        )
+    };
+    let fx = start_daemon_with(|projects| {
+        let mut f = std::fs::File::create(projects.join("sess-blk.jsonl")).unwrap();
+        for line in read_records("toolu_1", "sess-blk", 0, "/r/big.rs", &block("/r/big.rs")) {
+            writeln!(f, "{line}").unwrap();
+        }
+    })
+    .await;
+    wait_until("the block on disk at start", || {
+        recorded_blocks(&fx.db) == ["toolu_1"]
+    })
+    .await;
+
+    let transcript = fx.projects.join("sess-blk.jsonl");
+    append(
+        &transcript,
+        &read_records(
+            "toolu_2",
+            "sess-blk",
+            10,
+            "/r/other.rs",
+            &block("/r/other.rs"),
+        ),
+    );
+    // The turn that read the second block's message, which prices it.
+    append(
+        &transcript,
+        &[transcript_line(
+            "msg-after",
+            "sess-blk",
+            "2026-10-13T09:00:20.000Z",
+            (10, 5, 100, 0),
+        )],
+    );
+    wait_until("the block appended live", || {
+        recorded_blocks(&fx.db) == ["toolu_1", "toolu_2"]
+    })
+    .await;
+    wait_until("the turn after it", || has_turn(&fx.db, "msg-after")).await;
+
+    let pool = lumen_stats::connect(&format!("sqlite:{}?mode=rwc", fx.db.display()))
+        .await
+        .unwrap();
+    let s = lumen_stats::savings_summary(
+        &pool,
+        1_791_979_200_000,
+        None,
+        &lumen_core::savings::Facts {
+            billing_mode: lumen_core::savings::BillingView::Api,
+            identity_hook_registered: Some(true),
+        },
+        &lumen_core::savings::Uncalibrated,
+    )
+    .await
+    .unwrap();
+    let c = &s.all_time.counts;
+    assert_eq!(
+        (c.blocked_reads, c.blocked_reads_from_transcripts),
+        (2, 2),
+        "{c:?}"
+    );
+    // Each priced at the turn after it: toolu_2's call priced toolu_1, msg-after toolu_2.
+    assert_eq!(s.all_time.measured.map(|m| m.rows), Some(2), "{s:?}");
+}

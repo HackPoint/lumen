@@ -7,6 +7,7 @@ pub mod events;
 pub mod faults;
 pub mod identity;
 pub mod identity_hook;
+pub mod intercept;
 pub mod meter;
 pub mod project;
 pub mod ranked;

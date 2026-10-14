@@ -767,10 +767,15 @@ pub async fn load_savings_ledger(
     .collect();
     let (spooled, spool_gap) = sql::spooled_blocked_reads(spool);
     blocked_reads.extend(spooled);
+    let (packed,): (Option<String>,) = sqlx::query_as(sql::RECORDED_BLOCKS_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let recorded_blocks = sql::parse_recorded_blocks(packed.as_deref())?;
 
-    let sessions = sql::sessions_json(&calls, &blocked_reads);
+    let sessions = sql::sessions_json(&calls, &blocked_reads, &recorded_blocks);
     // Each chunk of sessions on a connection of its own, side by side, unpacked in chunk order.
-    let chunks = sql::session_chunks(&calls, &blocked_reads);
+    let chunks = sql::session_chunks(&calls, &blocked_reads, &recorded_blocks);
     let packed: Vec<Vec<(String, String)>> =
         futures_util::future::try_join_all(chunks.iter().map(|chunk| {
             sqlx::query_as::<_, (String, String)>(sql::TURNS_SQL)
@@ -817,6 +822,12 @@ pub async fn load_savings_ledger(
         .await
         .map_err(db_err)?;
     let valve_reads = sql::parse_valve_reads(packed.as_deref())?;
+    let (packed,): (Option<String>,) = sqlx::query_as(sql::SCANNED_SQL)
+        .bind(&sessions)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let scanned = sql::parse_scanned(packed.as_deref())?;
 
     Ok((
         Ledger {
@@ -826,6 +837,8 @@ pub async fn load_savings_ledger(
             turns: Vec::new(),
             boundaries,
             blocked_reads,
+            recorded_blocks,
+            scanned,
             recent_turns,
             events_from,
             subagent_events_from,
@@ -841,15 +854,26 @@ pub async fn load_savings_ledger(
     ))
 }
 
-/// The newest row of each table the summary reads (`savings::load::FINGERPRINT_SQL`): equal
-/// twice running, the ledger has not changed in between.
-pub async fn savings_fingerprint(pool: &SqlitePool) -> Result<[Option<i64>; 4], String> {
-    let (a, b, c, d): (Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
-        sqlx::query_as(sql::FINGERPRINT_SQL)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
-    Ok([a, b, c, d])
+/// What [`savings_fingerprint`] reads: one value per table the summary reads.
+pub type SavingsFingerprint = [Option<i64>; 6];
+
+/// The newest row of each table the summary reads, and how far the transcripts have been read for
+/// blocks (`savings::load::FINGERPRINT_SQL`): equal twice running, the ledger has not changed in
+/// between.
+pub async fn savings_fingerprint(pool: &SqlitePool) -> Result<SavingsFingerprint, String> {
+    type Row = (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
+    let (a, b, c, d, e, f): Row = sqlx::query_as(sql::FINGERPRINT_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    Ok([a, b, c, d, e, f])
 }
 
 /// What Lumen saved, as the app shows it: the engine's summary of the ledger `pool` holds, at

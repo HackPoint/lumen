@@ -1989,3 +1989,406 @@ fn a_figure_that_is_not_a_number_is_never_shown_as_one() {
     }
     assert!(!text::headline_line(&s).contains("NaN"));
 }
+
+// ── blocked Reads the transcripts record ─────────────────────────────────────
+
+/// A block the transcript of session `s` records, `secs` past 1:00.
+fn recorded(secs: i64, agent: Option<&str>, path: &str, kind: &str) -> RecordedBlockRow {
+    RecordedBlockRow {
+        session_id: "s".into(),
+        agent_id: agent.map(str::to_string),
+        path: path.into(),
+        ts_ms: at(1, secs),
+        kind: kind.into(),
+    }
+}
+
+/// `agent`'s own transcript in session `s`, read for blocks through `through_ms`.
+fn scanned(agent: Option<&str>, through_ms: i64) -> ScannedRow {
+    ScannedRow {
+        source_file: match agent {
+            Some(a) => format!("/h/.claude/projects/-p/s/subagents/agent-{a}.jsonl"),
+            None => "/h/.claude/projects/-p/s.jsonl".into(),
+        },
+        session_id: "s".into(),
+        agent_id: agent.map(str::to_string),
+        through_ms,
+    }
+}
+
+/// A turn of subagent `agent` of session `s`, at `ms`.
+fn sub_turn(agent: &str, ms: i64, model: &str) -> TurnRow {
+    TurnRow {
+        is_subagent: true,
+        source_file: Some(format!(
+            "/h/.claude/projects/-p/s/subagents/agent-{agent}.jsonl"
+        )),
+        ..turn(&format!("{agent}-{ms}"), "s", ms, model)
+    }
+}
+
+/// The blocked Reads of all time: in all, from transcripts, from faults on evidence, bounded,
+/// and the escape-valve faults behind them.
+fn blocks_of(l: &Ledger) -> (i64, i64, i64, i64, i64) {
+    let c = run(l).all_time.counts;
+    (
+        c.blocked_reads,
+        c.blocked_reads_from_transcripts,
+        c.blocked_reads_from_faults,
+        c.blocked_reads_bounded,
+        c.valve_faults,
+    )
+}
+
+/// A block the transcript records is one round, on evidence, priced at the turn of the agent
+/// that tried the Read that read the block's message: the main agent's next turn, or the
+/// subagent's own.
+#[test]
+fn a_block_a_transcript_records_is_one_round_priced_at_the_turn_after_it() {
+    let mut l = derived_ledger();
+    l.recorded_blocks
+        .push(recorded(30, None, "/r/big.rs", "redirect"));
+    let s = run(&l);
+    assert_eq!(blocks_of(&l), (1, 1, 0, 0, 0));
+    let line = s
+        .ledger
+        .recent
+        .iter()
+        .find(|x| x.kind == LineKind::BlockedRead)
+        .unwrap();
+    assert_eq!(line.extra_round_basis, "blockedReadRecorded");
+    assert!(line.extra_round_evidenced);
+    assert_eq!(
+        (line.ts.as_str(), line.path.as_deref()),
+        (ts(at(1, 30)).as_str(), Some("/r/big.rs"))
+    );
+    // t2, at 1:01, read the block's message: its round as it ran.
+    let c = (10.0 * 3.0 + 500.0 * 15.0 + 50_000.0 * 0.3 + 3_000.0 * 3.75) / 1e6;
+    assert!(close(line.extra_round_usd.unwrap().value, c), "{line:?}");
+    let call_net = run(&derived_ledger()).all_time.measured.unwrap().net.value;
+    assert!(close(s.all_time.measured.unwrap().net.value, call_net - c));
+
+    // A subagent's block is priced at the subagent's own next turn, not the main agent's.
+    l.turns.push(sub_turn("x", at(1, 40), OPUS));
+    l.turns.push(sub_turn("x", at(1, 70), OPUS));
+    l.recorded_blocks
+        .push(recorded(45, Some("x"), "/r/big.rs", "redirect"));
+    let s = run(&l);
+    assert_eq!(blocks_of(&l), (2, 2, 0, 0, 0));
+    let line = s
+        .ledger
+        .recent
+        .iter()
+        .find(|x| x.kind == LineKind::BlockedRead && x.ts == ts(at(1, 45)))
+        .unwrap();
+    assert_eq!(line.pair.model.as_deref(), Some(OPUS));
+    let c = (10.0 * 5.0 + 500.0 * 25.0 + 50_000.0 * 0.5 + 3_000.0 * 6.25) / 1e6;
+    assert!(close(line.extra_round_usd.unwrap().value, c), "{line:?}");
+
+    // Each block a transcript records is counted, a path blocked twice in one context included
+    // (the intercept's marker file was cleared in between).
+    l.recorded_blocks
+        .push(recorded(130, None, "/r/big.rs", "redirect"));
+    assert_eq!(blocks_of(&l), (3, 3, 0, 0, 0));
+    // One whose agent has no turn after it has no round to price: tokens only, still counted.
+    l.recorded_blocks
+        .push(recorded(300, None, "/r/big.rs", "redirect"));
+    let s = run(&l);
+    assert_eq!(s.all_time.counts.blocked_reads, 4);
+    assert_eq!(s.all_time.unpriced.blocked_reads, 1);
+}
+
+/// Where a transcript records the block on a path, the escape-valve faults on it are its later
+/// Reads: corroboration, not more blocks. Faults no evidence attributes are no longer bounded by
+/// an agent whose transcript was read through its latest turn and holds no block of the path.
+#[test]
+fn recorded_blocks_are_the_evidence_and_the_faults_on_their_path_corroborate() {
+    let mut l = derived_ledger();
+    // Five faults on one file from a hook before 1.9.0, with no meter row: nothing says whose.
+    for secs in [61, 62, 63, 64, 65] {
+        l.blocked_reads.push(fault(secs, "s", "/r/big.rs", None));
+    }
+    // Two subagents running then.
+    let x_last = at(1, 61) - 4 * 60_000;
+    let y_last = at(1, 65) + 4 * 60_000;
+    l.turns.push(sub_turn("x", x_last, SONNET));
+    l.turns.push(sub_turn("y", y_last, SONNET));
+    assert_eq!(blocks_of(&l), (3, 0, 1, 2, 5), "the rule for faults alone");
+
+    // The main agent's transcript records the block, and the three transcripts were read
+    // through their latest turns.
+    l.recorded_blocks
+        .push(recorded(50, None, "/r/big.rs", "redirect"));
+    l.scanned.push(scanned(None, at(1, 240)));
+    l.scanned.push(scanned(Some("x"), x_last));
+    l.scanned.push(scanned(Some("y"), y_last));
+    assert_eq!(blocks_of(&l), (1, 1, 0, 0, 5));
+    let line = run(&l)
+        .ledger
+        .recent
+        .into_iter()
+        .find(|x| x.kind == LineKind::BlockedRead)
+        .unwrap();
+    assert_eq!(line.extra_round_basis, "blockedReadRecorded");
+
+    // y's transcript not read: y may have been blocked on the file too, at most once.
+    l.scanned.retain(|r| r.agent_id.as_deref() != Some("y"));
+    assert_eq!(blocks_of(&l), (2, 1, 0, 1, 5));
+    // x's read short of its latest turn: it may hold a block not read yet.
+    l.scanned[1].through_ms = x_last - 1;
+    assert_eq!(blocks_of(&l), (3, 1, 0, 2, 5));
+    l.scanned[1].through_ms = x_last;
+    l.scanned.push(scanned(Some("y"), y_last));
+
+    // A fault from 1.9.0 names its agent: x's, when x's transcript records the block, is its
+    // later Read; z's, with no block of the file recorded, is z's block, on the fault's evidence.
+    for agent in ["x", "z"] {
+        let mut f = fault(70, "s", "/r/big.rs", None);
+        f.agent_id = Some(agent.into());
+        f.version = Some("1.9.0".into());
+        l.blocked_reads.push(f);
+    }
+    l.recorded_blocks
+        .push(recorded(66, Some("x"), "/r/big.rs", "redirect"));
+    assert_eq!(blocks_of(&l), (3, 2, 1, 0, 7));
+}
+
+/// A path with faults and no block a transcript records keeps the rule for faults, whatever the
+/// transcripts record of other paths: a transcript read through and showing no block of a path
+/// that has faults is a matcher that missed one as likely as a block that never was.
+#[test]
+fn a_path_only_faults_speak_for_keeps_the_rule_for_faults() {
+    let mut l = derived_ledger();
+    for secs in [61, 62, 63, 64, 65] {
+        l.blocked_reads.push(fault(secs, "s", "/r/big.rs", None));
+    }
+    let x_last = at(1, 61) - 4 * 60_000;
+    let y_last = at(1, 65) + 4 * 60_000;
+    l.turns.push(sub_turn("x", x_last, SONNET));
+    l.turns.push(sub_turn("y", y_last, SONNET));
+    l.recorded_blocks
+        .push(recorded(50, None, "/r/other.rs", "redirect"));
+    l.scanned.push(scanned(None, at(1, 240)));
+    l.scanned.push(scanned(Some("x"), x_last));
+    l.scanned.push(scanned(Some("y"), y_last));
+    assert_eq!(blocks_of(&l), (4, 1, 1, 2, 5));
+
+    // Blocked again after a Lumen answer is a block of its own kind: a recorded first block of
+    // the path does not stand for it.
+    let mut l = derived_ledger();
+    l.blocked_reads
+        .push(fault(90, "s", "/r/big.rs", Some(AFTER_LUMEN_READ)));
+    l.recorded_blocks
+        .push(recorded(50, None, "/r/big.rs", "redirect"));
+    l.scanned.push(scanned(None, at(1, 240)));
+    assert_eq!(blocks_of(&l), (2, 1, 1, 0, 1));
+    l.recorded_blocks
+        .push(recorded(80, None, "/r/big.rs", "served"));
+    assert_eq!(blocks_of(&l), (2, 2, 0, 0, 1));
+}
+
+/// A call may have followed a blocked Read. Where a transcript records a block of the call's own
+/// file in the call's own conversation, before it, and was read through the call, that block is
+/// the call's round, on a line of its own, and the call carries none. One block answers one call.
+#[test]
+fn a_call_after_a_recorded_block_of_its_file_carries_no_round_of_its_own() {
+    let mut l = derived_ledger();
+    let rounds = |l: &Ledger| {
+        let s = run(l);
+        let call = s
+            .ledger
+            .recent
+            .iter()
+            .find(|x| x.kind == LineKind::Call)
+            .unwrap()
+            .clone();
+        let c = &s.all_time.counts;
+        (
+            call.extra_round_basis,
+            call.extra_rounds,
+            c.extra_rounds_evidenced,
+            c.extra_rounds_modelled,
+        )
+    };
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 0, 1));
+
+    // The block of its file before it, recorded, and the transcript read through the call: one
+    // round in all, the block's.
+    l.recorded_blocks
+        .push(recorded(3, None, "/r/a.rs", "redirect"));
+    l.scanned.push(scanned(None, at(1, 240)));
+    assert_eq!(rounds(&l), ("blockRecorded", 0, 1, 0));
+
+    // A block of another file is its own round, and not this call's.
+    l.recorded_blocks[0].path = "/r/zzz.rs".into();
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 1, 1));
+    l.recorded_blocks[0].path = "/r/a.rs".into();
+    // Nor one after the call, in the call's own second included.
+    l.recorded_blocks[0].ts_ms = at(1, 5) + 500;
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 1, 1));
+    l.recorded_blocks[0].ts_ms = at(1, 3);
+
+    // A transcript not read through the call yet may hold another block before it.
+    l.scanned[0].through_ms = at(1, 4);
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 1, 1));
+    l.scanned[0].through_ms = at(1, 240);
+    // Another file read with the session's lines (here an older Claude Code's subagent
+    // transcript beside the session's) does not vouch for the conversation on its own...
+    l.scanned[0].source_file = "/h/.claude/projects/-p/agent-a7.jsonl".into();
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 1, 1));
+    // ...and holds the conversation's own reading down to its own.
+    l.scanned[0] = scanned(None, at(1, 240));
+    l.scanned.push(ScannedRow {
+        source_file: "/h/.claude/projects/-p/agent-a7.jsonl".into(),
+        through_ms: at(1, 4),
+        ..scanned(None, 0)
+    });
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 1, 1));
+    l.scanned.pop();
+    assert_eq!(rounds(&l), ("blockRecorded", 0, 1, 0));
+
+    // A subagent's call is answered by its own block, in its own transcript.
+    l.calls[0].agent_id = Some("x".into());
+    l.turns.push(sub_turn("x", at(1, 9), SONNET));
+    assert_eq!(rounds(&l), ("blockNotRecorded", 1, 1, 1));
+    l.recorded_blocks
+        .push(recorded(3, Some("x"), "/r/a.rs", "redirect"));
+    l.scanned.push(scanned(Some("x"), at(1, 240)));
+    assert_eq!(rounds(&l), ("blockRecorded", 0, 2, 0));
+    l.calls[0].agent_id = None;
+
+    // One block answers one call: a second outline of the file later may have followed a block
+    // of its own.
+    l.calls.push(call(
+        2,
+        Some("s"),
+        at(1, 100),
+        "smart_read",
+        "/r/a.rs",
+        10_000,
+    ));
+    let c = run(&l).all_time.counts;
+    assert_eq!((c.extra_rounds_evidenced, c.extra_rounds_modelled), (2, 1));
+}
+
+/// Both loaders read the blocks the transcripts record, with the turns of the sessions they name,
+/// and the transcripts read for blocks of the sessions the summary reads.
+#[test]
+fn the_rusqlite_loader_reads_recorded_blocks_and_the_transcripts_read_for_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l.db");
+    let conn = crate::meter::connect_db(&db).unwrap();
+    conn.execute_batch(
+        "INSERT INTO turns(message_id,session_id,ts,model,input_tokens,output_tokens,
+                           cache_read_input_tokens,cache_creation_input_tokens,cache_5m,cache_1h,
+                           speed,inference_geo)
+         VALUES('t1','b','2026-10-12T01:00:09.250Z','claude-sonnet-4-6',10,500,50000,3000,3000,0,
+                'standard','global');
+         INSERT INTO intercept_blocks(tool_use_id,session_id,agent_id,path,lines,kind,ts_ms,uuid,
+                                      source_file)
+         VALUES('toolu_1','b',NULL,'/r/big.rs',400,'redirect',1791766805000,'r-1',
+                '/h/.claude/projects/-p/b.jsonl'),
+               ('toolu_2','b','a7','/r/big.rs',400,'served',1791766806000,'r-2',
+                '/h/.claude/projects/-p/b/subagents/agent-a7.jsonl');
+         INSERT INTO transcript_scans(source_file,session_id,agent_id,matcher,through_ms)
+         VALUES('/h/.claude/projects/-p/b.jsonl','b',NULL,1,1791766809250),
+               ('/h/.claude/projects/-p/q.jsonl','q',NULL,1,1791766809250);",
+    )
+    .unwrap();
+    let (ledger, _) = load::load(&conn, NOW, None).unwrap();
+    assert_eq!(
+        ledger.recorded_blocks,
+        [
+            RecordedBlockRow {
+                session_id: "b".into(),
+                agent_id: None,
+                path: "/r/big.rs".into(),
+                ts_ms: 1_791_766_805_000,
+                kind: "redirect".into(),
+            },
+            RecordedBlockRow {
+                session_id: "b".into(),
+                agent_id: Some("a7".into()),
+                path: "/r/big.rs".into(),
+                ts_ms: 1_791_766_806_000,
+                kind: "served".into(),
+            },
+        ]
+    );
+    assert_eq!(ledger.sessions.len(), 1, "the session a block names");
+    assert_eq!(
+        ledger.scanned,
+        [ScannedRow {
+            source_file: "/h/.claude/projects/-p/b.jsonl".into(),
+            session_id: "b".into(),
+            agent_id: None,
+            through_ms: 1_791_766_809_250,
+        }],
+        "only the sessions the summary reads"
+    );
+    let s = summarize(&ledger, &clock(), &facts(), &Uncalibrated);
+    assert_eq!(s.all_time.counts.blocked_reads_from_transcripts, 2);
+    // The main agent's block is priced at t1; a7 has no turn in the ledger.
+    assert_eq!(s.all_time.measured.map(|m| m.rows), Some(1));
+    assert_eq!(s.all_time.unpriced.blocked_reads, 1);
+}
+
+/// Two blocks, each answered with smart_read; a transcript records only the first (the other was
+/// lost to the daemon's race), and the transcript is read through both calls. Two rounds were
+/// spent, and a block of one file stands for no other file's.
+#[test]
+fn a_block_recorded_on_another_file_does_not_stand_for_a_calls_round() {
+    let mut l = derived_ledger();
+    l.calls.push(call(
+        2,
+        Some("s"),
+        at(1, 2),
+        "smart_read",
+        "/r/other.rs",
+        10_000,
+    ));
+    l.calls.sort_by_key(|c| c.ts.clone());
+    l.recorded_blocks
+        .push(recorded(1, None, "/r/other.rs", "redirect"));
+    l.scanned.push(scanned(None, at(1, 240)));
+    let c = run(&l).all_time.counts;
+    assert_eq!(
+        (c.extra_rounds_evidenced, c.extra_rounds_modelled),
+        (1, 1),
+        "the recorded block, and the call on /r/a.rs that may have followed one"
+    );
+}
+
+/// Blocked Reads say where they come from only where they are not all of one kind on evidence:
+/// the same words as savings-text.ts's `blockedReadsText`.
+#[test]
+fn blocked_reads_say_where_they_come_from_only_where_they_are_mixed() {
+    let c = |t: i64, f: i64, b: i64| Counts {
+        blocked_reads: t + f + b,
+        blocked_reads_from_transcripts: t,
+        blocked_reads_from_faults: f,
+        blocked_reads_bounded: b,
+        ..Counts::default()
+    };
+    assert_eq!(text::blocked_reads_text(&c(0, 0, 0)), None);
+    assert_eq!(
+        text::blocked_reads_text(&c(1, 0, 0)).unwrap(),
+        "1 blocked Read"
+    );
+    assert_eq!(
+        text::blocked_reads_text(&c(1200, 0, 0)).unwrap(),
+        "1,200 blocked Reads"
+    );
+    assert_eq!(
+        text::blocked_reads_text(&c(0, 9, 0)).unwrap(),
+        "9 blocked Reads"
+    );
+    assert_eq!(
+        text::blocked_reads_text(&c(3, 9, 0)).unwrap(),
+        "12 blocked Reads: 3 recorded, 9 from faults"
+    );
+    assert_eq!(
+        text::blocked_reads_text(&c(0, 9, 2)).unwrap(),
+        "11 blocked Reads: 9 from faults, 2 bounded"
+    );
+}

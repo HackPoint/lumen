@@ -922,7 +922,10 @@ const TRAY_SAVINGS_RECOMPUTE: std::time::Duration = std::time::Duration::from_se
 /// size and time. `None` when it cannot be told, which makes the summary again.
 async fn savings_inputs(
     pool: &sqlx::SqlitePool,
-) -> Option<([Option<i64>; 4], Option<(u64, std::time::SystemTime)>)> {
+) -> Option<(
+    lumen_stats::SavingsFingerprint,
+    Option<(u64, std::time::SystemTime)>,
+)> {
     let rows = match lumen_stats::savings_fingerprint(pool).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -947,7 +950,10 @@ async fn refresh_tray_savings(app: tauri::AppHandle, menu: tauri::menu::Menu<tau
     let mut shown: Option<(tauri::menu::MenuItem<tauri::Wry>, String)> = None;
     let mut pool: Option<sqlx::SqlitePool> = None;
     let mut made: Option<(
-        ([Option<i64>; 4], Option<(u64, std::time::SystemTime)>),
+        (
+            lumen_stats::SavingsFingerprint,
+            Option<(u64, std::time::SystemTime)>,
+        ),
         std::time::Instant,
     )> = None;
     loop {

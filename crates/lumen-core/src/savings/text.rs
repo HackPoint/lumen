@@ -16,7 +16,7 @@
 //! token, after the share of tokens Lumen kept out of context. Tokens read `≈`: they are the
 //! central value of a band. A figure that is not a number is never printed as one.
 
-use super::{BillingView, DataQuality, Period, SavingsSummary, Status};
+use super::{BillingView, Counts, DataQuality, Period, SavingsSummary, Status};
 
 /// What the dollars are said to be at where the user does not pay per token: a subscription,
 /// or a billing mode not chosen or not readable.
@@ -194,18 +194,42 @@ fn status_word(s: &Status) -> &'static str {
     }
 }
 
+/// A period's blocked Reads, and, where they are not all of one kind on evidence, where each count
+/// comes from: `219 blocked Reads` (all recorded in transcripts, or all on the escape valve's
+/// faults), `219 blocked Reads: 200 recorded, 7 from faults, 12 bounded` (bounded: at most that
+/// many more, where no evidence says whose). `None` with none.
+pub fn blocked_reads_text(c: &Counts) -> Option<String> {
+    let head = match c.blocked_reads {
+        0 => return None,
+        1 => "1 blocked Read".to_string(),
+        n => format!("{} blocked Reads", tokens_signed(n)),
+    };
+    let one_kind = c.blocked_reads_from_transcripts == 0 || c.blocked_reads_from_faults == 0;
+    if one_kind && c.blocked_reads_bounded == 0 {
+        return Some(head);
+    }
+    let split: Vec<String> = [
+        (c.blocked_reads_from_transcripts, "recorded"),
+        (c.blocked_reads_from_faults, "from faults"),
+        (c.blocked_reads_bounded, "bounded"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n != 0)
+    .map(|(n, what)| format!("{} {what}", tokens_signed(n)))
+    .collect();
+    Some(format!("{head}: {}", split.join(", ")))
+}
+
 /// What a period's bold figures leave out, each part on its own: where blocked Reads are all the
-/// period holds, how many, since the figure is then theirs alone; the modelled dollars; and the
-/// calls with tokens and no dollars. The app shows each as a tag beside the figure; the terminal
-/// and the menu say them in brackets ([`beside`]).
+/// period holds, how many ([`blocked_reads_text`]), since the figure is then theirs alone; the
+/// modelled dollars; and the calls with tokens and no dollars. The app shows each as a tag beside
+/// the figure; the terminal and the menu say them in brackets ([`beside`]).
 pub fn beside_parts(p: &Period) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
-    if p.counts.calls == 0 {
-        match p.counts.blocked_reads {
-            0 => {}
-            1 => parts.push("1 blocked Read".to_string()),
-            n => parts.push(format!("{} blocked Reads", tokens_signed(n))),
-        }
+    if p.counts.calls == 0
+        && let Some(blocked) = blocked_reads_text(&p.counts)
+    {
+        parts.push(blocked);
     }
     if let Some(m) = p.modelled {
         parts.push(format!("{} modelled", usd_plus(m.value.value)));

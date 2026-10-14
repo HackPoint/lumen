@@ -1,5 +1,7 @@
 import cases from './savings-text.cases.json';
+import { savingsCounts } from './savings-summary.fake';
 import {
+    blockedReadsText,
     fixedAsRust,
     percent,
     shareText,
@@ -89,5 +91,16 @@ describe('savings text', () => {
     it('gives a share as lumen report does', () => {
         expect(percent(92.44)).toBe('92.4%');
         expect(percent(-2.5)).toBe('−2.5%');
+    });
+
+    it('says where blocked Reads come from only where they are not all of one kind on evidence', () => {
+        const c = (t: number, f: number, b: number) =>
+            savingsCounts({ blockedReads: t + f + b, blockedReadsFromTranscripts: t, blockedReadsFromFaults: f, blockedReadsBounded: b });
+        expect(blockedReadsText(c(0, 0, 0))).toBeNull();
+        expect(blockedReadsText(c(1, 0, 0))).toBe('1 blocked Read');
+        expect(blockedReadsText(c(1200, 0, 0))).toBe('1,200 blocked Reads');
+        expect(blockedReadsText(c(0, 9, 0))).toBe('9 blocked Reads');
+        expect(blockedReadsText(c(3, 9, 0))).toBe('12 blocked Reads: 3 recorded, 9 from faults');
+        expect(blockedReadsText(c(0, 9, 2))).toBe('11 blocked Reads: 9 from faults, 2 bounded');
     });
 });

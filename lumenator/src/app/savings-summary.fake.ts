@@ -41,6 +41,8 @@ export function savingsCounts(over: Partial<SavingsCounts> = {}): SavingsCounts 
     return {
         calls: 0,
         blockedReads: 0,
+        blockedReadsFromTranscripts: 0,
+        blockedReadsFromFaults: 0,
         derivedPairs: 0,
         unverifiedProvenanceRows: 0,
         extraRoundsEvidenced: 0,
@@ -121,6 +123,9 @@ export interface CasePeriod {
     unpricedCalls?: number;
     calls?: number;
     blockedReads?: number;
+    blockedReadsFromTranscripts?: number;
+    blockedReadsFromFaults?: number;
+    blockedReadsBounded?: number;
     dataQuality: DataQuality;
 }
 
@@ -142,7 +147,13 @@ function casePeriod(c: CasePeriod): SavingsPeriod {
             : dollars(c.net, { gross: band(c.gross ?? c.net), extraRounds: band(c.extraRounds ?? 0) }),
         modelled: c.modelled === undefined || c.modelled === null ? null : modelled(c.modelled),
         unpriced: unpriced({ calls: c.unpricedCalls ?? 0 }),
-        counts: savingsCounts({ calls: c.calls ?? 0, blockedReads: c.blockedReads ?? 0 }),
+        counts: savingsCounts({
+            calls: c.calls ?? 0,
+            blockedReads: c.blockedReads ?? 0,
+            blockedReadsFromTranscripts: c.blockedReadsFromTranscripts ?? 0,
+            blockedReadsFromFaults: c.blockedReadsFromFaults ?? 0,
+            blockedReadsBounded: c.blockedReadsBounded ?? 0,
+        }),
         dataQuality: c.dataQuality,
     });
 }

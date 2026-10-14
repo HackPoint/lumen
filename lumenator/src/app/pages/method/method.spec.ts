@@ -33,7 +33,15 @@ describe('Method', () => {
             modelled: modelled(0.4, 1),
             unpriced: unpriced({ calls: 1, tokens: band(500), noSession: 1 }),
             usdShortfalls: ['Some turns recorded no speed: priced at the lower rate.'],
-            counts: savingsCounts({ calls: 3, blockedReads: 2, blockedReadsBounded: 1, derivedPairs: 2, valveFaults: 5 }),
+            counts: savingsCounts({
+                calls: 3,
+                blockedReads: 4,
+                blockedReadsFromTranscripts: 2,
+                blockedReadsFromFaults: 1,
+                blockedReadsBounded: 1,
+                derivedPairs: 2,
+                valveFaults: 5,
+            }),
             dataQuality: { state: 'partial', reason: '1 row with no session recorded, so tokens and no dollars' },
         });
         const allTime = recordedPeriod(20_000, 0.5, {
@@ -81,6 +89,23 @@ describe('Method', () => {
                         extraRoundBasis: 'blockedReadBounded',
                         extraRoundEvidenced: false,
                         netUsd: null,
+                    }),
+                    callLine({
+                        ts: '2026-10-11T10:00:00Z',
+                        kind: 'blockedRead',
+                        tool: null,
+                        path: '/repo/src/big.rs',
+                        tokensSaved: band(0),
+                        pair: { ...callLine().pair, rounds: null, roundsBound: null },
+                        extraRounds: 1,
+                        extraRoundBasis: 'blockedReadRecorded',
+                        extraRoundEvidenced: true,
+                        netUsd: band(-0.03),
+                    }),
+                    callLine({
+                        ts: '2026-10-11T09:30:00Z',
+                        path: '/repo/src/big.rs',
+                        extraRoundBasis: 'blockRecorded',
                     }),
                     callLine({
                         ts: '2026-10-11T09:00:00Z',
@@ -252,7 +277,9 @@ describe('Method', () => {
         expect(row('Tokens only: calls')?.[1]).toBe('1');
         expect(row('Lumen calls')?.[1]).toBe('3');
         expect(row('Calls with their own R and C')?.[1]).toBe('2');
-        expect(row('Blocked Reads let through')?.[1]).toBe('2');
+        expect(row('Blocked Reads')?.[1]).toBe('4');
+        expect(row('of them recorded in the transcript of the agent that tried')?.[1]).toBe('2');
+        expect(row('of them from escape-valve faults, on evidence')?.[1]).toBe('1');
         expect(row('of them bounded, where no evidence says whose (modelled, at the most)')?.[1]).toBe('1');
         expect(row('Escape-valve faults behind them')?.[1]).toBe('5');
         expect(row('Data')).toEqual(['Data', 'partial: 1 row with no session recorded, so tokens and no dollars', 'complete']);
@@ -277,11 +304,15 @@ describe('Method', () => {
                 'no dollars: noSession', 'none'],
             ['2026-10-12 09:00:00 UTC', 'blocked Read, then let through', '−300, capped at what a Read returns', 'the file, as a Read returns it',
                 'tokens only', 'claude-opus-4-8', '1: a blocked Read no evidence attributes, modelled'],
+            ['2026-10-11 10:00:00 UTC', 'blocked Read, from its transcript /repo/src/big.rs', '0', 'the file, as a Read returns it',
+                '−$0.03', 'claude-opus-4-8', '1: the blocked Read, as its transcript records it, on evidence'],
+            ['2026-10-11 09:30:00 UTC', 'smart_read /repo/src/big.rs', '9,000', 'the file, as a Read returns it', '$0.11',
+                "claude-opus-4-8, R 12 to the session's end", 'none: the recorded block before it, counted on its own line'],
             ['2026-10-11 09:00:00 UTC', '? /repo/src/lib.rs', '9,000', 'the file, as a Read returns it', '$0.11 (+$0.02 modelled)',
                 "claude-opus-4-8, R 12 to the session's end, unrecorded (may be too long)", 'none'],
         ]);
         // A loss, in dollars where it has them and in tokens where it has none.
-        expect(Array.from(recent.querySelectorAll('tr.is-loss')).length).toBe(2);
+        expect(Array.from(recent.querySelectorAll('tr.is-loss')).length).toBe(3);
         expect(norm(section('ledger-title').querySelector('.method__dim')?.textContent)).toBe('7 older calls are not listed.');
     });
 

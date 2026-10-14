@@ -213,6 +213,31 @@ pub const MIGRATIONS: &[&str] = &[
     //            session, agent and path; without this, a subagent's block and its parent's on
     //            the same file could not be told apart.
     "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+    // ── 1.9.0: the Reads the intercept blocked, from the transcripts ─────────
+    // A block writes no row (the hook keeps only a marker file), and the escape valve's fault
+    // records only a later Read of a blocked path. The transcript of the agent that tried the
+    // Read records every block: the daemon reads them there, one row per blocked Read, keyed by
+    // the Read's tool_use id, which survives the daemon re-reading every transcript on start.
+    //
+    // Both tables are also in DDL, which is enough for a fresh ledger, and are repeated here as
+    // `session_events` (1.7.0) and `faults` are: DDL runs as one batch that stops at its first
+    // failing statement, so on a ledger old enough for an earlier statement there to fail, a table
+    // declared only in DDL is never created. Each statement here runs on its own. Their indexes
+    // are here and not in DDL, for the reason given above `idx_session_events_session`.
+    "CREATE TABLE IF NOT EXISTS intercept_blocks (\
+        tool_use_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent_id TEXT, \
+        path TEXT NOT NULL, lines INTEGER, kind TEXT NOT NULL, ts_ms INTEGER NOT NULL, \
+        uuid TEXT NOT NULL, source_file TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_intercept_blocks_session \
+     ON intercept_blocks(session_id, ts_ms)",
+    // Which transcripts the daemon has read for blocks from their first line, and through which
+    // turn of each session in them: where one has been read, a block it does not hold did not
+    // happen there, so the savings summary need not bound one from the faults.
+    "CREATE TABLE IF NOT EXISTS transcript_scans (\
+        source_file TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT, \
+        matcher INTEGER NOT NULL, through_ms INTEGER NOT NULL, \
+        PRIMARY KEY (source_file, session_id))",
+    "CREATE INDEX IF NOT EXISTS idx_transcript_scans_session ON transcript_scans(session_id)",
 ];
 
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
@@ -349,6 +374,34 @@ CREATE TABLE IF NOT EXISTS faults (
     agent_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant);
+
+-- 1.9.0: Reads the intercept blocked, as the transcript of the agent that tried each records it
+-- (the hook writes no row for a block). Keyed by the Read's tool_use id and written with INSERT OR
+-- IGNORE: the daemon re-reads every transcript from its first line on start. Its index is in
+-- MIGRATIONS, not here.
+CREATE TABLE IF NOT EXISTS intercept_blocks (
+    tool_use_id TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    agent_id    TEXT,              -- the subagent whose transcript holds it; NULL for the main agent
+    path        TEXT NOT NULL,     -- as the hook named it, which is what its faults name
+    lines       INTEGER,
+    kind        TEXT NOT NULL,     -- redirect | log | served (blocked again after a Lumen answer)
+    ts_ms       INTEGER NOT NULL,  -- the tool_result record's own timestamp, unix ms
+    uuid        TEXT NOT NULL,     -- the tool_result record's uuid
+    source_file TEXT
+);
+
+-- 1.9.0: transcripts the daemon has read for blocks from their first line (by matcher, the
+-- version of lumen_core::intercept that read them): one row per file and session in it, through
+-- that session's latest turn read there.
+CREATE TABLE IF NOT EXISTS transcript_scans (
+    source_file TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    agent_id    TEXT,
+    matcher     INTEGER NOT NULL,
+    through_ms  INTEGER NOT NULL,
+    PRIMARY KEY (source_file, session_id)
+);
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch
 -- against a database that may predate E7, where session_id does not yet exist —
 -- the index would fail, and because init_schema propagates that with `?`, the

@@ -89,6 +89,10 @@ fn period(mut p: Period, v: &Value) -> Period {
     p.unpriced.calls = v["unpricedCalls"].as_i64().unwrap_or(0);
     p.counts.calls = v["calls"].as_i64().unwrap_or(0);
     p.counts.blocked_reads = v["blockedReads"].as_i64().unwrap_or(0);
+    p.counts.blocked_reads_from_transcripts =
+        v["blockedReadsFromTranscripts"].as_i64().unwrap_or(0);
+    p.counts.blocked_reads_from_faults = v["blockedReadsFromFaults"].as_i64().unwrap_or(0);
+    p.counts.blocked_reads_bounded = v["blockedReadsBounded"].as_i64().unwrap_or(0);
     p.data_quality = quality(&v["dataQuality"]);
     p
 }

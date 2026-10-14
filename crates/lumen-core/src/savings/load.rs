@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::{
-    BlockedReadRow, BoundaryRow, CallRow, Clock, Ledger, LoadedTurn, SessionTurns, TurnClass,
-    ValveReadRow,
+    BlockedReadRow, BoundaryRow, CallRow, Clock, Ledger, LoadedTurn, RecordedBlockRow, ScannedRow,
+    SessionTurns, TurnClass, ValveReadRow,
 };
 
 /// The Lumen calls as one JSON array of arrays (see [`parse_calls`], which puts them in the
@@ -83,12 +83,26 @@ pub const RECENT_TURNS_SQL: &str = "SELECT COUNT(*) FROM turns \
 pub const BLOCKED_SQL: &str = "SELECT ts, session_id, path, detail, agent_id, version \
      FROM faults WHERE kind = 'hook_fail_open' AND variant = 'retry_escape_valve' ORDER BY rowid";
 
-/// What changes when anything the summary reads changes: the newest row of each table it reads.
-/// A refresh that finds the same four can keep the summary it has, unless the clock has moved it
-/// (a new week, seven days without a call).
+/// The blocked Reads the transcripts record, as one JSON array of arrays (see
+/// [`parse_recorded_blocks`], which puts them in the order they were written). All of them: each
+/// is a line of its own, a session with no Lumen call included.
+pub const RECORDED_BLOCKS_SQL: &str = "SELECT json_group_array(json_array(rowid, session_id, \
+     agent_id, path, ts_ms, kind)) FROM intercept_blocks";
+
+/// The transcripts the daemon read for blocks, for the sessions in `?1`: each file, the session
+/// and the agent it read, and through which of that session's turns (see [`parse_scanned`]).
+pub const SCANNED_SQL: &str = "SELECT json_group_array(json_array(source_file, session_id, \
+     agent_id, through_ms)) FROM transcript_scans \
+     WHERE session_id IN (SELECT value FROM json_each(?1))";
+
+/// What changes when anything the summary reads changes: the newest row of each table it reads,
+/// and how far the daemon has read the transcripts for blocks (a row it moves on, not adds). A
+/// refresh that finds the same six can keep the summary it has, unless the clock has moved it (a
+/// new week, seven days without a call).
 pub const FINGERPRINT_SQL: &str = "SELECT (SELECT MAX(rowid) FROM read_events), \
      (SELECT MAX(rowid) FROM turns), (SELECT MAX(rowid) FROM session_events), \
-     (SELECT MAX(rowid) FROM faults)";
+     (SELECT MAX(rowid) FROM faults), (SELECT MAX(rowid) FROM intercept_blocks), \
+     (SELECT MAX(through_ms) FROM transcript_scans)";
 
 /// For `?1` (unix seconds): the unix seconds of Monday 00:00 of its ISO week in local time, and
 /// that Monday's local date. SQLite's `localtime` is the machine's zone, so the app and the CLI,
@@ -165,16 +179,74 @@ pub fn parse_valve_reads(packed: Option<&str>) -> Result<Vec<ValveReadRow>, Stri
         .collect())
 }
 
-/// The sessions whose turns the engine needs, as the JSON array [`TURNS_SQL`] binds.
-pub fn sessions_json(calls: &[CallRow], blocked: &[BlockedReadRow]) -> String {
+/// [`RECORDED_BLOCKS_SQL`]'s packed rows, in the order they were written. `None` is no row.
+pub fn parse_recorded_blocks(packed: Option<&str>) -> Result<Vec<RecordedBlockRow>, String> {
+    let Some(packed) = packed else {
+        return Ok(Vec::new());
+    };
+    let mut rows: Vec<(i64, String, Option<String>, String, i64, String)> =
+        serde_json::from_str(packed)
+            .map_err(|e| format!("the blocks the transcripts record did not unpack: {e}"))?;
+    rows.sort_by_key(|r| r.0);
+    Ok(rows
+        .into_iter()
+        .map(
+            |(_, session_id, agent_id, path, ts_ms, kind)| RecordedBlockRow {
+                session_id,
+                agent_id,
+                path,
+                ts_ms,
+                kind,
+            },
+        )
+        .collect())
+}
+
+/// [`SCANNED_SQL`]'s packed rows, ordered so both loaders agree. `None` is no row.
+pub fn parse_scanned(packed: Option<&str>) -> Result<Vec<ScannedRow>, String> {
+    let Some(packed) = packed else {
+        return Ok(Vec::new());
+    };
+    let mut rows: Vec<(String, String, Option<String>, i64)> = serde_json::from_str(packed)
+        .map_err(|e| format!("the transcripts read for blocks did not unpack: {e}"))?;
+    rows.sort();
+    Ok(rows
+        .into_iter()
+        .map(
+            |(source_file, session_id, agent_id, through_ms)| ScannedRow {
+                source_file,
+                session_id,
+                agent_id,
+                through_ms,
+            },
+        )
+        .collect())
+}
+
+/// Every session a call, a blocked Read's fault or a block a transcript records names, sorted.
+fn session_ids<'a>(
+    calls: &'a [CallRow],
+    blocked: &'a [BlockedReadRow],
+    recorded: &'a [RecordedBlockRow],
+) -> Vec<&'a str> {
     let mut ids: Vec<&str> = calls
         .iter()
         .filter_map(|c| c.session_id.as_deref())
         .chain(blocked.iter().filter_map(|b| b.session_id.as_deref()))
+        .chain(recorded.iter().map(|b| b.session_id.as_str()))
         .collect();
     ids.sort_unstable();
     ids.dedup();
-    serde_json::Value::from(ids).to_string()
+    ids
+}
+
+/// The sessions whose turns the engine needs, as the JSON array [`TURNS_SQL`] binds.
+pub fn sessions_json(
+    calls: &[CallRow],
+    blocked: &[BlockedReadRow],
+    recorded: &[RecordedBlockRow],
+) -> String {
+    serde_json::Value::from(session_ids(calls, blocked, recorded)).to_string()
 }
 
 /// How many statements the turns are read in, side by side: a ledger of a million turns reads in
@@ -184,14 +256,12 @@ pub const TURN_CHUNKS: usize = 4;
 /// [`sessions_json`] cut into at most [`TURN_CHUNKS`] arrays of consecutive sessions, each read
 /// by its own [`TURNS_SQL`] on its own connection. Read in this order, the chunks give the
 /// sessions in the order one statement would.
-pub fn session_chunks(calls: &[CallRow], blocked: &[BlockedReadRow]) -> Vec<String> {
-    let mut ids: Vec<&str> = calls
-        .iter()
-        .filter_map(|c| c.session_id.as_deref())
-        .chain(blocked.iter().filter_map(|b| b.session_id.as_deref()))
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
+pub fn session_chunks(
+    calls: &[CallRow],
+    blocked: &[BlockedReadRow],
+    recorded: &[RecordedBlockRow],
+) -> Vec<String> {
+    let ids = session_ids(calls, blocked, recorded);
     if ids.is_empty() {
         return Vec::new();
     }
@@ -539,9 +609,13 @@ pub fn load(
         .map_err(sql)?;
     let (spooled, spool_gap) = spooled_blocked_reads(spool);
     blocked_reads.extend(spooled);
+    let packed: Option<String> = conn
+        .query_row(RECORDED_BLOCKS_SQL, [], |r| r.get(0))
+        .map_err(sql)?;
+    let recorded_blocks = parse_recorded_blocks(packed.as_deref())?;
 
-    let sessions = sessions_json(&calls, &blocked_reads);
-    let chunks = session_chunks(&calls, &blocked_reads);
+    let sessions = sessions_json(&calls, &blocked_reads, &recorded_blocks);
+    let chunks = session_chunks(&calls, &blocked_reads, &recorded_blocks);
     let read =
         |conn: &rusqlite::Connection, chunk: &str| -> Result<Vec<(String, String)>, String> {
             let mut stmt = conn.prepare(TURNS_SQL).map_err(sql)?;
@@ -612,6 +686,10 @@ pub fn load(
         .query_row(VALVE_READS_SQL, [valve_sessions, valve_paths], |r| r.get(0))
         .map_err(sql)?;
     let valve_reads = parse_valve_reads(packed.as_deref())?;
+    let packed: Option<String> = conn
+        .query_row(SCANNED_SQL, [&sessions], |r| r.get(0))
+        .map_err(sql)?;
+    let scanned = parse_scanned(packed.as_deref())?;
 
     Ok((
         Ledger {
@@ -621,6 +699,8 @@ pub fn load(
             turns: Vec::new(),
             boundaries,
             blocked_reads,
+            recorded_blocks,
+            scanned,
             recent_turns,
             events_from,
             subagent_events_from,

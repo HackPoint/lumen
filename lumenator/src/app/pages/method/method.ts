@@ -58,8 +58,10 @@ const EXTRA: Record<CallLine['extraRoundBasis'], string> = {
     freshAfterStub: 'a fresh ask after a stub',
     inlineText: 'writing inline text out',
     blockNotRecorded: 'a blocked Read that may have come first',
+    blockRecorded: 'the recorded block before it, counted on its own line',
     blockedRead: 'the blocked Read',
     blockedReadBounded: 'a blocked Read no evidence attributes',
+    blockedReadRecorded: 'the blocked Read, as its transcript records it',
 };
 
 /**
@@ -214,7 +216,9 @@ function figureRows(s: SavingsSummary): FigureRow[] {
         both('Tokens only: a model with no price', (p) => n(p.unpriced.noPrice)),
         both('Lumen calls', (p) => n(p.counts.calls)),
         both('Calls with their own R and C', (p) => n(p.counts.derivedPairs)),
-        both('Blocked Reads let through', (p) => n(p.counts.blockedReads)),
+        both('Blocked Reads', (p) => n(p.counts.blockedReads)),
+        both('of them recorded in the transcript of the agent that tried', (p) => n(p.counts.blockedReadsFromTranscripts)),
+        both('of them from escape-valve faults, on evidence', (p) => n(p.counts.blockedReadsFromFaults)),
         both('of them bounded, where no evidence says whose (modelled, at the most)', (p) => n(p.counts.blockedReadsBounded)),
         both('Escape-valve faults behind them', (p) => n(p.counts.valveFaults)),
         both('Extra rounds on evidence', (p) => n(p.counts.extraRoundsEvidenced)),
@@ -229,7 +233,11 @@ function figureRows(s: SavingsSummary): FigureRow[] {
 }
 
 function ledgerRow(l: CallLine): LedgerRow {
-    const what = l.kind === 'blockedRead' ? 'blocked Read, then let through' : (l.tool ?? '?');
+    const what = l.kind !== 'blockedRead'
+        ? (l.tool ?? '?')
+        : l.extraRoundBasis === 'blockedReadRecorded'
+          ? 'blocked Read, from its transcript'
+          : 'blocked Read, then let through';
     const p = l.pair;
     const readBy = p.model
         ? `${p.model}${p.rounds !== null && p.roundsBound ? `, R ${p.rounds} ${BOUND[p.roundsBound]}` : ''}`
@@ -246,7 +254,7 @@ function ledgerRow(l: CallLine): LedgerRow {
         net,
         readBy,
         extraRound: l.extraRounds === 0
-            ? 'none'
+            ? l.extraRoundBasis === 'blockRecorded' ? `none: ${EXTRA.blockRecorded}` : 'none'
             : `${l.extraRounds}: ${EXTRA[l.extraRoundBasis]}, ${l.extraRoundEvidenced ? 'on evidence' : 'modelled'}`,
         loss: (l.netUsd?.value ?? l.tokensSaved.value) < 0,
     };

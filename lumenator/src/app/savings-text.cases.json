@@ -716,7 +716,8 @@
           "blockedReads": 219,
           "dataQuality": {
             "state": "complete"
-          }
+          },
+          "blockedReadsFromFaults": 219
         },
         "allTime": {
           "tokensSaved": 50000,
@@ -759,6 +760,75 @@
       },
       "cli": "Lumen this week: ≈\u00a00 tokens saved, net; net loss of at most $0.85 (219 blocked Reads) · all time: ≈\u00a050,000 tokens saved, net; at least $1.20 saved, net · not working (lumen report for detail, lumen dash for the live dashboard)",
       "tray": "Net loss of at most $0.85 this week (219 blocked Reads) · not working"
+    },
+    {
+      "name": "blocksPartlyFromFaults",
+      "summary": {
+        "billingMode": "api",
+        "status": {
+          "state": "notWorking",
+          "reason": "in the last 7 days the Read intercept blocked 207 reads, and up to 12 more where no agent is known (230 escape-valve faults), and no Lumen tool was called: the blocks saved nothing, up to $0.85 in extra rounds"
+        },
+        "recommendation": {
+          "code": "blocksWithoutSavings",
+          "text": "The Read intercept is blocking Reads that are then let through, so each block costs a round and saves nothing, up to $0.85 in extra rounds. Run `lumen doctor` to see whether Claude Code reaches Lumen's MCP server; until it does, LUMEN_HOOK_ENABLED=0 in the env block of ~/.claude/settings.json turns the intercept off."
+        },
+        "week": {
+          "tokensSaved": 0,
+          "sharePct": null,
+          "net": -0.85,
+          "gross": 0,
+          "extraRounds": 0.85,
+          "calls": 0,
+          "blockedReads": 219,
+          "dataQuality": {
+            "state": "complete"
+          },
+          "blockedReadsFromTranscripts": 200,
+          "blockedReadsFromFaults": 7,
+          "blockedReadsBounded": 12
+        },
+        "allTime": {
+          "tokensSaved": 50000,
+          "sharePct": 30,
+          "net": 1.2,
+          "calls": 12,
+          "blockedReads": 219,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "app": {
+        "week": {
+          "share": null,
+          "tokens": "≈\u00a00",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "net loss of at most",
+          "usd": "$0.85",
+          "usdTail": null,
+          "basis": null,
+          "beside": [
+            "219 blocked Reads: 200 recorded, 7 from faults, 12 bounded"
+          ],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": null,
+          "tokens": "≈\u00a050,000",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$1.20",
+          "usdTail": "saved, net",
+          "basis": null,
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a00 tokens saved, net; net loss of at most $0.85 (219 blocked Reads: 200 recorded, 7 from faults, 12 bounded) · all time: ≈\u00a050,000 tokens saved, net; at least $1.20 saved, net · not working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "Net loss of at most $0.85 this week (219 blocked Reads: 200 recorded, 7 from faults, 12 bounded) · not working"
     },
     {
       "name": "weekEmpty",

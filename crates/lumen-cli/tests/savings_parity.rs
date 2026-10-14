@@ -354,6 +354,101 @@ fn realistic(db: &Path, spool: &Path) {
         ),
     )
     .unwrap();
+    // Blocks the transcripts record: before sess-03's call and again after a Lumen answer, in
+    // sess-05's subagent, on sess-24's faulted file, and in a session with no Lumen call at all;
+    // and the transcripts the daemon read for them.
+    let start = |i: i64| MONDAY_MS - 3 * 86_400_000 + i * 4 * 3_600_000;
+    l.turn(
+        "sess-blk",
+        at(20) + 3_000,
+        "claude-sonnet-4-6",
+        Some("standard"),
+        30_000,
+        Some((0, 1_200)),
+        None,
+    );
+    let blocks = [
+        (
+            "toolu_b1",
+            "sess-03",
+            None,
+            "/repo/src/module_3.rs",
+            "redirect",
+            start(3) + 1_000,
+        ),
+        (
+            "toolu_b2",
+            "sess-03",
+            None,
+            "/repo/src/module_3.rs",
+            "served",
+            start(3) + 10_000,
+        ),
+        (
+            "toolu_b3",
+            "sess-05",
+            Some("a1b2"),
+            "/repo/src/sub.rs",
+            "redirect",
+            at(4) + 5_000,
+        ),
+        (
+            "toolu_b4",
+            "sess-24",
+            None,
+            "/repo/src/big.rs",
+            "redirect",
+            start(24) + 1_000,
+        ),
+        (
+            "toolu_b5",
+            "sess-blk",
+            None,
+            "/repo/src/x.rs",
+            "log",
+            at(20) + 1_000,
+        ),
+    ];
+    for (id, session, agent, path, kind, ms) in blocks {
+        conn.execute(
+            "INSERT INTO intercept_blocks(tool_use_id,session_id,agent_id,path,lines,kind,ts_ms,
+                                          uuid,source_file)
+             VALUES(?1,?2,?3,?4,400,?5,?6,?7,?8)",
+            rusqlite::params![
+                id,
+                session,
+                agent,
+                path,
+                kind,
+                ms,
+                format!("r-{id}"),
+                "/h/t.jsonl"
+            ],
+        )
+        .unwrap();
+    }
+    for (session, agent, through) in [
+        ("sess-03", None, AS_OF_MS),
+        ("sess-05", Some("a1b2"), at(4) + 9_000),
+        ("sess-24", None, AS_OF_MS),
+        ("sess-blk", None, at(20) + 3_000),
+    ] {
+        conn.execute(
+            "INSERT INTO transcript_scans(source_file,session_id,agent_id,matcher,through_ms)
+             VALUES(?1,?2,?3,1,?4)",
+            rusqlite::params![
+                match agent {
+                    Some(a) =>
+                        format!("/h/.claude/projects/-p/{session}/subagents/agent-{a}.jsonl"),
+                    None => format!("/h/.claude/projects/-p/{session}.jsonl"),
+                },
+                session,
+                agent,
+                through
+            ],
+        )
+        .unwrap();
+    }
 }
 
 /// `lumen report --json --as-of` in a sandbox holding `db` and `spool`.
@@ -415,7 +510,19 @@ async fn the_cli_and_the_app_return_the_same_bytes_from_one_ledger() {
     let v: serde_json::Value = serde_json::from_str(&app).unwrap();
     let all = &v["allTime"]["counts"];
     assert!(all["derivedPairs"].as_i64().unwrap() >= 20, "{all}");
-    assert_eq!(all["blockedReads"], 2, "{all}");
+    // Five blocks the transcripts record, sess-24's fault among their later Reads, and the
+    // spooled fault on a file no transcript records a block of.
+    assert_eq!(
+        (
+            &all["blockedReads"],
+            &all["blockedReadsFromTranscripts"],
+            &all["blockedReadsFromFaults"],
+            &all["blockedReadsBounded"],
+            &all["valveFaults"]
+        ),
+        (&6.into(), &5.into(), &1.into(), &0.into(), &2.into()),
+        "{all}"
+    );
     // All three parts: measured, modelled (sess-00 began before the first recorded event and
     // shows no collapse), and tokens only (three rows with no session, one model with no price).
     let at = &v["allTime"];
@@ -439,6 +546,14 @@ async fn the_cli_and_the_app_return_the_same_bytes_from_one_ledger() {
     assert_eq!(again.len(), 1, "{lines:?}");
     assert_eq!(again[0]["savedCl100k"], -600);
     assert_eq!(again[0]["extraRoundBasis"], "freshAfterStub");
+    // sess-03's call followed its recorded block: the block carries the round, not the call.
+    let sess03: Vec<_> = lines
+        .iter()
+        .filter(|l| l["path"] == "/repo/src/module_3.rs")
+        .map(|l| l["extraRoundBasis"].as_str().unwrap())
+        .collect();
+    assert!(sess03.contains(&"blockRecorded"), "{sess03:?}");
+    assert!(sess03.contains(&"blockedReadRecorded"), "{sess03:?}");
 }
 
 // ── what `lumen` and `lumen report` say, from fixture ledgers ───────────────────────────────

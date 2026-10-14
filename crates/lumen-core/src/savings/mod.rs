@@ -7,8 +7,9 @@
 //! fixed rounds. Each was one machine's averages multiplied out.
 //!
 //! The engine is pure. It takes typed rows (the Lumen calls in `read_events`, the turns of the
-//! sessions they were made in, the compactions and rewinds in `session_events`, and the blocked
-//! Reads the intercept's escape valve recorded), a clock, two facts about the install and a
+//! sessions they were made in, the compactions and rewinds in `session_events`, the Reads the
+//! intercept blocked as the transcripts record them, the transcripts read for them, and the
+//! escape valve's faults), a clock, two facts about the install and a
 //! [`Calibrator`], and returns a [`SavingsSummary`]. The loaders that read those rows are thin and
 //! share their SQL ([`load`]), so the app (sqlx, in lumen-stats) and the CLI (rusqlite, here)
 //! read the same rows in the same order and get the same bytes.
@@ -78,10 +79,24 @@
 //!   context: the counterfactual Read would have returned it at once, so one, on evidence;
 //! - `compress_logs` on inline text: one, plus the output tokens of writing the text out, on
 //!   evidence;
-//! - any other call may have followed a blocked Read. The intercept records a block in a marker
-//!   file, not in the ledger, so whether one did cannot be told: one, counted (conservatively)
-//!   and labelled modelled. The band's high end leaves these out;
-//! - a Read the intercept blocked and its escape valve then let through
+//! - a Read the intercept blocked: one, on evidence, priced at the turn of the blocked agent that
+//!   read the block's message. The hook writes no row for a block (only a marker file of its
+//!   own), but the transcript of the agent that tried the Read records it: the Read's call, then
+//!   its result, an error holding the block's message. The daemon reads each one there
+//!   ([`crate::intercept`], `intercept_blocks`), and records which transcripts it has read, from
+//!   their first line through which turn of each session in them (`transcript_scans`). A
+//!   conversation is read as far as its own transcript (`<session>.jsonl`, or the subagent's own
+//!   under `subagents/`) was, and no further than any other file read with lines of it;
+//! - any other call may have followed a blocked Read. Where a transcript records a block of the
+//!   call's own file in the call's own conversation before it, no earlier call was answered by
+//!   that block, and the transcript was read through the call, the block is the call's round, a
+//!   line of its own, and the call carries none. Elsewhere whether one did cannot be told (a
+//!   block of another file says nothing of this one, and a block the daemon did not record leaves
+//!   no trace): one, counted (conservatively) and labelled modelled. The band's high end leaves
+//!   these out;
+//! - where no transcript records the block of a path (the transcript was deleted before the
+//!   daemon read it, or has not been read yet), the escape valve's faults stand for it: a Read the
+//!   intercept blocked and its escape valve then let through
 //!   (`hook_fail_open/retry_escape_valve`): one, on evidence, priced at the turn that retried. The
 //!   intercept blocks a path once per context (the session's, and each subagent's apart), and
 //!   the valve logs a fault on every later Read of the same path, which costs nothing, so one is
@@ -95,7 +110,10 @@
 //!   agent, each subagent of the session with a turn within [`BLOCK_WINDOW_MS`] of the faults,
 //!   and any agent the meter named on the path then, never more than there are faults. That many
 //!   are counted, the first on evidence and the rest bounded and modelled, so the cost is never
-//!   understated.
+//!   understated. Where a transcript does record the block of the path, the faults on it are its
+//!   later Reads, counted beside it ([`Counts::valve_faults`]) and as nothing more: a fault whose
+//!   agent is known is that agent's block's, and faults nothing attributes are bounded only by the
+//!   agents whose transcripts were not read through their latest turn.
 //!
 //! **Net** = value − extra-round cost, signed. Never clamped.
 //!
@@ -105,8 +123,9 @@
 //! of its own has no dollars at all. Each period's dollars come in three parts, which no surface
 //! adds together:
 //! - **measured** ([`Period::measured`]): every call priced at the turn that read it, less every
-//!   extra round it cost, on evidence or modelled, and the blocked Reads priced at the turn that
-//!   retried them. This is the figure shown in bold, as "at least": every input is resolved the
+//!   extra round it cost, on evidence or modelled, and the blocked Reads, each priced at the turn
+//!   that read the block (a transcript's) or that retried it (a fault's). This is the figure shown
+//!   in bold, as "at least": every input is resolved the
 //!   low way (a cache read is the least a kept token costs, unrecorded prices fall low on the
 //!   saving and high on the round, modelled rounds are charged). Where R may be too long
 //!   (`sessionEndUnrecorded`), the saving is taken at the least it can be worth: at R = 0 (the
@@ -137,10 +156,11 @@ pub mod load;
 mod tests;
 pub mod text;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::intercept;
 use crate::repeat::{
     ARM_TREATMENT, PLAN_FRESH, ROUTE_DELTA, ROUTE_RECALL_DELTA, ROUTE_RECALL_UNCHANGED,
     ROUTE_UNCHANGED,
@@ -333,6 +353,35 @@ fn names_its_agent(version: Option<&str>) -> bool {
     }
 }
 
+/// A Read the intercept blocked, as the transcript of the agent that tried it records it
+/// (`intercept_blocks`): the hook writes no row for a block, so the daemon reads them there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordedBlockRow {
+    pub session_id: String,
+    /// The subagent whose transcript holds it; `None` for the main agent's.
+    pub agent_id: Option<String>,
+    /// As the hook named it, which is the path its escape-valve faults name.
+    pub path: String,
+    /// The block's `tool_result` record, unix ms.
+    pub ts_ms: i64,
+    /// `redirect`, `log`, or `served`: blocked again after smart_read or recall_file answered for
+    /// the path, as the escape valve's fault for the Read it then let through says
+    /// (`after_lumen_read`).
+    pub kind: String,
+}
+
+/// A transcript the daemon read for blocks from its first line, through the latest turn of
+/// `session_id` in it, at `through_ms` (`transcript_scans`): a block of that session it does not
+/// record did not happen in it by then.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScannedRow {
+    pub source_file: String,
+    pub session_id: String,
+    /// The subagent whose transcript it is, by its path; `None` for the main agent's.
+    pub agent_id: Option<String>,
+    pub through_ms: i64,
+}
+
 /// A built-in Read the meter recorded (`builtin_read`) in a session with a blocked Read whose
 /// fault names no agent: the Read the escape valve let through is metered too, with its agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -358,6 +407,10 @@ pub struct Ledger {
     pub turns: Vec<TurnRow>,
     pub boundaries: Vec<BoundaryRow>,
     pub blocked_reads: Vec<BlockedReadRow>,
+    /// The blocked Reads the transcripts record, in the order they were written.
+    pub recorded_blocks: Vec<RecordedBlockRow>,
+    /// The transcripts of the sessions the engine reads that the daemon has read for blocks.
+    pub scanned: Vec<ScannedRow>,
     /// Main-agent turns of any session in the [`RECENT_DAYS`] before the clock's now.
     pub recent_turns: i64,
     /// The earliest compaction, rewind or resync the daemon recorded in a main transcript: the
@@ -634,8 +687,15 @@ pub struct Unpriced {
 pub struct Counts {
     /// Lumen calls.
     pub calls: i64,
-    /// Blocked Reads the escape valve let through.
+    /// Reads the intercept blocked, each an extra round: those a transcript records, and those
+    /// inferred from escape-valve faults where none does. The next two and
+    /// [`Counts::blocked_reads_bounded`] split them.
     pub blocked_reads: i64,
+    /// Recorded in the transcript of the agent that tried the Read: on evidence, exactly.
+    pub blocked_reads_from_transcripts: i64,
+    /// Inferred from escape-valve faults no transcript record accounts for, on evidence: the fault
+    /// or the meter's row for its Read names the agent, or it is the first of its path.
+    pub blocked_reads_from_faults: i64,
     /// Calls whose R and C came from their own turn chain.
     pub derived_pairs: i64,
     /// Calls whose token count is not known to be measured.
@@ -650,7 +710,8 @@ pub struct Counts {
     /// Derived pairs whose R a collapse ended (inferred, not recorded).
     pub rounds_collapse_rows: i64,
     /// The escape-valve faults behind the blocked Reads: one is logged on every later Read of a
-    /// path already blocked, which costs nothing.
+    /// path already blocked, which costs nothing. Where a transcript records the block, they
+    /// corroborate it.
     pub valve_faults: i64,
     /// Blocked Reads counted because faults no evidence attributes to an agent could stand for
     /// them: one per agent that could have read the path then, beyond the first; modelled, at the
@@ -753,8 +814,11 @@ pub struct CallLine {
     pub provenance: &'static str,
     pub pair: PairView,
     pub extra_rounds: i64,
-    /// `repeatAnswer`, `followUp`, `freshAfterStub`, `inlineText`, `blockNotRecorded` or
-    /// `blockedRead`.
+    /// `repeatAnswer`, `followUp`, `freshAfterStub`, `inlineText`, `blockNotRecorded` (a call
+    /// that may have followed a block no transcript records: modelled) or `blockRecorded` (one that
+    /// followed a recorded block of its file, which is its round: none); for a blocked Read,
+    /// `blockedReadRecorded` (a transcript records it), `blockedRead` (a fault stands for it) or
+    /// `blockedReadBounded` (one of the most that faults no evidence attributes could).
     pub extra_round_basis: &'static str,
     pub extra_round_evidenced: bool,
     /// `measured` when the line has dollars, `none` when it has tokens only. Every priced line's
@@ -833,10 +897,16 @@ enum Rounds {
     FollowUp,
     InlineText,
     BlockNotRecorded,
+    /// A call that followed a block of the same file in the same conversation, which a transcript
+    /// records: the block is a line of its own ([`Rounds::BlockedReadRecorded`]), so the call
+    /// carries none.
+    BlockRecorded,
     BlockedRead,
     /// A blocked Read that may have happened: one of the most the faults no evidence attributes
     /// could stand for. Counted, so the cost is not understated, and modelled.
     BlockedReadBounded,
+    /// A blocked Read the transcript of the agent that tried it records.
+    BlockedReadRecorded,
 }
 
 impl Rounds {
@@ -847,15 +917,17 @@ impl Rounds {
             Rounds::FollowUp => "followUp",
             Rounds::InlineText => "inlineText",
             Rounds::BlockNotRecorded => "blockNotRecorded",
+            Rounds::BlockRecorded => "blockRecorded",
             Rounds::BlockedRead => "blockedRead",
             Rounds::BlockedReadBounded => "blockedReadBounded",
+            Rounds::BlockedReadRecorded => "blockedReadRecorded",
         }
     }
 
     /// (evidenced, modelled) extra rounds.
     fn count(self) -> (i64, i64) {
         match self {
-            Rounds::RepeatAnswer => (0, 0),
+            Rounds::RepeatAnswer | Rounds::BlockRecorded => (0, 0),
             Rounds::BlockNotRecorded | Rounds::BlockedReadBounded => (0, 1),
             _ => (1, 0),
         }
@@ -1015,6 +1087,7 @@ struct Priced {
     unverified: bool,
     /// For a blocked Read, the escape-valve faults it stands for.
     valve_faults: i64,
+    rounds: Rounds,
     /// What the turns pricing it did not record.
     unknowns: chain::Unknowns,
     /// The consuming model, when it has no price.
@@ -1224,6 +1297,7 @@ fn price(draft: Draft, cal: &dyn Calibrator, week_start: i64) -> Priced {
         rounds_untrusted,
         unverified: draft.unverified,
         valve_faults: draft.valve_faults,
+        rounds: draft.rounds,
     }
 }
 
@@ -1283,8 +1357,10 @@ impl Acc {
             LineKind::BlockedRead => {
                 c.blocked_reads += 1;
                 c.valve_faults += p.valve_faults;
-                if !p.line.extra_round_evidenced {
-                    c.blocked_reads_bounded += 1;
+                match p.rounds {
+                    Rounds::BlockedReadRecorded => c.blocked_reads_from_transcripts += 1,
+                    Rounds::BlockedReadBounded => c.blocked_reads_bounded += 1,
+                    _ => c.blocked_reads_from_faults += 1,
                 }
             }
         }
@@ -1473,17 +1549,23 @@ const ROUND_COST_RULE: &str = "C, the cost of one extra round, is the turn that 
 const EXTRA_ROUNDS_RULE: &str = "A repeat-read stub or delta replaces a re-read: no extra round. \
      A recall_file or smart_read(mode=full) after an outline of the same file in the same \
      conversation, a fresh=true call after a stub of the same request, and compress_logs on \
-     inline text each cost one, on evidence; so does each Read the intercept blocked and its \
-     escape valve then let through, counted once per session, agent and path (the valve logs a \
-     fault on every later Read of the path too, which costs nothing) and once more where the \
-     path was blocked again after smart_read or recall_file answered for it. A fault that names \
-     no agent is attributed by the meter's row for the same Read. Faults nothing attributes are \
-     bounded: at most one block per agent that could have read the path then (the main agent, \
-     each subagent of the session with a turn within five minutes of them, any agent the meter \
-     named on the path then), never more than the faults; that many are counted, the first on \
-     evidence and the rest modelled. Any other call may have \
-     followed a blocked Read, which the ledger does not record: one extra round is counted for it \
-     and labelled modelled, and the band's high end leaves it out.";
+     inline text each cost one, on evidence; so does each Read the intercept blocked, as the \
+     transcript of the agent that tried it records it, priced at that agent's turn that read the \
+     block. Where no transcript records the block of a path (deleted before the daemon read it, \
+     or not read yet), the escape valve's faults stand for it: a block is counted once per \
+     session, agent and path (the valve logs a fault on every later Read of the path too, which \
+     costs nothing) and once more where the path was blocked again after smart_read or \
+     recall_file answered for it. A fault that names no agent is attributed by the meter's row \
+     for the same Read. Faults nothing attributes are bounded: at most one block per agent that \
+     could have read the path then (the main agent, each subagent of the session with a turn \
+     within five minutes of them, any agent the meter named on the path then), never more than \
+     the faults; that many are counted, the first on evidence and the rest modelled. Where a \
+     transcript records the block of the path, its faults are its later Reads and count as no \
+     more blocks, but for agents whose transcripts were not read through their latest turn. Any \
+     other call may have followed a blocked Read: where a transcript read through the call \
+     records a block of the same file in the same conversation before it, which no earlier call \
+     was answered by, that block is its round, counted on its own line; elsewhere one extra \
+     round is counted for it and labelled modelled, and the band's high end leaves it out.";
 
 const FLOORS_RULE: &str = "Each turn is priced at its model, speed and inference region as \
      recorded, through the app's own price table. Where a turn recorded no speed (on a model with \
@@ -1494,8 +1576,9 @@ const FLOORS_RULE: &str = "Each turn is priced at its model, speed and inference
 
 const PARTS_RULE: &str = "A dollar is the price of the model that consumed the tokens. Measured, \
      the figure shown as at least: calls priced at the turn that read them, less every extra \
-     round they cost, on evidence or modelled, and the blocked Reads priced at the turn that \
-     retried them; where R may be too long, a saving is taken at R = 0 (the one-time price \
+     round they cost, on evidence or modelled, and the blocked Reads, each priced at the turn \
+     that read the block or, where only a fault records it, that retried it; where R may be too \
+     long, a saving is taken at R = 0 (the one-time price \
      alone) and a loss at R, the least either can be. Modelled, shown beside it and never added \
      to it: what those calls are worth beyond that, the cache reads over their R. Tokens only: \
      calls with no session, no turn in the ledger that read them, or a model with no price; their \
@@ -1515,6 +1598,75 @@ pub fn summarize(
             "{} turns have a time that could not be read and were left out",
             chains.unreadable_turns
         ));
+    }
+
+    // The blocks the transcripts record, as of the clock, in time order, so that the first of
+    // each group below is its earliest; and the transcripts read for them.
+    let mut recorded: Vec<&RecordedBlockRow> = ledger
+        .recorded_blocks
+        .iter()
+        .filter(|b| b.ts_ms <= clock.now_ms)
+        .collect();
+    recorded.sort_by_key(|b| b.ts_ms);
+    // A session, a path, and whether it was blocked again after a Lumen answer (`served`).
+    type OnPath<'a> = (&'a str, &'a str, bool);
+    // Of each: the agents the transcripts record a block of, and the earliest block, which the
+    // faults no agent is known for are counted against.
+    let mut blocked_agents: HashMap<OnPath<'_>, (HashSet<Option<&str>>, usize)> = HashMap::new();
+    // Of each, by agent: the earliest block, which that agent's faults are counted against.
+    let mut first_recorded: HashMap<(OnPath<'_>, Option<&str>), usize> = HashMap::new();
+    for (i, b) in recorded.iter().enumerate() {
+        let on = (
+            b.session_id.as_str(),
+            b.path.as_str(),
+            b.kind == intercept::BlockKind::Served.as_str(),
+        );
+        let agent = b.agent_id.as_deref();
+        blocked_agents
+            .entry(on)
+            .or_insert_with(|| (HashSet::new(), i))
+            .0
+            .insert(agent);
+        first_recorded.entry((on, agent)).or_insert(i);
+    }
+    let mut recorded_faults: Vec<i64> = vec![0; recorded.len()];
+    // How far each conversation's transcripts were read for blocks: its own transcript's
+    // reading (`<session>.jsonl`, or the subagent's under `subagents/`), held down by any other
+    // file read with lines of it. Another file never vouches for a conversation on its own.
+    let mut own_read: HashMap<(&str, Option<&str>), i64> = HashMap::new();
+    let mut other_read: HashMap<(&str, Option<&str>), i64> = HashMap::new();
+    for r in &ledger.scanned {
+        let who = (r.session_id.as_str(), r.agent_id.as_deref());
+        let into = if crate::project::transcript_owner(&r.source_file) == Some(who) {
+            &mut own_read
+        } else {
+            &mut other_read
+        };
+        into.entry(who)
+            .and_modify(|t| *t = (*t).min(r.through_ms))
+            .or_insert(r.through_ms);
+    }
+    let read_through = |session: &str, agent: Option<&str>| {
+        let own = *own_read.get(&(session, agent))?;
+        Some(
+            other_read
+                .get(&(session, agent))
+                .map_or(own, |&other| own.min(other)),
+        )
+    };
+    // The recorded blocks of each session, agent and path, in time order, and how many a call has
+    // taken: a call that followed one is answered by it, one call per block.
+    let mut blocks_on_path: HashMap<Context<'_>, (Vec<i64>, usize)> = HashMap::new();
+    for b in &recorded {
+        blocks_on_path
+            .entry((
+                b.session_id.as_str(),
+                b.agent_id.as_deref(),
+                b.path.as_str(),
+            ))
+            .or_default()
+            .0
+            .push(b.ts_ms);
     }
 
     // Every call in the order it was written, so "after an outline" means after.
@@ -1545,7 +1697,26 @@ pub fn summarize(
             )
         });
         let after_stub = request.as_ref().is_some_and(|r| stubbed.contains(r));
-        let rounds = rounds_for(call, tool, &outlined, key.as_ref(), after_stub);
+        let rounds = match (
+            rounds_for(call, tool, &outlined, key.as_ref(), after_stub),
+            key,
+            ts_ms,
+        ) {
+            // The block of this file this call followed is recorded, in a transcript read through
+            // the call, and no earlier call took it: it is a line of its own, and this call's
+            // round. A block of another file, or none recorded, leaves the round modelled.
+            (Rounds::BlockNotRecorded, Some(k), Some(t))
+                if read_through(k.0, k.1).is_some_and(|through| through >= t)
+                    && blocks_on_path.get_mut(&k).is_some_and(|(times, taken)| {
+                        let followed = times.get(*taken).is_some_and(|&b| b < t);
+                        *taken += usize::from(followed);
+                        followed
+                    }) =>
+            {
+                Rounds::BlockRecorded
+            }
+            (r, _, _) => r,
+        };
         if is_outline(tool, &call.routed_via)
             && let Some(k) = key
         {
@@ -1616,6 +1787,14 @@ pub fn summarize(
     // session with a turn within [`BLOCK_WINDOW_MS`] of the faults, and any agent the meter named
     // on that path then; never more than there are faults. That many are counted, the first on
     // evidence and the rest bounded, so the cost is not understated.
+    //
+    // Where a transcript records the block of a path, that block is the evidence and the faults
+    // are its later Reads, counted beside it and nothing more: a fault whose agent is known is
+    // counted against that agent's block, and faults nothing attributes are bounded only by the
+    // agents whose transcripts were not read through their latest turn, since one that was holds
+    // every block of its own. A path no transcript records a block of keeps the rule above: a
+    // transcript read through that holds no block of a path with faults says the reading missed
+    // one as much as that none happened.
     let mut faults: Vec<(Option<i64>, usize, &BlockedReadRow)> = ledger
         .blocked_reads
         .iter()
@@ -1695,8 +1874,17 @@ pub fn summarize(
             groups.push(group);
             Unattributed::default()
         });
-        match agent {
-            Some(a) => {
+        // The block a transcript records for this agent: the fault is a later Read of it.
+        let recorded_block = match (agent, group.0, group.1) {
+            (Some(a), Some(s), Some(p)) => first_recorded.get(&((s, p, again), a)).copied(),
+            _ => None,
+        };
+        match (agent, recorded_block) {
+            (Some(a), Some(i)) => {
+                u.known.insert(a);
+                recorded_faults[i] += 1;
+            }
+            (Some(a), None) => {
                 u.known.insert(a);
                 match block_of.get(&(group, a)) {
                     Some(&i) => blocks[i].faults += 1,
@@ -1712,7 +1900,7 @@ pub fn summarize(
                     }
                 }
             }
-            None => u.faults.push((ts_ms, b)),
+            (None, _) => u.faults.push((ts_ms, b)),
         }
     }
     // The faults nothing attributes, group by group, in the order the groups first appeared.
@@ -1723,6 +1911,12 @@ pub fn summarize(
         if u.faults.is_empty() {
             continue;
         }
+        // Blocks of the path the transcripts record: the faults are their later Reads, and only
+        // an agent whose transcript was not read through its latest turn may hold another.
+        let in_transcripts = match (group.0, group.1) {
+            (Some(s), Some(p)) => blocked_agents.get(&(s, p, group.2)),
+            _ => None,
+        };
         // The agents that could have been blocked on the path then, beside those known already.
         let times: Vec<i64> = u.faults.iter().filter_map(|(t, _)| *t).collect();
         let candidates = match (group.0, times.iter().min(), times.iter().max()) {
@@ -1743,20 +1937,33 @@ pub fn summarize(
                             .map(|(_, a, _)| *a),
                     );
                 }
-                who.difference(&u.known).count()
+                who.retain(|a| !u.known.contains(a));
+                if let Some((agents, _)) = in_transcripts {
+                    who.retain(|a| {
+                        !agents.contains(a)
+                            && !read_through(session, *a).is_some_and(|through| {
+                                chains
+                                    .last_turn_ms(session, *a)
+                                    .is_none_or(|last| through >= last)
+                            })
+                    });
+                }
+                who.len()
             }
             // No session or no time to look agents up by: one per fault.
             _ => u.faults.len(),
         };
-        let first_is_evidence = u.known.is_empty();
+        let first_is_evidence = u.known.is_empty() && in_transcripts.is_none();
         let n = u
             .faults
             .len()
             .min(candidates.max(usize::from(first_is_evidence)));
         if n == 0 {
             // Every agent that could have read the path is known: these are its later Reads.
-            if let Some(i) = u.first_block {
-                blocks[i].faults += u.faults.len() as i64;
+            match (u.first_block, in_transcripts) {
+                (Some(i), _) => blocks[i].faults += u.faults.len() as i64,
+                (None, Some((_, i))) => recorded_faults[*i] += u.faults.len() as i64,
+                (None, None) => {}
             }
             continue;
         }
@@ -1798,6 +2005,27 @@ pub fn summarize(
             },
             pair,
             valve_faults: block.faults,
+        });
+    }
+    // The blocks the transcripts record, each one round on evidence, priced at the turn of the
+    // blocked agent that read the block's message.
+    for (b, faults) in recorded.iter().zip(recorded_faults) {
+        drafts.push(Draft {
+            ts: iso_ms(b.ts_ms),
+            ts_ms: Some(b.ts_ms),
+            kind: LineKind::BlockedRead,
+            tool: None,
+            route: None,
+            path: Some(b.path.clone()),
+            recorded_cl100k: 0,
+            against: Against::AlreadyInContext,
+            full_cl100k: 0,
+            returned_cl100k: 0,
+            previous_cl100k: None,
+            unverified: false,
+            rounds: Rounds::BlockedReadRecorded,
+            pair: chains.blocked_at(&b.session_id, b.agent_id.as_deref(), b.ts_ms),
+            valve_faults: faults,
         });
     }
 
@@ -1942,7 +2170,8 @@ fn usd_text(x: f64) -> String {
 
 /// The Reads the intercept blocked in the last [`RECENT_DAYS`] days, and what they cost.
 struct Blocks {
-    /// Blocks on evidence: one per session, agent, path and kind of fault.
+    /// Blocks on evidence: each a transcript records, and where none does, one per session,
+    /// agent, path and kind of fault.
     evidenced: i64,
     /// Blocks counted because faults no evidence attributes could stand for them: at most one
     /// per agent that could have read the path then.

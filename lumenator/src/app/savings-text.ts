@@ -1,4 +1,4 @@
-import type { Band, BillingView, SavingsPeriod } from './savings-summary';
+import type { Band, BillingView, SavingsCounts, SavingsPeriod } from './savings-summary';
 
 /**
  * How the savings figures read: `lumen_core::savings::text`, phrase for phrase.
@@ -163,14 +163,36 @@ export function showsShare(b: BillingView): boolean {
 }
 
 /**
+ * A period's blocked Reads, and, where they are not all of one kind on evidence, where each count
+ * comes from: `219 blocked Reads` (all recorded in transcripts, or all on the escape valve's
+ * faults), `219 blocked Reads: 200 recorded, 7 from faults, 12 bounded` (bounded: at most that many
+ * more, where no evidence says whose). `null` with none.
+ */
+export function blockedReadsText(c: SavingsCounts): string | null {
+    if (c.blockedReads === 0) return null;
+    const head = c.blockedReads === 1 ? '1 blocked Read' : `${tokensSigned(c.blockedReads)} blocked Reads`;
+    const oneKind = c.blockedReadsFromTranscripts === 0 || c.blockedReadsFromFaults === 0;
+    if (oneKind && c.blockedReadsBounded === 0) return head;
+    const split = (
+        [
+            [c.blockedReadsFromTranscripts, 'recorded'],
+            [c.blockedReadsFromFaults, 'from faults'],
+            [c.blockedReadsBounded, 'bounded'],
+        ] as const
+    )
+        .filter(([n]) => n !== 0)
+        .map(([n, what]) => `${tokensSigned(n)} ${what}`);
+    return `${head}: ${split.join(', ')}`;
+}
+
+/**
  * What a period's bold figures leave out: the blocked Reads where they are all it holds, the
  * modelled dollars, and the calls with tokens and no dollars.
  */
 export function besideParts(p: SavingsPeriod): string[] {
     const parts: string[] = [];
-    if (p.counts.calls === 0 && p.counts.blockedReads > 0) {
-        parts.push(p.counts.blockedReads === 1 ? '1 blocked Read' : `${tokensSigned(p.counts.blockedReads)} blocked Reads`);
-    }
+    const blocked = p.counts.calls === 0 ? blockedReadsText(p.counts) : null;
+    if (blocked !== null) parts.push(blocked);
     if (p.modelled !== null) parts.push(`${usdPlus(p.modelled.value.value)} modelled`);
     if (p.unpriced.calls > 0) {
         parts.push(p.unpriced.calls === 1 ? '1 call unpriced' : `${tokensSigned(p.unpriced.calls)} calls unpriced`);
