@@ -4,8 +4,8 @@
 //! computes one; it only lays the summary out for a terminal.
 
 use lumen_core::savings::{
-    self, Band, BillingView, CallLine, DataQuality, Dollars, Facts, LineKind, Period,
-    SavingsSummary, Status, Uncalibrated, text,
+    self, Band, BillingView, Calibrated, CallLine, DataQuality, Dollars, Facts, LineKind, Period,
+    SavingsSummary, Status, text,
 };
 
 /// The summary of this machine's ledger at `as_of_ms`.
@@ -27,7 +27,7 @@ pub fn summary(as_of_ms: i64) -> Result<SavingsSummary, String> {
         identity_hook_registered: identity_hook_registered(),
     };
     let spool = lumen_core::faults::spool_path();
-    savings::load::summary(&conn, as_of_ms, spool.as_deref(), &facts, &Uncalibrated)
+    savings::load::summary(&conn, as_of_ms, spool.as_deref(), &facts, &Calibrated)
 }
 
 /// Whether Claude Code's settings register Lumen's identity hook: the one predicate the app's
@@ -67,17 +67,22 @@ fn dollars(out: &mut String, d: &Dollars, high_open_why: &str) {
     ));
 }
 
+/// A token figure and its band: `12,345 (band 11,200 to 13,400)`.
 fn tokens_band(b: &Band<i64>) -> String {
     if b.low == b.high {
         text::tokens_signed(b.value)
     } else {
         format!(
-            "{} (band {} to {})",
+            "{} (band {})",
             text::tokens_signed(b.value),
-            text::tokens_signed(b.low),
-            text::tokens_signed(b.high)
+            text::tokens_band(b)
         )
     }
+}
+
+/// A ratio of Claude's tokens to cl100k_base's: `1.59×`.
+fn times(x: f64) -> String {
+    format!("{x:.2}\u{d7}")
 }
 
 fn period(out: &mut String, title: &str, when: &str, p: &Period, billing: BillingView) {
@@ -98,7 +103,7 @@ fn period(out: &mut String, title: &str, when: &str, p: &Period, billing: Billin
     };
     let c = &p.counts;
     out.push_str(&format!(
-        "  tokens saved, net     {}\n",
+        "  tokens saved, net     {}, Claude's tokens\n",
         tokens_band(&p.tokens_saved)
     ));
     if let Some(share) = p.share_pct {
@@ -117,7 +122,7 @@ fn period(out: &mut String, title: &str, when: &str, p: &Period, billing: Billin
     match &p.measured {
         Some(d) => {
             out.push_str(&format!(
-                "  measured               {}{basis}, from {}\n",
+                "  on record              {}{basis}, from {}\n",
                 text::usd_phrase(d.net.value),
                 rows(d.rows, "row")
             ));
@@ -127,7 +132,7 @@ fn period(out: &mut String, title: &str, when: &str, p: &Period, billing: Billin
                 "a session may still be running, or R may be too long and was taken at 0",
             );
         }
-        None => out.push_str("  measured               no dollars measured\n"),
+        None => out.push_str(&format!("  on record              {}\n", text::NO_DOLLARS)),
     }
     for why in &p.usd_shortfalls {
         out.push_str(&format!("    {why}\n"));
@@ -317,18 +322,44 @@ pub fn render_detail(s: &SavingsSummary) -> String {
         "  prices: list prices per model, speed and cache duration, as of {}\n",
         m.prices_as_of
     ));
+    let c = &m.calibration;
     out.push_str(&format!(
-        "  calibration: {}{}\n",
-        if m.calibration.calibrated {
+        "  tokens: {}{}{}. {}\n",
+        if c.calibrated {
             "calibrated"
         } else {
-            "uncalibrated"
+            "cl100k_base counts, not calibrated"
         },
-        match &m.calibration.as_of {
-            Some(d) => format!(" as of {d}. {}", m.calibration.note),
-            None => format!(". {}", m.calibration.note),
-        }
+        match &c.as_of {
+            Some(d) => format!(" as of {d}"),
+            None => String::new(),
+        },
+        match &c.claude_code_version {
+            Some(v) => format!(", through Claude Code {v}"),
+            None => String::new(),
+        },
+        c.note
     ));
+    for g in &c.groups {
+        let used = match &g.ratio {
+            Some(r) => format!(
+                "{} calls, their files {} cl100k_base tokens, converted at {} ({} to {})",
+                text::tokens_signed(g.calls),
+                text::tokens_signed(g.files_cl100k),
+                times(r.value),
+                times(r.low),
+                times(r.high)
+            ),
+            None => "no calls".to_string(),
+        };
+        out.push_str(&format!(
+            "    {}: {used}; the table's {} ({} to {})\n",
+            g.rows,
+            times(g.table_ratio.value),
+            times(g.table_ratio.low),
+            times(g.table_ratio.high)
+        ));
+    }
     out.push_str(&format!("  saved against: {}\n", m.counterfactual));
     out.push_str(&format!("  R: {}\n", m.rounds));
     out.push_str(&format!("  C: {}\n", m.round_cost));
@@ -389,7 +420,7 @@ mod tests {
                 billing_mode: BillingView::Unset,
                 identity_hook_registered: None,
             },
-            &Uncalibrated,
+            &Calibrated,
         )
     }
 
@@ -398,7 +429,20 @@ mod tests {
         let d = render_detail(&empty());
         assert!(d.contains("no Lumen activity recorded"), "{d}");
         assert!(d.contains("Status: no data"), "{d}");
-        assert!(d.contains("uncalibrated"), "{d}");
+        assert!(
+            d.contains(&format!(
+                "tokens: calibrated as of {}, through Claude Code {}.",
+                lumen_core::calibration::AS_OF,
+                lumen_core::calibration::CLAUDE_CODE_VERSION
+            )),
+            "{d}"
+        );
+        // Each group of rows with the table's ratio and the smallest and the largest any sample
+        // came out at, none with calls yet.
+        assert!(
+            d.contains("Haiku 5.5: no calls; the table's 1.59\u{d7} (1.33\u{d7} to 1.79\u{d7})"),
+            "{d}"
+        );
         assert!(d.contains("2026-10-13"), "the price table's date: {d}");
         assert!(
             !d.contains('$'),
@@ -435,7 +479,7 @@ mod tests {
         let d = render_detail(&s);
         assert!(
             d.contains(
-                "measured               net loss of at most $0.05 at API prices, from 4 rows"
+                "on record              net loss of at most $0.05 at API prices, from 4 rows"
             ),
             "{d}"
         );

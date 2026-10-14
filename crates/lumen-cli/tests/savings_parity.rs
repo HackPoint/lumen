@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use lumen_core::savings::{BillingView, Facts, Uncalibrated};
+use lumen_core::savings::{BillingView, Calibrated, Facts};
 
 /// Wednesday 2026-10-14 12:00 UTC.
 const AS_OF: &str = "2026-10-14T12:00:00Z";
@@ -498,7 +498,7 @@ async fn the_cli_and_the_app_return_the_same_bytes_from_one_ledger() {
         billing_mode: BillingView::of(&lumen_core::settings::billing_mode_for(&db)),
         identity_hook_registered: Some(false),
     };
-    let app = lumen_stats::savings_summary(&pool, AS_OF_MS, Some(&spool), &facts, &Uncalibrated)
+    let app = lumen_stats::savings_summary(&pool, AS_OF_MS, Some(&spool), &facts, &Calibrated)
         .await
         .unwrap();
     let app = serde_json::to_string_pretty(&app).unwrap();
@@ -690,7 +690,7 @@ fn lumen_says_each_billing_mode_as_the_app_does_and_its_dollars_are_the_measured
         assert!(detail.contains(&format!("Billing: {view}")), "{detail}");
         assert!(
             detail.contains(&format!(
-                "measured               {}{basis}, from ",
+                "on record              {}{basis}, from ",
                 text::usd_phrase(week["measured"]["net"]["value"].as_f64().unwrap())
             )),
             "{mode:?}: {detail}"
@@ -833,15 +833,32 @@ fn a_loss_under_half_a_cent_reads_minus_zero_in_lumen_and_lumen_report() {
     let (line, detail, v) = surfaces(&home, &db, &spool);
     let net = v["week"]["measured"]["net"]["value"].as_f64().unwrap();
     assert!(net < 0.0 && net > -0.005, "premise: {net}");
-    assert_eq!(v["week"]["tokensSaved"]["value"], -32);
+    // 32 more in cl100k_base's count; in Claude's, each side converted by the file's type and
+    // the model that read it.
+    let model = v["ledger"]["recent"][0]["pair"]["model"].as_str().unwrap();
+    let claude = |n: u64| {
+        lumen_core::calibration::calibrate(
+            n,
+            lumen_core::calibration::ContentType::Rust,
+            lumen_core::calibration::Model::from_model(model),
+        )
+        .value as i64
+    };
+    let more = claude(62) - claude(30);
     assert!(
-        line.contains(
-            "Lumen this week: \u{2248}\u{a0}32 more tokens, net; net loss under half a cent \u{b7} "
-        ),
+        more > 32,
+        "premise: Claude counts more than the proxy, {more}"
+    );
+    assert_eq!(v["week"]["tokensSaved"]["value"], -more);
+    assert!(
+        line.contains(&format!(
+            "Lumen this week: \u{2248}\u{a0}{more} more tokens, net; net loss under half a \
+             cent \u{b7} "
+        )),
         "{line}"
     );
     assert!(
-        detail.contains("measured               net loss under half a cent, from 1 row"),
+        detail.contains("on record              net loss under half a cent, from 1 row"),
         "{detail}"
     );
 }

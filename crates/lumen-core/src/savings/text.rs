@@ -8,15 +8,19 @@
 //! (`crates/lumen-core/tests/frontend_savings_text.rs` here, `savings-text.spec.ts` there), so
 //! the window cannot say another figure, sign or label either.
 //!
-//! The dollar figure is the measured one ([`super::Period::measured`]), a floor: a gain reads "at
-//! least $X saved, net", and a loss, whose floor is the most it can be, "net loss of at most $X"
-//! (or "net loss under half a cent"); the modelled dollars and the calls with no dollars are said
-//! beside it, never added to it. Every billing mode gets the dollars: on the API they are what
-//! the user paid less, and otherwise they are said "at API prices", since a plan is not billed per
-//! token, after the share of tokens Lumen kept out of context. Tokens read `≈`: they are the
-//! central value of a band. A figure that is not a number is never printed as one.
+//! The dollar figure is the one on record ([`super::Period::measured`], a name the schema keeps),
+//! a floor: a gain reads "at least $X saved, net", and a loss, whose floor is the most it can be,
+//! "net loss of at most $X" (or "net loss under half a cent"); the modelled dollars and the calls
+//! with no dollars are said beside it, never added to it. A period with none says "no dollars on
+//! record": "measured" is kept for the provider's usage data (`MESSAGING_CONTRACT.md`). Every
+//! billing mode gets the dollars: on the API they are what the user paid less, and otherwise they
+//! are said "at API prices", since a plan is not billed per token, after the share of tokens
+//! Lumen kept out of context. Tokens are Claude's, estimated from the cl100k_base counts the
+//! ledger records by the calibration ([`crate::calibration`]), and read `≈`: the central value of
+//! a band, which [`tokens_band`] says where there is room for it. A figure that is not a number is
+//! never printed as one.
 
-use super::{BillingView, Counts, DataQuality, Period, SavingsSummary, Status};
+use super::{Band, BillingView, Counts, DataQuality, Period, SavingsSummary, Status};
 
 /// What the dollars are said to be at where the user does not pay per token: a subscription,
 /// or a billing mode not chosen or not readable.
@@ -24,6 +28,9 @@ pub const AT_API_PRICES: &str = "at API prices";
 
 /// What a dollar or share figure that is not a finite number reads as: never `NaN` or `inf`.
 pub const NO_FIGURE: &str = "no figure";
+
+/// What a period with no dollars on record says in their place.
+pub const NO_DOLLARS: &str = "no dollars on record";
 
 /// `≈` and a no-break space: the sign and its number never wrap apart.
 const ABOUT: &str = "\u{2248}\u{a0}";
@@ -107,7 +114,12 @@ pub fn tokens_phrase(n: i64) -> String {
     format!("{} {}", tokens_figure(n), tokens_unit(n))
 }
 
-/// The measured net in three pieces, the figure the bold one: `at least` `$0.20` `saved, net`;
+/// A token band, low to high: `11,200 to 13,400`, `−1,300 to 2,100`.
+pub fn tokens_band(b: &Band<i64>) -> String {
+    format!("{} to {}", tokens_signed(b.low), tokens_signed(b.high))
+}
+
+/// The net on record in three pieces, the figure the bold one: `at least` `$0.20` `saved, net`;
 /// for a loss, whose floor is the most it can be, `net loss of at most` `$0.42` and nothing after;
 /// for a loss that rounds to no cent, `net loss` `under half a cent`. Not a number: no figure.
 pub fn usd_parts(x: f64) -> (&'static str, String, &'static str) {
@@ -252,18 +264,18 @@ fn beside(p: &Period) -> String {
     }
 }
 
-/// The measured dollars as a phrase, at API prices where the user does not pay per token, or
-/// that none were measured.
+/// The dollars on record as a phrase, at API prices where the user does not pay per token, or
+/// that none are on record.
 fn usd_clause(p: &Period, billing: BillingView) -> String {
     match (p.measured, price_basis(billing)) {
         (Some(d), Some(basis)) => format!("{} {basis}", usd_phrase(d.net.value)),
         (Some(d), None) => usd_phrase(d.net.value),
-        (None, _) => "no dollars measured".to_string(),
+        (None, _) => NO_DOLLARS.to_string(),
     }
 }
 
 /// One period as the terminal says it, in the phrases of the app's box for it: the share where
-/// the dollars are at API prices, the tokens, the measured net, and what the figure leaves out.
+/// the dollars are at API prices, the tokens, the net on record, and what the figure leaves out.
 /// A period that recorded nothing says so rather than showing a zero.
 fn period_body(s: &SavingsSummary, p: &Period) -> String {
     if p.data_quality == DataQuality::Empty {
@@ -290,7 +302,7 @@ fn capitalized(s: &str) -> String {
 }
 
 /// The tray menu's savings line, or `None` when there is nothing to say: no line at all rather
-/// than an empty or a placeholder one. On the API, the week's measured dollars alone; otherwise
+/// than an empty or a placeholder one. On the API, the week's dollars on record alone; otherwise
 /// the week as the terminal says it.
 pub fn tray_line(s: &SavingsSummary) -> Option<String> {
     if s.status == Status::NoData {

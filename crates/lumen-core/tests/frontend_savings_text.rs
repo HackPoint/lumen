@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 
 use lumen_core::savings::{
-    Band, BillingView, Clock, DataQuality, Dollars, Facts, Ledger, Modelled, Period,
-    Recommendation, SavingsSummary, Status, Uncalibrated, summarize, text,
+    Band, BillingView, Calibrated, Clock, DataQuality, Dollars, Facts, Ledger, Modelled, Period,
+    Recommendation, SavingsSummary, Status, summarize, text,
 };
 use serde_json::Value;
 
@@ -70,10 +70,22 @@ fn quality(v: &Value) -> DataQuality {
     }
 }
 
+/// A token band as the case names it: a number (no width) or `{low, value, high}`.
+fn token_band(v: &Value) -> Band<i64> {
+    match v {
+        Value::Object(_) => Band {
+            low: v["low"].as_i64().expect("low"),
+            value: v["value"].as_i64().expect("value"),
+            high: v["high"].as_i64().expect("high"),
+        },
+        _ => Band::exact(v.as_i64().unwrap_or(0)),
+    }
+}
+
 /// A period as the case names it, on top of an empty one. Gross and extra rounds default to the
 /// net and nothing, as in the app's builder.
 fn period(mut p: Period, v: &Value) -> Period {
-    p.tokens_saved = Band::exact(v["tokensSaved"].as_i64().unwrap_or(0));
+    p.tokens_saved = token_band(&v["tokensSaved"]);
     p.share_pct = v["sharePct"].as_f64();
     p.measured = v["net"].as_f64().map(|net| Dollars {
         rows: 1,
@@ -110,7 +122,7 @@ fn summary(v: &Value) -> SavingsSummary {
             billing_mode: billing(&v["billingMode"]),
             identity_hook_registered: None,
         },
-        &Uncalibrated,
+        &Calibrated,
     );
     s.status = status(&v["status"]);
     s.recommendation = None;
@@ -179,6 +191,14 @@ fn every_figure_formats_as_the_app_formats_it() {
             "tokens_phrase({n})"
         );
     }
+    for c in doc["tokensBand"].as_array().unwrap() {
+        let b = token_band(c);
+        assert_eq!(
+            text::tokens_band(&b),
+            c["text"].as_str().unwrap(),
+            "tokens_band({b:?})"
+        );
+    }
     for c in doc["share"].as_array().unwrap() {
         let pct = c["pct"].as_f64().unwrap();
         assert_eq!(
@@ -203,6 +223,21 @@ fn every_state_reads_the_same_in_the_terminal_the_tray_and_the_app() {
             "{name}: lumen"
         );
         assert_eq!(text::tray_line(&s), opt(&c["tray"]), "{name}: the tray");
+        // The band behind each central token figure, where the case gives one: the app's ⓘ and
+        // `lumen report` say it in these words.
+        if let Some(bands) = c.get("bands") {
+            for (key, p) in [("week", &s.week), ("allTime", &s.all_time)] {
+                assert_eq!(
+                    Some(text::tokens_band(&p.tokens_saved)),
+                    opt(&bands[key]),
+                    "{name}.{key}: band"
+                );
+                assert!(
+                    p.tokens_saved.low < p.tokens_saved.high,
+                    "{name}.{key}: a band"
+                );
+            }
+        }
 
         // The pieces the app's headline is made of, from the same functions as the line.
         for (key, p, when) in [

@@ -8,7 +8,7 @@
  * is missing here.
  */
 
-/** A low, central and high estimate. Central is the conservative figure. */
+/** A low, central and high estimate. For tokens central is the median; for dollars it is the conservative figure, the floor. */
 export interface Band {
     low: number;
     value: number;
@@ -31,7 +31,7 @@ export interface Dollars {
 
 /**
  * What calls whose R may be too long are worth beyond their worth at R = 0, which is in the
- * measured figure: the cache reads over that R.
+ * figure on record: the cache reads over that R.
  */
 export interface Modelled {
     /** Calls it comes from. */
@@ -108,12 +108,14 @@ export interface SavingsPeriod {
     /** tokensSaved / tokensFull at the central figures, percent; null with nothing read. */
     sharePct: number | null;
     /**
-     * The figure shown in bold, as "at least": dollars measured from the calls' own turns, a
-     * floor. Null when nothing in the period could be measured: never shown as $0.
+     * The figure shown in bold, as "at least": the dollars on record, priced from the calls' own
+     * turns, a floor. The field keeps the name it had before every surface called it "on record"
+     * ("measured" is for the provider's usage data). Null when nothing in the period could be
+     * priced so: never shown as $0.
      */
     measured: Dollars | null;
     /**
-     * What calls whose R may be too long are worth beyond R = 0. Shown beside `measured`,
+     * What calls whose R may be too long are worth beyond R = 0. Shown beside the figure on record,
      * labelled modelled, never added to it.
      */
     modelled: Modelled | null;
@@ -141,11 +143,33 @@ export interface Recommendation {
     text: string;
 }
 
+/**
+ * A group of rows by the ratio their cl100k_base counts were converted to Claude's at: those read
+ * by the models of one tokenizer, or those with no measured model.
+ */
+export interface CalibrationGroup {
+    key: 'opus47on' | 'opus46before' | 'unmeasured';
+    /** Which rows, in words. */
+    rows: string;
+    /** The table's ratio for the group, pooled over file types: the median, with the smallest to the largest any sample came out at. */
+    tableRatio: Band;
+    /** Lumen calls, all time, converted at this group's ratios. */
+    calls: number;
+    /** What their files held, in cl100k_base tokens, before the Read cap. */
+    filesCl100k: number;
+    /** The ratio their files came out at, each by its own type; null with no calls. */
+    ratio: Band | null;
+}
+
 export interface CalibrationInfo {
-    /** False while token figures are cl100k_base counts, a proxy for Claude's. */
+    /** Whether token figures are Claude's, converted from cl100k_base counts by the calibration. */
     calibrated: boolean;
+    /** The day the calibration table was measured. */
     asOf: string | null;
+    /** The Claude Code version it was measured through. */
+    claudeCodeVersion: string | null;
     note: string;
+    groups: CalibrationGroup[];
 }
 
 export interface SavingsMethod {
@@ -159,7 +183,7 @@ export interface SavingsMethod {
     extraRounds: string;
     /** How a turn that recorded no speed, region or cache duration is priced. */
     floors: string;
-    /** What goes in the measured, the modelled and the tokens-only parts. */
+    /** What goes in the parts on record, modelled and tokens only. */
     parts: string;
 }
 
@@ -203,7 +227,7 @@ export interface CallLine {
     route: string | null;
     path: string | null;
     inWeek: boolean;
-    /** What is counted as saved, in cl100k_base tokens, against `savedAgainst`. */
+    /** The proxy's own count of the saving, in cl100k_base tokens, before the Read cap. */
     savedCl100k: number;
     /** What the ledger recorded, against the whole file. */
     recordedSavedCl100k: number;
@@ -214,8 +238,9 @@ export interface CallLine {
      */
     savedAgainst: 'wholeFile' | 'previousAnswer' | 'answerNotInLedger' | 'alreadyInContext' | 'askedAgain';
     fullCl100k: number;
-    /** The file is larger than a Read returns, so it counts as what one returns. */
+    /** The file, in Claude's tokens, is larger than a Read returns, so it counts as what one returns. */
     readCapped: boolean;
+    /** In Claude's tokens: the calibration's band. */
     tokensSaved: Band;
     provenance: 'measured' | 'unverified';
     pair: PairView;
@@ -231,7 +256,7 @@ export interface CallLine {
         | 'blockedReadBounded'
         | 'blockedReadRecorded';
     extraRoundEvidenced: boolean;
-    /** `measured` when the line has dollars (all in the measured figure); `none`: tokens only. */
+    /** `measured` when the line has dollars, all in the figure on record; `none`: tokens only. */
     dollars: 'measured' | 'none';
     /** What the line is worth beyond R = 0 where R may be too long: modelled, not in `netUsd`. */
     modelledValueUsd: Band | null;
@@ -264,7 +289,7 @@ export interface SavingsSummary {
 }
 
 /** The summary schema this build reads: `lumen_core::savings::SCHEMA`. */
-export const SAVINGS_SCHEMA = 1;
+export const SAVINGS_SCHEMA = 2;
 
 /**
  * Why `v` is not a summary this window can show, or null when it is one. A summary of another

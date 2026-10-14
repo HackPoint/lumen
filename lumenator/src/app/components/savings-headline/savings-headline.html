@@ -33,15 +33,15 @@
                                 <span class="visually-hidden">{{ row.tokensSpoken }}</span>
                                 <span class="headline__seen" aria-hidden="true"><strong class="headline__tokens" [class.is-loss]="row.tokensLoss">{{ row.tokens }}</strong>&ngsp;<span class="headline__unit">{{ row.tokensUnit }}</span></span>
                             </p>&ngsp;
-                            <!-- The bold dollar figure is measured.net, a floor, and nothing else: "at least $X saved,
-                                 net", or for a loss "net loss of at most $X". -->
+                            <!-- The bold dollar figure is measured.net (the net on record), a floor, and nothing
+                                 else: "at least $X saved, net", or for a loss "net loss of at most $X". -->
                             @if (row.usd !== null) {
                                 <p class="headline__figure">
                                     <span class="visually-hidden">{{ row.usdSpoken }}</span>
                                     <span class="headline__seen" aria-hidden="true"><span class="headline__floor">{{ row.usdLead }}</span>&ngsp;<strong class="headline__usd" [class.is-loss]="row.usdLoss">{{ row.usd }}</strong>@if (row.usdTail) {&ngsp;<span class="headline__unit">{{ row.usdTail }}</span>}@if (row.basis) {&ngsp;<span class="headline__basis">{{ row.basis }}</span>}</span>
                                 </p>&ngsp;
                             } @else {
-                                <p class="headline__quiet">No dollars measured {{ row.when }}.</p>&ngsp;
+                                <p class="headline__quiet">No dollars on record {{ row.when }}.</p>&ngsp;
                             }
                             @if (row.beside.length > 0) {
                                 <p class="headline__beside">

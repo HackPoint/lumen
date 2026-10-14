@@ -36,9 +36,9 @@ export interface HeadlineRow {
     tokensLoss: boolean;
     tokensSpoken: string;
     /**
-     * The dollar line in three pieces, the figure the bold one: the measured net, as "at least
+     * The dollar line in three pieces, the figure the bold one: the net on record, as "at least
      * $X saved, net", "net loss of at most $X" or "net loss under half a cent". All null when
-     * nothing in the period was measured.
+     * nothing in the period is on record.
      */
     usdLead: string | null;
     usd: string | null;
@@ -59,9 +59,10 @@ export interface HeadlineRow {
  * The top of Home: how much Lumen saved, this week and all time, in tokens and in dollars, net,
  * both in bold.
  *
- * Everything shown is the summary's: the token figure is the central value of `tokensSaved`, and
- * the dollar figure is `measured.net` and nothing else, a floor: "at least $X saved, net", or for
- * a loss "net loss of at most $X". The modelled dollars and the calls with tokens and no dollars
+ * Everything shown is the summary's: the token figure is the central value of `tokensSaved`,
+ * Claude's tokens as the calibration estimates them from cl100k_base counts (its band on the ⓘ),
+ * and the dollar figure is `measured.net`, the net on record, and nothing else, a floor: "at least
+ * $X saved, net", or for a loss "net loss of at most $X". The modelled dollars and the calls with tokens and no dollars
  * stand beside it as tags, never in it. Wherever the dollars are at API prices (a subscription, a
  * billing mode not said or not readable) the share of tokens Lumen kept out of context comes
  * first. Each phrase is made by `savings-text.ts`, which says it as `lumen` and the tray do.
@@ -119,9 +120,12 @@ function row(
     const parts = net === null ? null : usdParts(net.value);
     const basis = priceBasis(s.billingMode);
     const n = p.tokensSaved.value;
-    const tokensBandText = `Tokens saved: band ${tokensBand(p.tokensSaved)}${s.method.calibration.calibrated
-        ? '.'
-        : ', in cl100k_base counts, a stand-in for Claude\'s tokenizer; the band leaves out how the two differ.'}`;
+    const cal = s.method.calibration;
+    const tokensBandText = cal.calibrated
+        ? `Tokens saved: band ${tokensBand(p.tokensSaved)} of Claude's tokens, estimated from cl100k_base counts`
+            + `${cal.asOf ? ` by the calibration of ${cal.asOf}` : ''}; the dollars take its low end.`
+        : `Tokens saved: band ${tokensBand(p.tokensSaved)}, in cl100k_base counts, a stand-in for Claude's tokenizer; `
+            + 'the band leaves out how the two differ.';
     const usdBandText = p.measured
         ? ` Dollars, net: ${usdBand(p.measured.net, p.measured.highOpen)}.`
         : '';
@@ -143,6 +147,6 @@ function row(
         basis,
         beside: besideParts(p),
         partial: p.dataQuality.state === 'partial' ? p.dataQuality.reason : null,
-        band: `${label}. ${tokensBandText}${usdBandText} The figures shown are the central ones; How it's measured has every band.`,
+        band: `${label}. ${tokensBandText}${usdBandText} The token figure shown is its band's central value and the dollar figure its band's low end; How it's measured has every band.`,
     };
 }

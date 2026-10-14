@@ -790,7 +790,7 @@ async fn a_blocked_read_in_a_transcript_reaches_the_savings_summary() {
             billing_mode: lumen_core::savings::BillingView::Api,
             identity_hook_registered: Some(true),
         },
-        &lumen_core::savings::Uncalibrated,
+        &lumen_core::savings::Calibrated,
     )
     .await
     .unwrap();

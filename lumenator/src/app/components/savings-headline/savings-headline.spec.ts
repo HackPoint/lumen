@@ -97,12 +97,19 @@ describe('SavingsHeadline', () => {
             } else {
                 expect(boxes.map(pieces), c.name).toEqual([c.app.week, c.app.allTime]);
             }
+            // The band behind each central token figure, on the period's ⓘ, as `lumen report` gives it.
+            const bands = (c as { bands?: { week: string; allTime: string } }).bands;
+            if (bands) {
+                const info = Array.from(root().querySelectorAll('.headline__period .info-btn')).map((b) => b.getAttribute('aria-label'));
+                expect(info[0], c.name).toContain(`Tokens saved: band ${bands.week} of Claude's tokens`);
+                expect(info[1], c.name).toContain(`Tokens saved: band ${bands.allTime} of Claude's tokens`);
+            }
         }
     });
 
     // ── each state, as it reads ────────────────────────────────────────────────────────────
 
-    it('API: tokens and dollars in bold, the dollars the measured net, "at least"', () => {
+    it('API: tokens and dollars in bold, the dollars the net on record, "at least"', () => {
         mount(state('api'));
         expect(periods()).toEqual([
             'This week ≈ 12,345 tokens saved, net at least $1.50 saved, net',
@@ -179,8 +186,8 @@ describe('SavingsHeadline', () => {
         mount(state('modelledUnpriced'));
         expect(periods()).toEqual([
             'This week ≈ 10 tokens saved, net at least $2.00 saved, net +$182 modelled 1,473 calls unpriced Partial data: 1,473 rows with no session recorded, so tokens and no dollars.',
-            // Modelled dollars alone are no measured figure: nothing bold, and no $0.
-            'All time ≈ 10 tokens saved, net No dollars measured all time. +$5.00 modelled',
+            // Modelled dollars alone are no figure on record: nothing bold, and no $0.
+            'All time ≈ 10 tokens saved, net No dollars on record all time. +$5.00 modelled',
         ]);
         expect(bold()).toEqual(['≈ 10', '$2.00', '≈ 10']);
     });
@@ -212,7 +219,7 @@ describe('SavingsHeadline', () => {
         expect(root().textContent).not.toContain('$');
     });
 
-    // ── the bold figure is measured.net ────────────────────────────────────────────────────
+    // ── the bold figure is measured.net, the net on record ─────────────────────────────────
 
     it('the bold dollar figure is exactly measured.net: not the gross, the modelled or the unpriced', () => {
         const week = recordedPeriod(5_000, null, {
@@ -234,25 +241,27 @@ describe('SavingsHeadline', () => {
     it('gives the bands behind the central figures on the period\'s ⓘ, and the figure stays central', () => {
         const week = recordedPeriod(5_000, null, {
             tokensSaved: { low: 4_000, value: 5_000, high: 6_000 },
-            measured: dollars(1.23, { net: { low: 0.5, value: 1.23, high: 4.56 }, highOpen: true }),
+            measured: dollars(1.23, { net: { low: 1.23, value: 1.23, high: 4.56 }, highOpen: true }),
         });
         const s = savingsSummary({ week, allTime: recordedPeriod(10, null), status: { state: 'working' } });
         mount(s);
         const info = Array.from(root().querySelectorAll('.headline__period .info-btn'));
         expect(info[0].getAttribute('aria-label')).toBe(
-            "This week. Tokens saved: band 4,000 to 6,000, in cl100k_base counts, a stand-in for Claude's tokenizer; "
-            + 'the band leaves out how the two differ. Dollars, net: $0.50 to $4.56, and the high end is not a bound. '
-            + "The figures shown are the central ones; How it's measured has every band.",
+            "This week. Tokens saved: band 4,000 to 6,000 of Claude's tokens, estimated from cl100k_base counts by the "
+            + 'calibration of 2026-10-14; the dollars take its low end. Dollars, net: $1.23 to $4.56, and the high end is '
+            + "not a bound. The token figure shown is its band's central value and the dollar figure its band's low end; "
+            + "How it's measured has every band.",
         );
         expect(info[1].getAttribute('aria-label')).toBe(
-            "All time. Tokens saved: band 10 to 10, in cl100k_base counts, a stand-in for Claude's tokenizer; "
-            + "the band leaves out how the two differ. The figures shown are the central ones; How it's measured has every band.",
+            "All time. Tokens saved: band 10 to 10 of Claude's tokens, estimated from cl100k_base counts by the "
+            + "calibration of 2026-10-14; the dollars take its low end. The token figure shown is its band's central value "
+            + "and the dollar figure its band's low end; How it's measured has every band.",
         );
         expect(bold()[0]).toBe('≈ 5,000');
-        // Calibrated counts have a band of their own, and say no more.
-        mount({ ...s, method: { ...s.method, calibration: { calibrated: true, asOf: '2026-11-01', note: '' } } });
+        // Counts a calibrator passed through as cl100k_base's say so, and that the band leaves the difference out.
+        mount({ ...s, method: { ...s.method, calibration: { ...s.method.calibration, calibrated: false, asOf: null } } });
         expect(root().querySelector('.headline__period .info-btn')?.getAttribute('aria-label'))
-            .toMatch(/^This week\. Tokens saved: band 4,000 to 6,000\. Dollars/);
+            .toMatch(/^This week\. Tokens saved: band 4,000 to 6,000, in cl100k_base counts, a stand-in for Claude's tokenizer; the band leaves out how the two differ\. Dollars/);
     });
 
     it('links to How it\'s measured', () => {

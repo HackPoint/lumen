@@ -866,7 +866,7 @@ mod tests {
     /// cannot word the same summary differently; a summary with nothing to say adds no line.
     #[test]
     fn the_savings_line_is_the_engines_tray_line() {
-        use lumen_core::savings::{summarize, BillingView, Clock, Facts, Ledger, Uncalibrated};
+        use lumen_core::savings::{summarize, BillingView, Calibrated, Clock, Facts, Ledger};
         let clock = Clock {
             now_ms: 1_791_979_200_000,
             week_start_ms: 1_791_763_200_000,
@@ -876,7 +876,7 @@ mod tests {
             billing_mode: BillingView::Api,
             identity_hook_registered: Some(true),
         };
-        let nothing = summarize(&Ledger::default(), &clock, &facts, &Uncalibrated);
+        let nothing = summarize(&Ledger::default(), &clock, &facts, &Calibrated);
         let line = lumen_core::savings::text::tray_line(&nothing);
         assert_eq!(line, None, "no data, no line");
         assert_eq!(
@@ -891,7 +891,7 @@ mod tests {
             },
             &clock,
             &facts,
-            &Uncalibrated,
+            &Calibrated,
         );
         let line = lumen_core::savings::text::tray_line(&idle).expect("a line");
         assert_eq!(line, "No Lumen activity this week \u{b7} not working");
@@ -911,8 +911,8 @@ mod tests {
     #[test]
     fn the_tray_says_the_measured_net_and_not_the_gross() {
         use lumen_core::savings::{
-            summarize, Band, BillingView, Clock, DataQuality, Dollars, Facts, Ledger, Status,
-            Uncalibrated,
+            summarize, Band, BillingView, Calibrated, Clock, DataQuality, Dollars, Facts, Ledger,
+            Status,
         };
         let clock = Clock {
             now_ms: 1_791_979_200_000,
@@ -934,7 +934,7 @@ mod tests {
                 billing_mode: mode,
                 identity_hook_registered: Some(true),
             };
-            let mut s = summarize(&Ledger::default(), &clock, &facts, &Uncalibrated);
+            let mut s = summarize(&Ledger::default(), &clock, &facts, &Calibrated);
             s.status = Status::Working;
             s.week.tokens_saved = Band::exact(4_000);
             s.week.counts.calls = 2;

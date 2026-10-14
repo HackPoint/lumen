@@ -15,7 +15,8 @@ checks that it does: the empty prompt is sent three times per model before any s
 again every ten samples, and every one of those totals must be equal. Each sample is sent
 twice and the two totals must agree; a third send settles a disagreement or the sample is
 dropped and reported, as is a sample the model stopped on safety grounds and Claude Code
-answered with another model. cl100k is counted the same way, as the difference of the two
+answered with another model: at most one such sample per model and one per content type, or the
+run aborts (FALLBACKS_PER_MODEL, FALLBACKS_PER_TYPE). cl100k is counted the same way, as the difference of the two
 wrapped prompts, so the boundary tokens where the sample meets the markers cancel on both
 sides of the ratio.
 
@@ -86,6 +87,14 @@ SESSION_ID = "00000000-0000-4000-8000-00000000ca1b"
 BASELINE_EVERY = 10
 # A sample may cost at most this many cl100k tokens, so Claude's count stays under ~30k.
 MAX_CL100K = 22_000
+# How many samples may fall back (the model stopped on safety grounds and Claude Code answered
+# with another) before a run is not trusted: one per model, and one per content type over every
+# model. A fallen-back sample is dropped for its model, so the rows it would be in rest on fewer
+# texts than the corpus has; one is an accident, more is a pattern, and the run aborts rather
+# than publish rows that quietly lost their samples. A Rust test holds results/run.json to the
+# same caps (calibration::tests::the_run_drops_no_more_safety_fallbacks_than_the_runner_allows).
+FALLBACKS_PER_MODEL = 1
+FALLBACKS_PER_TYPE = 1
 
 
 # ── corpus ──────────────────────────────────────────────────────────────────────────
@@ -320,6 +329,23 @@ def measure(model: str, content: str, sid: str, cwd: Path, iso: Isolation, log: 
     return totals
 
 
+def fallback_excess(fell_back: dict[str, list[str]], type_of: dict[str, str]) -> str | None:
+    """Why `fell_back` (model -> the samples it fell back on) is past the caps, or None."""
+    for model, ids in sorted(fell_back.items()):
+        if len(ids) > FALLBACKS_PER_MODEL:
+            return (f"{model} fell back on {len(ids)} samples {sorted(ids)}; at most "
+                    f"{FALLBACKS_PER_MODEL} may")
+    by_type: dict[str, list[str]] = {}
+    for model, ids in fell_back.items():
+        for sid in ids:
+            by_type.setdefault(type_of[sid], []).append(f"{sid}@{model}")
+    for t, hits in sorted(by_type.items()):
+        if len(hits) > FALLBACKS_PER_TYPE:
+            return (f"{t} fell back {len(hits)} times {sorted(hits)}; at most "
+                    f"{FALLBACKS_PER_TYPE} may")
+    return None
+
+
 def agreed(totals: list[int]) -> int | None:
     for t in totals:
         if totals.count(t) >= 2:
@@ -394,6 +420,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     cwd = workdir()
     iso = Isolation(cwd)
     RESULTS.mkdir(exist_ok=True)
+    type_of = {r["id"]: r["content_type"] for r in rows}
+    fell_back: dict[str, list[str]] = {}
     try:
         for model in args.models:
             log = Log(RESULTS / f"calls-{model}.tsv")
@@ -404,6 +432,11 @@ def cmd_run(args: argparse.Namespace) -> None:
                 t = agreed(totals)
                 print(f"{model} {row['id']:<10} {totals} -> "
                       f"{'fell back, dropped' if not totals else 'disagree' if t is None else t - base}")
+                if not totals:
+                    fell_back.setdefault(model, []).append(row["id"])
+                    excess = fallback_excess(fell_back, type_of)
+                    if excess:
+                        raise Abort(f"too many safety fallbacks: {excess}")
                 if i % BASELINE_EVERY == 0 or i == len(rows):
                     again = baseline(model, cwd, iso, log, 1, args.delay)
                     if again != base:
@@ -495,6 +528,11 @@ def cmd_summarize(args: argparse.Namespace) -> None:
         if mid in measured:
             sys.exit(f"{path.name}: {mid} is measured twice")
         measured[mid] = (deltas, checks)
+    # The caps over every model's run, which `run` can only check within one invocation.
+    excess = fallback_excess({m: c["fell_back_to_another_model"] for m, (_, c) in measured.items()},
+                             {r["id"]: r["content_type"] for r in counts})
+    if excess:
+        sys.exit(f"too many safety fallbacks: {excess}")
     known = [base_id(m) for m in MODELS]
     models = sorted(measured, key=lambda m: (known.index(m) if m in known else len(known), m))
     expected = {r["id"] for r in counts}
@@ -564,7 +602,8 @@ def cmd_summarize(args: argparse.Namespace) -> None:
     for row in table:
         t, m = row["content_type"], row["model"]
         t = names.get(t, t.capitalize())
-        ratios = f"{round(row['median'] * 1000)}, {round(row['p10'] * 1000)}, {round(row['p90'] * 1000)}"
+        ratios = "[" + ", ".join(str(round(row[k] * 1000))
+                                 for k in ("median", "p10", "p90", "min", "max")) + "]"
         if t == "Pooled" and m == "all":
             print(f"    everything({row['n']}, {row['models']}, {ratios}),")
         elif t == "Pooled":

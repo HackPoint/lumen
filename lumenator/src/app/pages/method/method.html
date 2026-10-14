@@ -77,6 +77,33 @@
                 @for (line of calibration(); track $index) {
                     <p class="method__p">{{ line }}</p>
                 }
+                @if (calibrationGroups().length > 0) {
+                    <div class="method__scroll">
+                        <table class="method__table method__cal">
+                            <caption class="visually-hidden">Claude's tokens per cl100k_base token, by group of rows, all time</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Rows</th>
+                                    <th scope="col">Calls</th>
+                                    <th scope="col">Their files, cl100k_base</th>
+                                    <th scope="col">Converted at</th>
+                                    <th scope="col">The table's ratio</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @for (g of calibrationGroups(); track g.rows) {
+                                    <tr>
+                                        <th scope="row">{{ g.rows }}</th>
+                                        <td>{{ g.calls }}</td>
+                                        <td>{{ g.files }}</td>
+                                        <td>{{ g.used }}</td>
+                                        <td>{{ g.table }}</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
             </section>
 
             <section class="method__section" aria-labelledby="figures-title">

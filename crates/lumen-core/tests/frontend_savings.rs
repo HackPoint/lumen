@@ -8,8 +8,7 @@
 use std::collections::BTreeSet;
 
 use lumen_core::savings::{
-    BillingView, BoundaryRow, CallRow, Clock, Facts, Ledger, TurnRow, Uncalibrated, iso_ms,
-    summarize,
+    BillingView, BoundaryRow, Calibrated, CallRow, Clock, Facts, Ledger, TurnRow, iso_ms, summarize,
 };
 
 const MONDAY: i64 = 1_791_763_200_000;
@@ -88,7 +87,7 @@ fn every_field_the_engine_sends_is_in_the_frontends_type() {
             billing_mode: BillingView::Api,
             identity_hook_registered: Some(true),
         },
-        &Uncalibrated,
+        &Calibrated,
     );
     assert!(
         s.recommendation.is_some(),

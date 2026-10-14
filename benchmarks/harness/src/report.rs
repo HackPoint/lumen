@@ -112,7 +112,9 @@ pub struct Savings {
     pub dollars: String,
     pub engine: String,
     pub reason: String,
-    /// The engine's calibrator: whether these cl100k_base counts are converted to Claude's.
+    /// The engine's calibrator: whether the engine's token figures are Claude's, converted from
+    /// the cl100k_base counts the ledger records. This document's own figures are cl100k_base
+    /// counts either way.
     pub calibrated: bool,
     pub calibration_note: String,
 }
@@ -120,7 +122,7 @@ pub struct Savings {
 /// The savings section, from the engine itself.
 pub fn savings() -> Savings {
     use lumen_core::savings::Calibrator;
-    let cal = lumen_core::savings::Uncalibrated.info();
+    let cal = lumen_core::savings::Calibrated.info();
     Savings {
         dollars: "none".to_string(),
         engine: "lumen_core::savings (crates/lumen-core/src/savings)".to_string(),

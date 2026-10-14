@@ -56,9 +56,24 @@ Opus 4.7 and later: `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `clau
   `claude-fable-5` on `log-05`, no sample was dropped.
 
 `crates/lumen-core/src/calibration.rs` embeds this table: `calibrate(cl100k_tokens, content_type,
-model)` returns Claude's count from the median with the p10 to p90 band. A model the table does
-not have keeps the content type and gets its row over every model, with a band over both groups;
+model)` returns Claude's count from the median with the p10 to p90 band, and `observed(...)` the
+same median with the smallest to the largest ratio any one sample came out at (`min` and `max`
+in `results/table.tsv`). A model the table does not have keeps the content type and gets the
+mean of the two groups' medians for it, each group weighted alike, with a band over both groups;
 a content type it does not have gets the model's pooled row, with a band over that model's rows.
+The rows over every model are not used for an unknown model: they weigh the groups eight to
+four, which is how many models each group had in the run, not how likely an unknown model is to
+have either tokenizer.
+
+Lumen's savings figures go through `observed`, by the file's type and the model of the turn that
+read it. A saving is the file's count less the count of the answer Lumen made from it (an
+outline, a slice, a stub or a delta), and the corpus is raw file text only: no row measured an
+answer. So the file takes its row's `min` to `max`, and the answer the file's median with the
+widest band measured for the model, its pooled row's `min` to `max` over every type (the row
+over every model and type where the model is not known). The bold dollar figure, a floor, takes
+the file at its `min` less the answer at its `max`. Not a percentile: a floor has to hold for
+each call, and about a tenth of the samples fall below a p10 (on the later group, as low as
+1.335 where the pooled p10 is 1.444).
 
 ## Re-running it (every release)
 
@@ -114,8 +129,13 @@ Every call must be one request to the model asked for. One exception is handled 
 stopped on: when the model stops on safety grounds and Claude Code answers with another model,
 the usage is the other model's, so the run logs the call as `fallback`, drops that sample for
 that model and goes on, since one sample a model will not answer says nothing about the method.
-It happened once in 720 samples: `claude-fable-5` stopped twice on `log-05` (Go's runtime panic
-output) and `claude-opus-4-8` answered. Anything else that is not one request (a second turn, a second model) stops the run.
+More than one is a pattern rather than an accident, and leaves rows resting on fewer texts than
+the corpus has: `run` and `summarize` abort past one fallback per model, or one per content type
+over every model (`FALLBACKS_PER_MODEL`, `FALLBACKS_PER_TYPE`), and a test in
+`lumen_core::calibration` holds `results/run.json` to the same caps. It happened once in 720
+samples: `claude-fable-5` stopped twice on `log-05` (Go's runtime panic output) and
+`claude-opus-4-8` answered. Anything else that is not one request (a second turn, a second model)
+stops the run.
 
 ### Isolation
 
@@ -225,7 +245,7 @@ and `go` and six for `shell`.
   CSS, HTML, YAML, SQL, minified code or non-Latin text; a type it does not cover gets the model's
   pooled row with a band over all its types (`calibrate` in `calibration.rs`).
 - **Twelve models.** A model not in the table, an alias such as `opus` included, gets the content
-  type's row over every model, with a band over every model's row for that type: two tokenizers
-  are in the table, so that band spans both.
+  type's ratio on each of the two tokenizers, weighted alike, with a band over every model's row
+  for that type: two tokenizers are in the table, so that band spans both.
 - **A row over several models counts each text once per model.** `n` in `table.tsv` is the
   number of distinct samples and `models` how many models they were sent to.

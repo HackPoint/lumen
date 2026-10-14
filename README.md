@@ -288,17 +288,20 @@ Here is what each one means, where it comes from, and any honesty caveat.
 ### Home
 
 The top of Home is the savings headline: tokens saved and dollars saved, net, this week and all
-time, both in bold, from the savings engine's summary of your own ledger. The dollar figure is the
-measured net, a floor: a gain reads "at least $X saved, net", and a loss, whose floor is the most
-it can be, "net loss of at most $X" (or "net loss under half a cent"), in red. On a subscription,
+time, both in bold, from the savings engine's summary of your own ledger. The tokens are Claude's,
+estimated from Lumen's `cl100k_base` counts by the calibration (below), so they read "≈", with
+the band on the ⓘ. The dollar figure is the net on record, a floor: a gain reads "at least $X
+saved, net", and a loss, whose floor is the most it can be, "net loss of at most $X" (or "net
+loss under half a cent"), in red. On a subscription,
 or before you have said how you pay, the dollars are "at API prices", since a plan is not billed
 per token, after the share of tokens Lumen kept out of context ("≈ 92% fewer tokens from file
 and tool reads this week"). What may be worth more (modelled) and the calls with tokens and no
 dollars (unpriced) are tags beside the figure, never in it. Under it: whether Lumen is working
 (a loss whose band reaches a gain says Lumen *may* have cost more than it saved), and the one
 thing to do, with its step (Run Setup, or `lumen doctor`). "How it's measured", from the
-headline and from Details, has every rule, the price table and its date, whether token counts
-are calibrated, each figure's band and count, and the newest 200 calls. The figures are
+headline and from Details, has every rule, the price table and its date, the calibration (its
+date, the Claude Code version it was measured through, and the ratio each group of rows was
+converted at), each figure's band and count, and the newest 200 calls. The figures are
 refreshed every minute and when the window gets focus; if a refresh fails, the last figures
 stay, marked as not up to date. Bare `lumen` and the tray say the same figures in the same words.
 
@@ -446,21 +449,35 @@ transcript), and its model, speed, region and cache duration price both the savi
 round: a dollar is always the price of the model that consumed the tokens.
 
 - **What a call saved** is what a built-in Read would have put in context, less what the call
-  returned. A Read returns at most 25,000 tokens of a file (Claude Code's documented default, and
-  a file over 256 KB is refused whole, after which the model reads a page), so a larger file
-  counts as 25,000. Until the engine applies the calibration table (below), the counts are
-  `cl100k_base` tokens, a proxy for Claude's, and the cap is applied to those.
+  returned, in Claude's tokens: each `cl100k_base` count the ledger records is converted by the
+  calibration table (below), by the file's type and the model of the turn that read the result,
+  at the median ratio, with the smallest to the largest ratio any sample came out at as its band.
+  A row with no such turn, or one read by a model the calibration did not measure, takes the
+  type's ratio over both tokenizers, weighted alike, with a band that spans them. What Lumen
+  returned (an outline, a slice, a stub, a delta) is not the raw file text the calibration
+  measured, so it takes the file's median with the widest band any sample gave: the smallest to
+  the largest ratio of every sample the model was sent, of every type (every sample of every
+  model where the model is not known). A Read returns at most 25,000 of Claude's tokens of a file
+  (Claude Code's documented default, and a file over 256 KB is refused whole, after which the
+  model reads a page), so a file whose calibrated count is larger counts as 25,000.
 - **`R`** is the turns after the one that read the result, up to the first compaction or rewind
   the daemon recorded in that transcript, or the first turn whose prompt is smaller than the one
   before it: context was taken out there (a compaction, a rewind, cleared tool results), whether
   or not the ledger recorded it, and the result may have gone with it. That end is labelled
   inferred.
-- **The figure shown, in bold, as "at least"** is the measured one: every call priced at the turn
-  that read it, less every extra round it cost, and the Reads the intercept blocked, each priced
-  at the turn that read the block (or, where only an escape-valve fault records it, the turn that
-  retried it). Where a conversation began before the daemon
-  recorded compactions and shows no shrink to end `R`, `R` may be too long, so the saving is
-  taken at `R = 0` (the price of putting the tokens in context once) and its rounds in full.
+- **The figure shown, in bold, as "at least"** is the one on record: every call priced at the
+  turn that read it, less every extra round it cost, and the Reads the intercept blocked, each
+  priced at the turn that read the block (or, where only an escape-valve fault records it, the
+  turn that retried it). It is a floor, so it takes the tokens a call saved at the low end of
+  their calibrated band: the file at the smallest ratio its row measured, less Lumen's answer at
+  the largest of its band (for a repeat read, the earlier answer at its smallest less the stub
+  or delta at its largest), never at the median ratio and never at a percentile, so it holds
+  call by call. An extra round is the turn's own recorded usage, the provider's count, and is
+  not calibrated. Where a conversation began before the daemon recorded compactions and shows no
+  shrink to end `R`, `R` may be too long, so the saving is taken at `R = 0` (the price of
+  putting the tokens in context once) and its rounds in full.
+  "On record" rather than "measured": the provider's usage data is measured, and this figure
+  also rests on calibrated estimates.
 - **Modelled**, beside it and never added to it: what those calls are worth beyond `R = 0`.
 - **Tokens only**: a call with no session to find its turns in (most rows before 1.1.5), no turn
   that read it, or a model with no price. Its tokens count; its dollars are not guessed from
@@ -480,8 +497,9 @@ round: a dollar is always the price of the model that consumed the tokens.
   the same conversation before it: then that block, counted on its own, is the call's round, and
   it answers for that one call only.
 
-Every figure is a band, low to high, and the central one is the conservative one. `lumen report`
-prints the rules in full.
+Every figure is a band, low to high. A token figure's central value is at the median ratios; a
+dollar figure's is the conservative one, and the bold figure's is its band's low end. `lumen
+report` prints the rules in full.
 
 **Tool calls and built-in `Read` events are counted with a stand-in for Claude's tokenizer.**
 
@@ -490,15 +508,20 @@ OpenAI's BPE tokenizer, because Claude's is not available offline. Every figure 
 tokenizer's count, never a guess, but it is a count in `cl100k_base`'s units, and Claude
 counts the same text differently. Measured against Claude's own usage data on 60 samples of
 raw file text from public repositories ([benchmarks/calibration](benchmarks/calibration/README.md),
-Claude Code 2.1.296, calibration of 2026-10-14), Claude Opus 4.7 and every later model measured
-count about 1.59× as many tokens (1.44–1.70×), and earlier models about 1.24× as many
-(1.14–1.31×); the earlier models measured are Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5.
-Each band is the 10th to the 90th percentile of the samples; by kind of file the median on the
-later models runs from 1.44× for logs to 1.70× for shell scripts. The samples are raw text: a
-`Read` also sends a line number on every line and a tool-result wrapper, which are not in these
-ratios. Every sample came out higher in Claude's count than in `cl100k_base`'s, on every model
-measured, but the samples are English and include no CSS, HTML, YAML, SQL or non-Latin text.
-`lumen_core::calibration` turns a count into an estimate of Claude's with its band. The usage figures elsewhere in the app (context fill, consumption windows, cache
+Claude Code 2.1.296, calibration of 2026-10-14), the models measured from Claude Opus 4.7 on
+(Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count about
+1.59× as many tokens (1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet 4.6, Opus
+4.5 and Haiku 4.5) about 1.24× as many (1.14–1.31×). Each band is the 10th to the 90th
+percentile of the samples (a savings figure's band, and the floor at its low end, take the
+smallest to the largest ratio any sample came out at instead); by kind of file the median on
+the models from Opus 4.7 on runs from 1.44× for logs to 1.70× for shell scripts. The samples
+are raw text: a `Read` also sends a line number on every line, every answer comes in a
+tool-result wrapper, and an answer Lumen makes from a file (an outline, a slice, a stub) is
+text of its own, none of which is in these ratios. Every sample came out higher in Claude's
+count than in `cl100k_base`'s, on every model measured, but the samples are English and include
+no CSS, HTML, YAML, SQL or non-Latin text.
+`lumen_core::calibration` turns a count into an estimate of Claude's with its band, and every
+savings figure goes through it. The usage figures elsewhere in the app (context fill, consumption windows, cache
 reads) are not counted by Lumen: they are the provider's own, read from Claude Code's
 transcripts.
 
@@ -619,10 +642,12 @@ ratio looks.
 Every intercepted read reports `full_tokens` vs `returned_tokens`, counted with the
 `cl100k_base` BPE tokenizer. That is a real tokenizer but not the one Claude bills with: the
 counts are deterministic in its units and approximate Claude's, which come out higher: on raw
-file text Claude Opus 4.7 and later count about 1.59× as many tokens (1.44–1.70×), and earlier
-models about 1.24× as many (1.14–1.31×), from the 10th to the 90th percentile of the 60 samples
-in the [calibration](benchmarks/calibration/README.md) (calibration of 2026-10-14; a `Read`'s
-line numbers are not in these ratios). Nothing is guessed, extrapolated or scaled up — 96.6% of
+file text the models measured from Claude Opus 4.7 on (Opus 4.7, Opus 4.8, Opus 5, Sonnet 5,
+Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count about 1.59× as many tokens (1.44–1.70×), and
+the earlier models measured (Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5) about 1.24× as many
+(1.14–1.31×), from the 10th to the 90th percentile of the 60 samples in the
+[calibration](benchmarks/calibration/README.md) (calibration of 2026-10-14; a `Read`'s line
+numbers and the tool-result wrapper are not in these ratios). Nothing is guessed, extrapolated or scaled up — 96.6% of
 that saving rests on a tokenizer count rather than a bytes/4 guess, which is asserted by a test
 rather than asserted here.
 

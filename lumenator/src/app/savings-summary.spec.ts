@@ -10,8 +10,9 @@ describe('notASummary', () => {
     it('refuses what is not one, another schema, or one with no periods', () => {
         expect(notASummary(null)).toBe('the app answered with something that is not a savings summary');
         expect(notASummary('x')).toBe('the app answered with something that is not a savings summary');
-        expect(notASummary({ ...savingsSummary(), schema: 2 })).toBe(
-            'the app sent a savings summary of schema 2, and this window reads schema 1',
+        // Schema 1 sent cl100k_base counts where schema 2 sends Claude's tokens: not shown as these.
+        expect(notASummary({ ...savingsSummary(), schema: 1 })).toBe(
+            'the app sent a savings summary of schema 1, and this window reads schema 2',
         );
         expect(notASummary({ ...savingsSummary(), week: null })).toBe('the savings summary has no periods');
         expect(notASummary({ ...savingsSummary(), allTime: undefined })).toBe('the savings summary has no periods');

@@ -5,6 +5,7 @@ import {
     fixedAsRust,
     percent,
     shareText,
+    tokensBand,
     tokensFigure,
     tokensPhrase,
     tokensSigned,
@@ -34,6 +35,12 @@ describe('savings text', () => {
             expect(tokensSigned(c.n), `tokensSigned(${c.n})`).toBe(c.signed);
             expect(tokensFigure(c.n), `tokensFigure(${c.n})`).toBe(c.figure);
             expect(tokensPhrase(c.n), `tokensPhrase(${c.n})`).toBe(c.phrase);
+        }
+    });
+
+    it('formats every token band in the shared case list as the engine does', () => {
+        for (const c of cases.tokensBand) {
+            expect(tokensBand(c), `tokensBand(${JSON.stringify(c)})`).toBe(c.text);
         }
     });
 

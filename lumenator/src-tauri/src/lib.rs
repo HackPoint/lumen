@@ -887,7 +887,7 @@ async fn savings_summary_now() -> Result<lumen_core::savings::SavingsSummary, St
 async fn savings_summary_with(
     pool: &sqlx::SqlitePool,
 ) -> Result<lumen_core::savings::SavingsSummary, String> {
-    use lumen_core::savings::{BillingView, Facts, Uncalibrated};
+    use lumen_core::savings::{BillingView, Calibrated, Facts};
     let billing_mode = match lumen_core::meter::db_path() {
         Some(db) => BillingView::of(&lumen_core::settings::billing_mode_for(&db)),
         None => BillingView::Unreadable,
@@ -906,7 +906,7 @@ async fn savings_summary_with(
         lumen_core::repeat::now_ms(),
         spool.as_deref(),
         &facts,
-        &Uncalibrated,
+        &Calibrated,
     )
     .await
 }

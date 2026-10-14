@@ -483,7 +483,7 @@ test('Home shows in bold what the ledger saved, as `lumen` says it, and keeps a 
   const line = lumen();
   const summary = JSON.parse(lumen('report', '--json'));
   t.diagnostic(`lumen: ${line}`);
-  assert.ok(summary.week.measured && summary.allTime.measured, 'premise: the fixture has measured dollars in both periods');
+  assert.ok(summary.week.measured && summary.allTime.measured, 'premise: the fixture has dollars on record in both periods');
 
   await withApp(t, sb, {}, async s => {
     // A healthy launch keeps its window closed: open it, as the menu's Open Lumen does.

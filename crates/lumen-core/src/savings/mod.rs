@@ -10,7 +10,8 @@
 //! sessions they were made in, the compactions and rewinds in `session_events`, the Reads the
 //! intercept blocked as the transcripts record them, the transcripts read for them, and the
 //! escape valve's faults), a clock, two facts about the install and a
-//! [`Calibrator`], and returns a [`SavingsSummary`]. The loaders that read those rows are thin and
+//! [`Calibrator`] ([`Calibrated`], the calibration table, everywhere but in tests), and returns
+//! a [`SavingsSummary`]. The loaders that read those rows are thin and
 //! share their SQL ([`load`]), so the app (sqlx, in lumen-stats) and the CLI (rusqlite, here)
 //! read the same rows in the same order and get the same bytes.
 //!
@@ -21,16 +22,31 @@
 //! - the built-in Read, which returns at most [`READ_TOKEN_LIMIT`] tokens of a file in one call
 //!   (Claude Code's documented default), so a larger file counts as that much, not the whole. A
 //!   file over 256 KB is refused whole with an error, and the model then reads a page, so the cap
-//!   holds there too; the refused Read, a round the counterfactual spends, is not credited. Until
-//!   calibration lands the counts are cl100k_base's, so the cap is applied to those;
+//!   holds there too; the refused Read, a round the counterfactual spends, is not credited. The
+//!   cap is in Claude's tokens, so it is compared with the file's calibrated count, each end of
+//!   its band on its own;
 //! - for a repeat read's stub or delta, the answer Lumen would otherwise have sent again: its
 //!   earlier answer to the same request in the same conversation, as the ledger recorded it.
-//!   With no such answer in the ledger it counts as none, the whole file at most;
+//!   With no such answer in the ledger it counts as none, that answer at most (an answer of
+//!   the whole file, at an answer's band, less the stub);
 //! - for a `fresh=true` call after a stub, nothing: the stub already stood in for the answer it
 //!   asks for again, so this call adds what it returns;
 //! - for compress_logs on inline text, nothing: the text was in context already.
 //!
-//! Recorded in cl100k_base tokens, a proxy, and converted to Claude's tokens by the calibrator.
+//! **Tokens.** The ledger records cl100k_base counts, a proxy for Claude's tokenizer, which is
+//! not available offline. Every count the engine uses (the file's, the answer's, an earlier
+//! answer a repeat read stands in for, and the 25,000 it is capped at) is converted to Claude's
+//! tokens through [`crate::calibration::observed`]: by the file's content type (its extension)
+//! and the model of the turn that read the result, at the median ratio the corpus measured for
+//! them, with the smallest to the largest ratio any sample came out at as the band (not the 10th
+//! to 90th percentile: the dollar floor is the band's low end, and it must hold for each call,
+//! not only on the average of many). A row with no consuming turn, or one read by a model the
+//! table does not have, takes the content type's ratio over both tokenizers, weighted alike, with
+//! a band that spans them. The ratios are of raw file text; an answer Lumen made from a file (an
+//! outline, a slice, a stub, a delta) is a kind of text the corpus never measured, so it takes the
+//! file's median and the widest span measured for the model, over every content type (and every
+//! model where the model is not known). A count of the proxy's alone is said as such (`*_cl100k`
+//! on a line). A Read's line numbers and the tool-result wrapper are in no row.
 //!
 //! **The consuming turn.** The call's session (and, inside a subagent, its agent: a subagent's
 //! turns are those of its own transcript, `<session>/subagents/agent-<agent_id>.jsonl`, under
@@ -53,7 +69,7 @@
 //!   running: its R is a lower bound. A conversation that began before the daemon recorded events
 //!   ([`Ledger::events_from`]) and shows no collapse after the result has no record to vouch for
 //!   its end (a turn the ledger lacks could hide a compaction): its R may be too long, so it is
-//!   labelled `sessionEndUnrecorded`, and only what the saving is worth at R = 0 is measured (see
+//!   labelled `sessionEndUnrecorded`, and only what the saving is worth at R = 0 is on record (see
 //!   below).
 //!
 //! A resync (the daemon lost its place in a file) ends nothing: the lines after it are still read
@@ -117,12 +133,16 @@
 //!
 //! **Net** = value − extra-round cost, signed. Never clamped.
 //!
-//! # Dollars: measured, modelled, tokens only
+//! # Dollars: on record, modelled, tokens only
 //!
 //! A dollar is the price of the model that consumed the tokens, so a row with no consuming turn
 //! of its own has no dollars at all. Each period's dollars come in three parts, which no surface
-//! adds together:
-//! - **measured** ([`Period::measured`]): every call priced at the turn that read it, less every
+//! adds together. Every surface calls the first "on record": priced from the turns the ledger
+//! records, through the provider's own usage, and resting on token counts that are estimates.
+//! "Measured" is kept for provider usage data (`MESSAGING_CONTRACT.md`), so the word is not
+//! used for it; the field names keep it (`Period::measured`, a line's `dollars: "measured"`), and
+//! mean "on record" wherever they appear:
+//! - **on record** ([`Period::measured`]): every call priced at the turn that read it, less every
 //!   extra round it cost, on evidence or modelled, and the blocked Reads, each priced at the turn
 //!   that read the block (a transcript's) or that retried it (a fault's). This is the figure shown
 //!   in bold, as "at least": every input is resolved the
@@ -132,7 +152,7 @@
 //!   one-time price alone) for a saving, which only grows with R, and at R for a loss, which
 //!   grows with R too. Its rounds are certain, and charged in full;
 //! - **modelled** ([`Period::modelled`]): what those calls are worth beyond that, the cache reads
-//!   over an R that may be too long. Shown beside the measured figure, labelled, never in it;
+//!   over an R that may be too long. Shown beside the figure on record, labelled, never in it;
 //! - **tokens only** ([`Period::unpriced`]): no consuming turn to price by (no session id, as on
 //!   most rows before 1.1.5; no turn after the call; a subagent whose transcript is not in the
 //!   ledger; a time that does not parse; a compaction before any turn read the result), or one
@@ -141,14 +161,26 @@
 //!
 //! # Bands
 //!
-//! Every token and dollar figure is a band `{low, value, high}`. Tokens: the calibrator's band.
-//! Dollars: `value` is the conservative central figure. Where a turn did not record its speed, its
-//! inference region or its cache-write duration, the value side is priced at the lower rate
-//! (standard speed, global routing, the 5-minute write) and the extra round at the higher one
-//! (fast mode's prices, US-only inference's 1.1 times, the 1-hour write), and every modelled extra
-//! round is counted. `low` takes the low end of the tokens as well; `high` prices both sides the
-//! other way and leaves modelled extra rounds out, and is no upper bound where R is a lower bound
-//! ([`Dollars::high_open`]).
+//! Every token and dollar figure is a band `{low, value, high}`. Tokens: `value` at the median
+//! ratio; `low` and `high` for a file at the smallest and the largest ratio any sample of its row
+//! came out at (never a percentile, so a floor holds call by call), and for an answer Lumen made,
+//! whose own ratio no row measured, at the smallest and the largest of any sample the model was
+//! sent. A saving is the counterfactual less the answer (for a repeat read, the earlier answer
+//! less the stub or delta), and the two are kinds of text whose ratios nothing ties together:
+//! `low` is the counterfactual at its low end less the answer at its high end, `high` the other
+//! way, `value` the medians'. The cap holds each end of the file on its own.
+//!
+//! Dollars: `value` is the conservative central figure, a floor, and must not rest on the median
+//! ratio. So the value of saved tokens takes the **low** end of their band in both `low` and
+//! `value` (for a loss, the low end is the largest loss), and the high end in `high`. What comes
+//! from the provider's usage is not calibrated: C, the extra round, is the reading turn's own
+//! recorded usage, exact. The one cost Lumen counts itself, the output tokens of writing inline
+//! text out, is taken at the high end of its band in `value` and `low`. Where a turn did not
+//! record its speed, its inference region or its cache-write duration, the value side is priced
+//! at the lower rate (standard speed, global routing, the 5-minute write) and the extra round at
+//! the higher one (fast mode's prices, US-only inference's 1.1 times, the 1-hour write), and every
+//! modelled extra round is counted. `high` prices both sides the other way and leaves modelled
+//! extra rounds out, and is no upper bound where R is a lower bound ([`Dollars::high_open`]).
 
 mod chain;
 pub mod load;
@@ -160,6 +192,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::calibration;
 use crate::intercept;
 use crate::repeat::{
     ARM_TREATMENT, PLAN_FRESH, ROUTE_DELTA, ROUTE_RECALL_DELTA, ROUTE_RECALL_UNCHANGED,
@@ -169,8 +202,11 @@ use crate::settings::BillingMode;
 
 pub use chain::{iso_ms, parse_ts_ms};
 
-/// Bumped when a field of [`SavingsSummary`] changes meaning or name.
-pub const SCHEMA: u32 = 1;
+/// Bumped when a field of [`SavingsSummary`] changes meaning or name. 2: token figures are
+/// Claude's tokens through the calibration table (they were cl100k_base counts), the dollar
+/// floor takes the low end of the token band, and the calibration says which ratio each group of
+/// rows was converted at.
+pub const SCHEMA: u32 = 2;
 
 /// Every `routed_via` the MCP server writes. A row with one of these is a Lumen call; the hooks'
 /// `builtin_read` and `bash_output` are not, nor is a route this build does not know (counted in
@@ -212,7 +248,7 @@ pub const INLINE_PATH: &str = "(inline)";
 /// call on it is this much. A file over 256 KB is refused with an error rather than given a first
 /// page; the model then reads a page, so the cap holds, and the refused Read's round, which would
 /// favour Lumen, is not credited. A user who raised the variable read more, and is credited less.
-/// Until calibration lands the counts compared with it are cl100k_base's, a proxy for Claude's.
+/// The limit is in Claude's tokens, so the file's calibrated count is what is compared with it.
 pub const READ_TOKEN_LIMIT: i64 = 25_000;
 
 /// The window "recent" means for status and recommendation: no call in it is a finding.
@@ -528,52 +564,189 @@ impl Band<f64> {
 }
 
 /// What a calibrator says about itself, for the method section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationInfo {
-    /// False while counts are cl100k_base's with no conversion: every token figure is then the
-    /// proxy's, and its band does not include the proxy's error.
+    /// Whether token figures are Claude's tokens converted from the cl100k_base counts the ledger
+    /// records. False only for a calibrator that passes the proxy's counts through (in tests).
     pub calibrated: bool,
+    /// The day the table was measured.
     pub as_of: Option<String>,
+    /// The Claude Code version whose usage data it was measured through.
+    pub claude_code_version: Option<String>,
     pub note: String,
+    /// The groups of rows by the ratio they were converted at: one per tokenizer the table
+    /// found, and one for rows with no measured model.
+    pub groups: Vec<CalibrationGroup>,
+}
+
+/// One group of rows by the ratio they were converted at: those read by the models of one
+/// tokenizer, or those with no measured model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationGroup {
+    /// `opus47on`, `opus46before`, or `unmeasured`.
+    pub key: &'static str,
+    /// Which rows, in words.
+    pub rows: String,
+    /// The table's ratio for the group, pooled over content types: Claude's tokens per
+    /// cl100k_base token, the median with the smallest to the largest ratio any sample came out
+    /// at (over both tokenizers for `unmeasured`).
+    pub table_ratio: Band<f64>,
+    /// Lumen calls, all time, converted at this group's ratios.
+    pub calls: i64,
+    /// What their files held in cl100k_base tokens, before the Read cap.
+    pub files_cl100k: i64,
+    /// The ratio those files were converted at, over all of them (each by its own content
+    /// type): their Claude tokens, as a band, per cl100k_base token. `None` with no calls.
+    pub ratio: Option<Band<f64>>,
 }
 
 /// Converts Lumen's cl100k_base counts into Claude's, by content type (from the path) and model.
 ///
-/// The seam the calibration table plugs into. Until it does, [`Uncalibrated`] passes counts
-/// through and says so. `Sync`, so an async loader can hold one across an await on any thread.
+/// [`Calibrated`] is the calibration table; a test can put another behind the seam. `Sync`, so
+/// an async loader can hold one across an await on any thread.
 pub trait Calibrator: Sync {
     /// Claude's count of what Lumen counted as `cl100k` tokens of the file at `path`, read by
     /// `model` (`None` when no turn names one).
     fn claude_tokens(&self, cl100k: u64, path: &str, model: Option<&str>) -> Band<u64>;
+    /// The same for an answer Lumen made from that file (an outline, a slice, a stub, a delta),
+    /// a kind of text a calibration may not have measured. The file's own band unless said.
+    fn answer_tokens(&self, cl100k: u64, path: &str, model: Option<&str>) -> Band<u64> {
+        self.claude_tokens(cl100k, path, model)
+    }
+    /// Which of [`CalibrationInfo::groups`] a row read by `model` is converted by.
+    fn group(&self, _model: Option<&str>) -> Option<usize> {
+        None
+    }
+    /// What it says about itself; the engine fills in each group's calls and ratio.
     fn info(&self) -> CalibrationInfo;
 }
 
-/// The identity: a cl100k_base count is reported as itself, with a zero-width band, and the
-/// summary says the counts are uncalibrated.
-pub struct Uncalibrated;
+/// The calibration table ([`crate::calibration`]): a count is converted by its file's content
+/// type and the consuming turn's model, at the median ratio, with the smallest to the largest
+/// ratio observed as its band ([`calibration::observed`]); a row with no measured model takes the
+/// type's ratio over both tokenizers, weighted alike, with a band that spans them. An answer
+/// Lumen made takes the file's median and the widest span observed for the model.
+pub struct Calibrated;
 
-impl Calibrator for Uncalibrated {
-    fn claude_tokens(&self, cl100k: u64, _path: &str, _model: Option<&str>) -> Band<u64> {
-        Band::exact(cl100k)
-    }
+/// The key of the group of rows with no measured model.
+const UNMEASURED: &str = "unmeasured";
 
-    fn info(&self) -> CalibrationInfo {
-        CalibrationInfo {
-            calibrated: false,
-            as_of: None,
-            note: "Uncalibrated: token figures are cl100k_base counts, OpenAI's tokenizer, a \
-                   proxy for Claude's. Claude's count of the same text differs, and the bands \
-                   do not yet include that difference."
-                .to_string(),
+impl Calibrated {
+    fn convert(cl100k: u64, path: &str, model: Option<&str>, text: calibration::Text) -> Band<u64> {
+        let e = calibration::observed(
+            cl100k,
+            calibration::ContentType::from_path(path),
+            model.and_then(calibration::Model::from_model),
+            text,
+        );
+        Band {
+            low: e.low,
+            value: e.value,
+            high: e.high,
         }
     }
 }
 
-/// A signed count through the calibrator: a loss is calibrated as its size and keeps its sign,
-/// with the ends swapped so `low` stays the lower.
-fn calibrated(cal: &dyn Calibrator, n: i64, path: &str, model: Option<&str>) -> Band<i64> {
-    let b = cal.claude_tokens(n.unsigned_abs(), path, model);
+impl Calibrator for Calibrated {
+    fn claude_tokens(&self, cl100k: u64, path: &str, model: Option<&str>) -> Band<u64> {
+        Calibrated::convert(cl100k, path, model, calibration::Text::File)
+    }
+
+    fn answer_tokens(&self, cl100k: u64, path: &str, model: Option<&str>) -> Band<u64> {
+        Calibrated::convert(cl100k, path, model, calibration::Text::Answer)
+    }
+
+    fn group(&self, model: Option<&str>) -> Option<usize> {
+        let tokenizer = model
+            .and_then(calibration::Model::from_model)
+            .map(calibration::Model::tokenizer);
+        Some(match tokenizer {
+            Some(t) => calibration::TOKENIZERS
+                .iter()
+                .position(|g| g == t)
+                .expect("a model's tokenizer is one of them"),
+            None => calibration::TOKENIZERS.len(),
+        })
+    }
+
+    fn info(&self) -> CalibrationInfo {
+        let ratio = |(median, min, max): (u32, u32, u32)| Band {
+            low: f64::from(min) / 1000.0,
+            value: f64::from(median) / 1000.0,
+            high: f64::from(max) / 1000.0,
+        };
+        let mut groups: Vec<CalibrationGroup> = calibration::TOKENIZERS
+            .iter()
+            .map(|t| {
+                let (min, max) = t.range(None);
+                CalibrationGroup {
+                    key: t.key,
+                    rows: format!("read by {}", t.label),
+                    table_ratio: ratio((t.median(None), min, max)),
+                    calls: 0,
+                    files_cl100k: 0,
+                    ratio: None,
+                }
+            })
+            .collect();
+        groups.push(CalibrationGroup {
+            key: UNMEASURED,
+            rows: "read by a model the calibration did not measure, or by no turn in the ledger"
+                .to_string(),
+            table_ratio: {
+                let r = calibration::ratio(calibration::ContentType::Other, None);
+                ratio((r.median, r.min, r.max))
+            },
+            calls: 0,
+            files_cl100k: 0,
+            ratio: None,
+        });
+        CalibrationInfo {
+            calibrated: true,
+            as_of: Some(calibration::AS_OF.to_string()),
+            claude_code_version: Some(calibration::CLAUDE_CODE_VERSION.to_string()),
+            note: format!(
+                "Token figures are Claude's tokens, estimated from the cl100k_base counts Lumen \
+                 records (OpenAI's tokenizer: Claude's is not available offline), by the \
+                 calibration of {}, measured through Claude Code {} against Claude's own usage \
+                 data on 60 samples of raw file text. Each count is converted by its file's type \
+                 and the model of the turn that read it, at the median ratio for them, with the \
+                 smallest to the largest ratio any sample came out at as its band (not the 10th \
+                 to 90th percentile: the floor is the band's low end, and must hold call by \
+                 call); a row with no measured model takes the type's ratio over both \
+                 tokenizers, weighted alike, with a band that spans them. {} So an answer Lumen \
+                 made takes the file's median, with the smallest to the largest ratio of any \
+                 sample the model was sent as its band (of any sample at all where the model is \
+                 not known). The dollar floor takes the low end of each saving: the file at its \
+                 smallest ratio less Lumen's answer at its largest.",
+                calibration::AS_OF,
+                calibration::CLAUDE_CODE_VERSION,
+                calibration::NOT_COVERED
+            ),
+            groups,
+        }
+    }
+}
+
+/// A count of a file through the calibrator (an answer's through [`answer_tokens`], `answer`):
+/// a negative count, which a ledger should not hold, is calibrated as its size and keeps its
+/// sign, with the ends swapped so `low` stays the lower.
+///
+/// [`answer_tokens`]: Calibrator::answer_tokens
+fn calibrated(
+    cal: &dyn Calibrator,
+    n: i64,
+    path: &str,
+    model: Option<&str>,
+    answer: bool,
+) -> Band<i64> {
+    let b = if answer {
+        cal.answer_tokens(n.unsigned_abs(), path, model)
+    } else {
+        cal.claude_tokens(n.unsigned_abs(), path, model)
+    };
     let s = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
     if n >= 0 {
         Band {
@@ -623,11 +796,13 @@ pub struct Period {
     pub tokens_full: Band<i64>,
     /// `tokens_saved / tokens_full` at the central figures, in percent; `None` with nothing read.
     pub share_pct: Option<f64>,
-    /// The figure shown in bold, as "at least": the dollars measured from the calls' own turns.
-    /// `None` when no row of the period could be measured. See the module docs.
+    /// The figure shown in bold, as "at least": the dollars on record, priced from the calls' own
+    /// turns. The field keeps the name it had before the surfaces called it "on record" (see the
+    /// module docs). `None` when no row of the period could be priced so.
     pub measured: Option<Dollars>,
     /// What calls whose R may be too long are worth beyond their worth at R = 0, which is in
-    /// `measured`. Shown beside it, labelled modelled, never added to it. `None` when nothing is.
+    /// `measured` (on record). Shown beside it, labelled modelled, never added to it. `None` when
+    /// nothing is.
     pub modelled: Option<Modelled>,
     /// Rows with tokens and no dollars.
     pub unpriced: Unpriced,
@@ -655,7 +830,7 @@ pub struct Dollars {
     pub high_open: bool,
 }
 
-/// What a period's calls may be worth beyond the measured figure: the cache reads over an R
+/// What a period's calls may be worth beyond the figure on record: the cache reads over an R
 /// that may be too long.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -698,7 +873,8 @@ pub struct Counts {
     pub blocked_reads_from_faults: i64,
     /// Calls whose R and C came from their own turn chain.
     pub derived_pairs: i64,
-    /// Calls whose token count is not known to be measured.
+    /// Calls whose token count is not known to come from the tokenizer (`token_source` is not
+    /// `measured`, the ledger's name for a tokenizer count).
     pub unverified_provenance_rows: i64,
     pub extra_rounds_evidenced: i64,
     pub extra_rounds_modelled: i64,
@@ -724,7 +900,7 @@ pub struct Counts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum DataQuality {
-    /// Every row has a derived, priced pair and a measured count.
+    /// Every row has a derived, priced pair and a tokenizer count.
     Complete,
     Partial {
         reason: String,
@@ -763,7 +939,7 @@ pub struct Method {
     pub extra_rounds: &'static str,
     /// How a turn that did not record its speed, region or cache duration is priced.
     pub floors: &'static str,
-    /// What goes in the measured, the modelled and the tokens-only parts.
+    /// What goes in the parts on record, modelled and tokens only.
     pub parts: &'static str,
 }
 
@@ -797,7 +973,8 @@ pub struct CallLine {
     pub route: Option<String>,
     pub path: Option<String>,
     pub in_week: bool,
-    /// What is counted as saved, in cl100k_base tokens, against `saved_against`.
+    /// The proxy's own count of the saving against `saved_against`, in cl100k_base tokens, before
+    /// the Read cap (which is in Claude's tokens): `tokens_saved` is this, calibrated and capped.
     pub saved_cl100k: i64,
     /// What the ledger recorded, against the whole file.
     pub recorded_saved_cl100k: i64,
@@ -807,8 +984,10 @@ pub struct CallLine {
     /// `askedAgain` for a `fresh=true` call after a stub.
     pub saved_against: &'static str,
     pub full_cl100k: i64,
-    /// The file is larger than a Read returns, so it counts as [`READ_TOKEN_LIMIT`].
+    /// The file, in Claude's tokens at the median ratio, is larger than a Read returns, so it
+    /// counts as [`READ_TOKEN_LIMIT`].
     pub read_capped: bool,
+    /// In Claude's tokens: the calibration's band.
     pub tokens_saved: Band<i64>,
     /// `measured`, or `unverified` for a count of unknown provenance.
     pub provenance: &'static str,
@@ -821,8 +1000,9 @@ pub struct CallLine {
     /// `blockedReadBounded` (one of the most that faults no evidence attributes could).
     pub extra_round_basis: &'static str,
     pub extra_round_evidenced: bool,
-    /// `measured` when the line has dollars, `none` when it has tokens only. Every priced line's
-    /// `net_usd` is in the measured figure.
+    /// `measured` when the line has dollars, which every surface calls "on record" (the name is
+    /// the schema's: see the module docs), `none` when it has tokens only. Every priced line's
+    /// `net_usd` is in the figure on record.
     pub dollars: &'static str,
     /// What the saving is worth at the line's R that it is not at R = 0, where R may be too long
     /// (`sessionEndUnrecorded`): in the period's modelled figure, not in `value_usd` or `net_usd`.
@@ -976,7 +1156,8 @@ enum Against {
     /// the one the ledger recorded for it, earlier in the same conversation.
     PreviousAnswer,
     /// A repeat read whose earlier answer is not in the ledger: no saving is counted, and the
-    /// whole file is the band's high end.
+    /// band's high end is that answer at its most, the whole file counted as an answer, less
+    /// the stub.
     AnswerNotInLedger,
     /// Inline text for compress_logs: it was in context already, so nothing.
     AlreadyInContext,
@@ -1018,18 +1199,22 @@ struct Draft {
     valve_faults: i64,
 }
 
-/// Value of a signed token band at a value-per-token band, conservatively: a gain at the floor
-/// price and a loss at the ceiling in `low` and `value`, the reverse in `high`.
+/// Value of a signed token band at a value-per-token band, conservatively. `low` and `value`
+/// both take the low end of the tokens, a gain at the floor price and a loss at the ceiling:
+/// the central dollar figure is a floor, and a floor must not rest on the median ratio of the
+/// calibration. `high` takes the high end of the tokens, priced the other way.
 fn value_of(s: Band<i64>, p: &chain::Price) -> Band<f64> {
     let pessimistic = |n: i64| n as f64 * if n >= 0 { p.v_lo } else { p.v_hi };
     Band {
         low: pessimistic(s.low),
-        value: pessimistic(s.value),
+        value: pessimistic(s.low),
         high: s.high as f64 * if s.high >= 0 { p.v_hi } else { p.v_lo },
     }
 }
 
-/// Cost of a line's extra rounds, and for inline text the output tokens of writing it out.
+/// Cost of a line's extra rounds, and for inline text the output tokens of writing it out. A
+/// round is the turn's own recorded usage, the provider's count, so it is not calibrated. The
+/// text written out is Lumen's count, calibrated, so the floor takes the high end of its band.
 fn cost_of(rounds: Rounds, p: &chain::Price, written: Band<i64>) -> Band<f64> {
     let (evidenced, modelled) = rounds.count();
     let mut cost = Band {
@@ -1040,7 +1225,7 @@ fn cost_of(rounds: Rounds, p: &chain::Price, written: Band<i64>) -> Band<f64> {
     if rounds == Rounds::InlineText {
         cost.add(Band {
             low: written.low as f64 * p.out_lo,
-            value: written.value as f64 * p.out_hi,
+            value: written.high as f64 * p.out_hi,
             high: written.high as f64 * p.out_hi,
         });
     }
@@ -1057,7 +1242,7 @@ enum NoPrice {
     ModelPrice,
 }
 
-/// Whether a line's dollars are in the measured figure, or it has tokens only. See the module
+/// Whether a line's dollars are in the figure on record, or it has tokens only. See the module
 /// docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Part {
@@ -1092,6 +1277,11 @@ struct Priced {
     unknowns: chain::Unknowns,
     /// The consuming model, when it has no price.
     unpriced_model: Option<String>,
+    /// Which of the calibrator's groups its counts were converted by.
+    cal_group: Option<usize>,
+    /// The file's count, cl100k_base and Claude's, before the Read cap.
+    file_cl100k: i64,
+    file_claude: Band<i64>,
 }
 
 fn price(draft: Draft, cal: &dyn Calibrator, week_start: i64) -> Priced {
@@ -1131,46 +1321,56 @@ fn price(draft: Draft, cal: &dyn Calibrator, week_start: i64) -> Priced {
         ),
     };
     let path = draft.path.as_deref().unwrap_or("").to_string();
-    let cal_n = |n: i64| calibrated(cal, n, &path, model.as_deref());
+    // Every count by the file's content type and the model of the turn that read the result: a
+    // file's as the calibration measured file text, an answer Lumen made (an outline, a slice, a
+    // stub, a delta) with the widest span measured for the model, since its own was never
+    // measured.
+    let file_n = |n: i64| calibrated(cal, n, &path, model.as_deref(), false);
+    let answer_n = |n: i64| calibrated(cal, n, &path, model.as_deref(), true);
     let none = Band::exact(0);
-    // A saving is the counterfactual less the reply, end with end: one file's tokens and its
-    // reply's are the same kind of text, so a calibrator's ratio is the same for both.
-    let less = |f: Band<i64>, r: Band<i64>| {
-        let (a, b) = (f.low - r.low, f.high - r.high);
-        Band {
-            low: a.min(b),
-            value: f.value - r.value,
-            high: a.max(b),
-        }
+    // A saving is what would have been given less what was: the low end the first at its low
+    // end and the second at its high, the high end the other way. The two are different kinds of
+    // text (a file and an answer made from it), so nothing ties their ratios together, and a
+    // floor must hold whatever each turns out to be.
+    let less = |f: Band<i64>, r: Band<i64>| Band {
+        low: f.low - r.high,
+        value: f.value - r.value,
+        high: f.high - r.low,
     };
-    let returned = cal_n(draft.returned_cl100k);
+    let returned = answer_n(draft.returned_cl100k);
     let negative = |b: Band<i64>| Band {
         low: -b.high,
         value: -b.value,
         high: -b.low,
     };
+    // The file, in Claude's tokens, before the Read cap.
+    let file = file_n(draft.full_cl100k);
     // `would`: what the conversation would have been given, in Claude's tokens.
     let (tokens, would, saved_cl100k, read_capped) = match draft.against {
         Against::WholeFile => {
-            let f = cal_n(draft.full_cl100k);
+            // The cap is in Claude's tokens: each end of the file's band is held to it. The
+            // answer's ratio is its own, so the ends stay apart: no ratio both share to put the
+            // file on the cap while the answer moves with it.
             let cap = |n: i64| n.min(READ_TOKEN_LIMIT);
             let would = Band {
-                low: cap(f.low),
-                value: cap(f.value),
-                high: cap(f.high),
+                low: cap(file.low),
+                value: cap(file.value),
+                high: cap(file.high),
             };
             (
                 less(would, returned),
                 would,
-                cap(draft.full_cl100k) - draft.returned_cl100k,
-                f.value > READ_TOKEN_LIMIT,
+                // The proxy's own figure, before the cap, which is in Claude's tokens.
+                draft.full_cl100k - draft.returned_cl100k,
+                file.value > READ_TOKEN_LIMIT,
             )
         }
         Against::PreviousAnswer => {
+            // The earlier answer is an answer too: both sides take the answer's band.
             let previous = draft
                 .previous_cl100k
                 .map_or(draft.full_cl100k, |p| p.min(draft.full_cl100k));
-            let would = cal_n(previous);
+            let would = answer_n(previous);
             (
                 less(would, returned),
                 would,
@@ -1179,12 +1379,13 @@ fn price(draft: Draft, cal: &dyn Calibrator, week_start: i64) -> Priced {
             )
         }
         // Unknown, and positive (the server answers with a stub only when it is the smaller):
-        // none counted, the whole file at most.
+        // none counted, and at most the earlier answer less the stub. That answer is an answer,
+        // of at most the whole file, so it takes the file's count at an answer's band.
         Against::AnswerNotInLedger => (
             Band {
                 low: 0,
                 value: 0,
-                high: cal_n(draft.recorded_cl100k).high.max(0),
+                high: less(answer_n(draft.full_cl100k), returned).high.max(0),
             },
             none,
             0,
@@ -1195,14 +1396,14 @@ fn price(draft: Draft, cal: &dyn Calibrator, week_start: i64) -> Priced {
         }
     };
     // What inline text cost to write out as the call's argument: the whole text, as output.
-    let written = cal_n(draft.full_cl100k);
+    let written = file;
     // The consuming turn's own price, or none: a row with no consuming turn is not priced from
     // anyone else's.
     let price = derived_price;
     let derived = matches!(draft.pair, chain::Outcome::Derived(_));
     let lower_bound = !blocked
         && matches!(&draft.pair, chain::Outcome::Derived(p) if p.bound == chain::Bound::SessionOpen);
-    // R may be too long: the line's dollars are then modelled, never measured.
+    // R may be too long: what the line is worth beyond R = 0 is then modelled, never on record.
     let rounds_untrusted =
         !blocked && matches!(&draft.pair, chain::Outcome::Derived(p) if !p.rounds_trusted);
     let part = match (&draft.pair, &price) {
@@ -1288,6 +1489,9 @@ fn price(draft: Draft, cal: &dyn Calibrator, week_start: i64) -> Priced {
             (None, Some(m)) => Some(m.clone()),
             _ => None,
         },
+        cal_group: cal.group(model.as_deref()),
+        file_cl100k: draft.full_cl100k,
+        file_claude: file,
         part,
         line,
         ts_ms: draft.ts_ms,
@@ -1469,7 +1673,7 @@ impl Acc {
             }
             if c.unverified_provenance_rows > 0 {
                 why.push(format!(
-                    "{} with a token count not known to be measured",
+                    "{} with a token count not known to come from the tokenizer",
                     rows(c.unverified_provenance_rows)
                 ));
             }
@@ -1523,11 +1727,11 @@ impl Acc {
 }
 
 const COUNTERFACTUAL_RULE: &str = "A call's saving is what the conversation would otherwise have \
-     been given, less what the call returned. Otherwise is the built-in Read, which returns at most \
-     25,000 tokens of a file in one call (Claude Code's documented default; a larger file counts \
-     as that much, and a file over 256 KB, which a Read refuses whole, as the page the model then \
-     reads; the cap is compared with cl100k_base counts until calibration lands); for a repeat \
-     read's stub or delta, the answer Lumen gave the same request \
+     been given, less what the call returned, in Claude's tokens. Otherwise is the built-in Read, \
+     which returns at most 25,000 of Claude's tokens of a file in one call (Claude Code's \
+     documented default; a file whose calibrated count is larger counts as that much, each end of \
+     its band on its own, and a file over 256 KB, which a Read refuses whole, as the page the \
+     model then reads); for a repeat read's stub or delta, the answer Lumen gave the same request \
      earlier in the same conversation, which it would have sent again; for a fresh=true call \
      after a stub, and for compress_logs on inline text, nothing, so what they return is a loss.";
 
@@ -1537,7 +1741,7 @@ const ROUNDS_RULE: &str = "R is the number of turns of the same conversation (th
      sent a smaller prompt than the turn before it (context was taken out, and the result may \
      have gone with it); and the end of the session. A conversation from before the daemon \
      recorded compactions, with no collapse to see, has nothing to vouch for its end: its R may \
-     be too long, so its saving is measured at R = 0 and the rest is modelled. The value of a \
+     be too long, so its saving on record is taken at R = 0 and the rest is modelled. The value of a \
      saved token is the price of putting it in context once, at the cache duration that turn \
      recorded, plus a cache read on each of the R turns at that turn's own model, speed and \
      region.";
@@ -1574,12 +1778,16 @@ const FLOORS_RULE: &str = "Each turn is priced at its model, speed and inference
      end prices both sides the other way and leaves modelled extra rounds out; it is no bound \
      where a session may still be running or R may be too long.";
 
-const PARTS_RULE: &str = "A dollar is the price of the model that consumed the tokens. Measured, \
+const PARTS_RULE: &str = "A dollar is the price of the model that consumed the tokens. On record, \
      the figure shown as at least: calls priced at the turn that read them, less every extra \
      round they cost, on evidence or modelled, and the blocked Reads, each priced at the turn \
      that read the block or, where only a fault records it, that retried it; where R may be too \
      long, a saving is taken at R = 0 (the one-time price \
-     alone) and a loss at R, the least either can be. Modelled, shown beside it and never added \
+     alone) and a loss at R, the least either can be. The tokens a call saved are taken at the \
+     low end of their calibrated band there (the file at the smallest ratio any sample came out \
+     at, Lumen's answer at the largest), so the floor does not rest on the median ratio, and at \
+     the high end in the band's high end; an extra round is the turn's own recorded usage, the \
+     provider's count, and is not calibrated. Modelled, shown beside it and never added \
      to it: what those calls are worth beyond that, the cache reads over their R. Tokens only: \
      calls with no session, no turn in the ledger that read them, or a model with no price; their \
      tokens count and their dollars are not guessed from other calls'.";
@@ -2034,6 +2242,33 @@ pub fn summarize(
         .map(|d| price(d, cal, clock.week_start_ms))
         .collect();
 
+    // Each group of rows by the ratio its counts were converted at: its calls, all time, and the
+    // ratio their files came out at, each by its own content type.
+    let mut calibration = cal.info();
+    let mut converted: Vec<(i64, i64, Band<i64>)> =
+        vec![(0, 0, Band::default()); calibration.groups.len()];
+    for p in priced.iter().filter(|p| p.line.kind == LineKind::Call) {
+        if let Some(g) = p.cal_group.and_then(|g| converted.get_mut(g)) {
+            g.0 += 1;
+            g.1 += p.file_cl100k.max(0);
+            if p.file_cl100k > 0 {
+                g.2.add(p.file_claude);
+            }
+        }
+    }
+    for (group, (calls, cl100k, claude)) in calibration.groups.iter_mut().zip(converted) {
+        group.calls = calls;
+        group.files_cl100k = cl100k;
+        group.ratio = (cl100k > 0).then(|| {
+            let r = |n: i64| (n as f64 / cl100k as f64 * 1000.0).round() / 1000.0;
+            Band {
+                low: r(claude.low),
+                value: r(claude.value),
+                high: r(claude.high),
+            }
+        });
+    }
+
     let as_of = iso_ms(clock.now_ms);
     let mut week = Acc::default();
     let mut all = Acc::default();
@@ -2096,7 +2331,7 @@ pub fn summarize(
         recommendation,
         method: Method {
             prices_as_of: crate::rates::PRICES_AS_OF,
-            calibration: cal.info(),
+            calibration,
             week: format!(
                 "the ISO week: Monday {} 00:00 local time to now",
                 clock.week_start

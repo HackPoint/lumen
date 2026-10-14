@@ -5,17 +5,22 @@ import { SessionService } from '../../session.service';
 import { TauriBridge } from '../../tauri-bridge';
 import { FakeTauriBridge, PRICE_TABLE, priceRow } from '../../tauri-bridge.fake';
 import type { SavingsSummary } from '../../savings-summary';
-import { band, callLine, dollars, modelled, recordedPeriod, savingsCounts, savingsPeriod, savingsSummary, unpriced } from '../../savings-summary.fake';
+import { band, calibrationInfo, callLine, dollars, modelled, recordedPeriod, savingsCounts, savingsPeriod, savingsSummary, unpriced } from '../../savings-summary.fake';
 
 /** How it's measured: the rules, prices, calibration, every count and band, and the per-call ledger. */
 describe('Method', () => {
     let fixture: ComponentFixture<Method>;
     let bridge: FakeTauriBridge;
 
-    const NOTE = "Uncalibrated: token figures are cl100k_base counts, OpenAI's tokenizer, a proxy for Claude's.";
+    const NOTE = "Token figures are Claude's tokens, estimated from the cl100k_base counts Lumen records.";
     const METHOD = {
         pricesAsOf: '2026-10-13',
-        calibration: { calibrated: false, asOf: null, note: NOTE },
+        calibration: calibrationInfo({
+            note: NOTE,
+            groups: calibrationInfo().groups.map((g) =>
+                g.key === 'opus47on' ? { ...g, calls: 2, filesCl100k: 12_000, ratio: { low: 1.471, value: 1.583, high: 1.642 } } : g,
+            ),
+        }),
         week: 'the ISO week: Monday 2026-10-12 00:00 local time to now',
         counterfactual: 'COUNTERFACTUAL',
         rounds: 'ROUNDS',
@@ -54,7 +59,7 @@ describe('Method', () => {
             week,
             allTime,
             status: { state: 'working' },
-            method: METHOD,
+            method: { ...METHOD },
             ledger: {
                 recent: [
                     callLine(),
@@ -226,30 +231,57 @@ describe('Method', () => {
         expect(prices.querySelector('table')).toBeNull();
     });
 
-    it('says once that the counts are uncalibrated, in the engine\'s words', async () => {
+    it('says when and through what the counts were calibrated, once, in the engine\'s words', async () => {
         await mount((b) => b.responses.set('lumen_savings_summary', full()));
         const cal = section('cal-title');
-        expect(Array.from(cal.querySelectorAll('p')).map((p) => norm(p.textContent))).toEqual([NOTE]);
-        expect(cal.textContent?.match(/Uncalibrated/g)?.length).toBe(1);
+        expect(Array.from(cal.querySelectorAll('p')).map((p) => norm(p.textContent)))
+            .toEqual(['Calibrated as of 2026-10-14, through Claude Code 2.1.296.', NOTE]);
+        expect(cal.textContent?.match(/Calibrated as of/g)?.length).toBe(1);
     });
 
-    it('says the stand-in tokenizer itself where the engine gives no note', async () => {
+    it('gives the ratio each group of rows was converted at, with its band, beside the table\'s own', async () => {
+        await mount((b) => b.responses.set('lumen_savings_summary', full()));
+        const rows = Array.from(section('cal-title').querySelectorAll('tbody tr')).map((tr) =>
+            Array.from(tr.querySelectorAll('th, td')).map((c) => norm(c.textContent)),
+        );
+        expect(rows).toEqual([
+            [
+                'read by Claude Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5',
+                '2',
+                '12,000',
+                '1.58× (1.47× to 1.64×)',
+                '1.59× (1.33× to 1.79×)',
+            ],
+            ['read by Claude Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5', '0', '0', 'no calls', '1.24× (1.06× to 1.34×)'],
+            [
+                'read by a model the calibration did not measure, or by no turn in the ledger',
+                '0',
+                '0',
+                'no calls',
+                '1.42× (1.06× to 1.79×)',
+            ],
+        ]);
+        expect(section('cal-title').querySelectorAll('thead th').length).toBe(5);
+    });
+
+    it('says the stand-in tokenizer itself where counts were not converted and the engine gives no note', async () => {
         const s = full();
-        s.method.calibration = { calibrated: false, asOf: null, note: '' };
+        s.method.calibration = { calibrated: false, asOf: null, claudeCodeVersion: null, note: '', groups: [] };
         await mount((b) => b.responses.set('lumen_savings_summary', s));
         expect(norm(section('cal-title').querySelector('p')?.textContent))
-            .toBe("Uncalibrated: counts are cl100k_base, a stand-in for Claude's tokenizer.");
+            .toBe("Not calibrated: counts are cl100k_base, a stand-in for Claude's tokenizer.");
+        expect(section('cal-title').querySelector('table')).toBeNull();
     });
 
-    it('says when and how it was calibrated once it is', async () => {
+    it('says the date alone where no version is given, and nothing it was not told', async () => {
         const s = full();
-        s.method.calibration = { calibrated: true, asOf: '2026-11-01', note: 'Within 3% on the corpus.' };
+        s.method.calibration = { ...s.method.calibration, claudeCodeVersion: null, note: 'Within 3% on the corpus.' };
         await mount((b) => b.responses.set('lumen_savings_summary', s));
         expect(Array.from(section('cal-title').querySelectorAll('p')).map((p) => norm(p.textContent)))
-            .toEqual(['Calibrated as of 2026-11-01.', 'Within 3% on the corpus.']);
+            .toEqual(['Calibrated as of 2026-10-14.', 'Within 3% on the corpus.']);
         TestBed.resetTestingModule();
         const t = full();
-        t.method.calibration = { calibrated: true, asOf: null, note: 'Within 3%.' };
+        t.method.calibration = { ...t.method.calibration, asOf: null, claudeCodeVersion: null, note: 'Within 3%.' };
         await mount((b) => b.responses.set('lumen_savings_summary', t));
         expect(norm(section('cal-title').querySelector('p')?.textContent)).toBe('Calibrated.');
     });
@@ -262,13 +294,13 @@ describe('Method', () => {
         expect(row('Tokens the files held')).toEqual(['Tokens the files held', '10,000', '32,000 (band 30,000 to 34,000)']);
         // The share as `lumen report` gives it: kept out, so a saving is positive.
         expect(row('Share kept out of context')).toEqual(['Share kept out of context', '90.0%', '−2.5%']);
-        expect(row('Measured net, at least (the bold figure)')).toEqual([
-            'Measured net, at least (the bold figure)',
+        expect(row('Net on record, at least (the bold figure)')).toEqual([
+            'Net on record, at least (the bold figure)',
             '$0.11 (band $0.09 to $0.19, and the high end is not a bound)',
             '$0.50 (band $0.50 to $0.50)',
         ]);
-        expect(row('Measured value of the tokens')?.[1]).toBe('$0.12 (band $0.10 to $0.20)');
-        expect(row('Measured extra rounds')?.[1]).toBe('$0.01 (band $0.01 to $0.01)');
+        expect(row('Value of the tokens, on record')?.[1]).toBe('$0.12 (band $0.10 to $0.20)');
+        expect(row('Extra rounds, on record')?.[1]).toBe('$0.01 (band $0.01 to $0.01)');
         expect(row('Modelled, not added')).toEqual([
             'Modelled, not added',
             '+$0.40 from 1 call (band +$0.40 to +$0.40)',
@@ -324,7 +356,7 @@ describe('Method', () => {
         expect(ledger.querySelector('.method__dim')).toBeNull();
         const t = figures();
         expect(t.find((r) => r[0] === 'Data')).toEqual(['Data', 'nothing recorded', 'nothing recorded']);
-        expect(t.find((r) => r[0] === 'Measured net, at least (the bold figure)')?.[1]).toBe('none measured');
+        expect(t.find((r) => r[0] === 'Net on record, at least (the bold figure)')?.[1]).toBe('none on record');
         expect(t.find((r) => r[0] === 'Modelled, not added')?.[1]).toBe('none');
         expect(t.find((r) => r[0] === 'Share kept out of context')?.[1]).toBe('nothing read');
         expect(section('figures-title').querySelector('ul')).toBeNull();
@@ -352,8 +384,8 @@ describe('Method', () => {
         const m = await mount((b) => b.hangs.add('lumen_savings_summary'));
         expect(norm(root().querySelector('.method__p')?.textContent)).toBe('Reading the ledger.');
         expect(root().textContent).not.toContain('$');
-        expect([m.rules(), m.calibration(), m.figures(), m.shortfalls(), m.gains(), m.losses(), m.recent()])
-            .toEqual([[], [], [], [], [], [], []]);
+        expect([m.rules(), m.calibration(), m.calibrationGroups(), m.figures(), m.shortfalls(), m.gains(), m.losses(), m.recent()])
+            .toEqual([[], [], [], [], [], [], [], []]);
         expect([m.basis(), m.omitted(), m.asOf()]).toEqual([null, 0, '']);
     });
 });

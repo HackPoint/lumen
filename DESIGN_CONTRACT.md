@@ -65,7 +65,8 @@ You may rebuild the SVG/markup; keep these three inputs. Internal computeds
 summary = input<SavingsSummary | null>(null)
 error   = input<string | null>(null)   // why the latest fetch failed
 // SavingsSummary (src/app/savings-summary.ts) = { week, allTime, … }, each a SavingsPeriod:
-//   { tokensSaved (signed), measured (the bold "at least" dollars, null = none measured),
+//   { tokensSaved (signed, Claude's tokens through the calibration, a band),
+//     measured (the bold "at least" dollars, the net on record; null = none on record),
 //     modelled (shown beside it, never in it), unpriced (calls with tokens and no dollars), … }
 ```
 Null with no error renders nothing; null with an error says it could not be read, with no
@@ -134,7 +135,7 @@ Exposes cost computeds (totalCost, cacheSavings, cacheHitRate, fmt…). Restyle 
    - **Home** (route `/`). The hero is the **savings headline**
      (`<lumen-savings-headline>`): tokens saved and $ saved, net and signed, this
      week and all time, both bold, for every billing mode: the dollars are the
-     measured net, a floor ("at least $X saved, net"; a loss "net loss of at
+     net on record, a floor ("at least $X saved, net"; a loss "net loss of at
      most $X"), and "at API prices" unless the user pays per token, after the
      share of tokens ("≈ 92% fewer tokens from file and tool reads"). Modelled dollars and
      unpriced calls stand beside the figure as tags, never in it. Under it,

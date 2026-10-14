@@ -120,3 +120,14 @@
 .method__ledger tr.is-loss .method__net {
     color: var(--lumen-alert);
 }
+
+/* The calibration's groups: the rows column is a sentence, so it takes the width and wraps; the
+   ratios stay whole. */
+.method__cal tbody th {
+    font-weight: 400;
+    min-width: 12rem;
+}
+
+.method__cal td {
+    white-space: nowrap;
+}

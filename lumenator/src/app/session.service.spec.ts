@@ -1213,10 +1213,10 @@ describe('SessionService', () => {
   });
 
   it('shows no summary of a schema it does not read, or an answer that is not one', async () => {
-    const s = build((b) => b.responses.set('lumen_savings_summary', { ...savingsSummary(), schema: 2 }));
+    const s = build((b) => b.responses.set('lumen_savings_summary', { ...savingsSummary(), schema: 1 }));
     await settle();
     expect(s.savingsSummary()).toBeNull();
-    expect(s.savingsError()).toBe('the app sent a savings summary of schema 2, and this window reads schema 1');
+    expect(s.savingsError()).toBe('the app sent a savings summary of schema 1, and this window reads schema 2');
     bridge.responses.set('lumen_savings_summary', null);
     s.refreshSavingsSummary();
     await settle();

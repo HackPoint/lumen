@@ -17,11 +17,13 @@ Measured on macOS arm64, `cl100k_base` via `lumen-tok`, in two sittings:
 
 Every token figure on this page is a `cl100k_base` count, OpenAI's tokenizer standing in for
 Claude's, which is not available offline. It is a tokenizer's count, never a bytes/4 guess, but
-Claude counts the same text differently: on raw file text, Claude Opus 4.7 and later count about
-1.59× as many tokens (1.44–1.70×), and earlier models about 1.24× as many (1.14–1.31×), from
-the 10th to the 90th percentile of 60 samples measured against Claude's own usage data
+Claude counts the same text differently: on raw file text, the models measured from Claude Opus
+4.7 on (Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count
+about 1.59× as many tokens (1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet 4.6,
+Opus 4.5 and Haiku 4.5) about 1.24× as many (1.14–1.31×), from the 10th to the 90th percentile
+of 60 samples measured against Claude's own usage data
 ([benchmarks/calibration](../benchmarks/calibration/README.md), calibration of 2026-10-14). A
-`Read`'s line numbers are not in those ratios. The percentages here compare one `cl100k_base`
+`Read`'s line numbers and the tool-result wrapper are not in those ratios. The percentages here compare one `cl100k_base`
 count with another, and the calibration does not show whether they come out the same in
 Claude's units.
 

@@ -1,5 +1,5 @@
 {
-  "about": "How the savings figures read, in the terminal, the tray and the app. Read by the Rust test of lumen_core::savings::text (crates/lumen-core/tests/frontend_savings_text.rs) and by the TypeScript tests of savings-text.ts and the headline (lumenator/src/app/savings-text.spec.ts, components/savings-headline/savings-headline.spec.ts), so the window cannot show another figure, sign or label than `lumen` and the tray. Each state's summary names only what the text reads (gross and extraRounds default to net and 0); the tests fill the rest in as an empty summary has it. `app` is what each period's headline box says: the share line (wherever dollars are at API prices), the token figure and its unit, the dollar line in three pieces with the bold figure in the middle (null: none measured), what it is at, the tags beside it, whether it recorded nothing, and why its data is partial. ≈ is followed by a no-break space.",
+  "about": "How the savings figures read, in the terminal, the tray and the app. Read by the Rust test of lumen_core::savings::text (crates/lumen-core/tests/frontend_savings_text.rs) and by the TypeScript tests of savings-text.ts and the headline (lumenator/src/app/savings-text.spec.ts, components/savings-headline/savings-headline.spec.ts), so the window cannot show another figure, sign or label than `lumen` and the tray. Each state's summary names only what the text reads (gross and extraRounds default to net and 0); the tests fill the rest in as an empty summary has it. `app` is what each period's headline box says: the share line (wherever dollars are at API prices), the token figure and its unit, the dollar line in three pieces with the bold figure in the middle (null: none on record), what it is at, the tags beside it, whether it recorded nothing, and why its data is partial. A state's tokensSaved is a number (a band of no width) or a band {low, value, high}, Claude's tokens as the calibration gives them: every surface shows the central value, and `bands` is the band the app gives on the period's ⓘ and `lumen report` beside the figure. `tokensBand` holds the band's own formatting. ≈ is followed by a no-break space.",
   "usd": [
     {
       "x": 0,
@@ -182,6 +182,26 @@
       "signed": "−1,000,000",
       "figure": "≈\u00a01,000,000",
       "phrase": "≈\u00a01,000,000 more tokens, net"
+    }
+  ],
+  "tokensBand": [
+    {
+      "low": 11200,
+      "value": 12345,
+      "high": 13400,
+      "text": "11,200 to 13,400"
+    },
+    {
+      "low": -1300,
+      "value": 400,
+      "high": 2100,
+      "text": "−1,300 to 2,100"
+    },
+    {
+      "low": 0,
+      "value": 0,
+      "high": 0,
+      "text": "0 to 0"
     }
   ],
   "share": [
@@ -691,7 +711,7 @@
           "partial": null
         }
       },
-      "cli": "Lumen this week: ≈\u00a010 tokens saved, net; at least $2.00 saved, net (+$182 modelled; 1,473 calls unpriced) · all time: ≈\u00a010 tokens saved, net; no dollars measured (+$5.00 modelled) · working (lumen report for detail, lumen dash for the live dashboard)",
+      "cli": "Lumen this week: ≈\u00a010 tokens saved, net; at least $2.00 saved, net (+$182 modelled; 1,473 calls unpriced) · all time: ≈\u00a010 tokens saved, net; no dollars on record (+$5.00 modelled) · working (lumen report for detail, lumen dash for the live dashboard)",
       "tray": "Saved at least $2.00 this week (+$182 modelled; 1,473 calls unpriced) · working"
     },
     {
@@ -994,6 +1014,73 @@
       },
       "cli": "Lumen this week: ≈\u00a02,500,000 tokens saved, net; at least $12,346 saved, net · all time: ≈\u00a09,876,543 tokens saved, net; at least $1,234,567 saved, net · working (lumen report for detail, lumen dash for the live dashboard)",
       "tray": "Saved at least $12,346 this week · working"
+    },
+    {
+      "name": "calibratedBands",
+      "summary": {
+        "billingMode": "subscription",
+        "status": {
+          "state": "working"
+        },
+        "week": {
+          "tokensSaved": {
+            "low": 11200,
+            "value": 12345,
+            "high": 13400
+          },
+          "sharePct": 61.7,
+          "net": 0.92,
+          "calls": 10,
+          "dataQuality": {
+            "state": "complete"
+          }
+        },
+        "allTime": {
+          "tokensSaved": {
+            "low": -1300,
+            "value": 400,
+            "high": 2100
+          },
+          "sharePct": 0.6,
+          "net": -0.05,
+          "calls": 12,
+          "dataQuality": {
+            "state": "complete"
+          }
+        }
+      },
+      "bands": {
+        "week": "11,200 to 13,400",
+        "allTime": "−1,300 to 2,100"
+      },
+      "app": {
+        "week": {
+          "share": "≈\u00a062% fewer tokens from file and tool reads this week",
+          "tokens": "≈\u00a012,345",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "at least",
+          "usd": "$0.92",
+          "usdTail": "saved, net",
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        },
+        "allTime": {
+          "share": "≈\u00a00.6% fewer tokens from file and tool reads all time",
+          "tokens": "≈\u00a0400",
+          "tokensUnit": "tokens saved, net",
+          "usdLead": "net loss of at most",
+          "usd": "$0.05",
+          "usdTail": null,
+          "basis": "at API prices",
+          "beside": [],
+          "empty": false,
+          "partial": null
+        }
+      },
+      "cli": "Lumen this week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $0.92 saved, net at API prices · all time: ≈\u00a00.6% fewer tokens from file and tool reads; ≈\u00a0400 tokens saved, net; net loss of at most $0.05 at API prices · working (lumen report for detail, lumen dash for the live dashboard)",
+      "tray": "This week: ≈\u00a062% fewer tokens from file and tool reads; ≈\u00a012,345 tokens saved, net; at least $0.92 saved, net at API prices · working"
     },
     {
       "name": "empty",

@@ -1,6 +1,7 @@
 //! Fixture tests for the engine: every rule in the module docs, from rows built by hand.
 
 use super::*;
+use crate::calibration;
 use crate::rates;
 use crate::repeat::PLAN_UNIDENTIFIED;
 
@@ -85,8 +86,26 @@ fn turn(id: &str, session: &str, ms: i64, model: &str) -> TurnRow {
     }
 }
 
+/// The cl100k_base counts as they are, a zero-width band: the engine's rules on round numbers.
+/// The calibration itself has tests of its own below, through [`Calibrated`].
+struct Identity;
+impl Calibrator for Identity {
+    fn claude_tokens(&self, n: u64, _: &str, _: Option<&str>) -> Band<u64> {
+        Band::exact(n)
+    }
+    fn info(&self) -> CalibrationInfo {
+        CalibrationInfo {
+            calibrated: false,
+            as_of: None,
+            claude_code_version: None,
+            note: String::new(),
+            groups: Vec::new(),
+        }
+    }
+}
+
 fn run(ledger: &Ledger) -> SavingsSummary {
-    summarize(ledger, &clock(), &facts(), &Uncalibrated)
+    summarize(ledger, &clock(), &facts(), &Identity)
 }
 
 fn close(a: f64, b: f64) -> bool {
@@ -403,7 +422,9 @@ fn an_unverified_count_and_a_loader_gap_make_the_period_partial() {
     let DataQuality::Partial { reason } = &s.all_time.data_quality else {
         panic!("{:?}", s.all_time.data_quality)
     };
-    assert!(reason.contains("not known to be measured") && reason.contains("fault spool"));
+    assert!(
+        reason.contains("not known to come from the tokenizer") && reason.contains("fault spool")
+    );
     assert_eq!(s.all_time.counts.unverified_provenance_rows, 1);
 }
 
@@ -819,7 +840,7 @@ fn the_identity_hook_recommendation_follows_the_ledger_over_the_settings() {
             billing_mode: BillingView::Api,
             identity_hook_registered: Some(false),
         },
-        &Uncalibrated,
+        &Identity,
     );
     assert_eq!(s.recommendation, None);
 }
@@ -861,7 +882,7 @@ fn a_subscription_line_has_its_tokens_and_the_dollars_at_api_prices() {
             billing_mode: BillingView::Subscription,
             identity_hook_registered: Some(true),
         },
-        &Uncalibrated,
+        &Identity,
     );
     let usd = text::usd_signed(sub.week.measured.unwrap().net.value);
     let share = text::share_phrase(&sub.week).unwrap();
@@ -900,7 +921,9 @@ impl Calibrator for Half {
         CalibrationInfo {
             calibrated: true,
             as_of: Some("test".into()),
+            claude_code_version: None,
             note: String::new(),
+            groups: Vec::new(),
         }
     }
 }
@@ -923,12 +946,13 @@ fn a_calibrator_scales_tokens_and_dollars_and_keeps_a_loss_negative() {
         .iter()
         .find(|x| x.saved_cl100k == 10_000)
         .unwrap();
+    // The file (12,000 × 1.4 to 1.6) less the answer (2,000 × 1.4 to 1.6), the ends crossed.
     assert_eq!(
         gain.tokens_saved,
         Band {
-            low: 14_000,
+            low: 13_600,
             value: 15_000,
-            high: 16_000
+            high: 16_400
         }
     );
     let loss = s
@@ -937,17 +961,461 @@ fn a_calibrator_scales_tokens_and_dollars_and_keeps_a_loss_negative() {
         .iter()
         .find(|x| x.saved_cl100k == -40)
         .unwrap();
+    // 1,960 less 2,000: a loss at the medians, and a band that reaches a gain.
     assert_eq!(
         loss.tokens_saved,
         Band {
-            low: -64,
+            low: -456,
             value: -60,
-            high: -56
+            high: 336
         }
     );
     assert!(s.method.calibration.calibrated);
     let un = run(&l);
     assert!(!un.method.calibration.calibrated);
+}
+
+// ── calibration ──────────────────────────────────────────────────────────────
+
+/// A count through the calibration table by hand, as a file or as an answer Lumen made.
+fn observed(n: i64, path: &str, model: Option<&str>, text: calibration::Text) -> Band<i64> {
+    let e = calibration::observed(
+        n as u64,
+        calibration::ContentType::from_path(path),
+        model.and_then(calibration::Model::from_model),
+        text,
+    );
+    Band {
+        low: e.low as i64,
+        value: e.value as i64,
+        high: e.high as i64,
+    }
+}
+
+/// A saving through the calibration table by hand: the file at its low end less the answer at
+/// its high end, and the other way for the high end.
+fn by_table(full: i64, returned: i64, path: &str, model: Option<&str>) -> Band<i64> {
+    let f = observed(full, path, model, calibration::Text::File);
+    let r = observed(returned, path, model, calibration::Text::Answer);
+    Band {
+        low: f.low - r.high,
+        value: f.value - r.value,
+        high: f.high - r.low,
+    }
+}
+
+fn read_by(mut l: Ledger, model: &str) -> Ledger {
+    for t in &mut l.turns {
+        t.model = Some(model.into());
+    }
+    l
+}
+
+#[test]
+fn tokens_are_claudes_by_the_consuming_model_and_the_files_type() {
+    let mut seen: Vec<i64> = Vec::new();
+    // A Rust and a Python file, read by Sonnet 4.6 (the tokenizer up to Opus 4.6) and by Opus 4.8
+    // (the one from Opus 4.7 on).
+    for (model, group) in [(SONNET, "opus46before"), (OPUS, "opus47on")] {
+        for path in ["/r/a.rs", "/r/a.py"] {
+            let mut l = read_by(derived_ledger(), model);
+            l.calls[0].path = path.into();
+            let s = summarize(&l, &clock(), &facts(), &Calibrated);
+            let line = &s.ledger.recent[0];
+            let want = by_table(12_000, 2_000, path, Some(model));
+            assert_eq!(line.tokens_saved, want, "{model} {path}");
+            assert!(
+                want.low < want.value && want.value < want.high,
+                "a band, {want:?}"
+            );
+            // The proxy's own figure stays beside it.
+            assert_eq!(line.saved_cl100k, 10_000);
+            assert_eq!(s.all_time.tokens_saved, want);
+            let file = observed(12_000, path, Some(model), calibration::Text::File);
+            assert_eq!(s.all_time.tokens_full, file);
+            // The group it was converted by, its calls and the ratio its file came out at.
+            let c = &s.method.calibration;
+            for g in &c.groups {
+                assert_eq!(g.calls, i64::from(g.key == group), "{}", g.key);
+            }
+            let g = c.groups.iter().find(|g| g.key == group).unwrap();
+            assert_eq!(g.files_cl100k, 12_000);
+            let r = g.ratio.unwrap();
+            let at = |n: i64| (n as f64 / 12.0).round() / 1000.0;
+            assert!(
+                close(r.value, at(file.value)) && close(r.low, at(file.low)),
+                "{r:?}"
+            );
+            seen.push(want.value);
+        }
+    }
+    // Four different figures: the type and the tokenizer each move it, and the later tokenizer
+    // counts more.
+    let mut distinct = seen.clone();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 4, "{seen:?}");
+    assert!(seen[2] > seen[0] && seen[3] > seen[1], "{seen:?}");
+}
+
+/// The bold figure is a floor, so it must not rest on the median ratio: the value of the tokens
+/// saved takes the low end of their band in `value` as in `low`, and the high end in `high`.
+#[test]
+fn the_dollar_floor_takes_the_low_end_of_the_token_band() {
+    let s = summarize(&derived_ledger(), &clock(), &facts(), &Half);
+    let line = &s.ledger.recent[0];
+    // The file (12,000 × 1.4 to 1.6) at its low end less the answer (2,000 × 1.4 to 1.6) at
+    // its high end, and the other way.
+    assert_eq!(
+        line.tokens_saved,
+        Band {
+            low: 13_600,
+            value: 15_000,
+            high: 16_400
+        }
+    );
+    // 3.75 written once and 0.3 read on each of 2 rounds, per million.
+    let per = (3.75 + 2.0 * 0.3) / 1e6;
+    let value = line.value_usd.unwrap();
+    assert!(close(value.value, 13_600.0 * per), "the low end: {value:?}");
+    assert!(close(value.low, 13_600.0 * per), "{value:?}");
+    assert!(close(value.high, 16_400.0 * per), "the high end: {value:?}");
+    // The round is the turn's own usage, which no calibration touches.
+    let c = (10.0 * 3.0 + 500.0 * 15.0 + 50_000.0 * 0.3 + 3_000.0 * 3.75) / 1e6;
+    let cost = line.extra_round_usd.unwrap();
+    assert!(close(cost.value, c), "{cost:?}");
+    let net = s.all_time.measured.unwrap().net;
+    assert!(close(net.value, 13_600.0 * per - c), "{net:?}");
+    assert!(close(net.low, net.value), "{net:?}");
+
+    // Inline text written out is Lumen's count: the floor takes the high end of what it cost.
+    let mut l = derived_ledger();
+    l.calls.push(CallRow {
+        path: INLINE_PATH.into(),
+        routed_via: "compress_logs".into(),
+        tool: "mcp__lumen__compress_logs".into(),
+        ..call(2, Some("s"), at(1, 70), "compress_logs", INLINE_PATH, 0)
+    });
+    let s = summarize(&l, &clock(), &facts(), &Half);
+    let inline = s
+        .ledger
+        .recent
+        .iter()
+        .find(|x| x.saved_against == "alreadyInContext")
+        .unwrap();
+    assert_eq!(inline.pair.model.as_deref(), Some(SONNET));
+    let cost = inline.extra_round_usd.unwrap();
+    // Its round (a turn like every other here) and the 2,000 tokens it wrote out at 15 per
+    // million: × 1.6, the high end, in the floor; × 1.4 only in the band's high end of the net.
+    assert!(close(cost.value, c + 3_200.0 * 15e-6), "{cost:?}");
+    assert!(close(cost.high, c + 3_200.0 * 15e-6), "{cost:?}");
+    assert!(close(cost.low, c + 2_800.0 * 15e-6), "{cost:?}");
+}
+
+/// A loss is a floor too: the bold figure takes the largest loss its band allows, never the
+/// loss at the median ratio. A whole-file read whose answer (2,000) came out larger than the
+/// file (1,960): at the medians 60 tokens lost, at worst 456.
+#[test]
+fn a_loss_is_floored_at_the_largest_loss() {
+    let mut l = derived_ledger();
+    l.calls[0].routed_via = "smart_read_full".into();
+    l.calls[0].full_tokens = 1_960;
+    l.calls[0].saved_tokens = -40;
+    let s = summarize(&l, &clock(), &facts(), &Half);
+    let line = &s.ledger.recent[0];
+    // The file (1,960 × 1.4 to 1.6) at its low end less the answer (2,000 × 1.4 to 1.6) at its
+    // high end: 2,744 less 3,200.
+    assert_eq!(
+        line.tokens_saved,
+        Band {
+            low: -456,
+            value: -60,
+            high: 336
+        }
+    );
+    // To the micro-dollar the summary rounds to.
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    let per = (3.75 + 2.0 * 0.3) / 1e6;
+    let value = line.value_usd.unwrap();
+    assert!(
+        near(value.value, -456.0 * per),
+        "the largest loss: {value:?}"
+    );
+    assert!(near(value.low, -456.0 * per), "{value:?}");
+    assert!(near(value.high, 336.0 * per), "{value:?}");
+    let cost = line.extra_round_usd.unwrap();
+    let net = line.net_usd.unwrap();
+    assert!(near(net.value, -456.0 * per - cost.value), "{net:?}");
+    assert!(near(net.low, -456.0 * per - cost.high), "{net:?}");
+    let period = s.all_time.measured.unwrap().net;
+    assert!(
+        near(period.value, net.value) && near(period.low, net.low),
+        "{period:?}"
+    );
+}
+
+/// What a fresh=true ask after a stub, or compress_logs on inline text, returns is a loss
+/// against nothing: Lumen's answer, taken at its high end in the band's low end.
+#[test]
+fn a_loss_against_nothing_takes_the_answer_at_its_high_end() {
+    let mut l = derived_ledger();
+    let mut stub = call(2, Some("s"), at(1, 65), ROUTE_UNCHANGED, "/r/a.rs", 11_970);
+    stub.returned_tokens = 30;
+    l.calls.push(stub);
+    let mut fresh = call(3, Some("s"), at(1, 70), "smart_read", "/r/a.rs", 10_000);
+    fresh.repeat_plan = Some(PLAN_FRESH.into());
+    fresh.repeat_arm = Some(ARM_TREATMENT.into());
+    l.calls.push(fresh);
+    l.calls.push(CallRow {
+        path: INLINE_PATH.into(),
+        routed_via: "compress_logs".into(),
+        tool: "mcp__lumen__compress_logs".into(),
+        ..call(4, Some("s"), at(1, 75), "compress_logs", INLINE_PATH, 0)
+    });
+    let s = summarize(&l, &clock(), &facts(), &Half);
+    for against in ["askedAgain", "alreadyInContext"] {
+        let line = s
+            .ledger
+            .recent
+            .iter()
+            .find(|x| x.saved_against == against)
+            .unwrap();
+        // 2,000 returned, × 1.6 at the low end, × 1.4 at the high.
+        let t = line.tokens_saved;
+        assert_eq!(
+            t,
+            Band {
+                low: -3_200,
+                value: -3_000,
+                high: -2_800
+            },
+            "{against}"
+        );
+        assert!(t.low <= t.value && t.value <= t.high, "{against}: {t:?}");
+        // Its dollars take that largest loss in the floor.
+        let v = line.value_usd.unwrap();
+        assert!(close(v.value, v.low) && v.low < v.high, "{against}: {v:?}");
+    }
+}
+
+/// Lumen's answer (an outline, a slice, a stub) is not the raw file text the calibration
+/// measured, so its ratio was never measured: the floor takes the file at the smallest ratio any
+/// sample of its type came out at on the model, and the answer at the largest any sample of any
+/// type did. A 10,000-token Rust file on Sonnet 4.6 and a 1,000-token outline of it.
+#[test]
+fn the_floor_takes_the_file_at_its_low_end_and_the_answer_at_its_high_end() {
+    let mut l = read_by(derived_ledger(), SONNET);
+    l.calls[0].full_tokens = 10_000;
+    l.calls[0].returned_tokens = 1_000;
+    l.calls[0].saved_tokens = 9_000;
+    let s = summarize(&l, &clock(), &facts(), &Calibrated);
+    let line = &s.ledger.recent[0];
+    // The file: Rust on Sonnet 4.6, 1.254 at the median, 1.181 to 1.323 over its samples. The
+    // answer: the file's median, and 1.056 to 1.344, every sample Sonnet 4.6 was sent.
+    assert_eq!(
+        line.tokens_saved,
+        Band {
+            low: 11_810 - 1_344,
+            value: 12_540 - 1_254,
+            high: 13_230 - 1_056,
+        }
+    );
+    assert_eq!(
+        line.tokens_saved,
+        by_table(10_000, 1_000, "/r/a.rs", Some(SONNET))
+    );
+    // And the floor's dollars rest on that low end.
+    let per = (3.75 + 2.0 * 0.3) / 1e6;
+    let v = line.value_usd.unwrap();
+    // To the micro-dollar the summary rounds to.
+    assert!((v.value - 10_466.0 * per).abs() < 1e-6, "{v:?}");
+
+    // A repeat read's saving is two answers apart: the earlier one at its low end less the stub
+    // at its high end.
+    let mut l = read_by(derived_ledger(), SONNET);
+    l.calls[0].req_key = Some("/r/a.rs".into());
+    let mut stub = call(2, Some("s"), at(1, 65), ROUTE_UNCHANGED, "/r/a.rs", 11_960);
+    stub.req_key = Some("/r/a.rs".into());
+    stub.returned_tokens = 40;
+    stub.full_tokens = 12_000;
+    l.calls.push(stub);
+    let s = summarize(&l, &clock(), &facts(), &Calibrated);
+    let again = s
+        .ledger
+        .recent
+        .iter()
+        .find(|x| x.saved_against == "previousAnswer")
+        .unwrap();
+    let earlier = observed(2_000, "/r/a.rs", Some(SONNET), calibration::Text::Answer);
+    let now = observed(40, "/r/a.rs", Some(SONNET), calibration::Text::Answer);
+    assert_eq!(
+        again.tokens_saved,
+        Band {
+            low: earlier.low - now.high,
+            value: earlier.value - now.value,
+            high: earlier.high - now.low,
+        }
+    );
+    assert_eq!((earlier.low, earlier.high), (2_112, 2_688));
+
+    // A stub whose earlier answer is not in the ledger counts nothing, and at most that answer
+    // less the stub: an answer of at most the whole file, at an answer's high end, less the stub
+    // at its low end.
+    let mut l = read_by(derived_ledger(), SONNET);
+    let mut orphan = call(2, Some("s"), at(1, 65), ROUTE_UNCHANGED, "/r/c.rs", 11_960);
+    orphan.full_tokens = 12_000;
+    orphan.returned_tokens = 40;
+    l.calls.push(orphan);
+    let s = summarize(&l, &clock(), &facts(), &Calibrated);
+    let orphan = s
+        .ledger
+        .recent
+        .iter()
+        .find(|x| x.saved_against == "answerNotInLedger")
+        .unwrap();
+    let earlier = observed(12_000, "/r/c.rs", Some(SONNET), calibration::Text::Answer);
+    assert_eq!(
+        orphan.tokens_saved,
+        Band {
+            low: 0,
+            value: 0,
+            high: earlier.high - now.low,
+        }
+    );
+    assert_eq!(earlier.high - now.low, 16_128 - 42);
+}
+
+/// The 25,000 a Read returns is in Claude's tokens: a file is held to it by its calibrated
+/// count, so one under it as the proxy counts can be over it as Claude does.
+#[test]
+fn the_read_cap_is_compared_in_claudes_tokens() {
+    let mut l = read_by(derived_ledger(), OPUS);
+    l.calls[0].full_tokens = 18_000;
+    l.calls[0].saved_tokens = 16_000;
+    let file = observed(18_000, "/r/a.rs", Some(OPUS), calibration::Text::File);
+    assert!(
+        18_000 < READ_TOKEN_LIMIT && file.low > READ_TOKEN_LIMIT,
+        "premise: {file:?}"
+    );
+    let s = summarize(&l, &clock(), &facts(), &Calibrated);
+    let line = &s.ledger.recent[0];
+    assert!(line.read_capped);
+    let answer = observed(2_000, "/r/a.rs", Some(OPUS), calibration::Text::Answer);
+    assert_eq!(
+        line.tokens_saved,
+        Band {
+            low: READ_TOKEN_LIMIT - answer.high,
+            value: READ_TOKEN_LIMIT - answer.value,
+            high: READ_TOKEN_LIMIT - answer.low,
+        }
+    );
+    assert_eq!(s.all_time.tokens_full, Band::exact(READ_TOKEN_LIMIT));
+    // The proxy's own figure is before the cap.
+    assert_eq!(line.saved_cl100k, 16_000);
+
+    // A file whose band straddles the cap: each end of the file is held to it on its own, and
+    // the answer's ends stay its own.
+    let mut l = read_by(derived_ledger(), OPUS);
+    l.calls[0].full_tokens = 16_000;
+    l.calls[0].saved_tokens = 14_000;
+    let file = observed(16_000, "/r/a.rs", Some(OPUS), calibration::Text::File);
+    assert!(
+        file.low < READ_TOKEN_LIMIT && READ_TOKEN_LIMIT < file.high,
+        "premise: {file:?}"
+    );
+    let s = summarize(&l, &clock(), &facts(), &Calibrated);
+    assert_eq!(
+        s.ledger.recent[0].tokens_saved,
+        Band {
+            low: file.low - answer.high,
+            value: READ_TOKEN_LIMIT.min(file.value) - answer.value,
+            high: READ_TOKEN_LIMIT - answer.low,
+        }
+    );
+    // Under the cap at every ratio, nothing is cut.
+    let line = &summarize(
+        &read_by(derived_ledger(), OPUS),
+        &clock(),
+        &facts(),
+        &Calibrated,
+    )
+    .ledger
+    .recent[0];
+    assert!(!line.read_capped);
+}
+
+/// A row with no consuming turn, or one read by a model the table does not have, takes the
+/// content type's ratio over both tokenizers, weighted alike, with a band over both.
+#[test]
+fn a_row_with_no_measured_model_gets_the_band_over_both_tokenizers() {
+    let wide = by_table(12_000, 2_000, "/r/a.rs", None);
+    for m in [SONNET, OPUS] {
+        let own = by_table(12_000, 2_000, "/r/a.rs", Some(m));
+        assert!(
+            wide.low <= own.low && own.high <= wide.high,
+            "{m}: {own:?} in {wide:?}"
+        );
+    }
+    // No session: no turn read it.
+    let mut l = derived_ledger();
+    l.calls[0].session_id = None;
+    let s = summarize(&l, &clock(), &facts(), &Calibrated);
+    let line = &s.ledger.recent[0];
+    assert_eq!(line.pair.model, None);
+    assert_eq!(line.tokens_saved, wide);
+    assert_eq!(s.all_time.unpriced.tokens, wide);
+    let g = &s.method.calibration.groups;
+    assert_eq!(g.last().unwrap().key, "unmeasured");
+    assert_eq!(g.last().unwrap().calls, 1);
+    // Read by a model the calibration never measured: the same band.
+    let s = summarize(
+        &read_by(derived_ledger(), "claude-3-5-sonnet-20241022"),
+        &clock(),
+        &facts(),
+        &Calibrated,
+    );
+    assert_eq!(s.ledger.recent[0].tokens_saved, wide);
+    assert_eq!(s.method.calibration.groups.last().unwrap().calls, 1);
+}
+
+#[test]
+fn the_method_says_when_and_through_what_it_was_calibrated_and_each_groups_ratio() {
+    let s = summarize(&derived_ledger(), &clock(), &facts(), &Calibrated);
+    let c = &s.method.calibration;
+    assert!(c.calibrated);
+    assert_eq!(c.as_of.as_deref(), Some(calibration::AS_OF));
+    assert_eq!(
+        c.claude_code_version.as_deref(),
+        Some(calibration::CLAUDE_CODE_VERSION)
+    );
+    let keys: Vec<&str> = c.groups.iter().map(|g| g.key).collect();
+    assert_eq!(keys, ["opus47on", "opus46before", "unmeasured"]);
+    // Each tokenizer's pooled row, and for the rest both tokenizers alike, spanning them.
+    let later = c.groups[0].table_ratio;
+    let earlier = c.groups[1].table_ratio;
+    let none = c.groups[2].table_ratio;
+    // The median, with the smallest and the largest ratio any sample came out at.
+    assert!(close(later.value, 1.592) && close(later.low, 1.335) && close(later.high, 1.794));
+    assert!(close(earlier.value, 1.238) && close(earlier.low, 1.056) && close(earlier.high, 1.344));
+    assert!(close(none.value, 1.415), "{none:?}");
+    assert!(none.low <= earlier.low && later.high <= none.high);
+    assert!(c.note.contains("low end"), "{}", c.note);
+    assert!(
+        c.note.contains("Lumen's answer at its largest"),
+        "{}",
+        c.note
+    );
+    assert!(c.note.contains("tool-result wrapper"), "{}", c.note);
+    // The rules say the cap is in Claude's tokens and the floor rests on the low end.
+    assert!(s.method.counterfactual.contains("Claude's tokens"));
+    assert!(s.method.parts.contains("low end"));
+    for rule in [
+        s.method.counterfactual,
+        s.method.rounds,
+        s.method.parts,
+        s.method.floors,
+    ] {
+        assert!(!rule.contains("until calibration"), "{rule}");
+    }
 }
 
 #[test]
@@ -1130,7 +1598,7 @@ fn the_rusqlite_loader_reads_a_real_schema_and_the_week_starts_on_a_local_monday
         "{clock:?}"
     );
     assert_eq!(clock.week_start, "2026-10-12");
-    let s = summarize(&ledger, &clock, &facts(), &Uncalibrated);
+    let s = summarize(&ledger, &clock, &facts(), &Identity);
     assert_eq!(s.all_time.counts.calls, 1);
     // Three blocks: a7's (named by the meter's row for its Read), a8's and a9's.
     assert_eq!(s.all_time.counts.blocked_reads, 3);
@@ -1512,7 +1980,8 @@ fn a_file_larger_than_a_read_returns_counts_as_what_a_read_returns() {
     let line = &s.ledger.recent[0];
     assert!(line.read_capped);
     assert_eq!(line.recorded_saved_cl100k, 98_000);
-    assert_eq!(line.saved_cl100k, READ_TOKEN_LIMIT - 2_000);
+    // The proxy's own figure is before the cap, which is in Claude's tokens.
+    assert_eq!(line.saved_cl100k, 98_000);
     assert_eq!(line.tokens_saved.value, READ_TOKEN_LIMIT - 2_000);
     assert_eq!(s.week.tokens_full.value, READ_TOKEN_LIMIT);
     assert!(s.method.counterfactual.contains("25,000"));
@@ -2326,7 +2795,7 @@ fn the_rusqlite_loader_reads_recorded_blocks_and_the_transcripts_read_for_them()
         }],
         "only the sessions the summary reads"
     );
-    let s = summarize(&ledger, &clock(), &facts(), &Uncalibrated);
+    let s = summarize(&ledger, &clock(), &facts(), &Identity);
     assert_eq!(s.all_time.counts.blocked_reads_from_transcripts, 2);
     // The main agent's block is priced at t1; a7 has no turn in the ledger.
     assert_eq!(s.all_time.measured.map(|m| m.rows), Some(1));

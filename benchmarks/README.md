@@ -121,11 +121,13 @@ the engine's token counts are calibrated to Claude's.
 ## The tokenizer is a proxy
 
 Tokens are counted with `lumen_core::tokenizer::count_tokens`: `cl100k_base`, the same tokenizer
-the meter uses. It is not Claude's tokenizer: on raw file text Claude Opus 4.7 and later count
-about 1.59× as many tokens (1.44–1.70×), and earlier models about 1.24× as many
-(1.14–1.31×), from the 10th to the 90th percentile of 60 samples measured against Claude's
-own usage data ([calibration](calibration/README.md), calibration of 2026-10-14; a `Read`'s line
-numbers are not in these ratios). Counts compare one way of reading a file with
+the meter uses. It is not Claude's tokenizer: on raw file text the models measured from Claude
+Opus 4.7 on (Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5)
+count about 1.59× as many tokens (1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet
+4.6, Opus 4.5 and Haiku 4.5) about 1.24× as many (1.14–1.31×), from the 10th to the 90th
+percentile of 60 samples measured against Claude's own usage data
+([calibration](calibration/README.md), calibration of 2026-10-14; a `Read`'s line numbers and
+the tool-result wrapper are not in these ratios). Counts compare one way of reading a file with
 another; they are not a bill and not the number of tokens Claude would charge. The harness also
 re-counts every reply it receives and stops if the server's own figure disagrees, and it
 cross-checks each reply against the row the server wrote to its ledger.

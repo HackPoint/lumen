@@ -22,10 +22,12 @@ import { LumenTooltip } from '../../directives/tooltip.directive';
  * with it.
  */
 export const CALIBRATION_NOTE =
-    'On raw file text, Claude Opus 4.7 and later count about 1.59× as many tokens (1.44–1.70×), '
-    + 'and earlier models about 1.24× as many (1.14–1.31×): the 10th to 90th percentile of '
-    + "60 samples measured against Claude's own usage data (calibration of 2026-10-14). A Read's "
-    + 'line numbers are not in these ratios.';
+    'On raw file text, the models measured from Claude Opus 4.7 on (Opus 4.7, Opus 4.8, Opus 5, '
+    + 'Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count about 1.59× as many tokens '
+    + '(1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku '
+    + '4.5) about 1.24× as many (1.14–1.31×): the 10th to 90th percentile of 60 samples measured '
+    + "against Claude's own usage data (calibration of 2026-10-14). A Read's line numbers and the "
+    + 'tool-result wrapper around every answer are not in these ratios.';
 
 /**
  * What Lumen caused, beside what Claude Code's cache did, and whether Lumen is working.

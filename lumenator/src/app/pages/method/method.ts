@@ -4,7 +4,7 @@ import { TabNav } from '../../components/tab-nav/tab-nav';
 import { SessionService } from '../../session.service';
 import type { Band, CallLine, Dollars, SavingsPeriod, SavingsSummary } from '../../savings-summary';
 import type { ModelPrices, PriceRow } from '../../prices';
-import { percent, priceBasis, tokensSigned, usdBand, usdPlus, usdSigned } from '../../savings-text';
+import { fixedAsRust, percent, priceBasis, tokensSigned, usdBand, usdPlus, usdSigned } from '../../savings-text';
 
 /** A row of the figures-and-counts table: what it is, then this week's and all time's. */
 export interface FigureRow {
@@ -18,6 +18,15 @@ export interface PriceLine {
     model: string;
     cells: string[] | null;
     note: string;
+}
+
+/** A row of the calibration table: a group of rows and the ratio it was converted at. */
+export interface CalibrationRow {
+    rows: string;
+    calls: string;
+    files: string;
+    used: string;
+    table: string;
 }
 
 /** A call line as the ledger table shows it. */
@@ -68,7 +77,8 @@ const EXTRA: Record<CallLine['extraRoundBasis'], string> = {
  * How it's measured: everything behind Home's headline, from the same summary.
  *
  * The rules each figure is made by (the summary's own text), the price table and its date,
- * whether token counts are calibrated, every count and band for each period, and the per-call
+ * how token counts were calibrated and at what ratio each group of rows was converted, every
+ * count and band for each period, and the per-call
  * ledger (the newest 200 calls and the five that gained and lost most) as tables. Reached from
  * the headline and from Details. Computes nothing: each cell is a value the engine or the price
  * table sent, laid out by `savings-text.ts` as the terminal lays it out.
@@ -96,21 +106,34 @@ export class Method {
             { term: 'C, the cost of one extra round', text: m.roundCost },
             { term: 'Extra rounds', text: m.extraRounds },
             { term: 'Prices a turn did not record', text: m.floors },
-            { term: 'Measured, modelled and tokens only', text: m.parts },
+            { term: 'On record, modelled and tokens only', text: m.parts },
         ];
     });
 
     /**
-     * Whether token counts are calibrated, said once: the engine's own note, which says it is
-     * uncalibrated where it is, after the date it was calibrated on where it is.
+     * How token counts became Claude's, said once: the date and the Claude Code version the
+     * calibration was measured on and through, then the engine's own note. A summary whose counts
+     * were not converted says so.
      */
     readonly calibration = computed<string[]>(() => {
         const c = this.summary()?.method.calibration;
         if (!c) return [];
-        const head = c.calibrated ? [`Calibrated${c.asOf ? ` as of ${c.asOf}` : ''}.`] : [];
-        const note = c.note || "Uncalibrated: counts are cl100k_base, a stand-in for Claude's tokenizer.";
+        const through = c.claudeCodeVersion ? `, through Claude Code ${c.claudeCodeVersion}` : '';
+        const head = c.calibrated ? [`Calibrated${c.asOf ? ` as of ${c.asOf}` : ''}${through}.`] : [];
+        const note = c.note || "Not calibrated: counts are cl100k_base, a stand-in for Claude's tokenizer.";
         return [...head, note];
     });
+
+    /** Each group of rows, the ratio it was converted at over its files, and the table's own. */
+    readonly calibrationGroups = computed<CalibrationRow[]>(() =>
+        (this.summary()?.method.calibration.groups ?? []).map((g) => ({
+            rows: g.rows,
+            calls: tokensSigned(g.calls),
+            files: tokensSigned(g.filesCl100k),
+            used: g.ratio ? ratioBand(g.ratio) : 'no calls',
+            table: ratioBand(g.tableRatio),
+        })),
+    );
 
     readonly basis = computed(() => {
         const s = this.summary();
@@ -171,6 +194,12 @@ function priceLine(model: string, p: ModelPrices | null, row: PriceRow): PriceLi
     };
 }
 
+/** A ratio of Claude's tokens to cl100k_base's, with its band: `1.59× (1.33× to 1.79×)`. */
+function ratioBand(b: Band): string {
+    const x = (r: number) => `${fixedAsRust(r, 2)}×`;
+    return `${x(b.value)} (${x(b.low)} to ${x(b.high)})`;
+}
+
 function calls(n: number): string {
     return n === 1 ? '1 call' : `${tokensSigned(n)} calls`;
 }
@@ -180,7 +209,7 @@ function tokenBand(b: Band): string {
 }
 
 function dollarsBand(d: Dollars | null, pick: (d: Dollars) => Band, open: boolean): string {
-    if (!d) return 'none measured';
+    if (!d) return 'none on record';
     const b = pick(d);
     return `${usdSigned(b.value)} (band ${usdBand(b, open && d.highOpen)})`;
 }
@@ -203,10 +232,10 @@ function figureRows(s: SavingsSummary): FigureRow[] {
         both('Tokens saved, net', (p) => tokenBand(p.tokensSaved)),
         both('Tokens the files held', (p) => tokenBand(p.tokensFull)),
         both('Share kept out of context', (p) => (p.sharePct === null ? 'nothing read' : percent(p.sharePct))),
-        both('Measured value of the tokens', (p) => dollarsBand(p.measured, (d) => d.gross, false)),
-        both('Measured extra rounds', (p) => dollarsBand(p.measured, (d) => d.extraRounds, false)),
-        both('Measured net, at least (the bold figure)', (p) => dollarsBand(p.measured, (d) => d.net, true)),
-        both('Rows measured', (p) => n(p.measured?.rows ?? 0)),
+        both('Value of the tokens, on record', (p) => dollarsBand(p.measured, (d) => d.gross, false)),
+        both('Extra rounds, on record', (p) => dollarsBand(p.measured, (d) => d.extraRounds, false)),
+        both('Net on record, at least (the bold figure)', (p) => dollarsBand(p.measured, (d) => d.net, true)),
+        both('Rows on record', (p) => n(p.measured?.rows ?? 0)),
         both('Modelled, not added', (p) => (p.modelled ? `${usdPlus(p.modelled.value.value)} from ${calls(p.modelled.rows)} (band ${usdPlus(p.modelled.value.low)} to ${usdPlus(p.modelled.value.high)})` : 'none')),
         both('Tokens only: calls', (p) => n(p.unpriced.calls)),
         both('Tokens only: blocked Reads', (p) => n(p.unpriced.blockedReads)),
@@ -226,7 +255,7 @@ function figureRows(s: SavingsSummary): FigureRow[] {
         both('R a lower bound (session may be running)', (p) => n(p.counts.roundsLowerBoundRows)),
         both('R from before compactions were recorded', (p) => n(p.counts.roundsUnrecordedRows)),
         both('R ended by a collapse (inferred)', (p) => n(p.counts.roundsCollapseRows)),
-        both('Token counts not known to be measured', (p) => n(p.counts.unverifiedProvenanceRows)),
+        both('Token counts not known to come from the tokenizer', (p) => n(p.counts.unverifiedProvenanceRows)),
         both('Times that could not be read', (p) => n(p.counts.unreadableTimeRows)),
         both('Data', quality),
     ];

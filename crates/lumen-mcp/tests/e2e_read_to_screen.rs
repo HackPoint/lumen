@@ -162,14 +162,26 @@ async fn a_real_read_reaches_the_optimizer_screen() {
             billing_mode: lumen_core::savings::BillingView::Api,
             identity_hook_registered: None,
         },
-        &lumen_core::savings::Uncalibrated,
+        &lumen_core::savings::Calibrated,
     )
     .await
     .unwrap();
     assert_eq!(s.all_time.counts.calls, 1);
+    let line = &s.ledger.recent[0];
     assert_eq!(
-        s.all_time.tokens_saved.value, o.lifetime_optimized_tokens,
-        "uncalibrated, the summary's tokens are the ledger's"
+        line.saved_cl100k, o.lifetime_optimized_tokens,
+        "the line keeps the ledger's own cl100k_base count beside Claude's"
+    );
+    // The summary's tokens are the ledger's, converted: no turn read the call, so by the file's
+    // type over both tokenizers, the file held to the 25,000 a Read returns, in Claude's tokens.
+    let kind = lumen_core::calibration::ContentType::from_path(line.path.as_deref().unwrap());
+    let claude = |n: i64| lumen_core::calibration::calibrate(n as u64, kind, None).value as i64;
+    let returned = o.lifetime_full_tokens - o.lifetime_optimized_tokens;
+    assert_eq!(
+        s.all_time.tokens_saved.value,
+        claude(o.lifetime_full_tokens).min(lumen_core::savings::READ_TOKEN_LIMIT)
+            - claude(returned),
+        "the summary's tokens are the ledger's, through the calibration"
     );
     assert_eq!(s.ledger.recent[0].pair.basis, "noSession");
     assert_eq!(
@@ -480,7 +492,7 @@ async fn an_untouched_install_claims_nothing() {
             billing_mode: lumen_core::savings::BillingView::Unset,
             identity_hook_registered: None,
         },
-        &lumen_core::savings::Uncalibrated,
+        &lumen_core::savings::Calibrated,
     )
     .await
     .unwrap();

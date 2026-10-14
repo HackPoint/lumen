@@ -20,6 +20,11 @@
 //! a sentence about provider data or one quoting the copy a fix replaced, is listed in
 //! [`ALLOWED`] with the reason.
 //!
+//! The same scan holds a second rule: the dollar floor is not called "measured". It is priced
+//! from the turns the provider's usage data records, but on token counts the calibration
+//! estimates, so every surface calls it "on record" ([`FLOOR_PHRASES`]); the summary's field
+//! names keep the old word (`Period::measured`), and are not text.
+//!
 //! A text scan, not a reader. It finds the phrases below, across line breaks and in any
 //! case; it does not find a claim made in other words. Code comments in Rust are not read
 //! (only string literals are), and comments in TypeScript and HTML are, because those files
@@ -51,6 +56,32 @@ const PHRASES: &[&str] = &[
     "counted exactly",
     "exactly counted",
 ];
+
+/// Phrases that call the dollar floor, the bold "at least" figure, measured. Matched as
+/// [`PHRASES`] are.
+const FLOOR_PHRASES: &[&str] = &[
+    "measured net",
+    "net measured",
+    "measured dollars",
+    "dollars measured",
+    "none measured",
+    "rows measured",
+    "measured value",
+    "measured extra",
+    "measured one",
+    "measured figure",
+    "measured, at least",
+    "measured, modelled",
+    "measured, the figure",
+];
+
+/// A floor phrase that is not about the floor, and why.
+const FLOOR_ALLOWED: &[Allowed] = &[allow(
+    "docs/e7-ledger-backups/README.md",
+    "adopted the measured value and recorded provenance",
+    "About two ledgers' token counts being merged, the tokenizer's count beside a bytes/4 \
+     guess: no dollar figure, and provenance is the ledger's `token_source = 'measured'`.",
+)];
 
 /// A use of a phrase that is not a claim about a proxy count, and why.
 ///
@@ -199,10 +230,21 @@ fn is_word(c: Option<&char>) -> bool {
     c.is_some_and(|c| c.is_alphanumeric() || *c == '_')
 }
 
-/// Every phrase in `text`, which starts on line `first_line` of `file`.
+/// Every proxy-count phrase in `text`, which starts on line `first_line` of `file`.
 fn find(file: &str, text: &str, first_line: usize, hits: &mut Vec<Hit>) {
+    find_any(PHRASES, file, text, first_line, hits)
+}
+
+/// Every one of `phrases` in `text`, which starts on line `first_line` of `file`.
+fn find_any(
+    phrases: &'static [&'static str],
+    file: &str,
+    text: &str,
+    first_line: usize,
+    hits: &mut Vec<Hit>,
+) {
     let (norm, lines) = normalize(text, first_line);
-    for phrase in PHRASES {
+    for phrase in phrases {
         let p: Vec<char> = phrase.chars().collect();
         let mut i = 0;
         while i + p.len() <= norm.len() {
@@ -354,7 +396,14 @@ struct Scan {
 }
 
 fn scan(root: &Path) -> Scan {
+    scan_for(PHRASES, root)
+}
+
+fn scan_for(phrases: &'static [&'static str], root: &Path) -> Scan {
     let mut scan = Scan::default();
+    let find = |file: &str, text: &str, first_line: usize, hits: &mut Vec<Hit>| {
+        find_any(phrases, file, text, first_line, hits)
+    };
 
     // ── Prose and the app's frontend, read whole ───────────────────────────────────
     let mut text = vec![
@@ -476,6 +525,39 @@ fn premises(scan: &Scan) {
     );
 }
 
+/// The hits no entry of `allowed` covers, and the entries that cover other than they say.
+fn problems(scan: &Scan, allowed: &[Allowed]) -> String {
+    let mut used = vec![0usize; allowed.len()];
+    let mut problems = String::new();
+    for hit in &scan.hits {
+        let by: Vec<usize> = (0..allowed.len())
+            .filter(|&a| allowed[a].file == hit.file && hit.context.contains(allowed[a].needle))
+            .collect();
+        match by.as_slice() {
+            [] => problems.push_str(&format!("  {hit}\n")),
+            [a] => used[*a] += 1,
+            _ => problems.push_str(&format!(
+                "  covered by {} entries {by:?}: {hit}\n",
+                by.len()
+            )),
+        }
+    }
+    for (a, n) in allowed.iter().zip(&used).filter(|(a, n)| a.n != **n) {
+        problems.push_str(&format!(
+            "  ALLOWED entry for {} {:?} covers {n} hit(s), not {}: {}\n",
+            a.file,
+            a.needle,
+            a.n,
+            if *n == 0 {
+                "it is stale — remove it"
+            } else {
+                "it now excuses text nobody looked at"
+            },
+        ));
+    }
+    problems
+}
+
 #[test]
 fn no_user_facing_text_calls_a_proxy_count_exact() {
     let root = workspace_root();
@@ -489,35 +571,7 @@ fn no_user_facing_text_calls_a_proxy_count_exact() {
         scan.hits.len(),
         ALLOWED.len()
     );
-
-    let mut used = vec![0usize; ALLOWED.len()];
-    let mut problems = String::new();
-    for hit in &scan.hits {
-        let by: Vec<usize> = (0..ALLOWED.len())
-            .filter(|&a| ALLOWED[a].file == hit.file && hit.context.contains(ALLOWED[a].needle))
-            .collect();
-        match by.as_slice() {
-            [] => problems.push_str(&format!("  {hit}\n")),
-            [a] => used[*a] += 1,
-            _ => problems.push_str(&format!(
-                "  covered by {} entries {by:?}: {hit}\n",
-                by.len()
-            )),
-        }
-    }
-    for (a, n) in ALLOWED.iter().zip(&used).filter(|(a, n)| a.n != **n) {
-        problems.push_str(&format!(
-            "  ALLOWED entry for {} {:?} covers {n} hit(s), not {}: {}\n",
-            a.file,
-            a.needle,
-            a.n,
-            if *n == 0 {
-                "it is stale — remove it"
-            } else {
-                "it now excuses text nobody looked at"
-            },
-        ));
-    }
+    let problems = problems(&scan, ALLOWED);
     assert!(
         problems.is_empty(),
         "\nUser-facing text claims a proxy token count is exact:\n{problems}\n\
@@ -529,9 +583,27 @@ fn no_user_facing_text_calls_a_proxy_count_exact() {
     );
 }
 
+/// The dollar floor is "on record" wherever a person reads it: "measured" is the provider's
+/// usage data, and the floor also rests on calibrated token counts (`MESSAGING_CONTRACT.md`).
+#[test]
+fn no_user_facing_text_calls_the_dollar_floor_measured() {
+    let root = workspace_root();
+    let scan = scan_for(FLOOR_PHRASES, &root);
+    premises(&scan);
+    let problems = problems(&scan, FLOOR_ALLOWED);
+    assert!(
+        problems.is_empty(),
+        "\nUser-facing text calls the dollar floor measured:\n{problems}\n\
+         The bold \"at least\" figure is the net on record: priced from the provider's usage \
+         data, on calibrated token counts. Say \"on record\". If the text is not about the \
+         floor, add it to FLOOR_ALLOWED in {} saying why.",
+        file!()
+    );
+}
+
 #[test]
 fn every_allowed_entry_states_a_reason() {
-    for a in ALLOWED {
+    for a in ALLOWED.iter().chain(FLOOR_ALLOWED) {
         assert!(
             !a.needle.trim().is_empty(),
             "{}: an empty needle covers the whole file",
@@ -583,6 +655,24 @@ fn the_phrases_are_found_across_lines_and_cases_and_nothing_else() {
     assert!(hits("tokens are exactly as before").is_empty());
     assert!(hits("unexact counting").is_empty());
     assert!(hits("estimated, and labelled so").is_empty());
+
+    let floor = |text: &str| {
+        let mut h = Vec::new();
+        find_any(FLOOR_PHRASES, "t", text, 1, &mut h);
+        h.into_iter().map(|h| h.phrase).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        floor("No dollars\nmeasured this week."),
+        vec!["dollars measured"]
+    );
+    assert_eq!(floor("the Measured net, at least"), vec!["measured net"]);
+    assert_eq!(floor("Rows measured"), vec!["rows measured"]);
+    assert!(
+        floor("p.measured.net").is_empty(),
+        "a field name is not text"
+    );
+    assert!(floor("How it's measured").is_empty());
+    assert!(floor("no dollars on record").is_empty());
 }
 
 #[test]

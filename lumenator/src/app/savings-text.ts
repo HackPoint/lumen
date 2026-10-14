@@ -102,7 +102,7 @@ export function tokensPhrase(n: number): string {
     return `${tokensFigure(n)} ${tokensUnit(n)}`;
 }
 
-/** The measured net in three pieces, the middle one bold. */
+/** The net on record in three pieces, the middle one bold. */
 export interface UsdParts {
     lead: string;
     figure: string;
@@ -223,7 +223,7 @@ export function usdBand(b: Band, highOpen: boolean): string {
     return `${usdSigned(b.low)} to ${usdSigned(b.high)}${highOpen ? ', and the high end is not a bound' : ''}`;
 }
 
-/** A token band, low to high. */
+/** A token band, low to high: `lumen_core::savings::text::tokens_band`. */
 export function tokensBand(b: Band): string {
     return `${tokensSigned(b.low)} to ${tokensSigned(b.high)}`;
 }

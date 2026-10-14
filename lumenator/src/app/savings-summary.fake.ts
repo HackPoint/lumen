@@ -1,6 +1,8 @@
 import type {
     Band,
     BillingView,
+    CalibrationGroup,
+    CalibrationInfo,
     CallLine,
     DataQuality,
     Dollars,
@@ -75,7 +77,7 @@ export function savingsPeriod(over: Partial<SavingsPeriod> = {}): SavingsPeriod 
     };
 }
 
-/** A period that recorded something: `tokens` saved, `usd` measured net (null: none measured). */
+/** A period that recorded something: `tokens` saved, `usd` the net on record (null: none). */
 export function recordedPeriod(tokens: number, usd: number | null, over: Partial<SavingsPeriod> = {}): SavingsPeriod {
     return savingsPeriod({
         tokensSaved: band(tokens),
@@ -88,7 +90,7 @@ export function recordedPeriod(tokens: number, usd: number | null, over: Partial
 
 export function savingsSummary(over: Partial<SavingsSummary> = {}): SavingsSummary {
     return {
-        schema: 1,
+        schema: 2,
         asOf: '2026-10-14T12:00:00Z',
         billingMode: 'api',
         week: savingsPeriod(),
@@ -97,7 +99,7 @@ export function savingsSummary(over: Partial<SavingsSummary> = {}): SavingsSumma
         recommendation: null,
         method: {
             pricesAsOf: '2026-10-13',
-            calibration: { calibrated: false, asOf: null, note: '' },
+            calibration: calibrationInfo(),
             week: '',
             counterfactual: '',
             rounds: '',
@@ -111,9 +113,31 @@ export function savingsSummary(over: Partial<SavingsSummary> = {}): SavingsSumma
     };
 }
 
+/** The calibration as the engine describes it, with no calls in any group unless told otherwise. */
+export function calibrationInfo(over: Partial<CalibrationInfo> = {}): CalibrationInfo {
+    const group = (key: CalibrationGroup['key'], rows: string, tableRatio: Band): CalibrationGroup =>
+        ({ key, rows, tableRatio, calls: 0, filesCl100k: 0, ratio: null });
+    return {
+        calibrated: true,
+        asOf: '2026-10-14',
+        claudeCodeVersion: '2.1.296',
+        note: "Token figures are Claude's tokens, estimated from the cl100k_base counts Lumen records.",
+        groups: [
+            group('opus47on', 'read by Claude Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5',
+                { low: 1.335, value: 1.592, high: 1.794 }),
+            group('opus46before', 'read by Claude Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5',
+                { low: 1.056, value: 1.238, high: 1.344 }),
+            group('unmeasured', 'read by a model the calibration did not measure, or by no turn in the ledger',
+                { low: 1.056, value: 1.415, high: 1.794 }),
+        ],
+        ...over,
+    };
+}
+
 /** A period as `savings-text.cases.json` names it: only what the text reads. */
 export interface CasePeriod {
-    tokensSaved?: number;
+    /** A band of no width, or the band itself. */
+    tokensSaved?: number | Band;
     sharePct?: number | null;
     net?: number | null;
     /** The value of the tokens before the extra rounds; the net unless the case says. */
@@ -140,7 +164,7 @@ export interface CaseSummary {
 
 function casePeriod(c: CasePeriod): SavingsPeriod {
     return savingsPeriod({
-        tokensSaved: band(c.tokensSaved ?? 0),
+        tokensSaved: typeof c.tokensSaved === 'object' ? c.tokensSaved : band(c.tokensSaved ?? 0),
         sharePct: c.sharePct ?? null,
         measured: c.net === undefined || c.net === null
             ? null
