@@ -1,4 +1,17 @@
-import type { Band, Dollars, Modelled, SavingsCounts, SavingsPeriod, SavingsSummary, Unpriced } from './savings-summary';
+import type {
+    Band,
+    BillingView,
+    CallLine,
+    DataQuality,
+    Dollars,
+    Modelled,
+    Recommendation,
+    SavingsCounts,
+    SavingsPeriod,
+    SavingsStatus,
+    SavingsSummary,
+    Unpriced,
+} from './savings-summary';
 
 /**
  * Summaries in the engine's shape, for specs. Test data only: the app receives every figure from
@@ -92,6 +105,95 @@ export function savingsSummary(over: Partial<SavingsSummary> = {}): SavingsSumma
             parts: '',
         },
         ledger: { recent: [], omitted: 0, topGains: [], topLosses: [] },
+        ...over,
+    };
+}
+
+/** A period as `savings-text.cases.json` names it: only what the text reads. */
+export interface CasePeriod {
+    tokensSaved?: number;
+    sharePct?: number | null;
+    net?: number | null;
+    /** The value of the tokens before the extra rounds; the net unless the case says. */
+    gross?: number;
+    extraRounds?: number;
+    modelled?: number | null;
+    unpricedCalls?: number;
+    calls?: number;
+    blockedReads?: number;
+    dataQuality: DataQuality;
+}
+
+/** A summary as `savings-text.cases.json` names it. */
+export interface CaseSummary {
+    billingMode: BillingView;
+    status: SavingsStatus;
+    recommendation?: Recommendation | null;
+    week: CasePeriod;
+    allTime: CasePeriod;
+}
+
+function casePeriod(c: CasePeriod): SavingsPeriod {
+    return savingsPeriod({
+        tokensSaved: band(c.tokensSaved ?? 0),
+        sharePct: c.sharePct ?? null,
+        measured: c.net === undefined || c.net === null
+            ? null
+            : dollars(c.net, { gross: band(c.gross ?? c.net), extraRounds: band(c.extraRounds ?? 0) }),
+        modelled: c.modelled === undefined || c.modelled === null ? null : modelled(c.modelled),
+        unpriced: unpriced({ calls: c.unpricedCalls ?? 0 }),
+        counts: savingsCounts({ calls: c.calls ?? 0, blockedReads: c.blockedReads ?? 0 }),
+        dataQuality: c.dataQuality,
+    });
+}
+
+/** The full summary a case names, the rest as an empty summary has it, as the Rust test builds it. */
+export function caseSummary(c: CaseSummary): SavingsSummary {
+    return savingsSummary({
+        billingMode: c.billingMode,
+        status: c.status,
+        recommendation: c.recommendation ?? null,
+        week: casePeriod(c.week),
+        allTime: casePeriod(c.allTime),
+    });
+}
+
+/** A call line read by a turn of its own, priced, unless told otherwise. */
+export function callLine(over: Partial<CallLine> = {}): CallLine {
+    return {
+        ts: '2026-10-14T11:00:00Z',
+        kind: 'call',
+        tool: 'smart_read',
+        route: 'smart_read',
+        path: '/repo/src/lib.rs',
+        inWeek: true,
+        savedCl100k: 9_000,
+        recordedSavedCl100k: 9_000,
+        savedAgainst: 'wholeFile',
+        fullCl100k: 10_000,
+        readCapped: false,
+        tokensSaved: band(9_000),
+        provenance: 'measured',
+        pair: {
+            basis: 'derived',
+            model: 'claude-opus-4-8',
+            speed: 'standard',
+            region: 'global',
+            rounds: 12,
+            roundsBound: 'sessionEnd',
+            roundsTrusted: true,
+            ttl: '5m',
+            someRoundsUnpriced: false,
+        },
+        extraRounds: 0,
+        extraRoundBasis: 'blockNotRecorded',
+        extraRoundEvidenced: false,
+        dollars: 'measured',
+        modelledValueUsd: null,
+        valueUsd: band(0.11),
+        extraRoundUsd: band(0),
+        netUsd: band(0.11),
+        pricingUnknown: [],
         ...over,
     };
 }

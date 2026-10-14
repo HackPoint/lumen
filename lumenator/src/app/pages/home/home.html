@@ -55,7 +55,11 @@
 
         <lumen-tab-nav />
 
-        <!-- How much Lumen saved, this week and all time. Renders nothing until a summary exists. -->
-        <lumen-savings-headline [summary]="savings()" />
+        <!-- How much Lumen saved, this week and all time. Renders nothing until a summary exists,
+             or until fetching one has failed, which it then says. -->
+        <lumen-savings-headline [summary]="savings()" [error]="savingsError()" />
+
+        <!-- Is it working, and what to do: the summary's status and its one recommendation. -->
+        <lumen-savings-status [summary]="savings()" />
     </div>
 </main>

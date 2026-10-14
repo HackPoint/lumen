@@ -1,11 +1,14 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, effect, inject, signal, untracked } from '@angular/core';
 import { Router } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
 import { IdentityHookPrompt } from '../../components/identity-hook-prompt/identity-hook-prompt';
 import { BillingPrompt } from '../../components/billing-prompt/billing-prompt';
 import { TabNav } from '../../components/tab-nav/tab-nav';
-import { SavingsHeadline, SavingsSummary } from '../../components/savings-headline/savings-headline';
+import { SavingsHeadline } from '../../components/savings-headline/savings-headline';
+import { SavingsStatus } from '../../components/savings-status/savings-status';
 import { RepeatReadsService } from '../../repeat-reads.service';
+import { SessionService } from '../../session.service';
+import { BillingModeService } from '../../billing-mode.service';
 import { TauriBridge } from '../../tauri-bridge';
 
 /** Mirrors the `lumen_startup_health` command's payload. */
@@ -18,8 +21,9 @@ interface StartupHealth {
 }
 
 /**
- * The main window's first screen, which answers three questions only: how much Lumen saved, is
- * it working, and what to do.
+ * The main window's first screen, which answers three questions only: how much Lumen saved (the
+ * savings headline, in bold), is it working and what to do (one status line and at most one
+ * recommendation under it), all from the engine's savings summary.
  *
  * Everything else that used to be here has a place of its own since 1.9.0: the context gauge
  * and its window selector are on Details, with the alert banner that describes them; the spend
@@ -28,7 +32,7 @@ interface StartupHealth {
  */
 @Component({
     selector: 'home',
-    imports: [Firefly, IdentityHookPrompt, BillingPrompt, TabNav, SavingsHeadline],
+    imports: [Firefly, IdentityHookPrompt, BillingPrompt, TabNav, SavingsHeadline, SavingsStatus],
     templateUrl: './home.html',
     styleUrl: './home.css',
     changeDetection: ChangeDetectionStrategy.OnPush
@@ -74,10 +78,27 @@ export class Home implements OnInit {
     readonly setupDone = signal(false);
 
     /**
-     * What the headline shows. Nothing computes a summary yet, so it stays null and the headline
-     * renders nothing; the savings engine sets it.
+     * What the headline shows: the engine's summary, as `lumen_savings_summary` last gave it. The
+     * service fetches it when the app starts, every minute after and whenever the window gets
+     * focus; null until the first fetch succeeds, and the headline then renders nothing.
      */
-    readonly savings = signal<SavingsSummary | null>(null);
+    private readonly session = inject(SessionService);
+    readonly savings = this.session.savingsSummary;
+    /** Why the latest fetch failed: with a summary, it is shown stale; with none, no figure. */
+    readonly savingsError = this.session.savingsError;
+    private readonly billing = inject(BillingModeService);
+
+    constructor() {
+        // A billing choice made here or on Settings changes how the summary says its dollars, and
+        // the summary reads it from the settings file: fetched again once the file says another.
+        let seen: string | null | undefined;
+        effect(() => {
+            const mode = this.billing.setting()?.mode;
+            if (mode === undefined) return;
+            if (seen !== undefined && seen !== mode) untracked(() => this.session.refreshSavingsSummary());
+            seen = mode;
+        });
+    }
 
     ngOnInit(): void {
         // Subscribed before the first read. A reason that arrives later, such as the tray checks
@@ -94,6 +115,9 @@ export class Home implements OnInit {
             })
             .catch(() => { /* non-fatal: proceed normally if command fails */ });
         void this.rr.load();
+        // Coming back to Home from another screen shows the figures as they are now. On the
+        // first open the service's own first fetch is still out.
+        if (this.savings() !== null || this.savingsError() !== null) this.session.refreshSavingsSummary();
     }
 
     private readVersion(): void {

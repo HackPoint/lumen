@@ -300,4 +300,11 @@ describe('Details', () => {
       expect(d.barPct(5, 0)).toBe(0);
     });
   });
+
+  it('links to How it\'s measured, under the Optimizer\'s heading', async () => {
+    await build();
+    const a = el<HTMLAnchorElement>('a.details__how');
+    expect(a.textContent?.trim()).toBe('How the savings are measured');
+    expect(a.getAttribute('href')).toBe('/method');
+  });
 });

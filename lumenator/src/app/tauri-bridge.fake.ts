@@ -67,6 +67,9 @@ export class FakeTauriBridge implements TauriBridge {
   /** Commands that should reject, simulating "not in Tauri" or a DB error. */
   readonly failures = new Set<string>();
 
+  /** Commands that never answer, for what a screen shows before the backend has. */
+  readonly hangs = new Set<string>();
+
   readonly notifications: Array<{ title: string; body: string }> = [];
 
   permissionGranted = true;
@@ -88,6 +91,9 @@ export class FakeTauriBridge implements TauriBridge {
     this.calls.push({ cmd, args });
     if (this.failures.has(cmd)) {
       return Promise.reject(new Error(`fake: ${cmd} failed`));
+    }
+    if (this.hangs.has(cmd)) {
+      return new Promise<T>(() => {});
     }
     return Promise.resolve(this.responses.get(cmd) as T);
   }

@@ -63,11 +63,24 @@ You may rebuild the SVG/markup; keep these three inputs. Internal computeds
 **`<lumen-savings-headline>`** — selector `lumen-savings-headline`
 ```
 summary = input<SavingsSummary | null>(null)
+error   = input<string | null>(null)   // why the latest fetch failed
 // SavingsSummary (src/app/savings-summary.ts) = { week, allTime, … }, each a SavingsPeriod:
 //   { tokensSaved (signed), measured (the bold "at least" dollars, null = none measured),
 //     modelled (shown beside it, never in it), unpriced (calls with tokens and no dollars), … }
 ```
-Null renders nothing. Fed by the savings summary; the headline computes nothing.
+Null with no error renders nothing; null with an error says it could not be read, with no
+figure; a summary with an error keeps its figures, marked not up to date as of its `asOf`. Fed
+by the savings summary; the headline computes nothing. Every phrase comes from
+`src/app/savings-text.ts`, which says each figure as `lumen` and the tray do
+(`lumen_core::savings::text`), held to it by `savings-text.cases.json`: change wording there and
+in the Rust module together, never in a template.
+
+**`<lumen-savings-status>`** — selector `lumen-savings-status`
+```
+summary = input<SavingsSummary | null>(null)
+```
+The status line ("Status: working" / "not working: <reason>" / "no data") and at most one
+recommendation with its step (Run Setup, `lumen doctor`). Null renders nothing.
 
 **`<cost>`** — selector `cost`
 ```
@@ -120,10 +133,18 @@ Exposes cost computeds (totalCost, cacheSavings, cacheHitRate, fmt…). Restyle 
    three questions only — how much did I save, is it working, what should I do:
    - **Home** (route `/`). The hero is the **savings headline**
      (`<lumen-savings-headline>`): tokens saved and $ saved, net and signed, this
-     week and all time, both bold. Under it go the "is it working" status and the
-     "what to do" recommendation slots. With no data each renders nothing (or a
-     neutral sentence once a summary says nothing was recorded), never a zero
-     dressed as a figure. The Setup and billing prompts sit above the tabs.
+     week and all time, both bold, for every billing mode: the dollars are the
+     measured net, a floor ("at least $X saved, net"; a loss "net loss of at
+     most $X"), and "at API prices" unless the user pays per token, after the
+     share of tokens ("≈ 92% fewer tokens from file and tool reads"). Modelled dollars and
+     unpriced calls stand beside the figure as tags, never in it. Under it,
+     `<lumen-savings-status>`: the "is it working" line and the "what to do"
+     recommendation. With no data each renders nothing (or a neutral sentence
+     once a summary says nothing was recorded), never a zero dressed as a figure.
+     The Setup and billing prompts sit above the tabs.
+   - **How it's measured** (route `/method`, not a tab): reached from the
+     headline and from Details. The rules, the price table and its date,
+     calibration, every count and band, and the per-call ledger as tables.
    - **Details** (route `/details`). Uses the **ring gauge** as its hero, with the
      window selector and the alert banner, then the Optimizer's token ratio,
      breakdowns and provenance counts. The ring is the precise, number-annotated

@@ -35,6 +35,11 @@ struct Cli {
     #[arg(long, hide = true)]
     no_anim: bool,
 
+    /// Bare `lumen`'s line as it stood at this time (unix milliseconds or ISO-8601), as
+    /// `lumen report --as-of` gives the detail. For tests and for reproducing a figure.
+    #[arg(long, hide = true, value_name = "TIME")]
+    as_of: Option<String>,
+
     /// Bare `lumen` prints the headline; each subcommand is one of the views behind it.
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -142,8 +147,10 @@ impl LegacyFaultFlags {
 /// without a terminal, a ledger or a network.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
-    /// Bare `lumen`: the one headline line.
-    Headline,
+    /// Bare `lumen`: the one headline line, as of now or as of `as_of`.
+    Headline {
+        as_of: Option<String>,
+    },
     /// The dashboard. `moved` is set for the pre-1.9.0 spelling, bare `lumen --no-anim`.
     Dash {
         no_anim: bool,
@@ -169,7 +176,7 @@ fn route(cli: Cli) -> Route {
             no_anim: true,
             moved: true,
         },
-        None => Route::Headline,
+        None => Route::Headline { as_of: cli.as_of },
         Some(Cmd::Dash { no_anim }) => Route::Dash {
             no_anim: no_anim || cli.no_anim,
             moved: false,
@@ -191,8 +198,13 @@ fn route(cli: Cli) -> Route {
 /// The one line bare `lumen` prints, from the savings summary: the tray menu's line is made
 /// from the same summary by the same module, so the two cannot disagree. It names `lumen dash`
 /// because until 1.9.0 bare `lumen` was the dashboard.
-fn headline_line() -> (String, i32) {
-    match savings::summary(lumen_core::repeat::now_ms()) {
+fn headline_line(as_of: Option<&str>) -> (String, i32) {
+    let at = match as_of.map(savings::parse_as_of) {
+        Some(Ok(t)) => t,
+        Some(Err(e)) => return (format!("lumen: --as-of: {e}"), 2),
+        None => lumen_core::repeat::now_ms(),
+    };
+    match savings::summary(at) {
         Ok(s) => (lumen_core::savings::text::headline_line(&s), 0),
         Err(e) => (savings::headline_error(&e), 1),
     }
@@ -235,15 +247,27 @@ fn stray_no_anim(cli: &Cli) -> bool {
     cli.no_anim && !matches!(cli.cmd, None | Some(Cmd::Dash { .. }))
 }
 
+/// True when the hidden `--as-of` was given before a command, where only bare `lumen` reads it.
+fn stray_as_of(cli: &Cli) -> bool {
+    cli.as_of.is_some() && cli.cmd.is_some()
+}
+
 fn main() {
     let cli = Cli::parse();
     if stray_no_anim(&cli) {
         eprintln!("lumen: --no-anim only changes `lumen dash`, so it does nothing here");
     }
+    if stray_as_of(&cli) {
+        eprintln!("lumen: --as-of before a command does nothing; `lumen report --as-of` takes it");
+    }
     let code = match route(cli) {
-        Route::Headline => {
-            let (line, code) = headline_line();
-            println!("{line}");
+        Route::Headline { as_of } => {
+            let (line, code) = headline_line(as_of.as_deref());
+            if code == 2 {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
             code
         }
         Route::SavingsDetail { json, as_of } => savings_detail(json, as_of.as_deref()),
@@ -480,7 +504,24 @@ mod tests {
 
     #[test]
     fn bare_lumen_is_the_headline() {
-        assert_eq!(routed(&[]), Route::Headline);
+        assert_eq!(routed(&[]), Route::Headline { as_of: None });
+        assert_eq!(
+            routed(&["--as-of", "1791806400000"]),
+            Route::Headline {
+                as_of: Some("1791806400000".into())
+            }
+        );
+    }
+
+    #[test]
+    fn as_of_before_a_command_is_said_to_do_nothing() {
+        let parsed = |args: &[&str]| {
+            let argv = std::iter::once("lumen").chain(args.iter().copied());
+            Cli::try_parse_from(argv).unwrap()
+        };
+        assert!(stray_as_of(&parsed(&["--as-of", "1", "dash"])));
+        assert!(!stray_as_of(&parsed(&["--as-of", "1"])));
+        assert!(!stray_as_of(&parsed(&["report", "--as-of", "1"])));
     }
 
     #[test]

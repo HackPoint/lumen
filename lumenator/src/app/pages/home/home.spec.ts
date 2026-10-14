@@ -304,34 +304,79 @@ describe('Home', () => {
       expect(said).toEqual([]);
     });
 
-    it('puts the savings headline first, under the navigation', async () => {
+    it('puts the savings headline first under the navigation, and the status under it, last', async () => {
       await build();
       const nav = el<HTMLElement>('nav.tab-nav');
       const headline = el<HTMLElement>('lumen-savings-headline');
       expect(nav.compareDocumentPosition(headline) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(headline.nextElementSibling).toBeNull();
+      expect(headline.nextElementSibling?.tagName).toBe('LUMEN-SAVINGS-STATUS');
+      expect(headline.nextElementSibling?.nextElementSibling).toBeNull();
     });
 
-    it('claims no saving before a summary exists: the headline renders nothing', async () => {
-      const h = await build();
+    it('claims no saving before the summary has come: the headline renders nothing', async () => {
+      const h = await build((b) => b.hangs.add('lumen_savings_summary'));
       expect(h.savings()).toBeNull();
       expect(el<HTMLElement>('lumen-savings-headline').childElementCount).toBe(0);
+      expect(el<HTMLElement>('lumen-savings-status').childElementCount).toBe(0);
       expect(text()).not.toMatch(/sav(ed|ing)/i);
       expect(text()).not.toContain('$');
     });
 
-    it('shows the headline the summary gives it', async () => {
-      const h = await build();
-      const summary: SavingsSummary = savingsSummary({
+    it('shows the summary the engine sends: bold figures, the status, and what to do', async () => {
+      await build((b) => b.responses.set('lumen_savings_summary', savingsSummary({
+        billingMode: 'api',
         week: recordedPeriod(1_200, 0.5),
         allTime: recordedPeriod(-400, -1.25),
-        status: { state: 'working' },
+        status: { state: 'notWorking', reason: 'Lumen cost more than it saved: net loss of at most $1.25 this week' },
+        recommendation: { code: 'smallSavings', text: 'Send only larger files.' },
+      })));
+      await settle();
+      const strong = Array.from(fixture.nativeElement.querySelectorAll('lumen-savings-headline strong'))
+        .map((e) => (e as HTMLElement).textContent?.replace(/\s/g, ' '));
+      expect(strong).toEqual(['≈ 1,200', '$0.50', '≈ 400', '$1.25']);
+      expect(el<HTMLElement>('lumen-savings-headline').textContent).toContain('net loss of at most');
+      expect(el<HTMLElement>('.status__line').textContent?.replace(/\s+/g, ' ').trim())
+        .toBe('Status: not working: Lumen cost more than it saved: net loss of at most $1.25 this week');
+      expect(el<HTMLElement>('.status__rec-text').textContent).toBe('Send only larger files.');
+    });
+
+    it('a failed first load says so, and shows no figure and no status', async () => {
+      await build((b) => b.failures.add('lumen_savings_summary'));
+      await settle();
+      expect(el<HTMLElement>('lumen-savings-headline').textContent?.replace(/\s+/g, ' ').trim())
+        .toBe("Lumen's savings could not be read: fake: lumen_savings_summary failed.");
+      expect(fixture.nativeElement.querySelector('lumen-savings-headline strong')).toBeNull();
+      expect(el<HTMLElement>('lumen-savings-status').childElementCount).toBe(0);
+    });
+
+    it('a failed refresh keeps the last good figures on screen, marked as not up to date', async () => {
+      await build((b) => b.responses.set('lumen_savings_summary', savingsSummary({
+        week: recordedPeriod(1_200, 0.5), allTime: recordedPeriod(5_000, 2), status: { state: 'working' },
+      })));
+      await settle();
+      bridge.failures.add('lumen_savings_summary');
+      window.dispatchEvent(new Event('focus'));
+      await settle();
+      expect(el<HTMLElement>('.headline__stale').textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Not up to date: the latest refresh failed (fake: lumen_savings_summary failed). These figures are as of 2026-10-14 12:00:00 UTC.',
+      );
+      const strong = Array.from(fixture.nativeElement.querySelectorAll('lumen-savings-headline strong'))
+        .map((e) => (e as HTMLElement).textContent?.replace(/\s/g, ' '));
+      expect(strong).toEqual(['≈ 1,200', '$0.50', '≈ 5,000', '$2.00']);
+    });
+
+    it('fetches the summary again once a billing choice is saved, since it changes how dollars are said', async () => {
+      await build((b) => {
+        b.responses.set('get_billing_mode_setting', billing({ mode: null }));
+        b.responses.set('set_billing_mode_setting', billing({ mode: 'api' }));
       });
-      h.savings.set(summary);
-      fixture.detectChanges();
-      expect(text()).toContain('This week');
-      expect(text()).toContain('+1,200');
-      expect(text()).toContain('−$1.25');
+      await settle();
+      const before = bridge.countOf('lumen_savings_summary');
+      const api = Array.from(el<HTMLElement>('lumen-billing-prompt section').querySelectorAll('button'))
+        .find((b) => b.textContent?.includes('API'))!;
+      api.click();
+      await settle();
+      expect(bridge.countOf('lumen_savings_summary')).toBe(before + 1);
     });
   });
 

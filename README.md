@@ -287,9 +287,20 @@ Here is what each one means, where it comes from, and any honesty caveat.
 
 ### Home
 
-The top of Home is the savings headline: tokens saved and dollars saved, net and signed, this
-week and all time. A period that cost more than it saved shows as a loss. Until the savings
-summary lands it shows nothing at all, not a zero, because nothing has computed a figure yet.
+The top of Home is the savings headline: tokens saved and dollars saved, net, this week and all
+time, both in bold, from the savings engine's summary of your own ledger. The dollar figure is the
+measured net, a floor: a gain reads "at least $X saved, net", and a loss, whose floor is the most
+it can be, "net loss of at most $X" (or "net loss under half a cent"), in red. On a subscription,
+or before you have said how you pay, the dollars are "at API prices", since a plan is not billed
+per token, after the share of tokens Lumen kept out of context ("≈ 92% fewer tokens from file
+and tool reads this week"). What may be worth more (modelled) and the calls with tokens and no
+dollars (unpriced) are tags beside the figure, never in it. Under it: whether Lumen is working
+(a loss whose band reaches a gain says Lumen *may* have cost more than it saved), and the one
+thing to do, with its step (Run Setup, or `lumen doctor`). "How it's measured", from the
+headline and from Details, has every rule, the price table and its date, whether token counts
+are calibrated, each figure's band and count, and the newest 200 calls. The figures are
+refreshed every minute and when the window gets focus; if a refresh fails, the last figures
+stay, marked as not up to date. Bare `lumen` and the tray say the same figures in the same words.
 
 ### Details and Settings
 

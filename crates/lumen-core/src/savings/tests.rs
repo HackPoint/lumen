@@ -326,9 +326,21 @@ fn a_week_that_lost_is_shown_negative_and_the_status_says_so() {
     let net = s.week.measured.unwrap().net;
     assert!(net.value < 0.0, "{net:?}");
     assert!(net.low <= net.value);
-    assert!(matches!(&s.status, Status::NotWorking { reason } if reason.contains('\u{2212}')));
+    // Its floor is the most it can have lost; its band's high end, which leaves the modelled
+    // round out, is a gain: it may have.
+    assert!(net.high > 0.0, "premise: {net:?}");
+    assert_eq!(
+        s.status,
+        Status::NotWorking {
+            reason: format!(
+                "Lumen may have cost more than it saved: {} this week",
+                text::usd_phrase(net.value)
+            )
+        }
+    );
+    assert!(text::usd_phrase(net.value).starts_with("net loss of at most $"));
     let line = text::tray_line(&s).unwrap();
-    assert!(line.starts_with("Saved at least \u{2212}$"), "{line}");
+    assert!(line.starts_with("Net loss of at most $"), "{line}");
     assert!(line.ends_with("not working"), "{line}");
     // A loss with its rounds cut short by a compaction says so.
     assert_eq!(s.recommendation.unwrap().code, "compactsEarly");
@@ -345,7 +357,7 @@ fn an_empty_ledger_has_no_figures_and_says_nothing_it_did_not_measure() {
     assert_eq!(s.status, Status::NoData);
     assert_eq!(s.recommendation, None);
     assert_eq!(text::tray_line(&s), None);
-    assert!(text::headline_line(&s).contains("no Lumen call recorded yet"));
+    assert!(text::headline_line(&s).contains("no Lumen activity recorded yet"));
 }
 
 #[test]
@@ -730,7 +742,8 @@ fn an_unrecorded_speed_region_and_cache_duration_make_the_dollars_a_floor() {
     );
     assert!(c_lo < c_hi);
 
-    // The reasons survive into the period, in the app's words, and the headline says "at least".
+    // The reasons survive into the period, in the app's words, and the figure is a floor: for a
+    // loss, the most it can be.
     for want in [
         rates::Shortfall::SpeedUnknown,
         rates::Shortfall::GeoUnknown,
@@ -739,8 +752,20 @@ fn an_unrecorded_speed_region_and_cache_duration_make_the_dollars_a_floor() {
         assert!(s.week.usd_shortfalls.contains(&want.describe()), "{want:?}");
     }
     let tray = text::tray_line(&s).unwrap();
-    assert!(tray.starts_with("Saved at least "), "{tray}");
-    assert!(text::headline_line(&s).contains("at least"));
+    assert!(tray.starts_with("Net loss of at most $"), "{tray}");
+    assert!(text::headline_line(&s).contains("net loss of at most $"));
+    // A floor that is a loss while its band reaches a gain is a loss that may not have been.
+    let net = s.week.measured.unwrap().net;
+    assert!(net.value < 0.0 && net.high > 0.0, "premise: {net:?}");
+    assert_eq!(
+        s.status,
+        Status::NotWorking {
+            reason: format!(
+                "Lumen may have cost more than it saved: {} this week",
+                text::usd_phrase(net.value)
+            )
+        }
+    );
 }
 
 #[test]
@@ -821,7 +846,7 @@ fn a_call_before_the_week_is_in_all_time_only() {
 }
 
 #[test]
-fn a_subscription_tray_line_is_in_tokens_and_an_api_one_in_dollars() {
+fn a_subscription_line_has_its_tokens_and_the_dollars_at_api_prices() {
     let l = derived_ledger();
     let api = run(&l);
     assert!(
@@ -838,12 +863,26 @@ fn a_subscription_tray_line_is_in_tokens_and_an_api_one_in_dollars() {
         },
         &Uncalibrated,
     );
+    let usd = text::usd_signed(sub.week.measured.unwrap().net.value);
+    let share = text::share_phrase(&sub.week).unwrap();
     assert_eq!(
         text::tray_line(&sub).unwrap(),
-        "Saved \u{2248} 10,000 tokens this week \u{b7} working"
+        format!(
+            "This week: {share}; \u{2248}\u{a0}10,000 tokens saved, net; at least {usd} saved, net at \
+             API prices \u{b7} working"
+        )
     );
-    assert!(!text::headline_line(&sub).contains('$'));
+    let line = text::headline_line(&sub);
+    assert!(
+        line.contains(&format!("at least {usd} saved, net at API prices")),
+        "{line}"
+    );
+    assert!(
+        line.contains("fewer tokens from file and tool reads"),
+        "{line}"
+    );
     assert!(text::headline_line(&api).contains("at least $"));
+    assert!(!text::headline_line(&api).contains("at API prices"));
     assert!(!text::headline_line(&api).contains("modelled"));
 }
 
@@ -1751,7 +1790,7 @@ fn blocked_reads_with_no_lumen_call_say_the_intercept_costs_and_saves_nothing() 
     // The tray and the one-liner say what the figure is: blocked Reads alone.
     let tray = text::tray_line(&s).unwrap();
     assert!(
-        tray.starts_with("Saved at least \u{2212}$0.07 this week (2 blocked Reads) \u{b7} "),
+        tray.starts_with("Net loss of at most $0.07 this week (2 blocked Reads) \u{b7} "),
         "{tray}"
     );
     assert!(text::headline_line(&s).contains("(2 blocked Reads)"));
@@ -1843,23 +1882,21 @@ fn the_bold_figure_is_the_measured_part_alone_and_the_rest_is_said_beside_it() {
     );
     assert_eq!(w.tokens_saved.value, 10_000 + 6_000 + 5_000 + 4_000);
 
-    let figure = text::usd_signed(measured.net.value);
+    // The figure is the measured net, a loss here: the most it can be.
+    let phrase = text::usd_phrase(measured.net.value);
+    assert!(phrase.starts_with("net loss of at most $"), "{phrase}");
     let beside = format!(
         "({} modelled; 2 calls unpriced)",
         text::usd_plus(modelled.value.value)
     );
     let tray = text::tray_line(&s).unwrap();
     assert!(
-        tray.starts_with(&format!(
-            "Saved at least {figure} this week {beside} \u{b7} "
-        )),
+        tray.starts_with(&format!("N{} this week {beside} \u{b7} ", &phrase[1..])),
         "{tray}"
     );
     let headline = text::headline_line(&s);
     assert!(
-        headline.contains(&format!(
-            ", at least {figure} net this week {beside}, at least "
-        )),
+        headline.contains(&format!("; {phrase} {beside} \u{b7} all time: ")),
         "{headline}"
     );
     assert!(!headline.contains('\n'));
@@ -1882,4 +1919,73 @@ fn a_sign_is_never_lost_to_rounding() {
     assert_eq!(text::usd_plus(0.0), "$0.00");
     assert_eq!(text::usd_signed(-123.4), "\u{2212}$123");
     assert_eq!(text::usd_plus(1.5), "+$1.50");
+}
+
+/// A loss every end of whose band is a loss is one Lumen did cause: inline text for
+/// compress_logs saves nothing and pays a round on evidence.
+#[test]
+fn a_loss_whose_band_is_a_loss_throughout_says_lumen_cost_more() {
+    let mut l = derived_ledger();
+    let c = &mut l.calls[0];
+    c.tool = "mcp__lumen__compress_logs".into();
+    c.routed_via = "compress_logs".into();
+    c.path = INLINE_PATH.into();
+    let s = run(&l);
+    let d = s.week.measured.unwrap();
+    assert!(d.net.high <= 0.0 && !d.high_open, "premise: {d:?}");
+    assert_eq!(
+        s.status,
+        Status::NotWorking {
+            reason: format!(
+                "Lumen cost more than it saved: {} this week",
+                text::usd_phrase(d.net.value)
+            )
+        }
+    );
+
+    // The same loss in a session that may still be running (no compaction ends its R, and a
+    // turn came ten minutes ago): its high end is no bound, so the loss is not certain.
+    l.boundaries.clear();
+    l.turns.push(turn("t6", "s", NOW - 600_000, SONNET));
+    let s = run(&l);
+    let d = s.week.measured.unwrap();
+    assert!(d.net.high <= 0.0 && d.high_open, "premise: {d:?}");
+    assert_eq!(
+        s.status,
+        Status::NotWorking {
+            reason: format!(
+                "Lumen may have cost more than it saved: {} this week",
+                text::usd_phrase(d.net.value)
+            )
+        }
+    );
+}
+
+/// A dollar figure that is not a number is left out, said, and never printed.
+#[test]
+fn a_figure_that_is_not_a_number_is_never_shown_as_one() {
+    let mut s = run(&derived_ledger());
+    let mut d = s.week.measured.unwrap();
+    d.net.value = f64::NAN;
+    s.week.measured = Some(d);
+    s.week.modelled = Some(Modelled {
+        rows: 1,
+        value: Band::exact(f64::INFINITY),
+    });
+    s.week.share_pct = Some(f64::NAN);
+    let p = finite_only(s.week.clone());
+    assert_eq!((p.measured, p.modelled, p.share_pct), (None, None, None));
+    assert_eq!(
+        p.data_quality,
+        DataQuality::Partial {
+            reason: NOT_A_NUMBER.to_string()
+        }
+    );
+    // And the words never print one, whatever reaches them.
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(text::usd_signed(x), "no figure");
+        assert_eq!(text::usd_phrase(x), "no figure");
+        assert_eq!(text::share_text(x), "no figure");
+    }
+    assert!(!text::headline_line(&s).contains("NaN"));
 }

@@ -250,3 +250,45 @@ export interface SavingsSummary {
     method: SavingsMethod;
     ledger: CallLedger;
 }
+
+/** The summary schema this build reads: `lumen_core::savings::SCHEMA`. */
+export const SAVINGS_SCHEMA = 1;
+
+/**
+ * Why `v` is not a summary this window can show, or null when it is one. A summary of another
+ * schema may mean other things by the same names, so it is not shown as if it did not.
+ */
+export function notASummary(v: unknown): string | null {
+    if (typeof v !== 'object' || v === null) {
+        return 'the app answered with something that is not a savings summary';
+    }
+    const s = v as Partial<SavingsSummary>;
+    if (s.schema !== SAVINGS_SCHEMA) {
+        return `the app sent a savings summary of schema ${String(s.schema)}, and this window reads schema ${SAVINGS_SCHEMA}`;
+    }
+    if (typeof s.week !== 'object' || s.week === null || typeof s.allTime !== 'object' || s.allTime === null) {
+        return 'the savings summary has no periods';
+    }
+    if (![s.week, s.allTime].every(figuresAreNumbers)) {
+        return 'the savings summary holds a figure that is not a number';
+    }
+    return null;
+}
+
+/** A band whose three ends are finite numbers. */
+function isBand(b: unknown): boolean {
+    const v = b as Partial<Band> | null;
+    return typeof v === 'object' && v !== null && [v.low, v.value, v.high].every((x) => typeof x === 'number' && Number.isFinite(x));
+}
+
+/**
+ * Every figure the headline shows is a finite number: the tokens, the share, and each part of
+ * the measured and modelled dollars. JSON has no NaN, so an engine figure that was one arrives as
+ * null, which a template would read as $0.00.
+ */
+function figuresAreNumbers(p: SavingsPeriod): boolean {
+    const share = p.sharePct === null || (typeof p.sharePct === 'number' && Number.isFinite(p.sharePct));
+    const measured = !p.measured || (isBand(p.measured.gross) && isBand(p.measured.extraRounds) && isBand(p.measured.net));
+    const modelled = !p.modelled || isBand(p.modelled.value);
+    return isBand(p.tokensSaved) && share && measured && modelled;
+}

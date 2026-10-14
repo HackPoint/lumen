@@ -1,0 +1,21 @@
+@if (line(); as l) {
+    <section class="status" aria-labelledby="status-title">
+        <h2 class="visually-hidden" id="status-title">Is it working</h2>
+        <p class="status__line" [attr.data-state]="state()">
+            <span class="status__dot" aria-hidden="true"></span>
+            <span class="status__text">{{ l }}</span>
+        </p>
+        @if (recommendation(); as r) {
+            <div class="status__rec" [attr.data-code]="r.code">
+                <h3 class="status__rec-title">What to do</h3>
+                <p class="status__rec-text">@for (p of parts(); track $index) {@if (p.code) {<code>{{ p.text }}</code>} @else {<span>{{ p.text }}</span>}}</p>
+                @if (runsSetup()) {
+                    <button type="button" class="status__btn" (click)="runSetup()">Run Setup</button>
+                }
+                @if (runsDoctor()) {
+                    <p class="status__action">In a terminal: <code>lumen doctor</code></p>
+                }
+            </div>
+        }
+    </section>
+}

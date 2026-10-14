@@ -8,7 +8,7 @@ import type {
 } from './components';
 import { aggTokens, isFloor, price, shortfalls } from './prices';
 import type { ModelTokens, PriceTable, Priced } from './prices';
-import type { SavingsSummary } from './savings-summary';
+import { notASummary, type SavingsSummary } from './savings-summary';
 
 // Fallback tiers, used ONLY when the model is unrecognised.
 const CONTEXT_TIERS = [200_000, 500_000, 1_000_000] as const;
@@ -542,15 +542,41 @@ export class SessionService {
 
   /**
    * What Lumen saved, from `lumen_savings_summary`: the engine's summary, which this service
-   * passes on and never computes from. Null until the first fetch resolves.
+   * passes on and never computes from. Null until the first fetch succeeds.
+   *
+   * A later fetch that fails leaves the last good summary here and says why in
+   * {@link savingsError}: those figures are true as of their own `asOf`, which the headline shows
+   * beside them, while blanking them would read as nothing saved.
    */
   readonly savingsSummary = signal<SavingsSummary | null>(null);
 
-  /** Re-fetch the savings summary. */
+  /**
+   * Why the latest fetch of the summary failed, or null once one succeeds. With a summary still
+   * held, that summary is stale; with none, there is no figure to show at all.
+   */
+  readonly savingsError = signal<string | null>(null);
+
+  /** Fetches started, so an answer that a later fetch overtook is dropped. */
+  private savingsFetches = 0;
+
+  /** Re-fetch the savings summary: every {@link USAGE_REFRESH_MS}, and when the window gets focus. */
   refreshSavingsSummary(): void {
+    const mine = ++this.savingsFetches;
     this.bridge.invoke<SavingsSummary>('lumen_savings_summary')
-        .then((s) => this.savingsSummary.set(s))
-        .catch(() => { /* not in Tauri / db not ready — ignore */ });
+        .then((s) => {
+          if (mine !== this.savingsFetches) return;
+          const problem = notASummary(s);
+          if (problem !== null) {
+            this.savingsError.set(problem);
+            return;
+          }
+          this.savingsSummary.set(s);
+          this.savingsError.set(null);
+        })
+        .catch((e: unknown) => {
+          if (mine !== this.savingsFetches) return;
+          this.savingsError.set(typeof e === 'string' ? e : e instanceof Error ? e.message : String(e));
+        });
   }
 
   // ── Context diagnostics ───────────────────────────────────────────────────
@@ -911,7 +937,14 @@ export class SessionService {
       this.refreshOptimizerStats();
       this.refreshSavingsSummary();
     }, USAGE_REFRESH_MS);
-    inject(DestroyRef).onDestroy(() => clearInterval(refreshTimer));
+    // The savings summary again when the window gets focus: someone coming back to it from a
+    // session expects what Lumen saved since, not a minute-old figure.
+    const onFocus = () => this.refreshSavingsSummary();
+    if (typeof window !== 'undefined') window.addEventListener('focus', onFocus);
+    inject(DestroyRef).onDestroy(() => {
+      clearInterval(refreshTimer);
+      if (typeof window !== 'undefined') window.removeEventListener('focus', onFocus);
+    });
   }
 
   /**

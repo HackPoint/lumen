@@ -440,3 +440,373 @@ async fn the_cli_and_the_app_return_the_same_bytes_from_one_ledger() {
     assert_eq!(again[0]["savedCl100k"], -600);
     assert_eq!(again[0]["extraRoundBasis"], "freshAfterStub");
 }
+
+// ── what `lumen` and `lumen report` say, from fixture ledgers ───────────────────────────────
+//
+// The app's headline is tested on the text it renders for each state, from summaries in the case
+// list it shares with lumen_core::savings::text (lumenator/src/app/savings-text.cases.json).
+// These hold the terminal to the same states from real ledgers, through the built binary: each
+// figure is read back from `lumen report --json` and must be what the line says, in the words the
+// window uses.
+
+use lumen_core::savings::text;
+
+/// `lumen <args>` in the sandbox, as `cli_json` runs it: (stdout, stderr, exit code).
+fn run_lumen(home: &Path, db: &Path, spool: &Path, args: &[&str]) -> (String, String, i32) {
+    let out = Command::new(env!("CARGO_BIN_EXE_lumen"))
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("LUMEN_DB", db)
+        .env("LUMEN_FAULT_SPOOL", spool)
+        .env("TZ", "UTC")
+        .output()
+        .expect("the lumen binary runs");
+    (
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// A sandbox: its home, ledger and spool paths, nothing written yet.
+fn sandbox() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let db = dir.path().join("lumen.db");
+    let spool = dir.path().join("faults.jsonl");
+    (dir, home, db, spool)
+}
+
+/// `lumen --as-of`, `lumen report --as-of` and the summary they come from.
+fn surfaces(home: &Path, db: &Path, spool: &Path) -> (String, String, serde_json::Value) {
+    let (line, err, code) = run_lumen(home, db, spool, &["--as-of", AS_OF]);
+    assert_eq!(code, 0, "lumen: {err}");
+    let (detail, err, code) = run_lumen(home, db, spool, &["report", "--as-of", AS_OF]);
+    assert_eq!(code, 0, "lumen report: {err}");
+    let json = serde_json::from_str(&cli_json(home, db, spool)).unwrap();
+    (line.trim_end().to_string(), detail, json)
+}
+
+fn billing(db: &Path, mode: Option<&str>) {
+    let path = lumen_core::settings::settings_path(db);
+    match mode {
+        Some(m) => std::fs::write(&path, format!("{{\"billing_mode\": \"{m}\"}}")).unwrap(),
+        None => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// The phrase a period's figures read as in the line, from the summary's own values: its tokens
+/// and its measured net, in the words of the app's box for it.
+fn clause(p: &serde_json::Value, basis: &str) -> String {
+    format!(
+        "{}; {}{basis}",
+        text::tokens_phrase(p["tokensSaved"]["value"].as_i64().unwrap()),
+        text::usd_phrase(p["measured"]["net"]["value"].as_f64().unwrap())
+    )
+}
+
+#[test]
+fn lumen_says_each_billing_mode_as_the_app_does_and_its_dollars_are_the_measured_net() {
+    // SAFETY: as in the parity test; nothing else in this binary reads TZ.
+    unsafe { std::env::set_var("TZ", "UTC") };
+    let (_dir, home, db, spool) = sandbox();
+    realistic(&db, &spool);
+
+    for (mode, view, basis) in [
+        (Some("api"), "API", ""),
+        (Some("subscription"), "subscription", " at API prices"),
+        (None, "not set", " at API prices"),
+    ] {
+        billing(&db, mode);
+        let (line, detail, v) = surfaces(&home, &db, &spool);
+        let (week, all) = (&v["week"], &v["allTime"]);
+        assert!(line.contains(&clause(week, basis)), "{mode:?}: {line}");
+        assert!(line.contains(&clause(all, basis)), "{mode:?}: {line}");
+        // The bold figure is the measured net: not the gross, and the modelled said beside it.
+        let net = text::usd_signed(all["measured"]["net"]["value"].as_f64().unwrap());
+        let gross = text::usd_signed(all["measured"]["gross"]["value"].as_f64().unwrap());
+        assert_ne!(net, gross, "premise: the extra rounds cost something");
+        assert!(!line.contains(&gross), "{line}");
+        assert!(
+            line.contains(&format!("at least {net} saved, net")),
+            "{line}"
+        );
+        let modelled = text::usd_plus(all["modelled"]["value"]["value"].as_f64().unwrap());
+        assert!(
+            line.contains(&format!("({modelled} modelled; ")),
+            "{mode:?}: {line}"
+        );
+        let unpriced = all["unpriced"]["calls"].as_i64().unwrap();
+        assert!(
+            line.contains(&format!(
+                "{} calls unpriced)",
+                text::tokens_signed(unpriced)
+            )),
+            "{mode:?}: {line}"
+        );
+        // Where the dollars are at API prices, the share of tokens comes first, in the app's
+        // words.
+        let share = format!(
+            "Lumen this week: \u{2248}\u{a0}{} tokens from file and tool reads; ",
+            text::share_text(week["sharePct"].as_f64().unwrap())
+        );
+        assert_eq!(
+            line.contains(&share),
+            mode != Some("api"),
+            "{mode:?}: {line}"
+        );
+        assert_eq!(
+            line.contains("at API prices"),
+            mode != Some("api"),
+            "{line}"
+        );
+
+        assert!(detail.contains(&format!("Billing: {view}")), "{detail}");
+        assert!(
+            detail.contains(&format!(
+                "measured               {}{basis}, from ",
+                text::usd_phrase(week["measured"]["net"]["value"].as_f64().unwrap())
+            )),
+            "{mode:?}: {detail}"
+        );
+        // Rows with no session: partial data, said why.
+        assert!(
+            detail.contains("partial data: 3 rows with no session recorded"),
+            "{detail}"
+        );
+    }
+}
+
+/// One session that read a call's result: the turn that made it, the call, and `after` turns.
+fn read_session(l: &mut Ledger<'_>, s: &str, start: i64, after: i64) {
+    l.turn(
+        s,
+        start,
+        "claude-opus-4-8",
+        Some("standard"),
+        30_000,
+        Some((0, 2_000)),
+        None,
+    );
+    for k in 0..after {
+        l.turn(
+            s,
+            start + 5_000 + k * 30_000,
+            "claude-opus-4-8",
+            Some("standard"),
+            32_000 + k * 1_000,
+            Some((0, 2_000)),
+            None,
+        );
+    }
+}
+
+#[test]
+fn a_losing_week_reads_as_a_loss_in_lumen_and_lumen_report() {
+    // SAFETY: as above.
+    unsafe { std::env::set_var("TZ", "UTC") };
+    let (_dir, home, db, spool) = sandbox();
+    {
+        let conn = lumen_core::meter::connect_db(&db).unwrap();
+        let mut l = Ledger {
+            conn: &conn,
+            turn_n: 0,
+        };
+        // The daemon recorded events from before the conversation, so its end is vouched for
+        // and its R cannot be too long.
+        conn.execute(
+            "INSERT INTO session_events(session_id,kind,uuid,ts_ms,source_file)
+             VALUES('earlier','resync','r0',?1,'/h/.claude/projects/-p/earlier.jsonl')",
+            [MONDAY_MS - 86_400_000],
+        )
+        .unwrap();
+        // compress_logs on inline text: saves nothing and pays for a round.
+        read_session(&mut l, "loss", MONDAY_MS + 3_600_000, 4);
+        l.call(
+            Some("loss"),
+            None,
+            MONDAY_MS + 3_600_000 + 2_000,
+            "compress_logs",
+            "compress_logs",
+            "(inline)",
+            9_000,
+            1_200,
+            Some("measured"),
+            None,
+        );
+    }
+    billing(&db, Some("api"));
+    let (line, detail, v) = surfaces(&home, &db, &spool);
+    let net = v["week"]["measured"]["net"]["value"].as_f64().unwrap();
+    assert!(net < 0.0, "premise: {net}");
+    assert!(line.contains(&clause(&v["week"], "")), "{line}");
+    let phrase = text::usd_phrase(net);
+    assert!(phrase.starts_with("net loss of at most $"), "{phrase}");
+    assert!(
+        line.contains(&format!("; {phrase} \u{b7} all time: ")),
+        "{line}"
+    );
+    assert!(line.contains(" \u{b7} not working ("), "{line}");
+    // Inline text pays a round on evidence and saves nothing: a loss at every end of its band,
+    // and the band's high end is a bound.
+    assert!(v["week"]["measured"]["net"]["high"].as_f64().unwrap() <= 0.0);
+    assert_eq!(v["week"]["measured"]["highOpen"], false);
+    assert!(
+        detail.contains(&format!(
+            "Status: not working: Lumen cost more than it saved: {phrase} this week"
+        )),
+        "{detail}"
+    );
+    assert!(detail.contains("Recommendation: "), "{detail}");
+}
+
+#[test]
+fn a_loss_under_half_a_cent_reads_minus_zero_in_lumen_and_lumen_report() {
+    // SAFETY: as above.
+    unsafe { std::env::set_var("TZ", "UTC") };
+    let (_dir, home, db, spool) = sandbox();
+    {
+        let conn = lumen_core::meter::connect_db(&db).unwrap();
+        let mut l = Ledger {
+            conn: &conn,
+            turn_n: 0,
+        };
+        // Last week, a first answer of 30 tokens; this week, in the same conversation, a stub
+        // of 62 for the same request: 32 tokens more than the answer it stood in for, and no
+        // extra round. A loss of a few hundredths of a cent.
+        let first = MONDAY_MS - 2 * 86_400_000;
+        read_session(&mut l, "tiny", first, 2);
+        l.call(
+            Some("tiny"),
+            None,
+            first + 2_000,
+            "smart_read",
+            "smart_read",
+            "/repo/src/tiny.rs",
+            6_000,
+            30,
+            Some("measured"),
+            Some(("treatment", "first")),
+        );
+        let again = MONDAY_MS + 3_600_000;
+        read_session(&mut l, "tiny", again, 3);
+        l.call(
+            Some("tiny"),
+            None,
+            again + 2_000,
+            "smart_read",
+            "smart_read_unchanged",
+            "/repo/src/tiny.rs",
+            6_000,
+            62,
+            Some("measured"),
+            Some(("treatment", "unchanged")),
+        );
+    }
+    billing(&db, Some("api"));
+    let (line, detail, v) = surfaces(&home, &db, &spool);
+    let net = v["week"]["measured"]["net"]["value"].as_f64().unwrap();
+    assert!(net < 0.0 && net > -0.005, "premise: {net}");
+    assert_eq!(v["week"]["tokensSaved"]["value"], -32);
+    assert!(
+        line.contains(
+            "Lumen this week: \u{2248}\u{a0}32 more tokens, net; net loss under half a cent \u{b7} "
+        ),
+        "{line}"
+    );
+    assert!(
+        detail.contains("measured               net loss under half a cent, from 1 row"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_week_of_blocked_reads_alone_says_how_many_beside_its_figure() {
+    // SAFETY: as above.
+    unsafe { std::env::set_var("TZ", "UTC") };
+    let (_dir, home, db, spool) = sandbox();
+    {
+        let conn = lumen_core::meter::connect_db(&db).unwrap();
+        let mut l = Ledger {
+            conn: &conn,
+            turn_n: 0,
+        };
+        // A call nine days ago, outside the last seven; this week, blocked Reads and no call.
+        let old = MONDAY_MS - 7 * 86_400_000;
+        read_session(&mut l, "old", old, 3);
+        l.call(
+            Some("old"),
+            None,
+            old + 2_000,
+            "smart_read",
+            "smart_read",
+            "/repo/src/a.rs",
+            6_000,
+            500,
+            Some("measured"),
+            Some(("treatment", "first")),
+        );
+        let t = MONDAY_MS + 3_600_000;
+        read_session(&mut l, "blk", t, 4);
+        for (i, path) in ["/repo/src/big.rs", "/repo/src/big2.rs"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO faults(ts,kind,variant,path,session_id)
+                 VALUES(?1,'hook_fail_open','retry_escape_valve',?2,'blk')",
+                rusqlite::params![iso(t + 6_000 + i as i64 * 30_000), path],
+            )
+            .unwrap();
+        }
+    }
+    billing(&db, Some("api"));
+    let (line, detail, v) = surfaces(&home, &db, &spool);
+    assert_eq!(v["week"]["counts"]["calls"], 0);
+    assert_eq!(v["week"]["counts"]["blockedReads"], 2);
+    let net = text::usd_phrase(v["week"]["measured"]["net"]["value"].as_f64().unwrap());
+    assert!(
+        line.contains(&format!(
+            "Lumen this week: \u{2248}\u{a0}0 tokens saved, net; {net} (2 blocked Reads) \u{b7} "
+        )),
+        "{line}"
+    );
+    assert!(detail.contains("Status: not working: in the last 7 days the Read intercept blocked"));
+    assert!(detail.contains("`lumen doctor`"), "{detail}");
+}
+
+#[test]
+fn an_empty_ledger_and_a_ledger_that_cannot_be_read_say_so_with_no_figure() {
+    let (_dir, home, db, spool) = sandbox();
+    let (line, _, code) = run_lumen(&home, &db, &spool, &["--as-of", AS_OF]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        line.trim_end(),
+        "Lumen: no Lumen activity recorded yet \u{b7} no data (lumen report for detail, lumen \
+         dash for the live dashboard)"
+    );
+    let (detail, _, _) = run_lumen(&home, &db, &spool, &["report", "--as-of", AS_OF]);
+    assert!(detail.contains("no Lumen activity recorded"), "{detail}");
+    assert!(!detail.contains('$'), "{detail}");
+
+    // A ledger that is a directory cannot be opened: said, with no figure, and a failing exit.
+    std::fs::create_dir(&db).unwrap();
+    let (line, _, code) = run_lumen(&home, &db, &spool, &["--as-of", AS_OF]);
+    assert_eq!(code, 1, "{line}");
+    assert!(
+        line.starts_with("Lumen: no savings figure (cannot open "),
+        "{line}"
+    );
+    assert!(!line.contains('$'), "{line}");
+    let (_, err, code) = run_lumen(&home, &db, &spool, &["report", "--as-of", AS_OF]);
+    assert_eq!(code, 1);
+    assert!(err.starts_with("lumen report: cannot open "), "{err}");
+}

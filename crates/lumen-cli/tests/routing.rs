@@ -125,7 +125,7 @@ fn lumen_report_alone_is_the_savings_detail_and_files_nothing() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let out = stdout(&o);
     // An empty sandbox has recorded nothing, and the detail says so, and how it would measure.
-    assert!(out.contains("nothing recorded"), "{out}");
+    assert!(out.contains("no Lumen activity recorded"), "{out}");
     assert!(out.contains("How it is measured"), "{out}");
     assert!(
         !out.contains('$'),

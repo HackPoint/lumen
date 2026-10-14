@@ -287,3 +287,13 @@
     color: var(--lumen-text-dim);
     white-space: nowrap;
 }
+
+/* To How it's measured, under the Optimizer's heading. The full text colour: dim text at this
+   size falls under 4.5:1 on the light theme. */
+.details__how {
+    align-self: flex-start;
+    font-size: 0.72rem;
+    color: var(--lumen-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}

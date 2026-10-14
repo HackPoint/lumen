@@ -13,8 +13,11 @@
 //
 // On Linux every test gives the app a home and data directory of its own, so nothing here
 // reads or writes the ledger, the hooks or the settings of the machine it runs on. Windows
-// takes those directories from the user's profile whatever the environment says, so there the
-// tests refuse to run outside CI, and on a runner use its profile, emptied before each test.
+// takes those directories from the user's profile whatever the environment says (its known
+// folders, not APPDATA or HOME), so no temporary directory can stand in for them: there the tests
+// run only on a GitHub-hosted runner (GITHUB_ACTIONS=true, RUNNER_ENVIRONMENT=github-hosted), a
+// virtual machine discarded after the job, and use its profile, emptied before each test. Anywhere
+// else, a self-hosted runner included, they refuse before touching anything.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -26,11 +29,15 @@ import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Driver, Session } from './webdriver.mjs';
+import { writeFixtureLedger } from './fixture-ledger.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const EXE = process.platform === 'win32' ? '.exe' : '';
 const APP = process.env.LUMEN_E2E_APP ?? path.join(ROOT, 'target', 'debug', `Lumen${EXE}`);
 const MCP = process.env.LUMEN_E2E_MCP ?? path.join(ROOT, 'target', 'release', `lumen-mcp${EXE}`);
+const CLI = process.env.LUMEN_E2E_CLI ?? path.join(ROOT, 'target', 'release', `lumen${EXE}`);
+// Where the screenshots go; CI uploads this directory.
+const ARTIFACTS = process.env.LUMEN_E2E_ARTIFACTS ?? path.join(os.tmpdir(), 'lumen-e2e-artifacts');
 const SETUP_RS = path.join(ROOT, 'lumenator', 'src-tauri', 'src', 'setup.rs');
 const LIB_RS = path.join(ROOT, 'lumenator', 'src-tauri', 'src', 'lib.rs');
 
@@ -43,10 +50,13 @@ const WINDOWS = process.platform === 'win32';
 // The ranked outline's own time budget is 60 s (LUMEN_RANKED_TIME_BUDGET_MS in smartRead).
 const MCP_MS = 120_000;
 
-if (!(process.platform === 'linux' || (WINDOWS && process.env.CI))) {
+/** A GitHub-hosted runner: a machine nobody uses, thrown away after the job. */
+const GITHUB_HOSTED = process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted';
+
+if (!(process.platform === 'linux' || (WINDOWS && GITHUB_HOSTED))) {
   // Elsewhere the app's data and home directories come from the OS rather than from the
   // environment, so a run could not be kept off the real ledger.
-  throw new Error('these tests run on Linux, and on Windows only in CI; see the header');
+  throw new Error('these tests run on Linux, and on Windows only on a GitHub-hosted runner; see the header');
 }
 
 /** A home and data directory of the test's own, holding the marker that Setup has run. */
@@ -78,6 +88,12 @@ function sandbox() {
  * (%LOCALAPPDATA%) whatever the environment says, with what an earlier test left removed.
  */
 function runnerProfile() {
+  // Checked again where it deletes, so no path to this function can empty a profile someone uses.
+  if (!GITHUB_HOSTED) throw new Error('refusing to empty a Windows profile off a GitHub-hosted runner');
+  const appDataRoot = process.env.APPDATA ?? '';
+  if (!path.resolve(appDataRoot).toLowerCase().startsWith(path.resolve(os.homedir()).toLowerCase() + path.sep)) {
+    throw new Error(`refusing: APPDATA ${appDataRoot} is not inside this runner's profile ${os.homedir()}`);
+  }
   // Whatever the previous test launched and its driver's tree kill missed: a daemon whose app
   // was closed first is no longer under the driver, and while it runs it holds 127.0.0.1:9999,
   // which the next app's daemon then cannot bind.
@@ -89,7 +105,9 @@ function runnerProfile() {
   const db = path.join(appData, 'lumen.db');
   // Retried: the previous test's app and daemon release their handles as they exit.
   const gone = { recursive: true, force: true, maxRetries: 20, retryDelay: 250 };
-  for (const f of [db, `${db}-wal`, `${db}-shm`, logs]) fs.rmSync(f, gone);
+  // The settings file too: a billing choice one test made would keep the next one's question away.
+  const settings = path.join(appData, 'lumen_settings.json');
+  for (const f of [db, `${db}-wal`, `${db}-shm`, logs, settings]) fs.rmSync(f, gone);
   fs.mkdirSync(appData, { recursive: true });
   const marker = path.join(os.homedir(), '.claude', 'lumen', '.setup_done');
   fs.mkdirSync(path.dirname(marker), { recursive: true });
@@ -346,11 +364,14 @@ test('the Optimizer and Why screens show what the ledger holds', async t => {
 test('an empty ledger shows the empty states rather than zeros dressed as data', async t => {
   const sb = sandbox();
   await withApp(t, sb, { LUMEN_SIMULATE_TRAY: 'err' }, async s => {
-    // Home: no savings figure before anything computes one, and the billing question, since
-    // this sandbox's settings file has no answer.
+    // Home: the billing question, since this sandbox's settings file has no answer, and a
+    // headline that says nothing was recorded, in words, with no figure.
     const asked = await s.until('the billing question', TEXT, 15_000, 'lumen-billing-prompt .prompt__head');
     assert.equal(asked, 'How do you pay for Claude Code?');
-    assert.equal(await s.run('return document.querySelector("lumen-savings-headline")?.childElementCount'), 0);
+    const none = await s.until('the headline to say nothing was recorded', TEXT, 15_000, 'lumen-savings-headline .headline__none');
+    assert.equal(none, 'No Lumen activity recorded yet.');
+    assert.equal(await s.run('return document.querySelectorAll("lumen-savings-headline strong").length'), 0);
+    assert.equal(await s.run(TEXT, '.status__text'), 'Status: no data');
 
     await s.click('a.tab-nav__tab[href="/optimizer"]');
     const empty = await s.until('the Optimizer empty state', TEXT, 15_000, '.hero__empty-text');
@@ -445,4 +466,77 @@ test('a tray reported absent opens the window once the checks give up', async t 
   const at = steps.map(s => log.indexOf(s));
   assert.ok(at.every((n, i) => n >= 0 && (i === 0 || n > at[i - 1])), `steps at ${at}, expected in order:\n${log}`);
   assert.equal(log.match(/FALLBACK: revealed the main window/g).length, 1, log);
+});
+
+// Last: on Windows the settings file lives in the runner's profile, and the billing choice this
+// writes would otherwise reach the tests after it (runnerProfile removes it too).
+test('Home shows in bold what the ledger saved, as `lumen` says it, and keeps a picture of it', async t => {
+  const sb = sandbox();
+  const wrote = writeFixtureLedger(sb.db, { mcp: MCP, env: sb.env, billing: 'subscription' });
+  t.diagnostic(`fixture: ${JSON.stringify(wrote)}`);
+  // The terminal's figures from the same ledger, through the built CLI.
+  const lumen = (...args) => {
+    const r = spawnSync(CLI, args, { env: { ...sb.env, LUMEN_DB: sb.db }, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 0, `lumen ${args.join(' ')}: ${r.error ?? r.stderr}`);
+    return r.stdout.trim();
+  };
+  const line = lumen();
+  const summary = JSON.parse(lumen('report', '--json'));
+  t.diagnostic(`lumen: ${line}`);
+  assert.ok(summary.week.measured && summary.allTime.measured, 'premise: the fixture has measured dollars in both periods');
+
+  await withApp(t, sb, {}, async s => {
+    // A healthy launch keeps its window closed: open it, as the menu's Open Lumen does.
+    await s.run(`return window.__TAURI_INTERNALS__.invoke('plugin:window|show', { label: 'main' })`);
+    const boxes = await s.until('the headline\'s figures', `
+      const t = (p, sel) => p?.querySelector(sel)?.textContent.trim() ?? null;
+      const b = [...document.querySelectorAll('lumen-savings-headline .headline__period')].map(p => {
+        const [tokens, usd] = p.querySelectorAll('.headline__figure');
+        return {
+          share: t(p, '.headline__share'),
+          tokens: t(tokens, 'strong'),
+          tokensUnit: t(tokens, '.headline__unit'),
+          usdLead: t(usd, '.headline__floor'),
+          usd: t(usd, 'strong'),
+          usdTail: t(usd, '.headline__unit'),
+          basis: t(p, '.headline__basis'),
+          beside: [...p.querySelectorAll('.headline__tag')].map(x => x.textContent.trim()),
+        };
+      });
+      return b.length === 2 && b.every(x => x.tokens && x.usd) ? b : null;`, 30_000);
+    t.diagnostic(`Home: ${JSON.stringify(boxes)}`);
+    const [week, all] = boxes;
+    // Bold, both of them, in every period: tokens and dollars.
+    const bold = await s.run(`return [...document.querySelectorAll('lumen-savings-headline strong')]
+      .map(e => Number(getComputedStyle(e).fontWeight))`);
+    assert.ok(bold.length === 4 && bold.every(w => w >= 700), `font weights: ${bold}`);
+    // The same figures, signs and labels as the terminal's line, from the same ledger: each box,
+    // piece by piece, is that period's part of the line.
+    const body = (b, when) => [
+      b.share.slice(0, -(when.length + 1)),
+      `${b.tokens} ${b.tokensUnit}`,
+      [b.usdLead, b.usd, b.usdTail, b.basis].filter(Boolean).join(' '),
+    ].join('; ') + (b.beside.length ? ` (${b.beside.join('; ')})` : '');
+    const said = `Lumen this week: ${body(week, 'this week')} · all time: ${body(all, 'all time')} · `;
+    assert.ok(line.startsWith(said), `${said}\n${line}`);
+    assert.equal(week.basis, 'at API prices');
+    assert.ok(all.beside.some(b => b.endsWith(' modelled')) && all.beside.includes('1 call unpriced'), JSON.stringify(all));
+    const status = await s.run(TEXT, '.status__text');
+    assert.equal(status, 'Status: working');
+    assert.ok(line.includes(' · working ('), line);
+
+    // The picture for the release: Home as it renders on this platform.
+    await sleep(500);
+    fs.mkdirSync(ARTIFACTS, { recursive: true });
+    const png = path.join(ARTIFACTS, `home-${WINDOWS ? 'windows' : 'linux'}.png`);
+    fs.writeFileSync(png, await s.screenshot());
+    t.diagnostic(`screenshot: ${png} (${fs.statSync(png).size} bytes)`);
+    assert.ok(fs.statSync(png).size > 1_000, 'the screenshot holds a picture');
+
+    // How it's measured, from the headline: the per-call ledger, a row per line the summary holds.
+    await s.click('a.headline__how');
+    const rows = await s.until('the per-call ledger',
+      `return document.querySelectorAll('table[aria-labelledby="ledger-recent"] tbody tr').length || null;`);
+    assert.equal(rows, summary.ledger.recent.length);
+  });
 });

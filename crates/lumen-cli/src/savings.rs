@@ -80,12 +80,22 @@ fn tokens_band(b: &Band<i64>) -> String {
     }
 }
 
-fn period(out: &mut String, title: &str, p: &Period) {
+fn period(out: &mut String, title: &str, when: &str, p: &Period, billing: BillingView) {
     out.push_str(&format!("{title}\n"));
     if p.data_quality == DataQuality::Empty {
-        out.push_str("  nothing recorded\n\n");
+        out.push_str("  no Lumen activity recorded\n\n");
         return;
     }
+    // The first figure on Home where dollars are at API prices, said here in the same words.
+    if text::shows_share(billing)
+        && let Some(share) = text::share_line(p, when)
+    {
+        out.push_str(&format!("  {share}\n"));
+    }
+    let basis = match text::price_basis(billing) {
+        Some(b) => format!(" {b}"),
+        None => String::new(),
+    };
     let c = &p.counts;
     out.push_str(&format!(
         "  tokens saved, net     {}\n",
@@ -107,8 +117,8 @@ fn period(out: &mut String, title: &str, p: &Period) {
     match &p.measured {
         Some(d) => {
             out.push_str(&format!(
-                "  measured, at least     {} net, from {}\n",
-                text::usd_signed(d.net.value),
+                "  measured               {}{basis}, from {}\n",
+                text::usd_phrase(d.net.value),
                 rows(d.rows, "row")
             ));
             dollars(
@@ -117,7 +127,7 @@ fn period(out: &mut String, title: &str, p: &Period) {
                 "a session may still be running, or R may be too long and was taken at 0",
             );
         }
-        None => out.push_str("  measured, at least     nothing measured\n"),
+        None => out.push_str("  measured               no dollars measured\n"),
     }
     for why in &p.usd_shortfalls {
         out.push_str(&format!("    {why}\n"));
@@ -205,7 +215,7 @@ fn period(out: &mut String, title: &str, p: &Period) {
     ));
     match &p.data_quality {
         DataQuality::Complete => out.push_str("  data: complete\n"),
-        DataQuality::Partial { reason } => out.push_str(&format!("  data: partial: {reason}\n")),
+        DataQuality::Partial { reason } => out.push_str(&format!("  partial data: {reason}\n")),
         DataQuality::Empty => {}
     }
     out.push('\n');
@@ -259,24 +269,32 @@ pub fn render_detail(s: &SavingsSummary) -> String {
     let mut out = String::new();
     let billing = match s.billing_mode {
         BillingView::Subscription => {
-            "subscription (dollars are at API list prices; a plan is not billed per token)"
+            "subscription (dollars at API prices; a plan is not billed per token)"
         }
         BillingView::Api => "API",
-        BillingView::Unset => "not set (dollars are at API list prices)",
-        BillingView::Unreadable => "unreadable setting (dollars are at API list prices)",
+        BillingView::Unset => "not set (dollars at API prices)",
+        BillingView::Unreadable => "unreadable setting (dollars at API prices)",
     };
     out.push_str(&format!(
         "Lumen savings as of {}. Billing: {billing}.\n\n",
         s.as_of
     ));
-    period(&mut out, &format!("This week, {}", s.method.week), &s.week);
+    period(
+        &mut out,
+        &format!("This week, {}", s.method.week),
+        "this week",
+        &s.week,
+        s.billing_mode,
+    );
     period(
         &mut out,
         &match &s.all_time.from {
             Some(f) => format!("All time, since {f}"),
             None => "All time".to_string(),
         },
+        "all time",
         &s.all_time,
+        s.billing_mode,
     );
     match &s.status {
         Status::Working => out.push_str("Status: working\n"),
@@ -373,7 +391,7 @@ mod tests {
     #[test]
     fn the_detail_of_an_empty_ledger_says_nothing_was_recorded_and_how_it_would_be_measured() {
         let d = render_detail(&empty());
-        assert!(d.contains("nothing recorded"), "{d}");
+        assert!(d.contains("no Lumen activity recorded"), "{d}");
         assert!(d.contains("Status: no data"), "{d}");
         assert!(d.contains("uncalibrated"), "{d}");
         assert!(d.contains("2026-10-13"), "the price table's date: {d}");
@@ -411,7 +429,9 @@ mod tests {
         s.week.counts.calls = 7;
         let d = render_detail(&s);
         assert!(
-            d.contains("measured, at least     \u{2212}$0.05 net, from 4 rows"),
+            d.contains(
+                "measured               net loss of at most $0.05 at API prices, from 4 rows"
+            ),
             "{d}"
         );
         assert!(

@@ -1167,6 +1167,100 @@ describe('SessionService', () => {
     expect(bridge.countOf('lumen_savings_summary')).toBe(1);
   });
 
+  // ── the savings summary: what the headline is given ─────────────────────────
+
+  it('passes the summary on as the engine sent it, with no error', async () => {
+    const sent = savingsSummary({ week: recordedPeriod(10, 1.25), allTime: recordedPeriod(20, 2.5) });
+    const s = build((b) => b.responses.set('lumen_savings_summary', sent));
+    await settle();
+    expect(s.savingsSummary()).toBe(sent);
+    expect(s.savingsError()).toBeNull();
+  });
+
+  it('a failed first fetch leaves no summary and says why', async () => {
+    const s = build((b) => b.failures.add('lumen_savings_summary'));
+    await settle();
+    expect(s.savingsSummary()).toBeNull();
+    expect(s.savingsError()).toBe('fake: lumen_savings_summary failed');
+  });
+
+  it('a failed refresh keeps the last good summary, and says it failed; the next good one clears it', async () => {
+    const first = savingsSummary({ week: recordedPeriod(10, 1.25) });
+    const s = build((b) => b.responses.set('lumen_savings_summary', first));
+    await settle();
+    bridge.failures.add('lumen_savings_summary');
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsSummary()).toBe(first);
+    expect(s.savingsError()).toBe('fake: lumen_savings_summary failed');
+
+    bridge.failures.delete('lumen_savings_summary');
+    const second = savingsSummary({ week: recordedPeriod(20, 2.5) });
+    bridge.responses.set('lumen_savings_summary', second);
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsSummary()).toBe(second);
+    expect(s.savingsError()).toBeNull();
+  });
+
+  it('takes the backend\'s error text as it is, when it rejects with a string as Tauri does', async () => {
+    const s = build();
+    vi.spyOn(bridge, 'invoke').mockImplementation((cmd: string) =>
+      cmd === 'lumen_savings_summary' ? Promise.reject('cannot open /x/lumen.db') : Promise.resolve(undefined as never));
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsError()).toBe('cannot open /x/lumen.db');
+  });
+
+  it('shows no summary of a schema it does not read, or an answer that is not one', async () => {
+    const s = build((b) => b.responses.set('lumen_savings_summary', { ...savingsSummary(), schema: 2 }));
+    await settle();
+    expect(s.savingsSummary()).toBeNull();
+    expect(s.savingsError()).toBe('the app sent a savings summary of schema 2, and this window reads schema 1');
+    bridge.responses.set('lumen_savings_summary', null);
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsError()).toBe('the app answered with something that is not a savings summary');
+  });
+
+  it('drops an answer a later fetch overtook', async () => {
+    const s = build((b) => b.hangs.add('lumen_savings_summary'));
+    let answer!: (v: unknown) => void;
+    vi.spyOn(bridge, 'invoke').mockImplementation((cmd: string) =>
+      cmd === 'lumen_savings_summary' ? new Promise((r) => (answer = r)) : Promise.resolve(undefined as never));
+    s.refreshSavingsSummary();
+    const older = answer;
+    s.refreshSavingsSummary();
+    const newer = answer;
+    const fresh = savingsSummary({ week: recordedPeriod(20, 2.5) });
+    newer(fresh);
+    await settle();
+    older(savingsSummary({ week: recordedPeriod(10, 1.25) }));
+    await settle();
+    expect(s.savingsSummary()).toBe(fresh);
+  });
+
+  it('fetches the summary again when the window gets focus, and stops once destroyed', () => {
+    build();
+    expect(bridge.countOf('lumen_savings_summary')).toBe(1);
+    window.dispatchEvent(new Event('focus'));
+    expect(bridge.countOf('lumen_savings_summary')).toBe(2);
+    TestBed.resetTestingModule();
+    window.dispatchEvent(new Event('focus'));
+    expect(bridge.countOf('lumen_savings_summary')).toBe(2);
+  });
+
+  it('refreshes the summary every minute, as the other figures', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      build();
+      vi.advanceTimersByTime(60_000);
+      expect(bridge.countOf('lumen_savings_summary')).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refreshes both aggregate reports every minute, and stops once destroyed', () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     try {

@@ -439,6 +439,11 @@ fn premises(scan: &Scan) {
         "lumenator/src/app/components/savings-headline/savings-headline.ts",
         "lumenator/src/app/components/billing-prompt/billing-prompt.html",
         "lumenator/src/app/components/billing-prompt/billing-prompt.ts",
+        "lumenator/src/app/components/savings-status/savings-status.html",
+        "lumenator/src/app/components/savings-status/savings-status.ts",
+        "lumenator/src/app/pages/method/method.html",
+        "lumenator/src/app/pages/method/method.ts",
+        "lumenator/src/app/savings-text.ts",
     ] {
         assert!(
             scan.text_files.iter().any(|f| f == must),
@@ -454,6 +459,8 @@ fn premises(scan: &Scan) {
     );
     for must in [
         "crates/lumen-cli/src/main.rs",
+        "crates/lumen-cli/src/savings.rs",
+        "crates/lumen-core/src/savings/text.rs",
         "crates/lumen-mcp/src/lib.rs",
         "lumenator/src-tauri/src/setup.rs",
     ] {

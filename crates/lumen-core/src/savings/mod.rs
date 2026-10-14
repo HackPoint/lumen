@@ -1822,8 +1822,8 @@ pub fn summarize(
         .collect();
     let all_calls = all.counts.calls;
     let first_ms = all.first;
-    let week_period = week.period(Some(iso_ms(clock.week_start_ms)), &as_of, &gaps);
-    let all_period = all.period(first_ms.map(iso_ms), &as_of, &gaps);
+    let week_period = finite_only(week.period(Some(iso_ms(clock.week_start_ms)), &as_of, &gaps));
+    let all_period = finite_only(all.period(first_ms.map(iso_ms), &as_of, &gaps));
 
     let identity = identity_reaches_server(ledger, facts);
     let blocked: Vec<&Priced> = priced
@@ -1882,6 +1882,43 @@ pub fn summarize(
         },
         ledger: call_ledger(priced),
     }
+}
+
+/// Why a period has no dollar figure where one did not come out a number.
+const NOT_A_NUMBER: &str = "a dollar figure that came out as no number is left out";
+
+/// A period with no figure that is not a number: a dollar part with one is left out, the period
+/// is said to be partial for it, and a share that is not one is none. No surface prints `NaN`,
+/// and the app is never sent one as a figure (JSON has none; it would arrive as null).
+fn finite_only(mut p: Period) -> Period {
+    let band_ok = |b: &Band<f64>| b.low.is_finite() && b.value.is_finite() && b.high.is_finite();
+    let mut dropped = false;
+    if let Some(d) = p.measured
+        && !(band_ok(&d.gross) && band_ok(&d.extra_rounds) && band_ok(&d.net))
+    {
+        p.measured = None;
+        dropped = true;
+    }
+    if let Some(m) = p.modelled
+        && !band_ok(&m.value)
+    {
+        p.modelled = None;
+        dropped = true;
+    }
+    if p.share_pct.is_some_and(|x| !x.is_finite()) {
+        p.share_pct = None;
+    }
+    if dropped {
+        p.data_quality = match p.data_quality {
+            DataQuality::Partial { reason } => DataQuality::Partial {
+                reason: format!("{reason}; {NOT_A_NUMBER}"),
+            },
+            _ => DataQuality::Partial {
+                reason: NOT_A_NUMBER.to_string(),
+            },
+        };
+    }
+    p
 }
 
 /// Whether Lumen's identity hook reaches the server. The ledger's evidence wins, as in
@@ -2000,21 +2037,30 @@ fn judge(
         );
     }
 
-    // Net this week, in measured dollars where there are any, else in tokens.
-    let negative = match week.measured {
-        Some(d) => {
-            (d.net.value < 0.0).then(|| format!("net at least {} this week", usd_text(d.net.value)))
-        }
+    // Net this week, in measured dollars where there are any, else in tokens; and whether the
+    // loss is certain. The figure is a floor: a negative one whose band reaches above zero, or
+    // whose high end is no bound (an R that is a lower bound or may be too long), says only that
+    // Lumen may have cost more than it saved.
+    let negative: Option<(String, bool)> = match week.measured {
+        Some(d) => (d.net.value < 0.0).then(|| {
+            (
+                format!("{} this week", text::usd_phrase(d.net.value)),
+                d.net.high <= 0.0 && !d.high_open,
+            )
+        }),
         None => (week.tokens_saved.value < 0).then(|| {
-            format!(
-                "net {} tokens this week",
-                text::tokens_signed(week.tokens_saved.value)
+            (
+                format!("{} this week", text::tokens_phrase(week.tokens_saved.value)),
+                week.tokens_saved.high <= 0,
             )
         }),
     };
     let status = match &negative {
-        Some(what) => Status::NotWorking {
+        Some((what, true)) => Status::NotWorking {
             reason: format!("Lumen cost more than it saved: {what}"),
+        },
+        Some((what, false)) => Status::NotWorking {
+            reason: format!("Lumen may have cost more than it saved: {what}"),
         },
         None => Status::Working,
     };

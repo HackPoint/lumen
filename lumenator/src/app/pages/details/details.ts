@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { Gauge } from '../../components/gauge/gauge';
 import { Firefly } from '../../components/firefly/firefly';
 import { TabNav } from '../../components/tab-nav/tab-nav';
@@ -18,7 +19,7 @@ import type { ChannelBreakdown, ToolBreakdown } from '../../components/index';
  */
 @Component({
     selector: 'lumen-details',
-    imports: [Gauge, Firefly, TabNav, LumenTooltip],
+    imports: [Gauge, Firefly, TabNav, LumenTooltip, RouterLink],
     templateUrl: './details.html',
     styleUrl: './details.css',
     changeDetection: ChangeDetectionStrategy.OnPush,

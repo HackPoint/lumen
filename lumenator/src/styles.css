@@ -189,6 +189,20 @@ body {
   vertical-align: text-top;
 }
 
+/* Read by a screen reader and not drawn: a heading the eye gets from the layout, or a figure
+   said in words beside the symbols drawn for the eye. Global, since component CSS is scoped. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
 /* ── App shell ────────────────────────────────────────────────────────────────
    The window chrome shared by every full-window route: background, centred
    column, header and the tab nav.

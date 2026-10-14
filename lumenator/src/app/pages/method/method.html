@@ -1,0 +1,163 @@
+<main class="home">
+    <div class="home__inner method">
+        <header class="home__head">
+            <lumen-firefly class="home__logo" mode="logo" state="full"></lumen-firefly>
+            <p class="brand__tag">Context &amp; cost for Claude Code</p>
+        </header>
+
+        <lumen-tab-nav />
+
+        <h1 class="method__title">How it's measured</h1>
+
+        @if (summary(); as s) {
+            @if (error(); as e) {
+                <p class="method__stale" role="status">
+                    Not up to date: the latest refresh failed ({{ e }}). This is the summary as of {{ asOf() }}.
+                </p>
+            } @else {
+                <p class="method__lede">The summary as of {{ asOf() }}, from this machine's ledger.</p>
+            }
+
+            <section class="method__section" aria-labelledby="rules-title">
+                <h2 class="method__h2" id="rules-title">The rules</h2>
+                <dl class="method__rules">
+                    @for (r of rules(); track r.term) {
+                        <dt>{{ r.term }}</dt>
+                        <dd>{{ r.text }}</dd>
+                    }
+                </dl>
+            </section>
+
+            <section class="method__section" aria-labelledby="prices-title">
+                <h2 class="method__h2" id="prices-title">Prices</h2>
+                <p class="method__p">
+                    List prices per model, speed and cache duration, as of {{ s.method.pricesAsOf }}@if (priceSources().length > 0) {, from
+                    @for (src of priceSources(); track src) {<span class="method__src">{{ src }}</span>}}.
+                    @if (basis(); as b) {
+                        The dollars on Home are {{ b }}: your billing is not per token, or has not been said.
+                    }
+                </p>
+                @if (priceLines().length > 0) {
+                    <div class="method__scroll">
+                        <table class="method__table">
+                            <caption class="visually-hidden">List prices, US dollars per million tokens</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Model</th>
+                                    <th scope="col">Input</th>
+                                    <th scope="col">Output</th>
+                                    <th scope="col">5-min write</th>
+                                    <th scope="col">1-hour write</th>
+                                    <th scope="col">Cache read</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @for (p of priceLines(); track p.model) {
+                                    <tr>
+                                        <th scope="row">{{ p.model }}@if (p.note) {<span class="method__note">{{ p.note }}</span>}</th>
+                                        @if (p.cells; as cells) {
+                                            @for (c of cells; track $index) {
+                                                <td>{{ c }}</td>
+                                            }
+                                        } @else {
+                                            <td colspan="5">no price</td>
+                                        }
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                } @else {
+                    <p class="method__p">The price table has not loaded.</p>
+                }
+            </section>
+
+            <section class="method__section" aria-labelledby="cal-title">
+                <h2 class="method__h2" id="cal-title">Token counts</h2>
+                @for (line of calibration(); track $index) {
+                    <p class="method__p">{{ line }}</p>
+                }
+            </section>
+
+            <section class="method__section" aria-labelledby="figures-title">
+                <h2 class="method__h2" id="figures-title">Figures, bands and counts</h2>
+                <div class="method__scroll">
+                    <table class="method__table">
+                        <caption class="visually-hidden">Every figure and count, this week and all time</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col"><span class="visually-hidden">Figure</span></th>
+                                <th scope="col">This week</th>
+                                <th scope="col">All time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @for (f of figures(); track f.what) {
+                                <tr>
+                                    <th scope="row">{{ f.what }}</th>
+                                    <td>{{ f.week }}</td>
+                                    <td>{{ f.allTime }}</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                @if (shortfalls().length > 0) {
+                    <ul class="method__list">
+                        @for (w of shortfalls(); track w) {
+                            <li>{{ w }}</li>
+                        }
+                    </ul>
+                }
+            </section>
+
+            <section class="method__section" aria-labelledby="ledger-title">
+                <h2 class="method__h2" id="ledger-title">Per call</h2>
+                @if (recent().length === 0) {
+                    <p class="method__p">No Lumen activity recorded yet.</p>
+                } @else {
+                    @for (t of tables(); track t.id) {
+                        @if (t.rows.length > 0) {
+                            <h3 class="method__h3" [id]="'ledger-' + t.id">{{ t.title }}</h3>
+                            <div class="method__scroll">
+                                <table class="method__table method__ledger" [attr.aria-labelledby]="'ledger-' + t.id">
+                                    <thead>
+                                        <tr>
+                                            <th scope="col">Time</th>
+                                            <th scope="col">Call</th>
+                                            <th scope="col">Tokens saved</th>
+                                            <th scope="col">Against</th>
+                                            <th scope="col">Net</th>
+                                            <th scope="col">Read by</th>
+                                            <th scope="col">Extra round</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @for (l of t.rows; track $index) {
+                                            <tr [class.is-loss]="l.loss">
+                                                <td>{{ l.ts }}</td>
+                                                <td>{{ l.what }} <span class="method__path">{{ l.path }}</span></td>
+                                                <td>{{ l.tokens }}</td>
+                                                <td>{{ l.against }}</td>
+                                                <td class="method__net">{{ l.net }}</td>
+                                                <td>{{ l.readBy }}</td>
+                                                <td>{{ l.extraRound }}</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    }
+                    @if (omitted() > 0) {
+                        <p class="method__p method__dim">{{ omitted() }} older calls are not listed.</p>
+                    }
+                }
+            </section>
+        } @else if (error(); as e) {
+            <p class="method__stale" role="status">Lumen's savings could not be read: {{ e }}.</p>
+        } @else {
+            <p class="method__p">Reading the ledger.</p>
+        }
+    </div>
+</main>
