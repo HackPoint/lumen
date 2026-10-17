@@ -6,9 +6,9 @@ use lumen_bench::run::{self, Plan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Lumen 1.7.0: the last release before the work measured here.
-const BASELINE_LABEL: &str = "v1.7.0";
-const BASELINE_SHA: &str = "5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94";
+/// Lumen 1.8.0: the last release before the work measured here.
+const BASELINE_LABEL: &str = "v1.8.0";
+const BASELINE_SHA: &str = "12ad305679cf92b23167b032f56412a2a38e72a1";
 
 const DEFAULT_RUNS: usize = 200;
 const DEFAULT_WARMUP: usize = 20;
@@ -26,8 +26,8 @@ usage: benchmarks/run.sh [options]                  record a run
   --out DIR              where the results go (default benchmarks/results)
   --cache DIR            where corpora and the baseline build live (default: a directory under
                          the system temp dir). Never inside the repository.
-  --baseline-sha SHA     the baseline commit, 40 characters (default v1.7.0, 5d1ec04...)
-  --baseline-label NAME  its label in the output (default v1.7.0)
+  --baseline-sha SHA     the baseline commit, 40 characters (default v1.8.0, 12ad305...)
+  --baseline-label NAME  its label in the output (default v1.8.0)
   --no-baseline          measure the candidate only
   --candidate-bin PATH   use a prebuilt lumen-mcp as the candidate instead of building HEAD; needs
                          --candidate-sha, and the checkout is neither built nor required clean

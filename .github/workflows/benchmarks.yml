@@ -34,7 +34,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
 
     steps:
-      # The harness checks out the pinned Lumen commit from this clone and the v1.7.0
+      # The harness checks out the pinned Lumen commit from this clone and the v1.8.0
       # baseline commit from its history, so it needs all of it.
       - uses: actions/checkout@v7
         with:
