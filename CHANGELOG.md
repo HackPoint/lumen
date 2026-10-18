@@ -1,5 +1,518 @@
 # Changelog
 
+## [1.9.0] — 2026-10-18
+
+**Home now says in bold what Lumen saved: tokens and dollars, net, this week and all time.** The tokens are Claude's, estimated from Lumen's `cl100k_base` counts by a calibration against Claude's own usage data, so they read "≈". The dollars are a signed floor, the net on record: "at least $0.20 saved, net", or "net loss of at most $0.42". What may be worth more (modelled) and the calls with no price are tags beside the figure, never in it. One engine works the figures out per call from your own ledger, and bare `lumen` and the tray say the same figures in the same words. Every dollar figure in Lumen is now priced at the list price of the model that consumed the tokens, where 1.8.0 priced every model at Opus-class rates, and a figure that could not be priced in full says "at least", and why. How this build compares with 1.8.0 is under "Benchmarks against 1.8.0", at the end of this entry.
+
+**Upgrading from 1.8.0: nothing to run.** The ledger gains its new columns and tables, and loses the unused `sessions` table, the first time any Lumen program opens it, and a 1.8.0 build that opens it afterwards still works. Setup does not need to run again: the hooks are the ones 1.8.0 registered. (From 1.7.0 or earlier, run Setup once and restart Claude Code, as 1.8.0's notes say.) What you will notice: Home asks once whether you pay by subscription or through the API, and until you answer the dollars read "at API prices". The screens moved: the Context tab is Home, the context gauge is on Details, and spend, the alert thresholds, the Repeat reads switch, Report a fault and About are on a new Settings tab; Hotspots is Why, shown only when there is something to act on. In the terminal, bare `lumen` prints one line, the dashboard is `lumen dash`, the fault report is `lumen faults`, and `lumen report` is the savings in detail. The old spellings still work and say so on stderr (`lumen --no-anim`, and `lumen report` with any of the fault report's flags), but a script that ran `lumen report` with no flag, or read bare `lumen`'s piped line, now gets the savings. Turns ingested before 1.9.0 recorded no speed, region or cache-write duration, so a dollar figure that includes them reads "at least"; so does one holding a turn on a 4.6 or later model whose region Claude Code wrote as `not_available`.
+
+### Home says in bold what Lumen saved, and `lumen` and the tray say it in the same words
+
+Nothing in 1.8.0 said what Lumen had saved you. The Context tab showed how full the context was and what the session cost, and the Optimizer's net value rested on assumed constants (see the engine's entry below). Home now opens with the savings headline, in bold and large, from the engine's summary (`lumen_savings_summary`) and nothing else, for every billing mode.
+
+- **Tokens.** "≈ 25,400 tokens saved, net", the central value, in Claude's tokens; a period that
+  sent more than it kept out reads "≈ 32 more tokens, net". The band behind it is on the period's
+  ⓘ, on hover and on focus.
+- **Dollars.** The net on record and nothing else, a floor: "at least $0.20 saved, net". A loss,
+  whose floor is the most it can be, reads "net loss of at most $0.42", and one that rounds to no
+  cent "net loss under half a cent", in the alert colour. A sign is the value's, never the
+  rounding's: only zero reads $0.00. Thousands are grouped ("$12,346").
+- **On a subscription**, before you have said how you pay, or when the settings file cannot be
+  read, the dollars are "at API prices", since a plan is not billed per token, after the share of
+  tokens Lumen kept out of context: "≈ 92% fewer tokens from file and tool reads this week" ("≈
+  5.0% more …" the other way).
+- **Beside the bold figure, never added to it**, as smaller tags: "+$0.01 modelled", "1 call
+  unpriced", and "219 blocked Reads" where blocked Reads are all the period holds.
+- **No zero that was not recorded.** A period with no Lumen calls says "No Lumen activity this
+  week.", an empty ledger "No Lumen activity recorded yet.", a period with no dollars on record "No
+  dollars on record this week.", and a partial one "Partial data:" and the engine's reason.
+- **Status and one step.** Under the figures, one status line in `lumen report`'s words ("Status:
+  working", "Status: not working:" and the reason, "Status: no data") and at most one recommendation with
+  its step: Run Setup when the identity hook does not reach the server, "In a terminal: lumen
+  doctor" for the others. The floor is a floor, so a losing week whose band reaches above zero, or
+  whose high end is no bound, says "Lumen may have cost more than it saved: net loss of at most $X
+  this week"; only a bounded band that is a loss throughout says "Lumen cost more than it saved".
+- **How it's measured**, a screen reached from the headline and from Details: the summary's rules,
+  the price table with its date and source, the calibration, every figure with its band and every
+  count for both periods, and the per-call ledger (the five calls that gained and lost most, and
+  the newest 200) as tables.
+- **Refresh.** The summary is fetched when the app starts, every minute after, when the window gets
+  focus, when Home opens again and once a billing choice is saved. A fetch that fails keeps the
+  last good summary on screen, marked "Not up to date: the latest refresh failed", with why, and the
+  time the figures are as of, in UTC; with none before it, the headline says the savings could not be
+  read and shows no figure. A late answer from an overtaken fetch is dropped, and a summary of
+  another schema, or one holding a figure that is not a finite number, is not shown.
+- **Screen readers** are given each figure in words ("at least 105 dollars saved, net, all time, at
+  API prices"), with the symbols hidden; the headline, each period and the status have headings.
+  The two period cards stack below 480 px, so a long figure never pushes one off a narrow window.
+
+The terminal and the tray say the same:
+
+- **Bare `lumen`** prints one line: "Lumen this week: ≈ 92% fewer tokens from file and tool reads;
+  ≈ 25,400 tokens saved, net; at least $0.20 saved, net at API prices · all time: … · working
+  (lumen report for detail, lumen dash for the live dashboard)", and "no Lumen activity recorded
+  yet" for an empty ledger.
+- **The tray** shows a savings line, disabled, under its version line: on the API "Saved at least
+  $X this week" or "Net loss of at most $X this week", otherwise "This week: …", then the status.
+  With no data there is no line, rather than an empty one. It is worked out again every two
+  minutes, off the startup path.
+- **`lumen report`** prints each period with its bands, the method, the counts and the calls that
+  gained and lost most; `--json` prints the summary itself. A ledger that does not exist yet is
+  read as an empty one, not created.
+- **One wording.** `lumen_core::savings::text` makes the terminal's and the tray's lines and
+  `savings-text.ts` the headline's, phrase for phrase, held together by one case file that the Rust
+  and the TypeScript tests both read. It caught the app rounding $0.125 to $0.13 where the terminal
+  said $0.12; both now round half to even.
+
+The WebDriver e2e (Linux, Windows) writes a fixture ledger, holds every piece of Home to the built
+`lumen`'s line from the same ledger, follows How it's measured to a row per call, and keeps a
+screenshot; the macOS launch check does the same under a temporary `HOME`. Both refuse a path where
+a ledger or settings file already is, and on Windows and macOS they run only on GitHub-hosted
+runners, so no ledger of a real profile is read or written.
+
+### Home keeps three questions; Details, Settings and Why take the rest
+
+1.8.0's main window put the context gauge, the session cost, the daily usage, the alert
+thresholds, the Repeat reads switch and About on one screen, the Context tab, beside Optimizer and
+Hotspots. Home now answers how much Lumen saved, whether it is working and what to do. Nothing was
+deleted; the tabs are Home, Optimizer, Details, Why (when it has something) and Settings.
+
+- **Home** keeps the header, the startup banners, the Run Setup prompt for the identity hook and
+  the tabs, and gains the savings headline and, once, the billing question.
+- **Details** has the context gauge with its Auto/200K/500K/1M selector and the alert banner: they
+  describe how full Claude Code's context is, which is neither a saving nor something Lumen did.
+  Native notifications still fire whatever screen is open. It also has the Optimizer's token
+  ratio, the by-tool and by-channel breakdowns and the provenance counts. Its effectiveness is the
+  summary's share, losses included, and a negative share reads as more tokens, not as zero.
+- **Settings**, new: Billing mode; Spend (the session cost tiles and the daily usage report, beside
+  the thresholds they are compared with); the alert thresholds with the native notifications
+  toggle; the Repeat reads switch; Report a fault, moved from Hotspots, so the fault badge is now on
+  the Settings tab; and About.
+- **Why** is what Hotspots was (`/hotspots` redirects), with "What to do" first. It is in the tabs
+  only while a reported file is something to act on: at least 1,000 lines read at least 20 times,
+  or at least 10 reads with half of them unchanged, with advice written for it. A file that holds
+  10% of everything read does not count: on a young ledger nearly every file does.
+- **Optimizer.** The net value hero is gone, with its dollar figure, which rested on an assumed
+  number of rounds remaining; the "Lumen optimized" card has no dollar line, since a read event
+  records no model to price it by. The token cards, the provenance sentence under them, the
+  caching card and the Repeat reads card stay.
+- **The billing question**: "How do you pay for Claude Code?", Subscription (Pro/Max) or API (pay
+  per token). Home asks it once, after Setup and only once Setup is known to be done, never on the
+  Setup screen or in the tray popover; Settings changes it. It goes once answered, stays to say why
+  when a choice was not saved, and is not shown over a settings file that cannot be used, which
+  Settings explains. The choice is kept as `billing_mode` in `lumen_settings.json` beside
+  `repeat_reads`, read with the same 64 KiB cap, and only `"subscription"` or `"api"` is accepted
+  (a bad value is repeated back in short); absent means not asked yet. A bad `billing_mode` leaves
+  repeat reads alone, and the other way round.
+- **The settings file's writers take turns.** Each reads the file, changes its key and writes the
+  object back, and both used one temporary file name per process, so two at once could each write
+  back the other's old value or rename the other's file away: in 300 rounds, 62 lost
+  `repeat_reads: false` (repeat reads silently back on). A lock now spans the read and the rename,
+  and each temporary file is numbered. The billing writer keeps every other key and refuses to
+  replace a file that is not a JSON object: such a file turns repeat reads off, and one holding only
+  `billing_mode` would turn them back on.
+
+The CLI:
+
+- **Bare `lumen`** prints the one line above; it was the dashboard. The dashboard is `lumen dash`
+  (`--no-anim` kept; piped, it prints its one-shot line as before).
+- **`lumen report`** is the savings in detail. **`lumen faults`** is the fault report, with all its
+  flags.
+- **The old spellings still work**, and each says so in one line on stderr: `lumen report` with any
+  of the fault report's flags (`--dry-run`, `--yes`, `--repo`, `--include-source`, `--faults`) runs
+  `lumen faults`, and bare `lumen --no-anim` opens the dashboard. `--no-anim` given to any other
+  command says it does nothing there. `lumen report` with no flag, which previewed the fault report,
+  now prints the savings.
+- **The Claude Code plugin's `/lumen-report`** runs `lumen faults --dry-run`, and `lumen report`
+  in its place on a CLI older than 1.9.0. `lumen doctor`'s remedies, the README, the fault-report
+  doc and the issue template name the new commands.
+
+The macOS launch check (Issue 5) read About's version off Home; it now presses the Settings tab and
+reads it there. A tab the runner cannot press is reported as a limitation, not a failure, since the
+WebDriver e2e on Linux and Windows checks About on Settings too.
+
+### One engine prices every saving per call, from the turns that read it
+
+What Lumen saved was worked out in three places, and none of them knew the call it was pricing.
+lumen-stats priced a net value at Opus-class rates with a fixed 194 rounds remaining and a fixed
+1.604 rounds per call, the benchmark harness priced a "$/call" column with the outline sizing's
+fixed 65 rounds, and bare `lumen`, the tray and Home had nothing behind them. Each figure was one
+set of sessions multiplied out. `lumen_core::savings` is now the one place a saving is worked out.
+It is pure: the ledger's rows in, one summary out. The CLI reads the ledger through rusqlite and
+the app through sqlx with the same SQL, and a test holds `lumen report --json` and the app's loader
+to the same bytes on one realistic ledger.
+
+Per call, from the ledger:
+
+- **The turn that read the result** is the first turn of the call's own conversation at least one
+  second after the call (the meter records to the second, and the turn that made the call can share
+  it). A subagent's call is read in its own transcript, `<session>/subagents/agent-<id>.jsonl`,
+  under either path separator; a subagent with no turns in the ledger has tokens only.
+- **`R`** is the turns after that one, `<synthetic>` messages left out, up to the first of: a
+  compaction or rewind recorded in the same transcript; a collapse, the first later turn whose
+  prompt is smaller than the one before it, since a prompt only grows until context is taken out
+  (labelled inferred: it catches the compactions the ledger never recorded); or the session's end.
+  A conversation that began before the daemon's first recorded event and shows no collapse has
+  nothing to vouch for its end, and its `R` is labelled so; a session whose last turn is under an
+  hour old may still be running, and its `R` is a lower bound. The daemon now records a compaction
+  in a subagent's transcript as `subagent_compaction`, which ends that subagent's `R` and nothing of
+  the main conversation's; the repeat-read gate does not read it.
+- **Each turn is priced** at its model, its recorded speed and its recorded region (the two pricing
+  entries below). Where a turn recorded no speed, no usable region or no cache-write duration, its
+  saving is priced at the lower rate and its extra round at the higher, so the net is a floor, and
+  the summary gives the reasons.
+- **Against what.** A first read is counted against the built-in Read, which returns at most
+  25,000 tokens of a file (Claude Code's documented default), so a larger file counts as 25,000 and
+  the line says so. A repeat read's stub or delta is counted against Lumen's earlier answer to the
+  same request in the same conversation, not against the whole file; with no earlier answer in the
+  ledger it counts as none. A `fresh=true` call after a stub asks again for what the stub stood in
+  for: it is a loss, not a second saving.
+- **The value** of saving S tokens is S times the one-time price the reading turn paid for new
+  context (the cache write at the duration it recorded, the input price if it wrote no cache, the
+  5-minute price as a floor where it recorded no split) plus a cache read on each of the `R` turns,
+  at each turn's own model and speed. A cache read on every later round is the least a saved token
+  would have cost, so this is a floor.
+- **Extra rounds**, each the reading turn priced as it ran (a write of unrecorded duration at the
+  1-hour rate, so the cost is not understated): none for a repeat-read stub or delta; one, on
+  evidence, for a `recall_file` or `smart_read(mode="full")` after an outline of the same file in
+  the same conversation, for a `fresh=true` call after a stub, for `compress_logs` on inline text
+  (which saves nothing, since the text stays in context, and also pays for writing it out), and for
+  each Read the intercept blocked (the blocked Reads entry below); one, modelled, for any other
+  call, which may have followed a blocked Read.
+- **Net** is value less extra rounds, signed, never clamped.
+
+A dollar is the price of the model that consumed the tokens, so each period's dollars come in three
+parts that no surface adds together:
+
+- **On record**, the bold "at least" figure: every call priced at the turn that read it, less every
+  extra round it cost, on evidence or modelled. Where `R` may be too long, a saving is taken at
+  `R = 0` (the one-time price alone) and a loss at `R`, the least either can be; the rounds are
+  charged in full.
+- **Modelled**: what those calls are worth beyond that, the cache reads over an `R` that may be too
+  long. Shown beside the figure, labelled, never in it.
+- **Tokens only**: rows with no turn to price them by (no session id, as on most rows before 1.1.5;
+  no turn after the call; a subagent not in the ledger; a time that does not parse; a compaction
+  before any turn read the result) or whose model has no price. Their tokens count; their dollars
+  are not guessed from other calls'.
+
+Every token and dollar figure is a band, low, value and high; the central value is the conservative
+one, and where an `R` is a lower bound or may be too long the high end is said to be no bound. The
+summary holds the billing mode; the ISO week (Monday 00:00 local time to now) and all time, each
+with the tokens saved, the tokens the files held, the share, the three parts, what the priced turns
+did not record, the counts and the data quality; a status (working, not working with its reason, no
+data) and at most one recommendation; how each figure is made; and the per-call ledger, the newest
+200 calls and the five that gained and lost most.
+
+- **One test for the identity hook.** Setup's validator, the app's prompt, `lumen doctor` and the
+  engine all call `lumen_core::identity_hook`: a Lumen command under PreToolUse whose matcher
+  selects each of the three tools, with the ledger's newest 50 calls that carry a repeat plan
+  overruling `settings.json` either way. Until now the terminal counted any Lumen command on any
+  matching entry and the window only an exact matcher, so the two could disagree about one file. A
+  `mcp__lumen__.*` matcher, which Claude Code reads as selecting all three, now counts in the window
+  too; another tool's command on the three names counts in neither.
+- **The hook records the subagent on each escape-valve fault** (`agent_id`, in the spool line and a
+  new `faults` column; a main agent's line is unchanged). The backfill every opener runs now also
+  marks subagent rows written with backslashes, as the daemon already did.
+- **Speed.** On a synthetic ledger ten times a heavy user's (999,000 turns, 150,000 `read_events`,
+  2,500 compactions and rewinds) a summary takes 0.42 s for the tray, its pool kept open, and 0.56 s
+  for `lumen report`, migrations included; at the heavy user's own size, 39 and 53 ms. The tray works
+  it out again only when the newest row of a table it reads, or the fault spool, has changed, or
+  fifteen minutes have passed: 0.14 ms otherwise.
+- **Gone**: lumen-stats' net value and its fields, the app's copies of them,
+  `scripts/lumen_rounds.py` and `scripts/lumen_percall.py` (transcript replays priced at Opus-class
+  rates), and the harness's dollar column: a corpus run has no turns to price a saving by, so its
+  results say "none" and why. A test fails if the 194 or 1.604 figures, or their names, come back.
+
+Not changed: what the MCP tools return and what the hooks decide. The ranked arm's outline sizing
+(`econ.rs`, behind `LUMEN_RANKED_OUTLINE`, off by default) keeps its fixed inputs, 65 rounds
+included: over the pinned corpus every other value tried made a file-size bucket's replies larger
+(at 1,000 rounds the 300–999 line bucket returned 48,150 tokens against 43,577).
+
+### Each Read the intercept blocked is counted from the transcript that records it
+
+The hook writes no ledger row when it blocks a Read, only the marker file it keeps for itself, so
+the escape valve's faults were the only record of a block, and they name the agent only from 1.9.0
+on. Claude Code's transcripts record every block: the assistant's `tool_use` (a Read, with its
+`file_path`), then a `tool_result` flagged `is_error` whose text holds the hook's message, in the
+transcript of the agent that tried (`<session>.jsonl`, or `<session>/subagents/agent-<id>.jsonl`).
+The daemon now reads them.
+
+- **One definition of the message.** `lumen_core::intercept` builds the first line of every block
+  message (`Lumen intercept: <path> is <n> lines` and one of three tails) and reads it back from
+  anywhere in a text, since Claude Code puts its own words first. The hook's three messages are
+  built from it, byte for byte what they were. Every first line a hook has written since 0.1.0
+  parses, the eight-column `wc -l` count of the hooks Setup wrote up to 1.4.x included. Not a block:
+  a Read that went through of a file holding a block message, a Bash error quoting one, another
+  file's Read, any other error of a Read.
+- **The daemon** matches each result to the Read it answers (the last 64 Reads of a transcript are
+  kept) and writes a row of a new `intercept_blocks` table, keyed by the Read's `tool_use` id:
+  session, agent, the path as the hook named it, lines, kind, and the result's time. A new
+  `transcript_scans` table records which transcripts have been read for blocks from their first
+  line, and through which turn. A tail read that lost its tracker has lost the Reads waiting for a
+  result, so it moves nothing on until the file is read from its first line again.
+- **No separate backfill.** The daemon's startup pass already reads every transcript on disk from
+  byte 0, so the first start of 1.9.0 records every block the transcripts still hold, in the
+  daemon's own process, never the app's window; later starts write nothing for a row that has not
+  changed. On 252 MB of synthetic transcripts (600 files, 78,600 lines, 614 blocks) the scanner
+  adds 9 to 15 ms to the 130 ms of one of the daemon's per-line parses, and the startup pass took
+  1.48 s before and 1.40 s after (median of 11 alternating runs on a loaded machine).
+- **Trackers that race, and files rewritten in place.** The notify and poll paths can read one file
+  at once, and the first could put back a tracker that had fallen behind the offset; such a tracker
+  is now dropped, not trusted, and a read that starts behind its tracker no longer feeds it lines
+  twice (a prompt fed twice used to read as a rewind). A transcript rewritten in place, shorter than
+  its offset or holding other bytes in the 64 before where its tracker stopped, is read again from
+  its first line, with a resync. A file deleted and written again with the same lines and more is
+  still tailed as if it never left.
+- **The engine** counts a recorded block as one extra round, on evidence, priced at the first turn
+  of the blocked agent's own chain after it, the turn that read the message; a path blocked twice
+  in one context is two. The faults on the same session, path and kind are its later Reads,
+  counted beside it and as no more blocks.
+- **Where no transcript records a block** (it was deleted before the daemon read it), the faults
+  stand for it: one block per session, agent and path, a fault that names no agent being attributed
+  by the meter's `builtin_read` row for the same Read. Faults nothing attributes stand for at most
+  one block per agent that could have read the path then (the main agent, each subagent with a turn
+  within five minutes, any agent the meter named on the path), never more than the faults: the first
+  on evidence, the rest bounded and modelled.
+- **A Lumen call loses its modelled round** ("may have followed a blocked Read") where a transcript
+  read through the call records a block of the same file in the same conversation before it that no
+  earlier call was answered by: that block is the call's round. A conversation counts as read for
+  blocks only as far as its own transcript was read.
+- **Counts.** `blockedReadsFromTranscripts`, `blockedReadsFromFaults` and `blockedReadsBounded`,
+  which `blockedReads` sums. Where blocked Reads are all a period holds and they are not all of one
+  kind, `lumen`, the tray and Home say where they come from: "219 blocked Reads: 200 recorded, 7
+  from faults, 12 bounded". How it's measured lists the three counts and names each recorded block
+  and the call it answered. A ledger with neither table filled, before the daemon has run, gives
+  the summary it would have given without them.
+
+Not changed: the hook writes nothing new for this. Limits: the repository holds captured hook
+payloads but no captured transcript of a blocked Read, so the shape of its `tool_result`
+(`is_error` true, the hook's message inside) is an assumption, and the tests say so. A transcript
+rewritten by another program at the same length, with the same last 64 bytes before the offset, is
+not seen as rewritten; Claude Code only appends to transcripts.
+
+### Each model's tokens are priced at that model's list price, and a floor is shown as one
+
+Every dollar figure in the CLI and the app priced every token at one set of Opus-class rates ($5
+input, $25 output per million), whatever model consumed it, so a Sonnet 4.6 session read about 1.7
+times its cost and a Haiku 4.5 one five times. The app's rates were a TypeScript copy of the Rust
+constants, kept in step by a comment.
+
+- **A price table.** `lumen_core::rates` holds, per model, input, output, 5-minute and 1-hour cache
+  writes and cache reads, in USD per million tokens, from Anthropic's pricing page on 2026-10-13,
+  each row naming the page row it came from, and the fast-mode prices of the three models that have
+  it (Opus 5.5, Opus 5, Opus 4.8). A dated id or a `[1m]` suffix resolves to its alias; anything
+  else must match exactly, not by prefix, so a model the table has not heard of gets no price rather
+  than an older model's. `<synthetic>`, Bedrock ids, Claude Haiku 5.5 (priced by each request's
+  prompt length) and Claude Sonnet 4.5 (whose long-context premium the page no longer gives) have
+  none.
+- **No figure is shown as more complete than it is.** A model with no price adds no dollars; its
+  tokens are still counted. A cache write that recorded no duration is priced at the 5-minute rate,
+  the lower of the two, and a turn that recorded no speed at the standard rate on a model whose fast
+  mode costs more. Every turn ingested before 1.9.0 is both. A figure holding any of these is a
+  floor: the app tags it "at least" and the tag's tooltip says why, `lumen dash` prints "at least
+  $…" with a line for each reason, and a figure with nothing priced in it shows a dash, tagged "no
+  price", or a note that the prices have not loaded yet. Each figure is judged on its own: a write
+  of unknown duration makes the session cost and its cache-write part a floor, not its output cost.
+- **Spend alerts.** A floor over its limit fires the alert. A floor under it cannot settle whether
+  the limit was crossed, so the alert stays quiet and Settings says so under the thresholds.
+- **The daemon records** what the transcript says about both: the cache write's split by duration,
+  into `cache_5m` and `cache_1h` (in the schema from the start, never filled), and `usage.speed`,
+  into a new `turns.speed` column. A turn that recorded neither is stored as NULL, not as zero or
+  "standard", and no row is backfilled.
+- **Sums split by model.** `get_usage` returns `byModel` on every aggregate, and the daemon's
+  snapshot sends `by_model` with each session. The snapshot is now read in one transaction, and a
+  live turn it already counted is held back: a turn ingested while a client connected was in both
+  the snapshot and the live stream, and was counted twice. A snapshot with no split is left unpriced
+  rather than priced at the session's latest model, which a subagent may not share.
+- **`lumen dash`** shows a sum it could not read as a dash, where it showed zero on a first failure
+  and the previous figure, possibly another session's, after that. Its TODAY line is read from the
+  ledger while the daemon is connected; it stayed at $0.0000.
+- **The app holds no price of its own.** It gets the table from a new `lumen_prices` command, and a
+  test fails on a rate constant, a per-token literal or a model's prices written into the frontend.
+
+Not changed: MCP replies and hook decisions.
+
+### A US-only turn is priced at 1.1 times, and a turn whose region is not known as a floor
+
+Every dollar figure priced a turn at the global-routing rate, and the ledger did not record where a
+turn ran. Anthropic's pricing and data residency pages, read on 2026-10-14: for Claude 4.6 and
+later models, `inference_geo` `"us"` is 1.1 times every token price (input, output, cache writes
+and cache reads, on top of fast mode's prices too) and `"global"`, the default, the standard price;
+Opus 4.5, Sonnet 4.5, Haiku 4.5 and earlier always cost the standard price. Neither page defines
+`"not_available"`, which Claude Code writes in `usage.inference_geo`, and a request that names no
+region takes the workspace's default, which can be `"us"`. So a turn with `"not_available"` or no
+region is not known to have cost the standard price.
+
+- The daemon records `usage.inference_geo` as written, into a new `turns.inference_geo` column. A
+  turn that recorded none is NULL, and no row is backfilled. A 1.8.0 build that writes to the ledger
+  afterwards names its columns, and its turns get NULL too.
+- `"us"` costs 1.1 times on a model that offers it, `"global"` the price, and no region or
+  `"not_available"` the global price, flagged as a floor ("at least", with the reason, in the app
+  and the CLI). A region this build does not know has no price, as an unknown speed has none. An
+  older model costs its price wherever it ran.
+- Wherever Claude Code writes `"not_available"` (the real transcript line in Lumen's tests, an Opus
+  4.8 turn, carries it), a figure holding 4.6-or-later turns is now marked "at least": those turns
+  may have cost 1.1 times what is shown.
+- Spend, the snapshot's `by_model`, `get_usage`'s `byModel` and the app's per-model tally are split
+  by model, speed and region; `lumen_prices` sends the multiplier, and the frontend price guard
+  fails on a hard-coded 1.1. The app keeps an empty speed or region apart from an unrecorded one:
+  an empty one has no price.
+
+### Lumen's token counts are calibrated against Claude's, and no longer called exact
+
+Lumen counts tokens with `cl100k_base`, OpenAI's tokenizer, because Claude's is not available
+offline. The README and the Optimizer's footer claimed for those counts an exactness they have only
+in `cl100k_base`'s own units, and nothing said how far those units are from what Claude counts.
+
+- **How it is measured.** `benchmarks/calibration` needs no API key: it goes through Claude Code's
+  own usage data. The same prompt is sent with and without a sample (`claude -p --output-format
+  json`, no tools, no MCP servers, no hooks, no settings, no session persistence), and the
+  difference of the two prompt totals is Claude's count of the sample. Each model was validated
+  first: five sends of the empty prompt gave one total, two samples gave the same delta twice, a
+  one-character sample cost two tokens, and two samples sent together cost what they cost apart. In
+  the run every sample was sent twice and every pair agreed. No calibration call left a transcript
+  under `~/.claude/projects`, where the daemon would have ingested it as your own use; the runner
+  checks after every call and at the end of a run.
+- **The corpus.** Sixty samples from ten public repositories, pinned by commit and git blob id:
+  Rust, Python, TypeScript/JavaScript, Go, shell, JSON, logs and prose, all of it raw file text.
+- **Two tokenizers.** Twelve models were measured through Claude Code 2.1.296 on 2026-10-13 and
+  2026-10-14. Opus 4.7 and every later model measured (Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus
+  5.5, Sonnet 5.5 and Haiku 5.5) counted every sample alike: 1.34 to 1.79 times as many tokens as
+  `cl100k_base`, 1.59 at the median (10th percentile 1.44, 90th 1.70). Opus 4.6, Sonnet 4.6, Opus
+  4.5 and Haiku 4.5 counted every sample alike too: 1.06 to 1.34 times, 1.24 at the median (1.14,
+  1.31). Fable 5 stopped on one sample on safety grounds and Claude Code answered with another model,
+  so that sample is logged as a fallback and dropped for it.
+- **`lumen_core::calibration`** embeds the table, keyed by model and content type, with its dates.
+  A model it does not have, or a file type it does not have, gets a fallback row with a band widened
+  over every row it stands in for. Tests hold it to `results/table.tsv`.
+- **The text follows.** The README, `docs/efficiency.md`, `benchmarks/README.md`, the messaging
+  contract and the Optimizer tab say what counted a figure and how far that is from Claude's count
+  on raw file text, for both tokenizers, and a test holds each quote to the table. The Optimizer's
+  repeat reads card no longer calls a tokenizer count measured. `tests/proxy_count_claims.rs` fails
+  on user-facing text that calls a proxy count exact (the READMEs, the contracts, `docs/`,
+  `commands/`, this changelog's newest entry, the app's templates and TypeScript, and every string
+  literal in the crates' and the tray's Rust); it found 18 such phrases before this change and none
+  after.
+
+Not changed: what the hooks and the MCP tools return. Limits: the ratios are of raw file text; a
+Read's line numbers and the tool-result wrapper are in no row. Every sample came out higher in
+Claude's count than in `cl100k_base`'s, on every model measured, but the samples are English and
+include no CSS, HTML, YAML, SQL or non-Latin text. A later Claude Code or model can move every row,
+so the table carries its date wherever it is quoted.
+
+### Every token figure is Claude's, through the calibration, and the floor takes the file at its smallest ratio and Lumen's answer at its largest
+
+`cl100k_base` counts alone would leave every token figure short (on the models from Opus 4.7 on,
+Claude counts the same text about 1.59 times as many tokens), and the 25,000 tokens a Read returns
+at most are Claude's tokens, not `cl100k_base`'s. The engine now converts every count it uses (the
+file's, the answer's, the earlier answer a repeat read stands in for) through
+`lumen_core::calibration`, by the file's content type (its extension) and the model of the turn that
+read the result.
+
+- **A file** is converted at its row's median ratio, with the band from the smallest to the largest
+  ratio any one sample of the row came out at. Not the 10th to 90th percentile: the dollar floor is
+  the band's low end, and it must hold for each call, not only on the average of many.
+- **An answer Lumen made** (an outline, a slice, a stub, a delta) is a kind of text the corpus never
+  measured, so it takes the file's median and the widest span measured for the model, over every
+  content type: 1.335 to 1.794 on the models from Opus 4.7 on, 1.056 to 1.344 on Opus 4.6, Sonnet
+  4.6, Opus 4.5 and Haiku 4.5, and 1.056 to 1.794 where the model is not known.
+- **A row with no consuming turn, or one read by a model the table does not have**, takes the
+  type's ratio as the mean of the two tokenizers' medians, with a band that spans both. Weighing
+  every row alike counted the tokenizers eight models to four: Rust is now 1.421 where it would
+  have been 1.543, and a file of no known type 1.415 where it would have been 1.503.
+- **A saving** is the file less the answer, two kinds of text whose ratios nothing ties together:
+  its low end is the file at its low end less the answer at its high end, its high end the other
+  way, and its value the medians'. The same holds for a repeat read (the earlier answer less the
+  stub or delta), for a stub whose earlier answer is not in the ledger, and for a loss against
+  nothing (a `fresh=true` ask after a stub, `compress_logs` on inline text), which takes the answer
+  at its high end. The 25,000 cap holds each end of the file's band on its own.
+  Whether a line is capped (`readCapped`) is decided at the median, and a line's `savedCl100k`, the
+  proxy's own figure, is taken before the cap.
+- **The floor.** The bold figure values the saved tokens at the low end of their band (for a loss,
+  the largest loss), never at the median ratio, and the band's high end takes their high end. An
+  extra round is the turn's own recorded usage, the provider's count, and is not converted. The one
+  cost Lumen counts itself, writing inline text out for `compress_logs`, is taken at the high end of
+  its band.
+- **"On record", not "measured".** The provider's usage data is measured; the bold figure also rests
+  on calibrated estimates. So `lumen` and the tray say "no dollars on record", Home "No dollars on
+  record this week.", and How it's measured "Net on record, at least (the bold figure)". The
+  summary's field names keep the old word (`measured`), documented as meaning on record, and a test
+  fails on user-facing text that calls the floor measured.
+- **What each surface says.** The token figure stays "≈ N tokens saved, net", now in Claude's
+  tokens. The period's ⓘ gives `band L to H of Claude's tokens, estimated from cl100k_base counts by
+  the calibration of <date>; the dollars take its low end`. `lumen report` and How it's measured
+  print the calibration: its date, the Claude Code version it was measured through, and for each
+  tokenizer and for the rows with no measured model the table's ratio and band, the calls converted
+  at it all time, their files in `cl100k_base` tokens and the ratio those files came out at.
+- **The summary is schema 2**, since its token figures changed meaning; the app reads 2 and refuses
+  any other.
+- **`calibrate.py`** stops a run past one safety fallback per model, or one per content type over
+  every model, and a test holds the committed run to the same caps.
+
+Not changed: what the hooks and the MCP tools return. `lumen report --json` took the same time in a
+release build, within 1% (median of 15 alternating runs): the ratios are worked out once, and the
+lookups allocate nothing.
+
+### Upgrading a ledger is one transaction, and opening a current one writes nothing
+
+Every program that opens the ledger (daemon, app, hooks, MCP server, CLI) brings it up to date. Each
+step of that upgrade was a write transaction of its own, so upgrading a ledger from 1.5.1 took 9
+commits and one from 1.1.4 took 26. This release adds 8 steps. A backfill also asked for the write
+lock on every open, even when no row needed it. With several programs opening an old ledger at the
+same moment, each waits for every one of those locks, and on a slow disk the wait could run past the
+two seconds an opener retries a busy ledger. The upgrade tests saw this in one CI run on a Windows
+runner: nine openers at once, and in two of the upgrade cases one gave up with "database is locked".
+
+- The upgrade now runs in one transaction. It takes the write lock only when a step changes
+  something, and a ledger that is already up to date is opened without taking it at all. If the
+  ledger is busy, the whole upgrade is rolled back and tried again for up to two seconds, as
+  before, and the next open runs it again if that runs out.
+- A backfill reads first and writes only when a row needs it, so opening a current ledger writes
+  nothing.
+- The schema and the rows are unchanged, the same on all three code paths. Opening a current
+  ledger of 50,000 turns takes the same time as before (6.6 ms).
+
+### The unused `sessions` table is dropped
+
+Every DDL from the first commit to 1.8.0 created `sessions` (`session_id`, `cwd`, `model`,
+`started_at`, `source_file`), and nothing ever inserted a row into it or selected from it: a session
+is the `session_id` its turns carry. The table only looked like the place to find sessions (#13).
+
+- The DDL no longer creates it, and the migrations end with `DROP TABLE IF EXISTS sessions`, so the
+  daemon, the app and the rusqlite path (hooks, the MCP server, the CLI) all drop it through the
+  shared schema code. It is a no-op on a fresh ledger and on one where it already ran. A ledger that
+  somehow holds rows there loses them; no Lumen build ever wrote one.
+- A 1.8.0 build opening the ledger afterwards creates it again, empty; no other row or column
+  changes, nothing in 1.8.0 reads it, and the next open by 1.9.0 drops it again. A test runs that
+  round trip with 1.8.0's own schema code, through each of the three openers.
+- The upgrade matrix gains a 1.8.0 ledger: the long-lived ledger is now written by 1.5.0, 1.6.0,
+  1.7.0 and 1.8.0 in turn, and every cell asserts that `sessions` is gone after the upgrade, that the
+  ledger matches a fresh one, and that every row of every other table is kept.
+
+The release's other schema changes, each made by the shared migrations on every opener, with
+nothing to run: `turns.speed`, `turns.inference_geo` and `faults.agent_id` (NULL where nothing was
+recorded, no row backfilled), the `cache_5m` and `cache_1h` split now filled on ingest, and the
+`intercept_blocks` and `transcript_scans` tables.
+
+### Benchmarks against 1.8.0
+
+The benchmark harness now measures against the last release, v1.8.0, where it measured against
+v1.7.0. It was run on commit `5626660`, the last commit before this bump that changes anything it
+measures: tokens and latency on macOS (Apple M4), latency on Ubuntu 24.04 and Windows Server 2025
+through the Benchmarks workflow (run 39118498843), 200 runs per series. The results are in
+`benchmarks/results/pre-release-56266602bba5-*`, and `benchmarks/README.md` sets them beside 1.8.0's.
+
+This release changes how Lumen counts what it saved and how a ledger is upgraded, not what its tools
+return or what its hooks do, and the benchmark agrees:
+
+- **Tokens:** equal for every file and every mode (outline, recall, stub, delta). The two builds'
+  token digests are the same.
+- **Latency on macOS:** no difference. For every series, the two builds' pass medians overlap.
+- **Latency on Ubuntu:** `recall_file` on a file under 300 lines takes 30 µs longer (1.26 to 1.29 ms,
+  2%), and that held in every pass. Every other series overlaps. The cause was not traced (#62).
+- **Latency on Windows:** `smart_read` on a file of 1,000 to 2,999 lines and a call that claims its
+  identity record are 3% faster in every pass. Every other series overlaps.
+
 ## [1.8.0] — 2026-10-13
 
 **Repeat reads are on by default.** A second `smart_read` or `recall_file` of the same thing in a conversation is answered with a short stub when the file has not changed since, and with only what changed when it has. To turn them off, use the Repeat reads switch in the app, put `{"repeat_reads": false}` in `lumen_settings.json` in the Lumen data directory, or set `LUMEN_REPEAT_READS=off` (the variable wins over the file). The app now shows which version it is, under the tagline in the main window and in an About section. Measurements on a pinned corpus, 1.7.0 beside this build: [benchmarks/README.md](https://github.com/HackPoint/lumen/blob/v1.8.0/benchmarks/README.md#what-is-committed-here). They show a cost in time: a Read that Lumen blocks takes 0.4 to 2.6 ms longer than in 1.7.0, and the hook that names the conversation adds about 0.1 to 2 ms to each Lumen tool call, depending on the machine.
