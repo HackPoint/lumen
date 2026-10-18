@@ -19,6 +19,7 @@ lumen-bench: token and latency benchmarks for Lumen, baseline against candidate.
 usage: benchmarks/run.sh [options]                  record a run
        benchmarks/run.sh compare FILE [options]     measure latency again and set it against the
                                                     committed results FILE (a <label>-<os>.json)
+       benchmarks/run.sh versions|competitors|e2e ...  the P2 benchmarks (not yet implemented)
 
   --label NAME           name of the result files (default pre-release-<12 characters of the
                          candidate's commit>). A MAJOR.MINOR.PATCH label is a release result; any
@@ -214,6 +215,13 @@ fn load_corpora(o: &Opts, repo: &Path, cache: &Path) -> Result<Vec<Corpus>, Stri
 
 fn main_inner() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Each subcommand lives in its own module, which owns its arguments.
+    match args.first().map(String::as_str) {
+        Some("versions") => return lumen_bench::versions::entry(&args[1..]),
+        Some("competitors") => return lumen_bench::competitors::entry(&args[1..]),
+        Some("e2e") => return lumen_bench::e2e::entry(&args[1..]),
+        _ => {}
+    }
     let Some(o) = parse(&args)? else {
         print!("{HELP}");
         return Ok(());
@@ -227,12 +235,7 @@ fn main_inner() -> Result<(), String> {
         .out
         .clone()
         .unwrap_or_else(|| repo.join("benchmarks").join("results"));
-    if cache.starts_with(&repo) {
-        return Err(format!(
-            "the cache {} is inside the repository; the corpus must stay out of it",
-            cache.display()
-        ));
-    }
+    lumen_bench::assets::ensure_outside_repo(&cache, &repo)?;
 
     // The committed file is read first: an unreadable one stops the run before any building.
     let committed = match &o.compare {
