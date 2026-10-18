@@ -1,0 +1,340 @@
+src/_pytest/_code/code.py:95:                raise OSError("path check failed.")
+src/_pytest/_code/code.py:1165:        Handle the situation where the recursion process might raise an
+src/_pytest/_code/code.py:1266:        raise NotImplementedError()
+src/_pytest/_code/source.py:63:                raise IndexError("cannot slice a Source with a step")
+src/_pytest/_code/source.py:105:            raise IndexError("lineno out of range")
+src/_pytest/_code/source.py:146:    raise TypeError(f"could not get code object for {obj!r}")
+src/_pytest/_io/pprint.py:80:            raise ValueError("indent must be >= 0")
+src/_pytest/_io/pprint.py:82:            raise ValueError("depth must be > 0")
+src/_pytest/_io/pprint.py:84:            raise ValueError("width must be != 0")
+src/_pytest/_io/saferepr.py:131:    care to never raise exceptions itself.
+src/_pytest/_io/terminalwriter.py:110:                raise ValueError(f"unknown markup: {name!r}")
+src/_pytest/_io/terminalwriter.py:197:            raise ValueError(
+src/_pytest/_io/terminalwriter.py:225:            raise UsageError(
+src/_pytest/_io/terminalwriter.py:230:            raise UsageError(
+src/_pytest/_py/error.py:62:            raise AttributeError(name)
+src/_pytest/_py/error.py:84:        """Call a function and raise an errno-exception if applicable."""
+src/_pytest/_py/error.py:99:                    raise value
+src/_pytest/_py/error.py:111:            raise cls(f"{func.__name__}{args!r}")
+src/_pytest/_py/path.py:86:                raise TypeError(f"no {name!r} checker available for {self.path!r}")
+src/_pytest/_py/path.py:222:            raise NotImplementedError("XXX win32")
+src/_pytest/_py/path.py:232:            raise NotImplementedError("XXX win32")
+src/_pytest/_py/path.py:291:                raise ValueError(
+src/_pytest/_py/path.py:405:            raise error.EINVAL(target, "cannot move path into a subdirectory of itself")
+src/_pytest/_py/path.py:436:            raise TypeError(f"{relpath!r}: not a string or path object")
+src/_pytest/_py/path.py:629:            raise ValueError(f"Don't know how to compute {hashtype!r} hash")
+src/_pytest/_py/path.py:660:                raise ValueError(f"invalid specification {kw!r}")
+src/_pytest/_py/path.py:706:                        raise ValueError(f"invalid part specification {name!r}")
+src/_pytest/_py/path.py:918:                raise ValueError("can only process bytes")
+src/_pytest/_py/path.py:1039:            raise TypeError(f"mode {mode!r} must be an integer")
+src/_pytest/_py/path.py:1092:            raise error.ENOENT(self)
+src/_pytest/_py/path.py:1099:                raise ImportError(f"Can't find module {modname} at location {self!s}")
+src/_pytest/_py/path.py:1139:                    raise self.ImportMismatchError(modname, modfile, self)
+src/_pytest/_py/path.py:1183:            raise RuntimeError(
+src/_pytest/assertion/__init__.py:98:            raise TypeError(msg.format(repr(names)))
+src/_pytest/assertion/__init__.py:130:    """Try to install the rewrite hook, raise SystemError if it fails."""
+src/_pytest/assertion/util.py:59:            raise UsageError(
+src/_pytest/cacheprovider.py:179:            raise ValueError("name is not allowed to contain path separators")
+src/_pytest/capture.py:229:        raise OSError(
+src/_pytest/capture.py:239:        raise OSError(
+src/_pytest/capture.py:247:        raise UnsupportedOperation("redirected stdin is pseudofile, has no fileno()")
+src/_pytest/capture.py:250:        raise UnsupportedOperation("redirected stdin is pseudofile, has no flush()")
+src/_pytest/capture.py:262:        raise UnsupportedOperation("redirected stdin is pseudofile, has no seek(int)")
+src/_pytest/capture.py:268:        raise UnsupportedOperation("redirected stdin is pseudofile, has no tell()")
+src/_pytest/capture.py:271:        raise UnsupportedOperation("cannot truncate stdin")
+src/_pytest/capture.py:274:        raise UnsupportedOperation("cannot write to stdin")
+src/_pytest/capture.py:277:        raise UnsupportedOperation("Cannot write to stdin")
+src/_pytest/capture.py:307:        raise NotImplementedError()
+src/_pytest/capture.py:311:        raise NotImplementedError()
+src/_pytest/capture.py:315:        raise NotImplementedError()
+src/_pytest/capture.py:319:        raise NotImplementedError()
+src/_pytest/capture.py:323:        raise NotImplementedError()
+src/_pytest/capture.py:327:        raise NotImplementedError()
+src/_pytest/capture.py:331:        raise NotImplementedError()
+src/_pytest/capture.py:692:            raise ValueError("was already stopped")
+src/_pytest/capture.py:723:    raise ValueError(f"unknown capturing method: {method!r}")
+src/_pytest/config/__init__.py:290:        raise UsageError(f"{optname} must be a filename, given: {path}")
+src/_pytest/config/__init__.py:301:        raise UsageError(f"{optname} must be a directory, given: {path}")
+src/_pytest/config/__init__.py:399:        raise TypeError(msg.format(args, type(args)))
+src/_pytest/config/__init__.py:731:        raise KeyError(name)
+src/_pytest/config/__init__.py:766:            raise ConftestImportFailure(conftestpath, cause=e) from e
+src/_pytest/config/__init__.py:776:                        raise AssertionError(
+src/_pytest/config/__init__.py:842:                raise UsageError(f"plugin {name} cannot be disabled")
+src/_pytest/config/__init__.py:845:                raise UsageError(
+src/_pytest/config/__init__.py:920:            raise ImportError(
+src/_pytest/config/__init__.py:946:    raise UsageError(
+src/_pytest/config/__init__.py:1169:            raise NotImplementedError()
+src/_pytest/config/__init__.py:1458:                raise pytest.UsageError(
+src/_pytest/config/__init__.py:1495:            raise UsageError(
+src/_pytest/config/__init__.py:1504:            raise UsageError(message)
+src/_pytest/config/__init__.py:1720:        raise ValueError(msg)  # pragma: no cover
+src/_pytest/config/__init__.py:1729:            raise ValueError(f"unknown configuration value: {name!r}") from e
+src/_pytest/config/__init__.py:1807:                raise TypeError(
+src/_pytest/config/__init__.py:1813:                raise TypeError(
+src/_pytest/config/__init__.py:1837:                raise TypeError(
+src/_pytest/config/__init__.py:1844:                    raise TypeError(
+src/_pytest/config/__init__.py:1857:                raise TypeError(
+src/_pytest/config/__init__.py:1864:                    raise TypeError(
+src/_pytest/config/__init__.py:1872:                raise TypeError(
+src/_pytest/config/__init__.py:1880:                raise TypeError(
+src/_pytest/config/__init__.py:1888:                raise TypeError(
+src/_pytest/config/__init__.py:1896:                raise TypeError(
+src/_pytest/config/__init__.py:1930:        :param skip: If ``True``, raise :func:`pytest.skip` if option is undeclared or has a ``None`` value.
+src/_pytest/config/__init__.py:1937:                raise AttributeError(name)
+src/_pytest/config/__init__.py:1946:            raise ValueError(f"no option named {name!r}") from e
+src/_pytest/config/__init__.py:2118:        raise ValueError(f"invalid truth value {val!r}")
+src/_pytest/config/__init__.py:2160:        raise UsageError(error_template.format(error=error))
+src/_pytest/config/__init__.py:2168:        raise UsageError(error_template.format(error=str(e))) from None
+src/_pytest/config/__init__.py:2176:        raise UsageError(error_template.format(error=exception_text)) from None
+src/_pytest/config/__init__.py:2185:                raise ValueError("number is negative")
+src/_pytest/config/__init__.py:2187:            raise UsageError(
+src/_pytest/config/__init__.py:2196:        raise UsageError(
+src/_pytest/config/__init__.py:2220:        raise UsageError(f"{cat} is not a Warning subclass")
+src/_pytest/config/argparsing.py:256:                raise ValueError(
+src/_pytest/config/argparsing.py:260:                raise ValueError(f"{alias!r} is already an alias of {already!r}")
+src/_pytest/config/argparsing.py:357:            raise ValueError(f"option names {conflict} already added")
+src/_pytest/config/argparsing.py:371:                    raise ValueError("lowercase short options are reserved")
+src/_pytest/config/argparsing.py:411:        raise UsageError(self.format_usage() + msg)
+src/_pytest/config/findpaths.py:55:        raise UsageError(str(exc)) from exc
+src/_pytest/config/findpaths.py:89:            # If a setup.cfg contains a "[pytest]" section, we raise a failure to indicate users that
+src/_pytest/config/findpaths.py:106:            raise UsageError(f"{filepath}: {exc}") from exc
+src/_pytest/config/findpaths.py:130:                raise UsageError(
+src/_pytest/config/findpaths.py:267:            raise UsageError(
+src/_pytest/config/findpaths.py:334:            raise UsageError(
+src/_pytest/debugging.py:35:        raise argparse.ArgumentTypeError(
+src/_pytest/debugging.py:135:                raise UsageError(
+src/_pytest/doctest.py:209:                raise failure
+src/_pytest/doctest.py:219:                raise exc_info[1]
+src/_pytest/doctest.py:226:                raise failure
+src/_pytest/doctest.py:303:            raise MultipleDoctestFailures(failures)
+src/_pytest/faulthandler.py:68:            raise AttributeError()
+src/_pytest/fixtures.py:484:        raise NotImplementedError()
+src/_pytest/fixtures.py:497:        raise NotImplementedError()
+src/_pytest/fixtures.py:510:        raise NotImplementedError()
+src/_pytest/fixtures.py:521:            raise AttributeError(
+src/_pytest/fixtures.py:530:            raise AttributeError(f"cls not available in {self.scope}-scoped context")
+src/_pytest/fixtures.py:546:            raise AttributeError(f"module not available in {self.scope}-scoped context")
+src/_pytest/fixtures.py:555:            raise AttributeError(f"path not available in {self.scope}-scoped context")
+src/_pytest/fixtures.py:573:        raise NotImplementedError()
+src/_pytest/fixtures.py:592:        raise FixtureLookupError(None, self, msg)
+src/_pytest/fixtures.py:602:        raise FixtureLookupError(argname, self, msg)
+src/_pytest/fixtures.py:667:            raise FixtureLookupError(argname, self)
+src/_pytest/fixtures.py:670:            raise FixtureLookupError(argname, self)
+src/_pytest/fixtures.py:687:            raise FixtureLookupError(argname, self)
+src/_pytest/fixtures.py:918:            # The last fixture raise an error, let's present
+src/_pytest/fixtures.py:1000:            raise ValueError(f"{request.fixturename} did not yield a value") from None
+src/_pytest/fixtures.py:1037:        raise TypeError(
+src/_pytest/fixtures.py:1166:            raise exceptions[0]
+src/_pytest/fixtures.py:1169:            raise BaseExceptionGroup(msg, exceptions[::-1])
+src/_pytest/fixtures.py:1204:                    raise exc.with_traceback(exc_tb)
+src/_pytest/fixtures.py:1357:            raise ValueError("class fixtures not supported (maybe in the future)")
+src/_pytest/fixtures.py:1360:            raise ValueError(
+src/_pytest/fixtures.py:2032:        raise NotImplementedError()
+src/_pytest/fixtures.py:2043:        raise NotImplementedError()
+src/_pytest/fixtures.py:2054:        raise NotImplementedError()
+src/_pytest/fixtures.py:2086:            raise TypeError("parsefactories() requires holder or node_or_obj")
+src/_pytest/helpconfig.py:22:    """An argparse Action that will raise a PrintHelp exception in order to skip
+src/_pytest/helpconfig.py:56:            raise PrintHelp
+src/_pytest/helpconfig.py:202:            raise TypeError(f"help argument cannot be None for {name}")
+src/_pytest/junitxml.py:67:                raise TypeError(type(vl))
+src/_pytest/junitxml.py:332:        raise TypeError(msg.format(param=param, g=type(v).__name__))
+src/_pytest/legacypath.py:395:        raise ValueError(f"unknown configuration type: {type}", value)
+src/_pytest/logging.py:415:            raise  # noqa: PLE0704
+src/_pytest/logging.py:643:        raise UsageError(
+src/_pytest/main.py:100:        "configuration file raise errors",
+src/_pytest/main.py:108:        "file raise errors",
+src/_pytest/main.py:298:        raise argparse.ArgumentTypeError(msg)
+src/_pytest/main.py:308:        raise argparse.ArgumentTypeError(msg)
+src/_pytest/main.py:312:        raise argparse.ArgumentTypeError(msg)
+src/_pytest/main.py:399:        raise session.Interrupted(
+src/_pytest/main.py:410:            raise session.Failed(session.shouldfail)
+src/_pytest/main.py:412:            raise session.Interrupted(session.shouldstop)
+src/_pytest/main.py:693:            raise self.Failed(self.shouldfail)
+src/_pytest/main.py:695:            raise self.Interrupted(self.shouldstop)
+src/_pytest/main.py:862:                raise UsageError(*errors)
+src/_pytest/main.py:1125:    If the path doesn't exist, raise UsageError.
+src/_pytest/main.py:1126:    If the path is a directory and selection parts are present, raise UsageError.
+src/_pytest/main.py:1131:        raise UsageError(f"path cannot contain [] parametrization: {arg}")
+src/_pytest/main.py:1149:        raise UsageError(msg.format(arg=arg))
+src/_pytest/main.py:1156:        raise UsageError(msg.format(arg=arg))
+src/_pytest/mark/__init__.py:202:            raise UsageError("Keyword expressions do not support call parameters.")
+src/_pytest/mark/__init__.py:277:        raise UsageError(
+src/_pytest/mark/__init__.py:294:        raise UsageError(
+src/_pytest/mark/expression.py:100:                    raise SyntaxError(
+src/_pytest/mark/expression.py:106:                    raise SyntaxError(
+src/_pytest/mark/expression.py:126:                    raise SyntaxError(
+src/_pytest/mark/expression.py:151:        raise SyntaxError(
+src/_pytest/mark/expression.py:217:        raise SyntaxError(
+src/_pytest/mark/expression.py:222:        raise SyntaxError(
+src/_pytest/mark/expression.py:239:            raise SyntaxError(
+src/_pytest/mark/expression.py:265:    syntax variant), should raise :class:`~pytest.UsageError`.
+src/_pytest/mark/expression.py:304:        raise NotImplementedError()
+src/_pytest/mark/expression.py:307:        raise NotImplementedError()
+src/_pytest/mark/structures.py:72:        raise Collector.CollectError(
+src/_pytest/mark/structures.py:76:        raise LookupError(requested_mark)
+src/_pytest/mark/structures.py:124:            raise ValueError(
+src/_pytest/mark/structures.py:131:                raise TypeError(
+src/_pytest/mark/structures.py:477:            raise TypeError(f"got {mark_obj!r} instead of Mark")
+src/_pytest/mark/structures.py:597:            raise AttributeError("Marker name must NOT start with underscore")
+src/_pytest/mark/structures.py:679:        raise ValueError("cannot delete key in keywords dict")
+src/_pytest/monkeypatch.py:88:                raise ImportError(f"import error in {used}: {ex}") from ex
+src/_pytest/monkeypatch.py:97:        raise AttributeError(
+src/_pytest/monkeypatch.py:105:        raise TypeError(f"must be absolute import path string, not {import_path!r}")
+src/_pytest/monkeypatch.py:225:                raise TypeError(
+src/_pytest/monkeypatch.py:234:                raise TypeError(
+src/_pytest/monkeypatch.py:242:            raise AttributeError(f"{target!r} has no attribute {name!r}")
+src/_pytest/monkeypatch.py:270:                raise TypeError(
+src/_pytest/monkeypatch.py:279:                raise AttributeError(name)
+src/_pytest/monkeypatch.py:302:                raise KeyError(name)
+src/_pytest/nodes.py:168:                raise TypeError("config or parent must be provided")
+src/_pytest/nodes.py:176:                raise TypeError("session or parent must be provided")
+src/_pytest/nodes.py:200:                raise TypeError("nodeid or parent must be provided")
+src/_pytest/nodes.py:222:            raise TypeError("config is not a valid argument for from_parent")
+src/_pytest/nodes.py:224:            raise TypeError("session is not a valid argument for from_parent")
+src/_pytest/nodes.py:258:            raise ValueError(
+src/_pytest/nodes.py:323:            raise ValueError("is not a string or pytest.mark.* Marker")
+src/_pytest/nodes.py:504:        raise NotImplementedError("abstract")
+src/_pytest/nodes.py:721:        raise NotImplementedError("runtest must be implemented by Item subclass")
+src/_pytest/outcomes.py:23:            raise TypeError(error_msg.format(type(self).__name__, type(msg).__name__))
+src/_pytest/outcomes.py:99:        raise Exit(msg=reason, returncode=returncode)
+src/_pytest/outcomes.py:138:        raise Skipped(msg=reason, allow_module_level=allow_module_level)
+src/_pytest/outcomes.py:162:        raise Failed(msg=reason, pytrace=pytrace)
+src/_pytest/outcomes.py:192:        raise XFailed(msg=reason)
+src/_pytest/outcomes.py:266:            # Do not raise or issue warnings inside the catch_warnings() block.
+src/_pytest/outcomes.py:271:        raise skipped
+src/_pytest/outcomes.py:282:            raise Skipped(
+src/_pytest/pathlib.py:239:        raise OSError(
+src/_pytest/pathlib.py:251:        raise OSError(f"cannot create lockfile in {p}") from e
+src/_pytest/pathlib.py:258:            raise OSError("lock path got renamed after successful creation")
+src/_pytest/pathlib.py:420:    raise e
+src/_pytest/pathlib.py:546:        raise ImportError(path)
+src/_pytest/pathlib.py:574:            raise ImportError(f"Can't find module {module_name} at location {path}")
+src/_pytest/pathlib.py:606:            raise ImportPathMismatchError(module_name, module_file, path)
+src/_pytest/pathlib.py:619:            raise ImportPathMismatchError(module_name, module_file, path)
+src/_pytest/pathlib.py:808:                    # a warning and raise ModuleNotFoundError. To avoid the
+src/_pytest/pathlib.py:809:                    # warning, we check sys.meta_path explicitly and raise the error
+src/_pytest/pathlib.py:812:                        raise ModuleNotFoundError
+src/_pytest/pathlib.py:888:    raise CouldNotResolvePathError(f"Could not resolve for {path}")
+src/_pytest/pathlib.py:966:                # Reraise non-ignorable errors to avoid hiding issues.
+src/_pytest/pytester.py:374:            raise ValueError(
+src/_pytest/pytester.py:379:            raise ValueError(
+src/_pytest/pytester.py:585:            raise ValueError("Pytest terminal summary report not found")
+src/_pytest/pytester.py:769:            raise TypeError("ext must not be None")
+src/_pytest/pytester.py:772:            raise ValueError(
+src/_pytest/pytester.py:958:            raise ValueError("pytester_example_dir is unset, can't copy examples")
+src/_pytest/pytester.py:975:                raise LookupError(
+src/_pytest/pytester.py:989:            raise LookupError(
+src/_pytest/pytester.py:1108:            Typically we reraise keyboard interrupts from the child run. If
+src/_pytest/pytester.py:1156:            # Typically we reraise keyboard interrupts from the child run
+src/_pytest/pytester.py:1161:                    raise KeyboardInterrupt()
+src/_pytest/pytester.py:1219:        raise RuntimeError(f"Unrecognized runpytest option: {self._method}")
+src/_pytest/pytester.py:1450:                raise self.TimeoutExpired(timeout_message)
+src/_pytest/pytester.py:1515:                raise ValueError(
+src/_pytest/pytester.py:1634:        raise ValueError(f"line {fnline!r} not found in output")
+src/_pytest/pytester.py:1703:            raise TypeError(f"invalid type for lines2: {type(lines2).__name__}")
+src/_pytest/python.py:515:        raise nodes.Collector.CollectError(
+src/_pytest/python.py:519:        raise nodes.Collector.CollectError(
+src/_pytest/python.py:538:        raise nodes.Collector.CollectError(
+src/_pytest/python.py:547:        raise nodes.Collector.CollectError(
+src/_pytest/python.py:943:                raise nodes.Collector.CollectError(msg)
+src/_pytest/python.py:1022:            raise ValueError(msg) from e
+src/_pytest/python.py:1129:                raise nodes.Collector.CollectError(
+src/_pytest/python.py:1147:            raise ValueError(name) from e
+src/_pytest/python.py:1479:                raise TypeError("ids must be a callable or an iterable") from e
+src/_pytest/python.py:1757:        raise RuntimeError("function definitions are not supposed to be run as tests")
+src/_pytest/python_api.py:70:        raise NotImplementedError
+src/_pytest/python_api.py:86:        raise AssertionError(
+src/_pytest/python_api.py:108:        raise NotImplementedError
+src/_pytest/python_api.py:116:        # raise if there are any non-numeric elements in the sequence.
+src/_pytest/python_api.py:212:                raise TypeError(f"cannot compare '{actual}' to numpy.ndarray") from e
+src/_pytest/python_api.py:318:                raise TypeError(msg.format(key, value, pprint.pformat(self.expected)))
+src/_pytest/python_api.py:391:                raise TypeError(msg.format(x, index, pprint.pformat(self.expected)))
+src/_pytest/python_api.py:419:        # raise a ValueError.  In this case, display '???'.
+src/_pytest/python_api.py:508:            raise ValueError(
+src/_pytest/python_api.py:512:            raise ValueError("absolute tolerance can't be NaN.")
+src/_pytest/python_api.py:523:        # because we don't want to raise errors about the relative tolerance if
+src/_pytest/python_api.py:530:            raise ValueError(
+src/_pytest/python_api.py:534:            raise ValueError("relative tolerance can't be NaN.")
+src/_pytest/python_api.py:577:            raise TypeError(
+src/_pytest/python_api.py:582:            raise TypeError(
+src/_pytest/python_api.py:587:            raise TypeError(
+src/_pytest/python_api.py:594:            raise TypeError(
+src/_pytest/python_api.py:599:            raise ValueError(f"absolute tolerance can't be negative: {abs}")
+src/_pytest/python_api.py:602:                raise TypeError(
+src/_pytest/python_api.py:607:                raise ValueError(f"relative tolerance can't be negative: {rel}")
+src/_pytest/python_api.py:609:                raise ValueError("relative tolerance can't be NaN.")
+src/_pytest/python_api.py:891:        raise TypeError(msg)
+src/_pytest/raises.py:151:    If the code block does not raise the expected exception (:class:`ZeroDivisionError` in the example
+src/_pytest/raises.py:158:        ...     raise ValueError("value must be 0 or None")
+src/_pytest/raises.py:161:        ...     raise ValueError("value must be 42")
+src/_pytest/raises.py:169:        ...     raise e
+src/_pytest/raises.py:176:        ...     raise OSError(errno.EACCES, "no permission to view")
+src/_pytest/raises.py:182:        ...     raise ValueError("value must be 42")
+src/_pytest/raises.py:212:           ...         raise ValueError("value must be <= 10")
+src/_pytest/raises.py:220:           ...         raise ValueError("value must be <= 10")
+src/_pytest/raises.py:233:    some runs raise an exception and others do not.
+src/_pytest/raises.py:262:            raise TypeError(msg)
+src/_pytest/raises.py:269:        raise ValueError(
+src/_pytest/raises.py:272:            f"any special code to say 'this should never raise an exception'."
+src/_pytest/raises.py:275:        raise TypeError(f"{func!r} object (type: {type(func)}) must be callable")
+src/_pytest/raises.py:286:#  raise `_pytest.outcomes.Failed`, where
+src/_pytest/raises.py:441:                raise ValueError(
+src/_pytest/raises.py:451:            raise ValueError(msg + f"{exc.__name__!r}")
+src/_pytest/raises.py:453:            raise TypeError(msg + f"an exception instance: {type(exc).__name__}")
+src/_pytest/raises.py:454:        raise TypeError(msg + repr(type(exc).__name__))
+src/_pytest/raises.py:622:            raise ValueError("You must specify at least one parameter to match on.")
+src/_pytest/raises.py:711:            raise AssertionError(self._fail_reason) from None
+src/_pytest/raises.py:770:        will raise an error.
+src/_pytest/raises.py:780:            raise ExceptionGroup("", (ValueError(),))
+src/_pytest/raises.py:788:            raise ExceptionGroup(
+src/_pytest/raises.py:802:            raise BaseExceptionGroup("hello", [KeyboardInterrupt()]) from ValueError
+src/_pytest/raises.py:805:            raise ExceptionGroup("", (ExceptionGroup("", (ValueError(),)),))
+src/_pytest/raises.py:809:            raise ExceptionGroup("", (ExceptionGroup("", (ValueError(),)),))
+src/_pytest/raises.py:813:            raise ValueError
+src/_pytest/raises.py:822:            raise ExceptionGroup("", (ValueError("hello"), ValueError("goodbye")))
+src/_pytest/raises.py:971:            raise ValueError(
+src/_pytest/raises.py:978:            raise ValueError(
+src/_pytest/raises.py:984:            raise ValueError(
+src/_pytest/raises.py:1016:                raise ValueError(
+src/_pytest/raises.py:1027:                raise TypeError(
+src/_pytest/raises.py:1442:                raise AssertionError("unknown type")
+src/_pytest/recwarn.py:152:    such that some runs raise a warning and others do not.
+src/_pytest/recwarn.py:163:            raise TypeError(
+src/_pytest/recwarn.py:170:            raise TypeError(f"{func!r} object (type: {type(func)}) must be callable")
+src/_pytest/recwarn.py:228:        raise AssertionError(f"{cls!r} not found in warning list")
+src/_pytest/recwarn.py:239:            raise RuntimeError(f"Cannot enter {self!r} twice")
+src/_pytest/recwarn.py:255:            raise RuntimeError(f"Cannot exit {self!r} without entering first")
+src/_pytest/recwarn.py:280:                    raise TypeError(msg % type(exc))
+src/_pytest/recwarn.py:287:            raise TypeError(msg % type(expected_warning))
+src/_pytest/recwarn.py:377:                raise TypeError(
+src/_pytest/reports.py:256:    raise RuntimeError(stream.getvalue())
+src/_pytest/runner.py:266:        reraise += (KeyboardInterrupt,)
+src/_pytest/runner.py:334:            raise AttributeError(f"{self!r} has no valid result")
+src/_pytest/runner.py:364:            if reraise is not None and isinstance(excinfo.value, reraise):
+src/_pytest/runner.py:529:                raise exc[0].with_traceback(exc[1])
+src/_pytest/runner.py:579:            raise exceptions[0]
+src/_pytest/runner.py:581:            raise BaseExceptionGroup("errors during test teardown", exceptions[::-1])
+src/_pytest/scope.py:46:            raise ValueError(f"{self} is the lower-most scope")
+src/_pytest/scope.py:53:            raise ValueError(f"{self} is the upper-most scope")
+src/_pytest/skipping.py:110:                raise ValueError(
+src/_pytest/skipping.py:192:            raise TypeError(str(e) + " - maybe you meant pytest.mark.skipif?") from None
+src/_pytest/skipping.py:251:        raise skip.Exception(skipped.reason, _use_item_location=True)
+src/_pytest/threadexception.py:70:            raise errors[0]
+src/_pytest/threadexception.py:72:            raise ExceptionGroup("multiple thread exception warnings", errors)
+src/_pytest/tmpdir.py:97:            raise ValueError(
+src/_pytest/tmpdir.py:103:            raise ValueError(
+src/_pytest/tmpdir.py:118:            raise ValueError(f"{basename} is not a normalized and relative path")
+src/_pytest/tmpdir.py:193:                    raise OSError(
+src/_pytest/tmpdir.py:198:                    raise OSError(
+src/_pytest/unittest.py:143:            # If a single exception, raise it directly as this provides a more readable
+src/_pytest/unittest.py:146:                raise exceptions[0]
+src/_pytest/unittest.py:148:                raise ExceptionGroup("Unittest class cleanup errors", exceptions)
+src/_pytest/unittest.py:156:                raise skip.Exception(reason, _use_item_location=True)
+src/_pytest/unittest.py:189:            raise skip.Exception(reason, _use_item_location=True)
+src/_pytest/unittest.py:213:                raise skip.Exception(reason, _use_item_location=True)
+src/_pytest/unittest.py:321:                raise skip.Exception(reason, _use_item_location=True)
+src/_pytest/unittest.py:519:    # This covers explicit `raise unittest.SkipTest`.
+src/_pytest/unraisableexception.py:79:            raise errors[0]
+src/_pytest/unraisableexception.py:81:            raise ExceptionGroup("multiple unraisable exception warnings", errors)
+src/_pytest/warning_types.py:166:        raise type(w)(f"{w}\n at {filename}:{lineno}") from None
+src/pytest/__main__.py:9:    raise SystemExit(_console_main())

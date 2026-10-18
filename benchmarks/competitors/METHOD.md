@@ -56,11 +56,22 @@ revision and the run is offline (`HF_HUB_OFFLINE=1`), so the arm does not depend
 
 Question: for the same tool output, how many tokens reach the model, and does the answer survive?
 
-- **Corpus** (C1): outputs recorded once from public repositories, a few classes: a large source
-  file read, a long build or test log, a verbose `git`/search listing, a JSON blob. Each has
-  needles: the facts a task needs (a function name and its line, the failing test and its
-  message, the one changed line). The corpus is committed (at most 5 MB), every file pinned by
-  sha256, with no home paths in it.
+- **Corpus** (C1, `benchmarks/competitors/corpus/`, recorded by `competitors record`): real
+  outputs from public sources, in six categories: file reads by size bucket (under 300, 300-999,
+  1000-2999 and 3000+ lines; from the Lumen, react-hook-form and pytest commits pinned in
+  `benchmarks/README.md`, byte for byte from git's object store), shell output (`git ls-tree`,
+  `git show --stat`), grep output (`git grep`), test logs (real pytest runs quoted in pytest's
+  own documentation at the pinned commit, and real `cargo test` failures from the Rust book's
+  listings at a pinned commit), build logs (rustc and tsc diagnostics from the
+  compilers' own test baselines at pinned commits) and JSON (package registry, PyPI and GitHub
+  API documents, plus JSON files from the pinned repositories). The logs are public and pinned
+  rather than produced by running a build here, because a build at record time would depend on
+  the network, the toolchain and the clock. Each item has needles: the facts a task needs (a
+  definition line, a failing test and its message, an error code, a version and a checksum).
+  The corpus is committed (at most 5 MB), every file pinned by sha256 in `manifest.toml`, with
+  no home paths, user names or employer names in it (a documentation example's `/home/sweet/` is
+  rewritten to `/work/` and the item says so). A download is checked against its pinned sha256
+  before use, so a moved source stops the record instead of changing the corpus.
 - **Replay** (C2): each tool is driven through the mechanism it really uses, on the recorded
   bytes. squeez and RTK: the PreToolUse Bash rewrite through PATH shims that replay the recorded
   stdout and exit code, and the PostToolUse `updatedToolOutput` path. Headroom: its proxy in
