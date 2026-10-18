@@ -6,6 +6,8 @@
 //! source list, the marker's shape, and [`effective`], which every
 //! `resolve_db_path` caller goes through so that a stale path keeps working.
 
+pub mod retire;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -340,6 +342,21 @@ mod tests {
         .unwrap();
         let m = read_marker(root.path()).unwrap().unwrap();
         assert!(m.hwm.is_empty() && m.spool_offset == 0);
+    }
+
+    #[test]
+    fn names_fold_case_exactly_where_the_file_system_does() {
+        // Kills "compare case-sensitively on macOS": folding is asserted on
+        // macOS and Windows, and its absence on Linux.
+        let root = TempDir::new().unwrap();
+        mark(&root.path().join(NEW));
+        let shouty = root.path().join(OLD.to_ascii_uppercase()).join("lumen.db");
+        let expect = if cfg!(any(windows, target_os = "macos")) {
+            root.path().join(NEW).join("lumen.db")
+        } else {
+            shouty.clone()
+        };
+        assert_eq!(effective_with(&shouty, NEW, OLD), expect);
     }
 
     #[test]
