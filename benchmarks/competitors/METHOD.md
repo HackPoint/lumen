@@ -38,6 +38,18 @@ and the version report (`benchmarks/versions/`), so the two never disagree about
 the Linux containers. 1.1.5 is the first version with a `.deb`. It is labelled as the stand-in
 in every table; the other metrics of the version report still measure 1.0.0 on macOS and Windows.
 
+**How the Lumen arms are configured.** There is no headless Setup, so the arm writes what Setup
+writes: the `mcpServers.lumen` entry and the hooks, with Setup's matchers for that version (checked
+against a golden produced by `setup.rs`'s own writers). The two hook scripts are the happy path of
+Setup's scripts: the same `exec lumen-mcp hook ...` lines, without the fault report Setup's script
+writes when `lumen-mcp` is missing. That branch cannot run here, because the sidecar sits next to
+the script; the exit behaviour is the same.
+
+**Containers.** Images are named by `@sha256:` digest (a tag can move between two runs) and run
+with `--platform linux/amd64`. The cost cap counts the main thread and the subagents live, and a
+run is also bounded by what is left of the owner's budget (`--i-have-a-budget`), which is kept in
+`budget-ledger.json` beside the results.
+
 ## Deviation from defaults: telemetry
 
 Every arm runs with its telemetry switched off (`telemetry_env` in `tools.toml`: `DO_NOT_TRACK=1`,

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 publish = false
+default-run = "lumen-bench"
 description = "On-demand benchmark harness for the Lumen MCP server and hooks. Dev-only: nothing shipped depends on it."
 
 [lib]
@@ -13,6 +14,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "lumen-bench"
 path = "src/main.rs"
+
+# A stand-in for `claude` that the end-to-end tests run (no network, no model, no cost): it prints
+# recorded stream-json, writes recorded transcripts into $HOME/.claude/projects, or keeps
+# "spending". A binary rather than a script so the tests run on Windows too.
+[[bin]]
+name = "lumen-bench-stub-claude"
+path = "src/bin/stub_claude.rs"
 
 # Dev-only. No shipped binary (lumen-mcp, lumen-daemon, lumen-cli, the app) depends on this
 # crate, and it adds nothing to their dependency trees: every dependency below is already in

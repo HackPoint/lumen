@@ -111,6 +111,25 @@ fn bench(args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// `e2e` is implemented (E1): a bare invocation starts nothing, and a real run is refused without
+/// the key and the budget flag.
+#[test]
+fn a_bare_e2e_command_starts_nothing() {
+    let o = bench(&["e2e"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("a command is required"));
+    let o = Command::new(env!("CARGO_BIN_EXE_lumen-bench"))
+        .args(["e2e", "run", "--out", "x"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("refusing to start a real run"));
+    let help = bench(&["e2e", "--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("e2e"));
+}
+
 /// `versions` is implemented (V2): a bare invocation must not start a run, so it refuses and says
 /// what to name; `--help` still works.
 #[test]
@@ -131,7 +150,7 @@ fn a_bare_versions_command_starts_nothing() {
 
 #[test]
 fn the_new_subcommands_are_stubs_that_exit_non_zero() {
-    for sub in ["competitors", "e2e"] {
+    for sub in ["competitors"] {
         for args in [vec![sub], vec![sub, "run", "--out", "x"]] {
             let o = bench(&args);
             assert!(!o.status.success(), "{args:?}");
