@@ -43,6 +43,11 @@ pub struct FaultRecord {
     pub detail: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// The subagent the event belongs to, from 1.9.0; `None` for the main agent, and on every
+    /// record written before. Left off the spool line when `None`, so a main agent's line is
+    /// what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
     #[serde(default = "unknown_channel")]
@@ -85,6 +90,7 @@ impl FaultRecord {
             lines: None,
             detail: None,
             session_id: set("LUMEN_SESSION_ID").or_else(|| set("CLAUDE_CODE_SESSION_ID")),
+            agent_id: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             channel: set("LUMEN_CHANNEL")
                 .unwrap_or_else(|| crate::meter::channel_from(&var).to_string()),
@@ -332,8 +338,8 @@ pub fn insert(conn: &rusqlite::Connection, recs: &[FaultRecord]) -> rusqlite::Re
     let tx = conn.unchecked_transaction()?;
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel) \
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
+             agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         )?;
         for r in recs {
             stmt.execute(rusqlite::params![
@@ -346,6 +352,7 @@ pub fn insert(conn: &rusqlite::Connection, recs: &[FaultRecord]) -> rusqlite::Re
                 r.session_id,
                 r.version,
                 r.channel,
+                r.agent_id,
             ])?;
         }
     }
@@ -443,16 +450,24 @@ mod tests {
             &spool,
             &FaultRecord::now("hook_fail_open", "retry_escape_valve").with_path("a.rs"),
         );
-        record_at(
-            &spool,
-            &FaultRecord::now("hook_fail_open", "retry_escape_valve").with_path("b.rs"),
-        );
+        let mut sub = FaultRecord::now("hook_fail_open", "retry_escape_valve").with_path("b.rs");
+        sub.agent_id = Some("a1".into());
+        record_at(&spool, &sub);
 
         assert_eq!(drain_spool_at(&conn, &spool).unwrap(), 2);
         let n: i64 = conn
             .query_row("SELECT count(*) FROM faults", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2);
+        // The subagent's Read keeps its agent into the table; the main agent's has none.
+        let agents: Vec<Option<String>> = conn
+            .prepare("SELECT agent_id FROM faults ORDER BY path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(agents, [None, Some("a1".to_string())]);
         assert!(!spool.exists(), "spool should be gone after a clean drain");
         assert_eq!(
             drain_spool_at(&conn, &spool).unwrap(),

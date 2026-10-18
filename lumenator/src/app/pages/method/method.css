@@ -1,0 +1,133 @@
+/* Wider than the other screens' column: the ledger's tables need the room. */
+.method {
+    max-width: 720px;
+    align-items: stretch;
+    font-family: var(--lumen-font-sans);
+}
+
+.method__title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--lumen-text);
+}
+
+.method__section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.method__h2,
+.method__h3 {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+.method__h3 {
+    margin-top: 0.4rem;
+}
+
+.method__p,
+.method__lede,
+.method__rules dd,
+.method__list {
+    margin: 0;
+    font-size: 0.76rem;
+    line-height: 1.5;
+    color: var(--lumen-text);
+}
+
+.method__dim,
+.method__lede,
+.method__note,
+.method__path {
+    color: var(--lumen-text-dim);
+}
+
+.method__stale {
+    margin: 0;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--lumen-warn);
+    border-radius: 6px;
+    font-size: 0.74rem;
+    color: var(--lumen-warn);
+}
+
+.method__rules {
+    margin: 0;
+}
+
+.method__rules dt {
+    margin-top: 0.5rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    color: var(--lumen-text);
+}
+
+.method__src {
+    overflow-wrap: anywhere;
+    font-family: var(--lumen-font-mono);
+    font-size: 0.7rem;
+}
+
+.method__note,
+.method__path {
+    display: block;
+    font-size: 0.64rem;
+    font-weight: 400;
+    overflow-wrap: anywhere;
+}
+
+.method__scroll {
+    overflow-x: auto;
+}
+
+.method__table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-text);
+}
+
+.method__table th,
+.method__table td {
+    padding: 0.3rem 0.45rem;
+    border-bottom: 1px solid var(--lumen-border);
+    text-align: left;
+    vertical-align: top;
+}
+
+.method__table thead th {
+    color: var(--lumen-text-dim);
+    font-weight: 600;
+}
+
+.method__table tbody th {
+    font-weight: 600;
+}
+
+.method__net {
+    font-family: var(--lumen-font-mono);
+    white-space: nowrap;
+}
+
+.method__ledger tr.is-loss .method__net {
+    color: var(--lumen-alert);
+}
+
+/* The calibration's groups: the rows column is a sentence, so it takes the width and wraps; the
+   ratios stay whole. */
+.method__cal tbody th {
+    font-weight: 400;
+    min-width: 12rem;
+}
+
+.method__cal td {
+    white-space: nowrap;
+}

@@ -21,16 +21,37 @@
 //! the 125-token file that recorded −54 could not have been trimmed under this rule
 //! because its budget is negative before any rendering happens.
 //!
-//! Rates mirror `crate::rates` deliberately rather than importing them as f64: the
-//! arithmetic here is per-million and mixing the two representations invites the kind of
-//! silent unit error this module exists to prevent.
+//! The rates are Opus-class list prices (Opus 4.5 to 4.8 and Opus 5), assumed whatever model
+//! will read the outline, because the ranked arm that sizes it does not know which one will.
+//! They are this model's inputs and nothing else's.
+//!
+//! **Not a savings figure.** What Lumen saved is `crate::savings`, which prices each call at the
+//! model of the turn that read it and derives R and the round cost per call from the ledger. No
+//! figure the app, the CLI or the benchmarks show uses anything in this file
+//! (`crates/lumen-core/tests/retired_constants.rs` holds them to that). This only sizes a ranked
+//! outline, which is reached with `LUMEN_RANKED_OUTLINE` set and not otherwise.
+//!
+//! **Why the sizing still uses fixed inputs (1.9.0).** Replacing them with this installation's
+//! derived pairs, or with a conservative default, moves `S_min`, and the decision is made after
+//! the round is already spent: the model has called smart_read, so `S_min` only chooses between a
+//! ranked outline, the legacy outline and the file. Measured over the pinned benchmark corpus (779
+//! files, ranked arm, against this sizing's `S_min` of 5,383), every other `S_min` tried made a
+//! file-size bucket worse. A lower one, as a long session's derived R gives: at 1,000 the 300-999
+//! line bucket returned 48,150 tokens against 43,577 (65 files larger, 103 smaller). A higher one,
+//! as a conservative default gives: at 33,377 (`R = 0`, the write alone repaying the round) the
+//! 1,000-2,999 bucket returned 48,366 against 42,662 and the total rose from 179,556 to 185,716.
+//! Lumen's rule is that a change to what the tools return is better or equal on every series, so
+//! the sizing stayed as it was.
 
 use serde::Serialize;
 
-/// Per-million-token prices, matching `crate::rates`.
-const CACHE_READ_PER_M: f64 = 0.5;
-const CACHE_WRITE_PER_M: f64 = 6.25;
-const OUTPUT_PER_M: f64 = 25.0;
+/// The Opus-class prices the model assumes for every turn, USD per million tokens.
+pub const CACHE_READ_PER_M: f64 = 0.5;
+pub const CACHE_WRITE_PER_M: f64 = 6.25;
+pub const OUTPUT_PER_M: f64 = 25.0;
+/// Not used by the arithmetic here, which never prices fresh input. Carried so that a
+/// report of the model's rates can name all four.
+pub const INPUT_PER_M: f64 = 5.0;
 
 /// Where the inputs to `S_min` came from.
 ///
@@ -89,12 +110,18 @@ const MIN_TURNS_FOR_OBSERVED: i64 = 200;
 pub const DEFAULT_CONTEXT_TOKENS: f64 = 362_965.0;
 pub const DEFAULT_OUTPUT_TOKENS: f64 = 1_085.0;
 
-/// Median main-agent rounds remaining after a given call.
+/// Median main-agent rounds remaining after a given call, in the author's sessions.
 ///
 /// Not the median session length (72). `R` is how many rounds still follow the call, and
 /// a read is as likely to happen early as late, so the expected remainder is about half
 /// the session. 65 is the measured median remainder, which is why it is close to but not
 /// equal to half of 72.
+///
+/// Kept for the ranked arm's sizing only, and never for a savings figure (`crate::savings`
+/// derives R for each call from the turns that followed it). The ranked arm runs only with
+/// `LUMEN_RANKED_OUTLINE` set, which is off by default, and every alternative swept over the
+/// pinned corpus made a file-size bucket's replies larger (see the module docs).
+/// `crates/lumen-core/tests/retired_constants.rs` fails if anything else reads it.
 pub const DEFAULT_ROUNDS_REMAINING: f64 = 65.0;
 
 /// The inputs to a budget decision, and where they came from.
@@ -173,11 +200,9 @@ impl Econ {
     /// `output_tokens` mean is `O` directly. Subagent turns are excluded — they carry
     /// their own fresh context and are not the rounds an interception adds to.
     ///
-    /// `rounds_remaining` is left at the default: deriving it needs the per-call
-    /// `(R, round cost)` pairing that `req_key` was added to make possible, and until
-    /// that data exists a computed value here would be a guess wearing the word
-    /// "observed". Reported as `Observed` only when `C` and `O` both came from the
-    /// ledger.
+    /// `rounds_remaining` is left at the default. The per-call pairing now exists
+    /// (`crate::savings`), and sizing from it was measured and kept out: see the module docs.
+    /// Reported as `Observed` only when `C` and `O` both came from the ledger.
     pub fn observed(db: &std::path::Path) -> Self {
         let fallback = Self::default();
         let Ok(conn) = rusqlite::Connection::open_with_flags(

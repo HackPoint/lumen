@@ -19,27 +19,50 @@ use crate::busy;
 /// "already applied" would leave a column or an index missing for good. It is
 /// waited for, and returned if the wait runs out; the next open runs the
 /// migration again. [`BACKFILLS`] are not read that way: they rewrite rows, not the
-/// schema, so a ledger that stays busy for one does not fail the open.
+/// schema, so a ledger that stays busy for one does not fail the open. They are also read before
+/// they are run, so a ledger with no row to rewrite is not asked for the write lock.
 pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     busy::retry_busy(|| sqlx::raw_sql(DDL).execute(pool)).await?;
+    busy::retry_busy(|| migrate(pool)).await?;
+    for backfill in BACKFILLS {
+        // Literals in BACKFILLS, as below.
+        let pending = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(backfill.pending))
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+        if pending != 0 {
+            busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(backfill.rewrite)).execute(pool))
+                .await
+                .ok();
+        }
+    }
+    Ok(())
+}
+
+/// [`MIGRATIONS`] in one transaction, which takes the write lock when the first statement that
+/// changes something does, and not at all when none does.
+///
+/// Run statement by statement, each ALTER was a write transaction of its own: a lock to win
+/// against every other opener and a commit to sync, 26 of them for a 1.1.4 ledger and 12 for a
+/// 1.5.0 one. An ALTER that finds its column already there fails before it touches the file, so
+/// on a current ledger the statements take no lock. A busy ledger rolls the whole transaction
+/// back, and [`busy::retry_busy`] runs it again against whatever the winner left.
+async fn migrate(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     for migration in MIGRATIONS {
         // AssertSqlSafe is sound here: every statement is a literal in
         // MIGRATIONS above, so no runtime value can reach the SQL.
-        let outcome =
-            busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(*migration)).execute(pool)).await;
+        let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
+            .execute(&mut *tx)
+            .await;
         if let Err(e) = outcome
             && busy::is_busy(&e)
         {
+            tx.rollback().await.ok();
             return Err(e);
         }
     }
-    for backfill in BACKFILLS {
-        // Literals in BACKFILLS, as above.
-        busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(*backfill)).execute(pool))
-            .await
-            .ok();
-    }
-    Ok(())
+    tx.commit().await
 }
 
 /// Open the ledger at `url` as a pool and bring it up to date: what the daemon runs before it
@@ -179,16 +202,90 @@ pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS faults (\
         ts TEXT NOT NULL, kind TEXT NOT NULL, variant TEXT NOT NULL DEFAULT '-', \
         path TEXT, lines INTEGER, detail TEXT, session_id TEXT, \
-        version TEXT, channel TEXT NOT NULL DEFAULT 'unknown')",
+        version TEXT, channel TEXT NOT NULL DEFAULT 'unknown', agent_id TEXT)",
     "CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant)",
+    // ── 1.9.0: the sessions table is gone ────────────────────────────────────
+    // Every DDL from the first release to 1.8.0 created `sessions`, and no release ever wrote a
+    // row to it or read one: a session is the `session_id` its turns carry. An empty table
+    // that looks like the place to find sessions misleads whoever reads the schema next.
+    //
+    // IF EXISTS makes this a no-op on a fresh database, and on one where it already ran.
+    // An older build that opens the ledger afterwards creates the table again, empty, through
+    // its own CREATE TABLE IF NOT EXISTS, and the next open by this one drops it again. Nothing
+    // in either reads it, so the round trip changes no figure.
+    "DROP TABLE IF EXISTS sessions",
+    // ── 1.9.0: the speed a turn ran at ───────────────────────────────────────
+    // usage.speed, "standard" or "fast". Fast mode costs a premium on the models that have
+    // it, so a turn is priced at the rate of the speed it ran at. NULL on every turn ingested
+    // before 1.9.0, and on a transcript that does not record it: unknown, which is the truth,
+    // and a cost that holds such a turn on a model with fast mode is shown as a floor.
+    "ALTER TABLE turns ADD COLUMN speed TEXT",
+    // ── 1.9.0: where a turn's inference ran ──────────────────────────────────
+    // usage.inference_geo as the transcript wrote it: "us", "global", or "not_available", which
+    // Claude Code writes when it has no region to report. US-only inference costs 1.1 times on
+    // the 4.6 and later models, so a turn is priced at the rate of the region it ran in. NULL on
+    // every turn ingested before 1.9.0, and on a transcript that does not record it: unknown, and
+    // a cost that holds such a turn, or a "not_available" one, on a model where US-only costs more
+    // is shown as a floor. A 1.8.0 build that writes to the ledger afterwards names its columns,
+    // so its turns get NULL here too.
+    "ALTER TABLE turns ADD COLUMN inference_geo TEXT",
+    // ── 1.9.0: whose Read a fault was ────────────────────────────────────────
+    // agent_id — the subagent the hook event belonged to; NULL for the main agent, and on every
+    //            fault recorded before 1.9.0. The intercept blocks a path once per context, a
+    //            subagent's apart from its parent's, so the savings summary counts a block per
+    //            session, agent and path; without this, a subagent's block and its parent's on
+    //            the same file could not be told apart.
+    "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+    // ── 1.9.0: the Reads the intercept blocked, from the transcripts ─────────
+    // A block writes no row (the hook keeps only a marker file), and the escape valve's fault
+    // records only a later Read of a blocked path. The transcript of the agent that tried the
+    // Read records every block: the daemon reads them there, one row per blocked Read, keyed by
+    // the Read's tool_use id, which survives the daemon re-reading every transcript on start.
+    //
+    // Both tables are also in DDL, which is enough for a fresh ledger, and are repeated here as
+    // `session_events` (1.7.0) and `faults` are: DDL runs as one batch that stops at its first
+    // failing statement, so on a ledger old enough for an earlier statement there to fail, a table
+    // declared only in DDL is never created. Each statement here runs on its own. Their indexes
+    // are here and not in DDL, for the reason given above `idx_session_events_session`.
+    "CREATE TABLE IF NOT EXISTS intercept_blocks (\
+        tool_use_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, agent_id TEXT, \
+        path TEXT NOT NULL, lines INTEGER, kind TEXT NOT NULL, ts_ms INTEGER NOT NULL, \
+        uuid TEXT NOT NULL, source_file TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_intercept_blocks_session \
+     ON intercept_blocks(session_id, ts_ms)",
+    // Which transcripts the daemon has read for blocks from their first line, and through which
+    // turn of each session in them: where one has been read, a block it does not hold did not
+    // happen there, so the savings summary need not bound one from the faults.
+    "CREATE TABLE IF NOT EXISTS transcript_scans (\
+        source_file TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT, \
+        matcher INTEGER NOT NULL, through_ms INTEGER NOT NULL, \
+        PRIMARY KEY (source_file, session_id))",
+    "CREATE INDEX IF NOT EXISTS idx_transcript_scans_session ON transcript_scans(session_id)",
 ];
+
+/// A row rewrite and the read that says whether it has anything to do.
+pub struct Backfill {
+    /// A query for one integer, non-zero when [`Self::rewrite`] would change a row. It only reads,
+    /// so a ledger with nothing to rewrite is not asked for the write lock.
+    pub pending: &'static str,
+    pub rewrite: &'static str,
+}
 
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
 /// error, and the next open runs it again.
-pub const BACKFILLS: &[&str] = &[
+pub const BACKFILLS: &[Backfill] = &[
     // Mark the turns ingested from a subagent path. Idempotent, so safe to re-run on every open.
-    "UPDATE turns SET is_subagent = 1 \
-     WHERE is_subagent = 0 AND source_file LIKE '%/subagents/%'",
+    // Either separator: a ledger written on Windows holds backslashes, and the savings summary
+    // reads a turn's subagent from this column alone (LIKE has no escape character here, so the
+    // backslash is literal).
+    Backfill {
+        pending: "SELECT EXISTS (SELECT 1 FROM turns \
+            WHERE is_subagent = 0 \
+              AND (source_file LIKE '%/subagents/%' OR source_file LIKE '%\\subagents\\%'))",
+        rewrite: "UPDATE turns SET is_subagent = 1 \
+            WHERE is_subagent = 0 \
+              AND (source_file LIKE '%/subagents/%' OR source_file LIKE '%\\subagents\\%')",
+    },
 ];
 
 /// Column count of `read_events` on a current database — DDL plus every ALTER in
@@ -217,15 +314,13 @@ CREATE TABLE IF NOT EXISTS turns (
     source_file                 TEXT,
     -- 1 when the turn came from a subagent transcript. Counted in cost, excluded
     -- from the context-fill gauge (a subagent's context is not the session's).
-    is_subagent                 INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id  TEXT PRIMARY KEY,
-    cwd         TEXT,
-    model       TEXT,
-    started_at  TEXT,
-    source_file TEXT
+    is_subagent                 INTEGER NOT NULL DEFAULT 0,
+    -- 1.9.0: usage.speed, standard | fast | NULL when not recorded. Last, where the ALTER
+    -- in MIGRATIONS puts it on an older ledger, so the two agree on column order.
+    speed                       TEXT,
+    -- 1.9.0: usage.inference_geo, us | global | not_available | NULL when not recorded.
+    -- After speed, in the order the ALTERs in MIGRATIONS add them.
+    inference_geo               TEXT
 );
 
 CREATE TABLE IF NOT EXISTS calibration (
@@ -309,9 +404,40 @@ CREATE TABLE IF NOT EXISTS faults (
     session_id TEXT,
     -- Version that produced the fault, so a fixed regression stops matching.
     version    TEXT,
-    channel    TEXT NOT NULL DEFAULT 'unknown'
+    channel    TEXT NOT NULL DEFAULT 'unknown',
+    -- 1.9.0: the subagent the hook event belonged to; NULL for the main agent and before.
+    -- Declared where the ALTER in MIGRATIONS adds it on an older database.
+    agent_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_faults_kind ON faults(kind, variant);
+
+-- 1.9.0: Reads the intercept blocked, as the transcript of the agent that tried each records it
+-- (the hook writes no row for a block). Keyed by the Read's tool_use id and written with INSERT OR
+-- IGNORE: the daemon re-reads every transcript from its first line on start. Its index is in
+-- MIGRATIONS, not here.
+CREATE TABLE IF NOT EXISTS intercept_blocks (
+    tool_use_id TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    agent_id    TEXT,              -- the subagent whose transcript holds it; NULL for the main agent
+    path        TEXT NOT NULL,     -- as the hook named it, which is what its faults name
+    lines       INTEGER,
+    kind        TEXT NOT NULL,     -- redirect | log | served (blocked again after a Lumen answer)
+    ts_ms       INTEGER NOT NULL,  -- the tool_result record's own timestamp, unix ms
+    uuid        TEXT NOT NULL,     -- the tool_result record's uuid
+    source_file TEXT
+);
+
+-- 1.9.0: transcripts the daemon has read for blocks from their first line (by matcher, the
+-- version of lumen_core::intercept that read them): one row per file and session in it, through
+-- that session's latest turn read there.
+CREATE TABLE IF NOT EXISTS transcript_scans (
+    source_file TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    agent_id    TEXT,
+    matcher     INTEGER NOT NULL,
+    through_ms  INTEGER NOT NULL,
+    PRIMARY KEY (source_file, session_id)
+);
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch
 -- against a database that may predate E7, where session_id does not yet exist —
 -- the index would fail, and because init_schema propagates that with `?`, the
@@ -472,6 +598,11 @@ mod tests {
         for (id, file) in [
             ("main", "/h/.claude/projects/-p/abc.jsonl"),
             ("sub", "/h/.claude/projects/-p/abc/subagents/agent-1.jsonl"),
+            (
+                "win",
+                r"C:\Users\me\.claude\projects\C--p\abc\subagents\agent-2.jsonl",
+            ),
+            ("winmain", r"C:\Users\me\.claude\projects\C--p\abc.jsonl"),
         ] {
             sqlx::query(
                 "INSERT INTO turns (message_id, session_id, ts, input_tokens, \
@@ -495,8 +626,13 @@ mod tests {
                 .unwrap();
         assert_eq!(
             flagged,
-            vec![("main".to_string(), 0), ("sub".to_string(), 1)],
-            "the subagent row must be backfilled from its source_file"
+            vec![
+                ("main".to_string(), 0),
+                ("sub".to_string(), 1),
+                ("win".to_string(), 1),
+                ("winmain".to_string(), 0),
+            ],
+            "the subagent row must be backfilled from its source_file, under either separator"
         );
     }
 
@@ -698,6 +834,10 @@ mod tests {
             columns(&pool, "read_events")
                 .await
                 .contains(&"channel".into())
+        );
+        assert!(
+            columns(&pool, "sessions").await.is_empty(),
+            "a fresh database must not have the dropped sessions table"
         );
     }
 
@@ -987,5 +1127,323 @@ mod tests {
         assert_eq!(idx, 1);
         drop(conn);
         crate::meter::connect_db(&path).expect("a second open must be a no-op");
+    }
+
+    // ── 1.9.0: sessions dropped ──────────────────────────────────────────────
+
+    /// `sessions` as every release through 1.8.0 created it, holding a row. Hand-written: the
+    /// current DDL no longer has the table.
+    const SESSIONS_THROUGH_1_8_0: &str = "\
+        CREATE TABLE sessions ( \
+            session_id TEXT PRIMARY KEY, cwd TEXT, model TEXT, started_at TEXT, \
+            source_file TEXT); \
+        INSERT INTO sessions VALUES ('s-1','/p','claude-opus-5','2026-09-01T10:00:00Z', \
+            's-1.jsonl');";
+
+    #[tokio::test]
+    async fn a_database_with_sessions_loses_it_and_keeps_every_other_row() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        for sql in [READ_EVENTS_1_6_0, ROWS_1_6_0, SESSIONS_THROUGH_1_8_0] {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+        assert!(
+            !columns(&pool, "sessions").await.is_empty(),
+            "precondition: the table is there"
+        );
+        let before: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+
+        init_schema(&pool).await.unwrap();
+
+        assert!(
+            columns(&pool, "sessions").await.is_empty(),
+            "sessions must be dropped"
+        );
+        let after: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(rendered_rows_sql()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before, "no other row may change");
+
+        init_schema(&pool)
+            .await
+            .expect("a second run, with nothing left to drop, must not error");
+        assert!(columns(&pool, "sessions").await.is_empty());
+    }
+
+    #[test]
+    fn the_rusqlite_open_drops_sessions_too() {
+        let has_sessions = |c: &rusqlite::Connection| -> bool {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                == 1
+        };
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("1_8_0.db");
+        let before = {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            for sql in [READ_EVENTS_1_6_0, ROWS_1_6_0, SESSIONS_THROUGH_1_8_0] {
+                c.execute_batch(sql).unwrap();
+            }
+            assert!(has_sessions(&c), "precondition: the table is there");
+            rendered_rows(&c)
+        };
+        assert_eq!(before.len(), 2);
+
+        let conn = crate::meter::connect_db(&path).unwrap();
+
+        assert!(!has_sessions(&conn), "sessions must be dropped");
+        assert_eq!(rendered_rows(&conn), before);
+
+        drop(conn);
+        let again = crate::meter::connect_db(&path).expect("a second open must be a no-op");
+        assert!(!has_sessions(&again));
+        assert_eq!(rendered_rows(&again), before);
+    }
+
+    // ── 1.9.0: turns.speed and turns.inference_geo ───────────────────────────
+
+    /// `turns` as every release through 1.8.0 created it, holding a turn. Hand-written: the
+    /// current DDL has the columns.
+    const TURNS_THROUGH_1_8_0: &str = "\
+        CREATE TABLE turns ( \
+            message_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ts TEXT NOT NULL, \
+            model TEXT, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, \
+            cache_read_input_tokens INTEGER NOT NULL, \
+            cache_creation_input_tokens INTEGER NOT NULL, cache_1h INTEGER, cache_5m INTEGER, \
+            web_search_requests INTEGER, web_fetch_requests INTEGER, service_tier TEXT, \
+            source_file TEXT, is_subagent INTEGER NOT NULL DEFAULT 0); \
+        INSERT INTO turns (message_id, session_id, ts, model, input_tokens, output_tokens, \
+            cache_read_input_tokens, cache_creation_input_tokens) \
+            VALUES ('m-1','s-1','2026-09-01T10:00:00Z','claude-opus-4-8',1,2,3,4);";
+
+    /// The turn 1.8.0's daemon writes, its INSERT verbatim: it names its columns, so a ledger
+    /// this build has upgraded takes it, and the columns it does not know are NULL.
+    const TURN_WRITTEN_BY_1_8_0: &str = "\
+        INSERT OR IGNORE INTO turns
+             (message_id, session_id, ts, model,
+              input_tokens, output_tokens,
+              cache_read_input_tokens, cache_creation_input_tokens, source_file,
+              is_subagent)
+             VALUES ('m-2','s-1','2026-09-01T11:00:00Z','claude-opus-4-8',5,6,7,8,'f.jsonl',0)";
+
+    #[tokio::test]
+    async fn a_ledger_from_before_1_9_0_gains_turns_speed_and_region_unknown_on_every_old_turn() {
+        let dir = TempDir::new().unwrap();
+        let pool = pool_in(&dir).await;
+        sqlx::raw_sql(TURNS_THROUGH_1_8_0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        init_schema(&pool).await.unwrap();
+
+        let cols = columns(&pool, "turns").await;
+        assert_eq!(
+            cols[cols.len() - 2..],
+            ["speed".to_string(), "inference_geo".to_string()]
+        );
+        sqlx::raw_sql(TURN_WRITTEN_BY_1_8_0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows: Vec<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT message_id, speed, inference_geo FROM turns ORDER BY rowid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("m-1".to_string(), None, None),
+                ("m-2".to_string(), None, None)
+            ],
+            "an old turn's speed and region are unknown, and so are those of a turn 1.8.0 writes"
+        );
+
+        // A fresh ledger declares them in the same place.
+        let fresh_dir = TempDir::new().unwrap();
+        let fresh = pool_in(&fresh_dir).await;
+        init_schema(&fresh).await.unwrap();
+        assert_eq!(columns(&fresh, "turns").await, cols);
+    }
+
+    #[test]
+    fn the_rusqlite_open_adds_turns_speed_and_region_too() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("1_8_0.db");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(TURNS_THROUGH_1_8_0)
+            .unwrap();
+        let conn = crate::meter::connect_db(&path).unwrap();
+        conn.execute_batch(TURN_WRITTEN_BY_1_8_0).unwrap();
+        let rows: Vec<(Option<String>, Option<String>)> = conn
+            .prepare("SELECT speed, inference_geo FROM turns ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, [(None, None), (None, None)]);
+    }
+
+    // ── write-lock pressure ──────────────────────────────────────────────────
+
+    /// A 1.5.1 ledger (its `read_events`, and `turns` as 1.8.0 left it) that has been through
+    /// DDL once, so what a test measures after that is the migrations alone.
+    fn old_ledger_after_ddl(dir: &TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("old.db");
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(READ_EVENTS_1_5_1).unwrap();
+        c.execute_batch(TURNS_THROUGH_1_8_0).unwrap();
+        c.execute_batch(DDL).unwrap();
+        path
+    }
+
+    /// A connection that has read the ledger, which is what keeps the log from being checkpointed
+    /// and deleted when the connection under test closes.
+    fn holding_the_log(db: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+        conn
+    }
+
+    /// How many transactions the write-ahead log holds, counted from its frames: a commit is the
+    /// frame that records the size of the database after it. The caller keeps a connection open
+    /// ([`holding_the_log`]).
+    fn commits_in_wal(db: &std::path::Path) -> usize {
+        let wal = std::fs::read(db.with_extension("db-wal")).unwrap_or_default();
+        let Some(header) = wal.get(..32) else {
+            return 0;
+        };
+        let page = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
+        wal[32..]
+            .chunks_exact(24 + page)
+            .filter(|frame| frame[4..8] != [0; 4])
+            .count()
+    }
+
+    /// Every ALTER was a write transaction of its own, each a lock to win against the other
+    /// openers and a commit to sync: 12 for this ledger, 26 for a 1.1.4 one, 8 of them added by
+    /// 1.9.0. The migrations are one transaction now.
+    #[test]
+    fn the_rusqlite_open_migrates_in_one_commit() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        let held_open = holding_the_log(&path);
+        let before = commits_in_wal(&path);
+        drop(crate::meter::connect_db(&path).unwrap());
+        assert_eq!(commits_in_wal(&path) - before, 1);
+        drop(held_open);
+    }
+
+    #[tokio::test]
+    async fn the_sqlx_open_migrates_in_one_commit() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        let held_open = holding_the_log(&path);
+        let before = commits_in_wal(&path);
+        let pool = SqlitePoolOptions::new()
+            .connect(&format!("sqlite:{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        init_schema(&pool).await.unwrap();
+        assert_eq!(commits_in_wal(&path) - before, 1);
+        drop(held_open);
+    }
+
+    /// Opening a current ledger writes nothing, so it must not queue behind a writer: the backfill
+    /// was an UPDATE, which asks for the write lock whether or not a row matches. Run on a thread
+    /// because, before the fix, the open sat in SQLite's busy wait until the writer let go.
+    fn opens_without_waiting_for_a_writer(open: impl FnOnce(&std::path::Path) + Send + 'static) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("current.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                open(&path);
+                done.send(()).ok();
+            }
+        });
+        let waited = finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_err();
+        writer.execute_batch("ROLLBACK").unwrap();
+        reader.join().unwrap();
+        assert!(
+            !waited,
+            "the open waited for a writer it had nothing to write beside"
+        );
+    }
+
+    #[test]
+    fn the_rusqlite_open_of_a_current_ledger_does_not_wait_for_a_writer() {
+        opens_without_waiting_for_a_writer(|path| {
+            crate::meter::connect_db(path).unwrap();
+        });
+    }
+
+    #[test]
+    fn the_sqlx_open_of_a_current_ledger_does_not_wait_for_a_writer() {
+        opens_without_waiting_for_a_writer(|path| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    open_pool(&format!("sqlite:{}?mode=rwc", path.display()))
+                        .await
+                        .unwrap();
+                });
+        });
+    }
+
+    /// The backfill still runs when a row needs it: the read that gates it must agree with it.
+    #[test]
+    fn the_backfill_still_marks_a_subagent_turn_and_only_that() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("l.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        let c = rusqlite::Connection::open(&path).unwrap();
+        for (id, file) in [
+            ("main", "/h/projects/p/abc.jsonl"),
+            ("unix", "/h/projects/p/abc/subagents/agent-1.jsonl"),
+            ("win", r"C:\h\projects\p\abc\subagents\agent-2.jsonl"),
+        ] {
+            c.execute(
+                "INSERT INTO turns (message_id, session_id, ts, input_tokens, output_tokens, \
+                 cache_read_input_tokens, cache_creation_input_tokens, source_file) \
+                 VALUES (?1, 's', 't', 1, 1, 0, 0, ?2)",
+                rusqlite::params![id, file],
+            )
+            .unwrap();
+        }
+        drop(crate::meter::connect_db(&path).unwrap());
+        let marked: Vec<(String, i64)> = c
+            .prepare("SELECT message_id, is_subagent FROM turns ORDER BY message_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            marked,
+            [("main".into(), 0), ("unix".into(), 1), ("win".into(), 1)]
+        );
     }
 }

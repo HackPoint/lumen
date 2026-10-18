@@ -1,4 +1,4 @@
-//! `lumen report` — render a fault report, and file it as a GitHub issue.
+//! `lumen faults` (`lumen report` before 1.9.0) — render a fault report, and file it as a GitHub issue.
 //!
 //! Three sources feed one renderer: rows drained from the JSONL fault spool into
 //! `faults`, ranked declines already metered in `read_events`, and a live schema check.
@@ -1431,7 +1431,7 @@ pub fn find_existing_with(
         serde_json::from_str(&json).map_err(|e| format!("cannot parse issue list: {e}"))?;
     if issues.len() == DEDUPE_SCAN_LIMIT {
         eprintln!(
-            "lumen report: scanned only the {DEDUPE_SCAN_LIMIT} most recent open issues; \
+            "lumen faults: scanned only the {DEDUPE_SCAN_LIMIT} most recent open issues; \
              an older duplicate would not be found"
         );
     }
@@ -1639,7 +1639,7 @@ fn via_browser(
         let path = std::env::temp_dir().join("lumen-issue-body.md");
         std::fs::write(&path, body).map_err(|e| format!("cannot stage the body: {e}"))?;
         eprintln!(
-            "lumen report: the report is too long to prefill; its text is at {} — \
+            "lumen faults: the report is too long to prefill; its text is at {} — \
              paste it into the form that just opened",
             path.display()
         );

@@ -1,6 +1,6 @@
 /* ─────────────────────────────────────────────────────────────────────────────
    Optimizer / Savings screen
-   Background tinted with --lumen-save to distinguish from the Context screen.
+   Background tinted with --lumen-save to distinguish it from Home.
    ───────────────────────────────────────────────────────────────────────────── */
 .optimizer {
     min-height: 100vh;
@@ -103,54 +103,6 @@
     border: 1px solid var(--lumen-border);
     border-radius: var(--lumen-radius);
     animation: fade-up 0.35s ease both;
-}
-
-.hero__ring {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.25rem;
-}
-
-.hero__num {
-    font-family: var(--lumen-font-mono);
-    font-variant-numeric: tabular-nums;
-    font-size: 3.8rem;
-    font-weight: 700;
-    line-height: 1;
-    letter-spacing: -3px;
-    color: var(--hero-color, var(--lumen-ok));
-    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--hero-color, var(--lumen-ok)) 38%, transparent));
-}
-
-.hero__pct-sign {
-    font-size: 2rem;
-    letter-spacing: -1px;
-    vertical-align: super;
-    opacity: 0.75;
-}
-
-.hero__label {
-    font-family: var(--lumen-font-sans);
-    font-size: 0.7rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1.3px;
-    color: var(--lumen-text-dim);
-}
-
-.hero__sub {
-    margin: 0;
-    font-size: 0.82rem;
-    color: var(--lumen-text-dim);
-    text-align: center;
-    line-height: 1.6;
-    max-width: 30ch;
-}
-
-.hero__sub strong {
-    color: var(--lumen-text);
-    font-weight: 600;
 }
 
 /* empty state */
@@ -272,6 +224,15 @@
     white-space: nowrap;
 }
 
+/* How the token counts in the cards were made: a qualifier under them, not a figure. */
+.savings-provenance {
+    margin: -0.5rem 0 0;
+    font-size: 0.7rem;
+    line-height: 1.4;
+    color: var(--lumen-text-dim);
+    text-align: center;
+}
+
 /* ── period stats ── */
 .period-row {
     width: 100%;
@@ -313,8 +274,7 @@
     color: var(--lumen-text-dim);
 }
 
-/* ── breakdowns ── */
-.breakdown,
+/* ── repeat reads card ── */
 .repeat-card {
     width: 100%;
     background: var(--lumen-bg-secondary);
@@ -326,7 +286,6 @@
     gap: 0.55rem;
 }
 
-.breakdown__title,
 .repeat-card__title {
     margin: 0;
     font-family: var(--lumen-font-sans);
@@ -337,50 +296,10 @@
     color: var(--lumen-text-dim);
 }
 
-.breakdown__rows,
 .repeat-card__rows {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-}
-
-.breakdown__row {
-    display: grid;
-    grid-template-columns: 8rem 1fr auto;
-    align-items: center;
-    gap: 0.55rem;
-}
-
-.breakdown__name {
-    font-family: var(--lumen-font-mono);
-    font-size: 0.75rem;
-    color: var(--lumen-text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.breakdown__bar-wrap {
-    height: 4px;
-    background: var(--lumen-track);
-    border-radius: 2px;
-    overflow: hidden;
-}
-
-.breakdown__bar {
-    height: 100%;
-    background: var(--lumen-save);
-    border-radius: 2px;
-    min-width: 2px;
-    transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.breakdown__count {
-    font-family: var(--lumen-font-mono);
-    font-variant-numeric: tabular-nums;
-    font-size: 0.67rem;
-    color: var(--lumen-text-dim);
-    white-space: nowrap;
 }
 
 /* ── missed reads (CLI only, not savings) ── */
@@ -426,38 +345,14 @@
     to   { opacity: 1; transform: none; }
 }
 
-/* The dollar headline is wider than "87%", so it cannot be sized like a percentage. */
-.hero__num--usd {
-    font-size: clamp(1.6rem, 7vw, 2.6rem);
-    letter-spacing: -0.5px;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-}
-
-/* The token ratio, demoted below the dollar figure. */
-.hero__secondary {
-    font-size: 0.74rem;
-    color: var(--lumen-text-dim);
-    margin: 0.4rem 0 0;
-    line-height: 1.4;
-}
-
-/* The provenance caveat under the hero figure. Amber left rule, the same device
-   .hs__rec uses for advice: this qualifies the number above it rather than reporting a
-   fault, so it must be visible without reading as an error. */
-.hero__warn,
+/* Amber left rule, the same device .hs__rec uses for advice: this qualifies the figures above
+   it rather than reporting a fault, so it must be visible without reading as an error. */
 .repeat-card__unidentified {
     padding-left: 0.5rem;
     border-left: 2px solid color-mix(in srgb, var(--lumen-warn) 60%, transparent);
     font-size: 0.68rem;
     line-height: 1.4;
     color: var(--lumen-text-dim);
-}
-
-.hero__warn {
-    max-width: 46ch;
-    margin: 0.5rem auto 0;
-    text-align: left;
 }
 
 /* ── repeat reads: counted apart from the totals above ── */

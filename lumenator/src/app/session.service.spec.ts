@@ -1,9 +1,10 @@
 import { TestBed } from '@angular/core/testing';
 import { SessionService, WINDOW_OPTIONS, modelWindow, resolveWindow } from './session.service';
 import { TauriBridge } from './tauri-bridge';
-import { FakeTauriBridge } from './tauri-bridge.fake';
-import { RATE } from './components';
+import { FakeTauriBridge, PRICE_TABLE as SHARED_PRICES } from './tauri-bridge.fake';
 import type { OptimizerReport, UsageReport, TokenAgg } from './components';
+import { figureTag, isFloor } from './prices';
+import { recordedPeriod, savingsSummary } from './savings-summary.fake';
 
 /**
  * SessionService is the whole frontend data layer: it folds daemon frames into
@@ -14,9 +15,13 @@ import type { OptimizerReport, UsageReport, TokenAgg } from './components';
 describe('SessionService', () => {
   let bridge: FakeTauriBridge;
 
-  /** Construct the service with a fake bridge, optionally pre-seeded. */
+  /**
+   * Construct the service with a fake bridge, optionally pre-seeded. The bridge serves a
+   * price table unless the seed replaces or fails it.
+   */
   function build(seed?: (b: FakeTauriBridge) => void): SessionService {
     bridge = new FakeTauriBridge();
+    bridge.responses.set('lumen_prices', SHARED_PRICES);
     seed?.(bridge);
     TestBed.configureTestingModule({
       providers: [{ provide: TauriBridge, useValue: bridge }],
@@ -24,8 +29,9 @@ describe('SessionService', () => {
     return TestBed.inject(SessionService);
   }
 
-  function agg(over: Partial<TokenAgg> = {}): TokenAgg {
-    return {
+  /** A usage aggregate of one model's turns, Opus 4.8 unless a test names another. */
+  function agg(over: Partial<TokenAgg> = {}, model = 'claude-opus-4-8'): TokenAgg {
+    const a = {
       turns: 0,
       input: 0,
       output: 0,
@@ -33,6 +39,13 @@ describe('SessionService', () => {
       cacheWrite: 0,
       totalTokens: 0,
       ...over,
+    };
+    return {
+      byModel: [{
+        model, turns: a.turns, input: a.input, output: a.output,
+        cacheRead: a.cacheRead, cacheWrite: a.cacheWrite, cacheWrite1h: 0,
+      }],
+      ...a,
     };
   }
 
@@ -65,7 +78,10 @@ describe('SessionService', () => {
     } as OptimizerReport;
   }
 
-  /** A daemon "event" frame for one turn. */
+  /**
+   * A daemon "event" frame for one turn, routed globally unless a test says otherwise: a turn
+   * whose region is not known is a floor on every model from 4.6 on, and has tests of its own.
+   */
   function turnFrame(over: Record<string, unknown> = {}): string {
     return JSON.stringify({
       type: 'event',
@@ -76,6 +92,7 @@ describe('SessionService', () => {
         output_tokens: 0,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        inference_geo: 'global',
         ...over,
       },
     });
@@ -506,23 +523,230 @@ describe('SessionService', () => {
 
   // ── cost ──────────────────────────────────────────────────────────────────
 
-  it('prices the session from the live totals via the RATE table', () => {
+  it("prices the session's live turns at their model's rates", async () => {
     const s = build();
+    await settle();
     bridge.emit(
       'daemon',
       turnFrame({
+        model: 'claude-opus-4-8',
         input_tokens: 1_000_000,
         output_tokens: 1_000_000,
         cache_read_input_tokens: 1_000_000,
         cache_creation_input_tokens: 1_000_000,
+        cache_creation_1h_input_tokens: 0,
+        speed: 'standard',
       }),
     );
-    const expected =
-      1_000_000 * RATE.input +
-      1_000_000 * RATE.output +
-      1_000_000 * RATE.cacheRead +
-      1_000_000 * RATE.cacheWrite;
-    expect(s.costSession()).toBeCloseTo(expected, 10);
+    expect(s.costSession()).toBeCloseTo(5 + 25 + 0.5 + 6.25, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
+  });
+
+  it('keeps live turns apart by speed and prices a fast one at the fast-mode rate', async () => {
+    const s = build();
+    await settle();
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000 }));
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', speed: 'fast', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBeCloseTo(25 + 50, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
+  });
+
+  it('keeps live turns apart by region and prices a US-only one at 1.1 times', async () => {
+    const s = build();
+    await settle();
+    const opus = { model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000 };
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: 'global' }));
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: 'us' }));
+    expect(s.costSession()).toBeCloseTo(25 + 27.5, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
+  });
+
+  it("marks a live turn whose region is not known a floor, as Claude Code's 'not_available' is", async () => {
+    const s = build();
+    await settle();
+    for (const inference_geo of ['not_available', null, undefined]) {
+      bridge.emit('daemon', turnFrame({
+        model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000, inference_geo,
+      }));
+    }
+    expect(s.costSession()).toBeCloseTo(3 * 25, 10);
+    expect(figureTag(s.sessionPriced(), 'total')?.why).toContain('did not record where they ran');
+  });
+
+  it('keeps a live turn with an empty region apart from one that recorded none', async () => {
+    // '' is a region this build does not know, and has no price; null is not known, and is
+    // priced at the global rate as a floor. Kept under one key, one would take the other's.
+    const s = build();
+    await settle();
+    const opus = { model: 'claude-opus-4-8', speed: 'standard', output_tokens: 1_000_000 };
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: null }));
+    bridge.emit('daemon', turnFrame({ ...opus, inference_geo: '' }));
+    const p = s.sessionPriced();
+    expect(p.output).toBeCloseTo(25, 10);
+    expect(p.unpricedModels).toEqual(['claude-opus-4-8 in region ']);
+    expect(p.geoUnknown.output).toBe(1_000_000);
+  });
+
+  it("keeps a snapshot's split by region", async () => {
+    const s = build();
+    await settle();
+    bridge.emit('daemon', JSON.stringify({
+      type: 'snapshot',
+      sessions: [{
+        session_id: 's1', fill: 5_000, peak_fill: 5_000, model: 'claude-opus-4-8',
+        input: 0, output: 2_000_000, cache_read: 0, cache_write: 0,
+        ts: '2026-01-01T10:00:00Z',
+        by_model: [
+          { model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'us', input: 0,
+            output: 1_000_000, cache_read: 0, cache_write: 0, cache_write_1h: 0 },
+          { model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'global', input: 0,
+            output: 1_000_000, cache_read: 0, cache_write: 0, cache_write_1h: 0 },
+        ],
+      }],
+    }));
+    expect(s.costSession()).toBeCloseTo(27.5 + 25, 10);
+    // A live US-only turn adds to the US-only share, not the global one.
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-opus-4-8', speed: 'standard', inference_geo: 'us', output_tokens: 1_000_000,
+    }));
+    expect(s.costSession()).toBeCloseTo(2 * 27.5 + 25, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(false);
+  });
+
+  it('counts the whole write of a turn that recorded no split as of unknown duration', async () => {
+    const s = build();
+    await settle();
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-sonnet-4-6', speed: 'standard', cache_creation_input_tokens: 700,
+    }));
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-sonnet-4-6', speed: 'standard', cache_creation_input_tokens: 300,
+      cache_creation_1h_input_tokens: null,
+    }));
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-sonnet-4-6', speed: 'standard', cache_creation_input_tokens: 50,
+      cache_creation_1h_input_tokens: 20,
+    }));
+    const p = s.sessionPriced();
+    expect(p.durationUnknown).toBe(1_000);
+    expect(figureTag(p, 'total')?.label).toBe('at least');
+  });
+
+  it("prices a snapshot session's tokens per model", async () => {
+    const s = build();
+    await settle();
+    bridge.emit('daemon', JSON.stringify({
+      type: 'snapshot',
+      sessions: [{
+        session_id: 's1', fill: 5_000, peak_fill: 5_000, model: 'claude-opus-4-8',
+        input: 0, output: 2_000_000, cache_read: 0, cache_write: 0,
+        ts: '2026-01-01T10:00:00Z',
+        by_model: [
+          { model: 'claude-opus-4-8', input: 0, output: 1_000_000, cache_read: 0, cache_write: 0, cache_write_1h: 0 },
+          { model: 'claude-haiku-4-5-20251001', input: 0, output: 1_000_000, cache_read: 0, cache_write: 0 },
+        ],
+      }],
+    }));
+    expect(s.costSession()).toBeCloseTo(25 + 5, 10);
+    // A live turn adds to its own model's share.
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBeCloseTo(50 + 5, 10);
+  });
+
+  it('leaves a snapshot with no split unpriced rather than pricing it at its latest model', async () => {
+    // A daemon older than 1.9.0 sends sums only, and a subagent may have run another model.
+    const s = build();
+    await settle();
+    bridge.emit('daemon', JSON.stringify({
+      type: 'snapshot',
+      sessions: [{
+        session_id: 's1', fill: 5_000, model: 'claude-opus-4-8',
+        input: 0, output: 1_000_000, cache_read: 0, cache_write: 0,
+        ts: '2026-01-01T10:00:00Z',
+      }],
+    }));
+    expect(s.totals().output).toBe(1_000_000);
+    expect(s.sessionPriced().hasFigure).toBe(false);
+    // Turns after it are priced, and the figure says it leaves the rest out.
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBeCloseTo(25, 10);
+    expect(isFloor(s.sessionPriced(), 'total')).toBe(true);
+  });
+
+  it('prices a one-hour cache write at the one-hour rate', async () => {
+    const s = build();
+    await settle();
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-opus-4-8',
+      cache_creation_input_tokens: 3_000_000,
+      cache_creation_1h_input_tokens: 1_000_000,
+    }));
+    // 2M at the 5-minute rate, 1M at the 1-hour rate.
+    expect(s.sessionPriced().cacheWrite).toBeCloseTo(2 * 6.25 + 10, 10);
+  });
+
+  it('shows no session dollar figure until the price table arrives, and says that is why', () => {
+    const s = build((b) => b.failures.add('lumen_prices'));
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBe(0);
+    expect(s.sessionPriced().hasFigure).toBe(false);
+    expect(figureTag(s.sessionPriced(), 'total')).toEqual({
+      label: 'no price',
+      why: 'Prices have not loaded from Lumen yet, so nothing here is priced.',
+    });
+  });
+
+  // ── limits that cannot be checked ──────────────────────────────────────────
+
+  it('says a session limit cannot be checked when none of the session has a price', async () => {
+    const s = build();
+    await settle();
+    s.setSessionLimit(2);
+    bridge.emit('daemon', turnFrame({ model: '<synthetic>', output_tokens: 1_000_000 }));
+    expect(s.notification()).toBeNull();
+    expect(s.limitNotes()).toEqual([
+      'The per-session limit of $2 cannot be checked: none of that spend has a price. '
+        + 'No price for <synthetic>.',
+    ]);
+  });
+
+  it('says a limit can only be checked against a floor while the floor is under it', async () => {
+    const s = build();
+    await settle();
+    s.setSessionLimit(2);
+    s.setDailyLimit(0);
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', output_tokens: 10_000 }));
+    expect(s.limitNotes()).toEqual([
+      'The per-session limit of $2 can only be checked against at least $0.25. Some turns did '
+        + 'not record their speed and are priced at the standard rate; fast mode costs more.',
+    ]);
+    // Once the floor alone crosses the limit, the alert says so and nothing is unknown.
+    bridge.emit('daemon', turnFrame({ model: 'claude-opus-4-8', output_tokens: 100_000 }));
+    await settle();
+    expect(s.limitNotes()).toEqual([]);
+    expect(s.notification()?.text).toBe(
+      'Session cost of at least $2.75 exceeded your $2 per-session limit.',
+    );
+  });
+
+  it('has no note for an exact figure, a disabled limit, or usage not yet loaded', async () => {
+    const s = build((b) => b.failures.add('get_usage'));
+    await settle();
+    bridge.emit('daemon', turnFrame({ model: 'claude-sonnet-4-6', speed: 'standard', output_tokens: 10 }));
+    expect(s.limitNotes()).toEqual([]);
+    s.setSessionLimit(0);
+    bridge.emit('daemon', turnFrame({ model: '<synthetic>', output_tokens: 10 }));
+    expect(s.limitNotes()).toEqual([]);
+  });
+
+  it('says the daily limit cannot be checked against unpriced spend', async () => {
+    const today = agg({ output: 10 }, '<synthetic>');
+    const s = build((b) => b.responses.set('get_usage', usage({ today })));
+    await settle();
+    expect(s.limitNotes()).toEqual([
+      'The daily limit of $5 cannot be checked: none of that spend has a price. '
+        + 'No price for <synthetic>.',
+    ]);
   });
 
   it("reports today's cost as zero until the usage report loads", () => {
@@ -534,9 +758,94 @@ describe('SessionService', () => {
     const s = build((b) =>
       b.responses.set('get_usage', usage({ today: agg({ input: 2_000_000 }) })),
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(s.costToday()).toBeCloseTo(2_000_000 * RATE.input, 10);
+    await settle();
+    expect(s.costToday()).toBeCloseTo(2 * 5, 10);
+  });
+
+  it('leaves the sums of a backend that sends no split unpriced rather than guessing', async () => {
+    const { byModel: _, ...bare } = agg({ input: 2_000_000 });
+    const s = build((b) => b.responses.set('get_usage', usage({ today: bare })));
+    await settle();
+    expect(s.costToday()).toBe(0);
+    expect(s.todayPriced()?.hasFigure).toBe(false);
+  });
+
+  // ── per-model prices ──────────────────────────────────────────────────────
+  //
+  // Every turn used to be priced at one model's rates, Opus-class, whatever model ran it.
+  // The prices now come from the backend's table through `lumen_prices`, per model.
+
+  /** One row of the table `lumen_prices` serves. */
+  function priceRow(model: string, input: number, output: number, w5m: number, w1h: number, read: number) {
+    return {
+      provider: 'anthropic',
+      model,
+      source: 'https://platform.claude.com/docs/en/about-claude/pricing',
+      prices: { input, output, cacheWrite5m: w5m, cacheWrite1h: w1h, cacheRead: read },
+      note: '',
+    };
+  }
+
+  const PRICE_TABLE = {
+    asOf: '2026-10-13',
+    models: [
+      priceRow('claude-opus-4-8', 5, 25, 6.25, 10, 0.5),
+      priceRow('claude-sonnet-4-6', 3, 15, 3.75, 6, 0.3),
+      priceRow('claude-haiku-4-5', 1, 5, 1.25, 2, 0.1),
+    ],
+  };
+
+  function priced(): SessionService {
+    return build((b) => b.responses.set('lumen_prices', PRICE_TABLE));
+  }
+
+  it('prices a Sonnet turn at Sonnet rates', async () => {
+    const s = priced();
+    await settle();
+    bridge.emit('daemon', turnFrame({ model: 'claude-sonnet-4-6', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBeCloseTo(15, 10);
+  });
+
+  it('prices a Haiku turn at Haiku rates, dated id and all', async () => {
+    const s = priced();
+    await settle();
+    bridge.emit('daemon', turnFrame({ model: 'claude-haiku-4-5-20251001', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBeCloseTo(5, 10);
+  });
+
+  it('gives a turn from an unknown model no dollars', async () => {
+    const s = priced();
+    await settle();
+    bridge.emit('daemon', turnFrame({ model: '<synthetic>', output_tokens: 1_000_000 }));
+    expect(s.costSession()).toBe(0);
+  });
+
+  it('prices from the table the backend serves, not from a constant of its own', async () => {
+    // Made-up prices: a frontend with a rate of its own cannot produce these figures.
+    const s = build((b) => b.responses.set('lumen_prices', {
+      asOf: '2026-10-13',
+      models: [priceRow('claude-opus-4-8', 7, 70, 8, 9, 0.7)],
+    }));
+    await settle();
+    bridge.emit('daemon', turnFrame({
+      model: 'claude-opus-4-8', input_tokens: 1_000_000, output_tokens: 1_000_000,
+    }));
+    expect(s.costSession()).toBeCloseTo(77, 10);
+  });
+
+  it("prices today's usage per model", async () => {
+    const today = Object.assign(agg({ output: 2_000_000 }), {
+      byModel: [
+        { model: 'claude-sonnet-4-6', turns: 1, input: 0, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 },
+        { model: 'claude-haiku-4-5-20251001', turns: 1, input: 0, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 },
+      ],
+    });
+    const s = build((b) => {
+      b.responses.set('lumen_prices', PRICE_TABLE);
+      b.responses.set('get_usage', usage({ today }));
+    });
+    await settle();
+    expect(s.costToday()).toBeCloseTo(15 + 5, 10);
   });
 
   // ── optimizer signals ─────────────────────────────────────────────────────
@@ -544,7 +853,6 @@ describe('SessionService', () => {
   it('reports zeros for every optimizer signal before the report loads', () => {
     const s = build();
     expect(s.lifetimeOptimizedTokens()).toBe(0);
-    expect(s.lifetimeOptimizedUsd()).toBe(0);
     expect(s.optimizedToday()).toBe(0);
     expect(s.optimizedThisWeek()).toBe(0);
     expect(s.effectivenessPct()).toBe(0);
@@ -554,40 +862,44 @@ describe('SessionService', () => {
     expect(s.missedReads()).toEqual({ calls: 0, fullTokens: 0 });
   });
 
-  it('converts optimizer token savings at the input rate', async () => {
+  it("puts no dollar figure on the optimizer's tokens, which have no model to price by", async () => {
     const s = build((b) =>
       b.responses.set(
         'get_optimizer_stats',
         optimizer({ lifetimeOptimizedTokens: 4_000_000 }),
       ),
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(s.lifetimeOptimizedUsd()).toBeCloseTo(4_000_000 * RATE.input, 10);
+    await settle();
+    expect(s.lifetimeOptimizedTokens()).toBe(4_000_000);
+    expect((s as unknown as Record<string, unknown>)['lifetimeOptimizedUsd']).toBeUndefined();
   });
 
-  it('computes effectiveness as saved over full', async () => {
-    const s = build((b) =>
+  it('takes the effectiveness from the savings summary and computes none of its own', async () => {
+    const s = build((b) => {
       b.responses.set(
         'get_optimizer_stats',
         optimizer({ lifetimeOptimizedTokens: 750, lifetimeFullTokens: 1_000 }),
-      ),
-    );
+      );
+      b.responses.set(
+        'lumen_savings_summary',
+        savingsSummary({ allTime: recordedPeriod(600, null, { sharePct: 60 }) }),
+      );
+    });
     await Promise.resolve();
     await Promise.resolve();
-    expect(s.effectivenessPct()).toBeCloseTo(75, 10);
+    // The engine's share (losses included), not the optimizer report's 75%.
+    expect(s.effectivenessPct()).toBe(60);
   });
 
-  it('reports zero effectiveness rather than dividing by zero', async () => {
-    const s = build((b) =>
-      b.responses.set(
-        'get_optimizer_stats',
-        optimizer({ lifetimeOptimizedTokens: 500, lifetimeFullTokens: 0 }),
-      ),
-    );
+  it('reports zero effectiveness before there is a summary, or when nothing was read', async () => {
+    const none = build();
+    await Promise.resolve();
+    expect(none.effectivenessPct()).toBe(0);
+    TestBed.resetTestingModule();
+    const empty = build((b) => b.responses.set('lumen_savings_summary', savingsSummary()));
     await Promise.resolve();
     await Promise.resolve();
-    expect(s.effectivenessPct()).toBe(0);
+    expect(empty.effectivenessPct()).toBe(0);
   });
 
   it('surfaces missed reads separately from savings', async () => {
@@ -720,10 +1032,11 @@ describe('SessionService', () => {
 
   it('warns when a session passes its per-session limit, and toasts it once', async () => {
     const s = build();
+    await settle();
     s.setWindow(1_000_000); // keep context out of the way
     s.setSessionLimit(1);
     // A million output tokens is well over $1 at any published output rate.
-    bridge.emit('daemon', turnFrame({ output_tokens: 1_000_000 }));
+    bridge.emit('daemon', turnFrame({ model: 'claude-sonnet-4-6', output_tokens: 1_000_000 }));
     await settle();
     const n = s.notification();
     expect(n?.level).toBe('warn');
@@ -734,6 +1047,31 @@ describe('SessionService', () => {
     const toasts = bridge.notifications.filter((x) => x.title === 'Lumen — Session Alert');
     expect(toasts).toHaveLength(1);
     expect(toasts[0].body).toBe(n!.text);
+  });
+
+  it('says a cost alert is a floor when the spend behind it is partial', async () => {
+    const s = build();
+    await settle();
+    s.setWindow(1_000_000);
+    s.setSessionLimit(1);
+    bridge.emit('daemon', turnFrame({ model: 'claude-sonnet-4-6', output_tokens: 1_000_000 }));
+    bridge.emit('daemon', turnFrame({ model: '<synthetic>', output_tokens: 10 }));
+    await settle();
+    expect(s.notification()?.text).toBe(
+      'Session cost of at least $15.00 exceeded your $1 per-session limit.',
+    );
+  });
+
+  it('says a daily alert is a floor when today has unpriced turns', async () => {
+    const today = agg({ output: 1_000_000 });
+    today.byModel!.push({
+      model: null, turns: 1, input: 5, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0,
+    });
+    const s = build((b) => b.responses.set('get_usage', usage({ today })));
+    await settle();
+    s.setDailyLimit(1);
+    TestBed.tick();
+    expect(s.notification()?.text).toBe("Today's spend of at least $25.00 exceeded your $1 daily limit.");
   });
 
   it('warns about a session that has run for more than two hours, and not before', () => {
@@ -822,10 +1160,105 @@ describe('SessionService', () => {
 
   // ── refresh plumbing ──────────────────────────────────────────────────────
 
-  it('fetches both aggregate reports on construction', () => {
+  it('fetches the aggregate reports and the savings summary on construction', () => {
     build();
     expect(bridge.countOf('get_usage')).toBe(1);
     expect(bridge.countOf('get_optimizer_stats')).toBe(1);
+    expect(bridge.countOf('lumen_savings_summary')).toBe(1);
+  });
+
+  // ── the savings summary: what the headline is given ─────────────────────────
+
+  it('passes the summary on as the engine sent it, with no error', async () => {
+    const sent = savingsSummary({ week: recordedPeriod(10, 1.25), allTime: recordedPeriod(20, 2.5) });
+    const s = build((b) => b.responses.set('lumen_savings_summary', sent));
+    await settle();
+    expect(s.savingsSummary()).toBe(sent);
+    expect(s.savingsError()).toBeNull();
+  });
+
+  it('a failed first fetch leaves no summary and says why', async () => {
+    const s = build((b) => b.failures.add('lumen_savings_summary'));
+    await settle();
+    expect(s.savingsSummary()).toBeNull();
+    expect(s.savingsError()).toBe('fake: lumen_savings_summary failed');
+  });
+
+  it('a failed refresh keeps the last good summary, and says it failed; the next good one clears it', async () => {
+    const first = savingsSummary({ week: recordedPeriod(10, 1.25) });
+    const s = build((b) => b.responses.set('lumen_savings_summary', first));
+    await settle();
+    bridge.failures.add('lumen_savings_summary');
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsSummary()).toBe(first);
+    expect(s.savingsError()).toBe('fake: lumen_savings_summary failed');
+
+    bridge.failures.delete('lumen_savings_summary');
+    const second = savingsSummary({ week: recordedPeriod(20, 2.5) });
+    bridge.responses.set('lumen_savings_summary', second);
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsSummary()).toBe(second);
+    expect(s.savingsError()).toBeNull();
+  });
+
+  it('takes the backend\'s error text as it is, when it rejects with a string as Tauri does', async () => {
+    const s = build();
+    vi.spyOn(bridge, 'invoke').mockImplementation((cmd: string) =>
+      cmd === 'lumen_savings_summary' ? Promise.reject('cannot open /x/lumen.db') : Promise.resolve(undefined as never));
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsError()).toBe('cannot open /x/lumen.db');
+  });
+
+  it('shows no summary of a schema it does not read, or an answer that is not one', async () => {
+    const s = build((b) => b.responses.set('lumen_savings_summary', { ...savingsSummary(), schema: 1 }));
+    await settle();
+    expect(s.savingsSummary()).toBeNull();
+    expect(s.savingsError()).toBe('the app sent a savings summary of schema 1, and this window reads schema 2');
+    bridge.responses.set('lumen_savings_summary', null);
+    s.refreshSavingsSummary();
+    await settle();
+    expect(s.savingsError()).toBe('the app answered with something that is not a savings summary');
+  });
+
+  it('drops an answer a later fetch overtook', async () => {
+    const s = build((b) => b.hangs.add('lumen_savings_summary'));
+    let answer!: (v: unknown) => void;
+    vi.spyOn(bridge, 'invoke').mockImplementation((cmd: string) =>
+      cmd === 'lumen_savings_summary' ? new Promise((r) => (answer = r)) : Promise.resolve(undefined as never));
+    s.refreshSavingsSummary();
+    const older = answer;
+    s.refreshSavingsSummary();
+    const newer = answer;
+    const fresh = savingsSummary({ week: recordedPeriod(20, 2.5) });
+    newer(fresh);
+    await settle();
+    older(savingsSummary({ week: recordedPeriod(10, 1.25) }));
+    await settle();
+    expect(s.savingsSummary()).toBe(fresh);
+  });
+
+  it('fetches the summary again when the window gets focus, and stops once destroyed', () => {
+    build();
+    expect(bridge.countOf('lumen_savings_summary')).toBe(1);
+    window.dispatchEvent(new Event('focus'));
+    expect(bridge.countOf('lumen_savings_summary')).toBe(2);
+    TestBed.resetTestingModule();
+    window.dispatchEvent(new Event('focus'));
+    expect(bridge.countOf('lumen_savings_summary')).toBe(2);
+  });
+
+  it('refreshes the summary every minute, as the other figures', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      build();
+      vi.advanceTimersByTime(60_000);
+      expect(bridge.countOf('lumen_savings_summary')).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('refreshes both aggregate reports every minute, and stops once destroyed', () => {
@@ -841,6 +1274,29 @@ describe('SessionService', () => {
       TestBed.resetTestingModule();
       vi.advanceTimersByTime(180_000);
       expect(bridge.countOf('get_usage')).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches the price table once, and again only while it has not arrived', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const s = build((b) => b.failures.add('lumen_prices'));
+      expect(bridge.countOf('lumen_prices')).toBe(1);
+      await settle();
+      expect(s.prices()).toBeNull();
+
+      // The first fetch failed, so the next refresh asks again, and succeeds.
+      bridge.failures.delete('lumen_prices');
+      vi.advanceTimersByTime(60_000);
+      expect(bridge.countOf('lumen_prices')).toBe(2);
+      await settle();
+      expect(s.prices()?.asOf).toBe('2026-10-13');
+
+      // Once it has arrived it is not asked for again.
+      vi.advanceTimersByTime(60_000);
+      expect(bridge.countOf('lumen_prices')).toBe(2);
     } finally {
       vi.useRealTimers();
     }

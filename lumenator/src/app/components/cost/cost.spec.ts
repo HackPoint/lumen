@@ -1,16 +1,23 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Cost } from './cost';
-import { RATE } from '../index';
 import type { CostTotals } from '../index';
+import { price } from '../../prices';
+import type { ModelTokens } from '../../prices';
+import { PRICE_TABLE } from '../../tauri-bridge.fake';
 
 /**
  * The cost panel is the one place a wrong number costs the user money in
- * confidence. Every figure derives from the single RATE table.
+ * confidence. Every figure is priced per model from the backend's table; the
+ * panel shows what it is given and says when that leaves something out.
  */
 describe('Cost', () => {
   let fixture: ComponentFixture<Cost>;
 
-  function build(over: Partial<CostTotals> = {}): Cost {
+  /**
+   * The panel for one model's tokens at standard speed, routed globally, every write's duration
+   * recorded, so every figure is exact: Opus 4.8 unless a test names another.
+   */
+  function build(over: Partial<CostTotals> = {}, model = 'claude-opus-4-8'): Cost {
     const totals: CostTotals = {
       input: 0,
       output: 0,
@@ -18,10 +25,32 @@ describe('Cost', () => {
       cacheWrite: 0,
       ...over,
     };
+    return show(totals, [row(model, totals)]);
+  }
+
+  function row(model: string, t: Partial<ModelTokens>): ModelTokens {
+    return {
+      model, speed: 'standard', inferenceGeo: 'global', input: 0, output: 0, cacheRead: 0,
+      cacheWrite: 0, cacheWrite1h: 0, cacheWriteUnknown: 0, ...t,
+    };
+  }
+
+  function tags(): string[] {
+    return [...(fixture.nativeElement as HTMLElement).querySelectorAll('.partial-tag')]
+      .map((t) => t.textContent?.trim() ?? '');
+  }
+
+  /** The panel for `totals`, priced from `rows`. */
+  function show(totals: CostTotals, rows: ModelTokens[]): Cost {
     fixture = TestBed.createComponent(Cost);
     fixture.componentRef.setInput('totals', totals);
+    fixture.componentRef.setInput('priced', price(rows, PRICE_TABLE));
     fixture.detectChanges();
     return fixture.componentInstance;
+  }
+
+  function html(): string {
+    return (fixture.nativeElement as HTMLElement).innerHTML;
   }
 
   // ── per-component pricing ──────────────────────────────────────────────────
@@ -48,6 +77,11 @@ describe('Cost', () => {
     expect(c.totalCost()).toBeCloseTo(5.0 + 25.0 + 0.5 + 6.25, 10);
   });
 
+  it('prices a Sonnet session at Sonnet rates and a Haiku one at Haiku rates', () => {
+    expect(build({ output: 1_000_000 }, 'claude-sonnet-4-6').totalCost()).toBeCloseTo(15, 10);
+    expect(build({ output: 1_000_000 }, 'claude-haiku-4-5-20251001').totalCost()).toBeCloseTo(5, 10);
+  });
+
   it('prices output at five times input, per the rate table', () => {
     const c = build({ input: 1_000_000, output: 1_000_000 });
     expect(c.costOutput()).toBeCloseTo(c.costInput() * 5, 10);
@@ -60,14 +94,11 @@ describe('Cost', () => {
 
   // ── the savings story ──────────────────────────────────────────────────────
 
-  it('values cache reads at what they would have cost as fresh input', () => {
-    const c = build({ cacheRead: 1_000_000 });
-    expect(c.cacheReadFullPrice()).toBeCloseTo(1_000_000 * RATE.input, 10);
-  });
-
   it('reports savings as the gap between full price and cache price', () => {
-    const c = build({ cacheRead: 1_000_000 });
-    expect(c.cacheSavings()).toBeCloseTo(1_000_000 * (RATE.input - RATE.cacheRead), 10);
+    // Opus 4.8: $5/M fresh, $0.50/M from cache.
+    expect(build({ cacheRead: 1_000_000 }).cacheSavings()).toBeCloseTo(4.5, 10);
+    // Sonnet 5.5: $2/M fresh, $0.10/M from cache.
+    expect(build({ cacheRead: 1_000_000 }, 'claude-sonnet-5-5').cacheSavings()).toBeCloseTo(1.9, 10);
   });
 
   it('claims no savings when nothing was read from cache', () => {
@@ -122,22 +153,66 @@ describe('Cost', () => {
 
   // ── rendering ──────────────────────────────────────────────────────────────
 
-  it('renders the total cost into the DOM', () => {
+  it('renders the total cost into the DOM, untagged when it is exact', () => {
     const c = build({ output: 1_000_000 });
-    expect((fixture.nativeElement as HTMLElement).innerHTML).toContain(c.fmt(c.totalCost()));
+    expect(html()).toContain(c.fmt(c.totalCost()));
+    expect(tags()).toEqual([]);
   });
 
-  it('recomputes when the totals input changes', () => {
+  it('recomputes when the priced input changes', () => {
     const c = build({ output: 1_000_000 });
     const before = c.totalCost();
-    fixture.componentRef.setInput('totals', {
-      input: 0,
-      output: 2_000_000,
-      cacheRead: 0,
-      cacheWrite: 0,
-    });
+    fixture.componentRef.setInput(
+      'priced',
+      price([row('claude-opus-4-8', { output: 2_000_000 })], PRICE_TABLE),
+    );
     fixture.detectChanges();
     expect(c.totalCost()).toBeCloseTo(before * 2, 10);
+  });
+
+  // ── models with no price ───────────────────────────────────────────────────
+
+  it('shows a dash, not $0.00, when no token in the session has a price', () => {
+    const c = build({ output: 1_000_000 }, '<synthetic>');
+    expect(c.totalCost()).toBe(0);
+    expect(c.money('total')).toBe('—');
+    const values = [...(fixture.nativeElement as HTMLElement).querySelectorAll('.tile__value')];
+    expect(values.map((v) => v.textContent?.trim())).toEqual(['—', '—']);
+    expect(html()).not.toContain('$');
+    expect(tags()[0]).toBe('no price');
+  });
+
+  it('marks a total that leaves a model out as a floor, and names the model', () => {
+    const totals = { input: 0, output: 1_000_010, cacheRead: 0, cacheWrite: 0 };
+    const c = show(totals, [
+      row('claude-opus-4-8', { output: 1_000_000 }),
+      row('<synthetic>', { output: 10 }),
+    ]);
+    expect(c.totalCost()).toBeCloseTo(25, 10);
+    expect(c.tag('total')).toEqual({ label: 'at least', why: 'No price for <synthetic>.' });
+    // The output figure is the one it is short in; the saving has no cache reads to miss.
+    expect(c.tag('output')?.label).toBe('at least');
+    expect(c.tag('savings')).toBeNull();
+    expect(tags()).toEqual(['at least', 'at least']);
+  });
+
+  it('tags the caching saving as well when a model with cache reads has no price', () => {
+    const totals = { input: 0, output: 0, cacheRead: 1_000_010, cacheWrite: 0 };
+    const c = show(totals, [
+      row('claude-opus-4-8', { cacheRead: 1_000_000 }),
+      row('<synthetic>', { cacheRead: 10 }),
+    ]);
+    expect(c.money('savings')).toBe('$4.50');
+    expect(c.tag('savings')?.label).toBe('at least');
+  });
+
+  it('tags only the cache write and the total when a write recorded no duration', () => {
+    const totals = { input: 0, output: 100, cacheRead: 0, cacheWrite: 1_000 };
+    const c = show(totals, [row('claude-sonnet-4-6', { output: 100, cacheWrite: 1_000, cacheWriteUnknown: 1_000 })]);
+    expect(c.tag('total')?.label).toBe('at least');
+    expect(c.tag('cacheWrite')?.why).toContain('5-minute rate');
+    expect(c.tag('output')).toBeNull();
+    expect(c.tag('savings')).toBeNull();
   });
 
   // ── Popover fit: figures must not outgrow their column ────────────────────

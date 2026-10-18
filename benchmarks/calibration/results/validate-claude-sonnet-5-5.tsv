@@ -1,0 +1,16 @@
+time	kind	id	attempt	model_id	input	cache_creation	cache_read	total	reply
+2026-10-13T19:34:08Z	baseline	-	1	claude-sonnet-5-5	2	957	0	959	OK
+2026-10-13T19:34:13Z	baseline	-	2	claude-sonnet-5-5	2	0	957	959	OK
+2026-10-13T19:34:18Z	baseline	-	3	claude-sonnet-5-5	2	0	957	959	OK
+2026-10-13T19:34:23Z	baseline	-	4	claude-sonnet-5-5	2	0	957	959	OK
+2026-10-13T19:34:27Z	baseline	-	5	claude-sonnet-5-5	2	0	957	959	OK
+2026-10-13T19:34:32Z	validate	rust-02	1	claude-sonnet-5-5	2	3190	0	3192	OK
+2026-10-13T19:34:37Z	validate	rust-02	2	claude-sonnet-5-5	2	0	3190	3192	OK
+2026-10-13T19:34:42Z	validate	prose-03	1	claude-sonnet-5-5	2	2916	0	2918	OK
+2026-10-13T19:34:47Z	validate	prose-03	2	claude-sonnet-5-5	2	0	2916	2918	OK
+2026-10-13T19:34:52Z	validate	tiny:x	1	claude-sonnet-5-5	2	959	0	961	OK
+2026-10-13T19:34:57Z	validate	tiny:x	2	claude-sonnet-5-5	2	0	959	961	OK
+2026-10-13T19:35:02Z	validate	tiny:hello world	1	claude-sonnet-5-5	2	961	0	963	OK
+2026-10-13T19:35:06Z	validate	tiny:hello world	2	claude-sonnet-5-5	2	0	961	963	OK
+2026-10-13T19:35:11Z	validate	rust-02+prose-03	1	claude-sonnet-5-5	2	5149	0	5151	OK
+2026-10-13T19:35:16Z	validate	rust-02+prose-03	2	claude-sonnet-5-5	2	0	5149	5151	OK

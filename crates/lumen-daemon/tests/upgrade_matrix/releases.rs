@@ -1,6 +1,7 @@
 //! Each `schema_*.rs` is `crates/lumen-core/src/schema.rs` at its tag, verbatim to the end of `DDL`.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -19,6 +20,11 @@ mod v1_6_0 {
 mod v1_7_0 {
     include!("schema_v1_7_0.rs");
 }
+// 1.8.0's file also holds `open_pool`, which building a fixture has no use for.
+#[allow(dead_code)]
+mod v1_8_0 {
+    include!("schema_v1_8_0.rs");
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Release {
@@ -26,6 +32,7 @@ pub enum Release {
     V1_5_0,
     V1_6_0,
     V1_7_0,
+    V1_8_0,
 }
 
 impl Release {
@@ -35,6 +42,7 @@ impl Release {
             Release::V1_5_0 => v1_5_0::init_schema(pool).await,
             Release::V1_6_0 => v1_6_0::init_schema(pool).await,
             Release::V1_7_0 => v1_7_0::init_schema(pool).await,
+            Release::V1_8_0 => v1_8_0::init_schema(pool).await,
         };
         done.unwrap_or_else(|e| panic!("{self:?}'s own init_schema failed: {e}"));
     }
@@ -46,7 +54,18 @@ impl Release {
             Release::V1_5_0 => v1_5_0::READ_EVENTS_COLUMNS,
             Release::V1_6_0 => v1_6_0::READ_EVENTS_COLUMNS,
             Release::V1_7_0 => v1_7_0::READ_EVENTS_COLUMNS,
+            Release::V1_8_0 => v1_8_0::READ_EVENTS_COLUMNS,
         }
+    }
+
+    /// Open the ledger at `db` as this release did, then let go of it.
+    pub async fn open(self, db: &Path) {
+        let pool = SqlitePoolOptions::new()
+            .connect(&format!("sqlite:{}?mode=rwc", db.display()))
+            .await
+            .unwrap_or_else(|e| panic!("{self:?} cannot open {}: {e}", db.display()));
+        self.init_schema(&pool).await;
+        pool.close().await;
     }
 }
 
@@ -59,15 +78,18 @@ pub enum Fixture {
     V1_5_0,
     V1_6_0,
     V1_7_0,
-    /// Written by 1.5.0, then opened and written to by 1.6.0, then by 1.7.0.
+    /// Already has `read_events.agent_id`; still has `sessions`, which 1.9.0 drops.
+    V1_8_0,
+    /// Written by 1.5.0, then opened and written to by 1.6.0, 1.7.0 and 1.8.0 in turn.
     LongLived,
 }
 
-pub const ALL: [Fixture; 5] = [
+pub const ALL: [Fixture; 6] = [
     Fixture::V1_1_4,
     Fixture::V1_5_0,
     Fixture::V1_6_0,
     Fixture::V1_7_0,
+    Fixture::V1_8_0,
     Fixture::LongLived,
 ];
 
@@ -91,7 +113,13 @@ impl Fixture {
             Fixture::V1_5_0 => &[Release::V1_5_0],
             Fixture::V1_6_0 => &[Release::V1_6_0],
             Fixture::V1_7_0 => &[Release::V1_7_0],
-            Fixture::LongLived => &[Release::V1_5_0, Release::V1_6_0, Release::V1_7_0],
+            Fixture::V1_8_0 => &[Release::V1_8_0],
+            Fixture::LongLived => &[
+                Release::V1_5_0,
+                Release::V1_6_0,
+                Release::V1_7_0,
+                Release::V1_8_0,
+            ],
         }
     }
 
@@ -104,7 +132,8 @@ impl Fixture {
         match self.newest() {
             Release::V1_1_4 => TABLES_1_1_4,
             Release::V1_5_0 | Release::V1_6_0 => TABLES_1_5_0,
-            Release::V1_7_0 => TABLES_1_7_0,
+            // 1.8.0 added a column and no table.
+            Release::V1_7_0 | Release::V1_8_0 => TABLES_1_7_0,
         }
     }
 

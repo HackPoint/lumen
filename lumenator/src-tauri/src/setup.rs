@@ -951,7 +951,10 @@ fn lumen_hooks(settings: &serde_json::Value) -> Vec<LumenHook<'_>> {
         for entry in settings["hooks"][phase].as_array().into_iter().flatten() {
             let matcher = entry["matcher"].as_str().unwrap_or("");
             for hook in entry["hooks"].as_array().into_iter().flatten() {
-                if let Some(command) = hook["command"].as_str().filter(|c| c.contains("lumen_")) {
+                if let Some(command) = hook["command"]
+                    .as_str()
+                    .filter(|c| lumen_core::identity_hook::is_lumen_command(c))
+                {
                     found.push(LumenHook {
                         phase,
                         matcher,
@@ -965,20 +968,11 @@ fn lumen_hooks(settings: &serde_json::Value) -> Vec<LumenHook<'_>> {
 }
 
 /// Whether `settings` runs Lumen's hook before each of the three Lumen tools, which is what lets
-/// the MCP server tell which conversation a call belongs to (1.8.0, #32).
-///
-/// Before, not after: Claude Code runs a PostToolUse hook once the tool has answered, too late to
-/// say whose call it was, so the entries earlier versions left on PostToolUse do not count. All
-/// three: a call to a tool without it is answered in full whatever the other two do.
-///
-/// The `Read` intercept sits in the same list ([`INTERCEPT_MATCHERS`]) and is not this.
+/// the MCP server tell which conversation a call belongs to (1.8.0, #32): the one predicate
+/// `lumen doctor` and the savings summary call too (`lumen_core::identity_hook::registered`), so
+/// the window's prompt, this validator and the terminal agree about the same file.
 fn identity_hook_registered(settings: &serde_json::Value) -> bool {
-    let hooks = lumen_hooks(settings);
-    lumen_core::identity::MATCHERS.iter().all(|m| {
-        hooks
-            .iter()
-            .any(|h| h.phase == "PreToolUse" && h.matcher == *m)
-    })
+    lumen_core::identity_hook::registered(settings)
 }
 
 /// What the main window asks about the identity hook, to say whether repeat reads can work.
@@ -1027,19 +1021,18 @@ fn identity_hook_status_in(
 ///
 /// Opened read-only, so asking never creates, migrates or writes the ledger the daemon owns.
 fn some_recent_call_identified(db: &Path) -> bool {
-    let Ok(conn) = lumen_core::meter::open_read_only(db) else {
-        return false;
-    };
-    conn.query_row(
-        "SELECT COALESCE(SUM(repeat_plan = ?1), 0), COUNT(*) FROM (
-             SELECT repeat_plan FROM read_events
-             WHERE routed_via IN ('smart_read', 'recall_file', 'compress_logs')
-               AND repeat_plan IS NOT NULL
-             ORDER BY rowid DESC LIMIT 50)",
-        [lumen_core::repeat::PLAN_UNIDENTIFIED],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-    )
-    .is_ok_and(|(unidentified, all)| unidentified < all)
+    lumen_core::identity_hook::reaches_server(
+        Some(false),
+        lumen_core::identity_hook::recent_plans(db),
+    ) == Some(true)
+}
+
+/// Whether settings.json registers the identity hook, by [`identity_hook_registered`], for the
+/// savings summary: `None` when the file cannot be used. An absent file registers nothing, as the
+/// prompt reads it. The ledger's own evidence, which the summary weighs first, is not consulted
+/// here.
+pub(crate) fn identity_hook_registered_now() -> Option<bool> {
+    lumen_core::identity_hook::registered_in(&global_settings_path_in(&home()))
 }
 
 /// Whether the identity hook is registered, for the prompt on Home and the Optimizer tab.
@@ -4313,6 +4306,47 @@ mod tests {
         }
     }
 
+    /// `lumen doctor` always counted a list, a catch-all or a `mcp__lumen__.*` matcher with Lumen's
+    /// command on it, and until 1.9.0 the window did not, so the two disagreed about one file.
+    /// Both call `lumen_core::identity_hook` now; and the file is read the same way by the prompt
+    /// and by the CLI's savings summary, odd contents included.
+    #[test]
+    fn the_window_and_the_cli_agree_on_the_odd_shapes_of_settings_json() {
+        let [smart, recall, logs] = lumen_core::identity::MATCHERS;
+        for m in [
+            format!("{smart}|{recall}|{logs}"),
+            "mcp__lumen__.*".to_string(),
+            ".*".to_string(),
+            "*".to_string(),
+            String::new(),
+        ] {
+            assert!(identity_hook_registered(&lumen_before(&[&m])), "{m:?}");
+        }
+        assert!(!identity_hook_registered(&lumen_before(&[&format!(
+            "{smart}|{logs}"
+        )])));
+
+        let h = TempDir::new().unwrap();
+        for text in [
+            "",
+            " \n",
+            "{",
+            "[]",
+            "7",
+            "{}",
+            r#"{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"command":"/x/lumen_read_intercept.sh"}]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"mcp__lumen__smart_read","hooks":[{"command":"/opt/other.sh"}]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/x/lumen_read_intercept.sh"}]}]}}"#,
+        ] {
+            let file = write_settings_text(h.path(), text);
+            let window = identity_hook_status_in(h.path(), None)
+                .ok()
+                .map(|s| s.registered);
+            let cli = lumen_core::identity_hook::registered_in(&file);
+            assert_eq!(window, cli, "{text:?}");
+        }
+    }
+
     /// The window reads this, so the keys are the ones its TypeScript names.
     #[test]
     fn the_status_reaches_the_window_in_camel_case() {
@@ -4431,9 +4465,14 @@ mod tests {
                     settings_with_matchers(h, &["Read"], &["Read", "Bash", smart, recall, logs])
                 }),
             ),
+            // Claude Code reads `mcp__lumen__.*` as a pattern that selects all three, so the hook
+            // runs before each and the server learns whose call it is. Until 1.9.0 the window
+            // called this missing and `lumen doctor` registered; both now ask
+            // `lumen_core::identity_hook`, which says registered. The validator still reports the
+            // three entries Setup writes as absent, without blaming identity for it.
             (
                 "a broader matcher than the tools' names",
-                false,
+                true,
                 Box::new(|h| {
                     settings_with_matchers(h, &["Read", "mcp__lumen__.*"], &METER_MATCHERS)
                 }),

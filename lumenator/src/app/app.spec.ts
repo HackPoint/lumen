@@ -4,10 +4,12 @@ import { RouterTestingHarness } from '@angular/router/testing';
 import { AppComponent } from './app.component';
 import { appConfig } from './app.config';
 import { Home } from './pages/home/home';
-import { Hotspots } from './pages/hotspots/hotspots';
+import { Details } from './pages/details/details';
 import { Optimizer } from './pages/optimizer/optimizer';
 import { Panel } from './pages/panel/panel';
+import { Settings } from './pages/settings/settings';
 import { Setup } from './pages/setup/setup';
+import { Why } from './pages/why/why';
 import { TauriBridge } from './tauri-bridge';
 import { FakeTauriBridge } from './tauri-bridge.fake';
 
@@ -31,7 +33,9 @@ describe('App shell', () => {
     const pages = [
       ['/', Home],
       ['/optimizer', Optimizer],
-      ['/hotspots', Hotspots],
+      ['/details', Details],
+      ['/why', Why],
+      ['/settings', Settings],
       ['/panel', Panel],
       ['/setup', Setup],
     ] as const;
@@ -40,13 +44,19 @@ describe('App shell', () => {
     }
   });
 
+  it('sends the old Hotspots address to Why, which replaced it', async () => {
+    const harness = await RouterTestingHarness.create();
+    expect(await harness.navigateByUrl('/hotspots')).toBeInstanceOf(Why);
+    expect(TestBed.inject(Router).url).toBe('/why');
+  });
+
   it('renders the routed page once, inside the shell', async () => {
     const fixture = TestBed.createComponent(AppComponent);
-    await TestBed.inject(Router).navigateByUrl('/hotspots');
+    await TestBed.inject(Router).navigateByUrl('/why');
     fixture.detectChanges();
     const root = fixture.nativeElement as HTMLElement;
     expect(root.querySelectorAll('router-outlet').length).toBe(1);
-    expect(root.querySelectorAll('hotspots').length).toBe(1);
+    expect(root.querySelectorAll('why').length).toBe(1);
     expect(root.querySelectorAll('home').length).toBe(0);
   });
 });

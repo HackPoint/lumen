@@ -15,6 +15,18 @@ Measured on macOS arm64, `cl100k_base` via `lumen-tok`, in two sittings:
   below. The test reads the ledger of the machine it runs on, here the author's, and these were
   not re-measured.
 
+Every token figure on this page is a `cl100k_base` count, OpenAI's tokenizer standing in for
+Claude's, which is not available offline. It is a tokenizer's count, never a bytes/4 guess, but
+Claude counts the same text differently: on raw file text, the models measured from Claude Opus
+4.7 on (Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count
+about 1.59× as many tokens (1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet 4.6,
+Opus 4.5 and Haiku 4.5) about 1.24× as many (1.14–1.31×), from the 10th to the 90th percentile
+of 60 samples measured against Claude's own usage data
+([benchmarks/calibration](../benchmarks/calibration/README.md), calibration of 2026-10-14). A
+`Read`'s line numbers and the tool-result wrapper are not in those ratios. The percentages here compare one `cl100k_base`
+count with another, and the calibration does not show whether they come out the same in
+Claude's units.
+
 ---
 
 ## 1. An outline costs 7.4% of the file it describes
@@ -55,9 +67,10 @@ larger numbers, not the same ones.
 **1,573 intercepted reads, 11.03M tokens saved.**
 
 The dollar value this section gave is withdrawn (1.6.0). It was priced through the `Econ`
-model the UI headline uses, whose rounds-remaining input `R` is one assumed constant
-(`DEFAULT_ROUNDS_REMAINING`, 65) rather than derived per call, so the figure was that
-assumption multiplied out. The test still prints it; it is not published as a measurement.
+model, whose rounds-remaining input `R` was one assumed constant rather than derived per call,
+so the figure was that assumption multiplied out. From 1.9.0 `lumen report` derives `R` and the
+round's cost for each call from the ledger's own turns (`lumen_core::savings`); this page quotes
+no dollar figure, because that one is this machine's.
 
 The missed-optimization baseline — what the un-intercepted reads cost — is **3,500,277 tokens**.
 The raw figure is 6,931,572, and **half of that is binary files** whose token count came from a

@@ -299,6 +299,242 @@ async fn usage_opus_matching_is_ascii_case_insensitive() {
     );
 }
 
+// ── get_usage: per-model sums ────────────────────────────────────────────────
+//
+// A summed total cannot be priced: the frontend prices each model's share at that model's
+// rates, so every aggregate has to carry the split.
+
+#[tokio::test]
+async fn usage_splits_every_sum_by_the_model_that_consumed_it() {
+    let (_d, pool) = fixture().await;
+    // Now, not an hour ago: shortly after midnight an hour ago is yesterday.
+    let now = "datetime('now')";
+    turn(&pool, "o1", "s1", now, "claude-opus-4-8", (1, 2, 3, 4)).await;
+    turn(&pool, "o2", "s1", now, "claude-opus-4-8", (10, 20, 30, 40)).await;
+    turn(
+        &pool,
+        "h1",
+        "s1",
+        now,
+        "claude-haiku-4-5-20251001",
+        (100, 0, 0, 0),
+    )
+    .await;
+    turn_no_model(&pool, "n1", "s1", now).await;
+
+    let u = get_usage(&pool).await.unwrap();
+    for (name, agg) in [
+        ("5h", &u.rolling_5h),
+        ("today", &u.today),
+        ("week", &u.this_week),
+        ("all", &u.all_time),
+    ] {
+        let rows: Vec<_> = agg
+            .by_model
+            .iter()
+            .map(|m| {
+                (
+                    m.model.as_deref(),
+                    m.turns,
+                    m.input,
+                    m.output,
+                    m.cache_read,
+                    m.cache_write,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (None, 1, 1, 0, 0, 0),
+                (Some("claude-haiku-4-5-20251001"), 1, 100, 0, 0, 0),
+                (Some("claude-opus-4-8"), 2, 11, 22, 33, 44),
+            ],
+            "{name}: one row per model, a turn with none included"
+        );
+        // The totals are the rows added up, so the two can never disagree.
+        assert_eq!(agg.turns, 4, "{name}");
+        assert_eq!(agg.input, 112, "{name}");
+        assert_eq!(agg.total_tokens, 112 + 22 + 33 + 44, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn usage_7d_split_carries_each_sides_models() {
+    let (_d, pool) = fixture().await;
+    let d1 = "datetime('now','-1 days')";
+    turn(&pool, "o1", "s1", d1, "claude-opus-5-5", (10, 0, 0, 0)).await;
+    turn(&pool, "s1", "s1", d1, "claude-sonnet-5-5", (70, 0, 0, 0)).await;
+    turn_no_model(&pool, "n1", "s1", d1).await;
+
+    let u = get_usage(&pool).await.unwrap();
+    let models = |a: &TokenAgg| -> Vec<Option<String>> {
+        a.by_model.iter().map(|m| m.model.clone()).collect()
+    };
+    assert_eq!(
+        models(&u.rolling_7d_opus),
+        vec![Some("claude-opus-5-5".to_string())]
+    );
+    assert_eq!(
+        models(&u.rolling_7d_other),
+        vec![None, Some("claude-sonnet-5-5".to_string())],
+        "a turn with no model is on the other side, as SQL's LIKE put it"
+    );
+    assert_eq!(u.rolling_7d_other.input, 71);
+}
+
+#[tokio::test]
+async fn usage_carries_the_one_hour_cache_writes_where_they_were_recorded() {
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "a",
+        "s1",
+        "datetime('now')",
+        "claude-opus-4-8",
+        (0, 0, 0, 500),
+    )
+    .await;
+    turn(
+        &pool,
+        "b",
+        "s1",
+        "datetime('now')",
+        "claude-opus-4-8",
+        (0, 0, 0, 300),
+    )
+    .await;
+    sqlx::query("UPDATE turns SET cache_1h = 200, cache_5m = 300 WHERE message_id = 'a'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let u = get_usage(&pool).await.unwrap();
+    let opus = &u.all_time.by_model[0];
+    assert_eq!(opus.cache_write, 800);
+    assert_eq!(
+        opus.cache_write_1h, 200,
+        "turn b recorded no duration and adds nothing to the 1-hour part"
+    );
+    assert_eq!(
+        opus.cache_write_unknown, 300,
+        "turn b's whole write is of unknown duration, and a"
+    );
+}
+
+#[tokio::test]
+async fn usage_splits_each_model_by_the_speed_it_ran_at() {
+    // Fast mode costs a premium, so a fast turn cannot be summed with a standard one, nor a
+    // turn that recorded no speed with either.
+    let (_d, pool) = fixture().await;
+    for (id, speed) in [("f", "'fast'"), ("s", "'standard'"), ("n", "NULL")] {
+        turn(
+            &pool,
+            id,
+            "s1",
+            "datetime('now')",
+            "claude-opus-4-8",
+            (0, 10, 0, 0),
+        )
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE turns SET speed = {speed} WHERE message_id = '{id}'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let u = get_usage(&pool).await.unwrap();
+    let speeds: Vec<(Option<&str>, i64)> = u
+        .all_time
+        .by_model
+        .iter()
+        .map(|m| (m.speed.as_deref(), m.output))
+        .collect();
+    assert_eq!(
+        speeds,
+        vec![(None, 10), (Some("fast"), 10), (Some("standard"), 10)]
+    );
+    assert_eq!(u.all_time.output, 30);
+}
+
+#[tokio::test]
+async fn usage_splits_each_model_by_the_region_it_ran_in() {
+    // US-only inference costs 1.1 times on the 4.6 and later models, so a US-only turn cannot be
+    // summed with a global one, nor a turn whose region is not known with either.
+    let (_d, pool) = fixture().await;
+    for (id, geo) in [
+        ("u", "'us'"),
+        ("g", "'global'"),
+        ("a", "'not_available'"),
+        ("n", "NULL"),
+    ] {
+        turn(
+            &pool,
+            id,
+            "s1",
+            "datetime('now')",
+            "claude-opus-4-8",
+            (0, 10, 0, 0),
+        )
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE turns SET speed = 'standard', inference_geo = {geo} WHERE message_id = '{id}'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let u = get_usage(&pool).await.unwrap();
+    let geos: Vec<(Option<&str>, i64)> = u
+        .all_time
+        .by_model
+        .iter()
+        .map(|m| (m.inference_geo.as_deref(), m.output))
+        .collect();
+    assert_eq!(
+        geos,
+        vec![
+            (None, 10),
+            (Some("global"), 10),
+            (Some("not_available"), 10),
+            (Some("us"), 10)
+        ]
+    );
+    assert_eq!(u.all_time.output, 40);
+}
+
+#[tokio::test]
+async fn usage_serializes_the_split_for_the_frontend() {
+    // The wire names are load-bearing: the frontend reads byModel and cacheWrite1h.
+    let (_d, pool) = fixture().await;
+    turn(
+        &pool,
+        "a",
+        "s1",
+        "datetime('now')",
+        "claude-opus-4-8",
+        (1, 2, 3, 4),
+    )
+    .await;
+    let json = serde_json::to_value(get_usage(&pool).await.unwrap()).unwrap();
+    let row = &json["allTime"]["byModel"][0];
+    assert_eq!(row["model"], "claude-opus-4-8");
+    assert_eq!(row["cacheRead"], 3);
+    assert_eq!(row["cacheWrite"], 4);
+    assert_eq!(row["cacheWrite1h"], 0);
+    assert_eq!(
+        row["cacheWriteUnknown"], 4,
+        "the fixture turn recorded no duration"
+    );
+    assert!(row["speed"].is_null(), "nor a speed");
+    assert!(row["inferenceGeo"].is_null(), "nor a region");
+    assert!(
+        row.as_object().unwrap().contains_key("inferenceGeo"),
+        "sent as null, not left out"
+    );
+}
+
 // ── get_usage: local-time calendar rollups ───────────────────────────────────
 //
 // The highest-risk arithmetic in the app: "today" and "this week" are computed
@@ -691,10 +927,10 @@ async fn returned_the_file_instead(pool: &SqlitePool, tool: &str, c: Counts) {
 }
 
 /// A call answered with the file, because the view it would have sent cost as much, is a
-/// refusal and not a saving, whichever tool made it. It must leave every total, the per-tool and
-/// per-channel breakdowns and the dollar figures exactly as they were: counting its zero or
-/// negative saving would lower the figure the Optimizer screen leads with, and counting its call
-/// would charge it a round it did not cost.
+/// refusal and not a saving, whichever tool made it. It must leave every token total and the
+/// per-tool and per-channel breakdowns exactly as they were: counting its zero or negative saving
+/// would lower the figure the Optimizer screen leads with. (The savings engine does count it, as
+/// the loss it is: `lumen_core::savings`.)
 #[tokio::test]
 async fn a_call_that_returned_the_file_instead_changes_no_saving() {
     assert!(
@@ -710,15 +946,12 @@ async fn a_call_that_returned_the_file_instead_changes_no_saving() {
         (100, 1000, 900),
     )
     .await;
-    // The cost side needs 200 turns to be computed at all.
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
     let mut before = get_optimizer_stats(&pool).await.unwrap();
     assert_eq!(
         (before.lifetime_optimized_tokens, before.by_tool.len()),
         (900, 1),
         "premise: the real saving is counted"
     );
-    assert!(before.round_cost_usd > 0.0 && before.net_value_usd != 0.0);
 
     // compress_logs gives back the log itself (zero saved); the others give the file behind a note
     // that costs a little more (a small negative saving).
@@ -731,7 +964,7 @@ async fn a_call_that_returned_the_file_instead_changes_no_saving() {
     before.provenance_total_rows += 3;
     assert_eq!(
         after, before,
-        "a would_inflate row reached a saving, a breakdown or the net value"
+        "a would_inflate row reached a saving or a breakdown"
     );
 }
 
@@ -1263,9 +1496,6 @@ async fn first_reads_and_every_fallback_are_none_of_the_four_figures() {
 #[tokio::test]
 async fn served_answers_are_in_none_of_the_totals_above_them() {
     let (_d, pool) = fixture().await;
-    // With enough turns to price a round the net value is not zero, so a served row reaching it
-    // would show.
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
     event(
         &pool,
         "datetime('now')",
@@ -1283,7 +1513,6 @@ async fn served_answers_are_in_none_of_the_totals_above_them() {
     )
     .await;
     let before = get_optimizer_stats(&pool).await.unwrap();
-    assert!(before.net_value_usd != 0.0, "the fixture prices a round");
 
     let rows = [
         served("smart_read_unchanged", MEAS, (30, 1000, 970)),
@@ -1303,9 +1532,6 @@ async fn served_answers_are_in_none_of_the_totals_above_them() {
     assert_eq!(after.this_week_saved_tokens, before.this_week_saved_tokens);
     assert_eq!(after.by_tool, before.by_tool);
     assert_eq!(after.by_channel, before.by_channel);
-    assert_eq!(after.net_value_usd, before.net_value_usd);
-    assert_eq!(after.gross_value_usd, before.gross_value_usd);
-    assert_eq!(after.round_cost_usd, before.round_cost_usd);
     assert_eq!(
         after.repeat_reads,
         reads(2, 2, 970 + 470 + 1380 + 710, 4, 0, 0)
@@ -1682,161 +1908,5 @@ async fn context_report_json_uses_camel_case_for_the_frontend() {
     let f = &j["topFiles"][0];
     for k in ["totalTokens", "sharePct", "unchangedRereads"] {
         assert!(f.get(k).is_some(), "missing camelCase key topFiles[].{k}");
-    }
-}
-
-// ── Net dollar value ─────────────────────────────────────────────────────────
-
-/// Populate enough turns for the cost side to be computable.
-async fn turns_for_cost(pool: &SqlitePool, n: i64, ctx: i64, out: i64) {
-    for i in 0..n {
-        turn(
-            pool,
-            &format!("nv{i}"),
-            "s",
-            "datetime('now')",
-            "claude-opus-5",
-            (0, out, ctx, 0),
-        )
-        .await;
-    }
-}
-
-/// With too few turns to average, the cost side is unknown — and a gross figure with no
-/// cost against it is exactly the overstatement the dollar headline replaces.
-#[tokio::test]
-async fn net_value_is_zero_when_there_are_too_few_turns_to_price_a_round() {
-    let (_d, pool) = fixture().await;
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (100, 5_000, 4_900),
-    )
-    .await;
-    turns_for_cost(&pool, 10, 300_000, 1_000).await;
-
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    assert_eq!(o.round_cost_usd, 0.0);
-    assert_eq!(
-        o.gross_value_usd, 0.0,
-        "a gross figure with no cost beside it is the overstatement being removed"
-    );
-    assert_eq!(o.net_value_usd, 0.0);
-}
-
-#[tokio::test]
-async fn net_value_prices_saved_tokens_against_the_rounds_they_cost() {
-    let (_d, pool) = fixture().await;
-    // One call saving 100,000 tokens.
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (1_000, 101_000, 100_000),
-    )
-    .await;
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
-
-    let o = get_optimizer_stats(&pool).await.unwrap();
-
-    // gross = 100_000 x (6.25 + 0.5 x 194) / 1e6
-    let want_gross = 100_000.0 * (6.25 + 0.5 * 194.0) / 1e6;
-    assert!(
-        (o.gross_value_usd - want_gross).abs() < 1e-9,
-        "gross {} vs {want_gross}",
-        o.gross_value_usd
-    );
-
-    // cost = 1 call x ((100_000 x 0.5 + 1_000 x 25) / 1e6) x 1.604
-    let want_cost = ((100_000.0 * 0.5 + 1_000.0 * 25.0) / 1e6) * 1.604;
-    assert!(
-        (o.round_cost_usd - want_cost).abs() < 1e-9,
-        "cost {} vs {want_cost}",
-        o.round_cost_usd
-    );
-    assert!((o.net_value_usd - (want_gross - want_cost)).abs() < 1e-9);
-    assert_eq!(o.value_rounds, 194.0, "R must be surfaced, not hidden");
-    assert_eq!(o.pair_multiplier, 1.604);
-}
-
-/// A call that saves almost nothing must come out negative. This is the whole reason the
-/// headline changed: the token ratio would still have looked like a win.
-#[tokio::test]
-async fn a_call_that_saves_little_comes_out_negative() {
-    let (_d, pool) = fixture().await;
-    // 300 tokens saved out of 400 — an effectiveness ratio of 75%, and a loss.
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (100, 400, 300),
-    )
-    .await;
-    turns_for_cost(&pool, 200, 400_000, 1_200).await;
-
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    let ratio = 1.0
-        - (o.lifetime_full_tokens - o.lifetime_optimized_tokens) as f64
-            / o.lifetime_full_tokens as f64;
-    assert!(
-        ratio > 0.7,
-        "premise: the token ratio looks good ({ratio:.2})"
-    );
-    assert!(
-        o.net_value_usd < 0.0,
-        "and yet the call is a loss: net {}",
-        o.net_value_usd
-    );
-}
-
-/// Subagent turns carry their own context and must not price the main agent's rounds.
-#[tokio::test]
-async fn subagent_turns_do_not_price_the_round() {
-    let (_d, pool) = fixture().await;
-    event(
-        &pool,
-        "datetime('now')",
-        "smart_read",
-        "cli",
-        (100, 5_000, 4_900),
-    )
-    .await;
-    turns_for_cost(&pool, 200, 100_000, 1_000).await;
-    for i in 0..200 {
-        subagent_turn(
-            &pool,
-            &format!("sa{i}"),
-            "s",
-            "datetime('now')",
-            (0, 1_000, 1, 0),
-        )
-        .await;
-    }
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    let want = ((100_000.0 * 0.5 + 1_000.0 * 25.0) / 1e6) * 1.604;
-    assert!(
-        (o.round_cost_usd - want).abs() < 1e-9,
-        "subagent rows with a 1-token context dragged the round cost to {}",
-        o.round_cost_usd
-    );
-}
-
-#[tokio::test]
-async fn net_value_fields_are_camel_case_for_the_frontend() {
-    let (_d, pool) = fixture().await;
-    let o = get_optimizer_stats(&pool).await.unwrap();
-    let j = serde_json::to_value(&o).unwrap();
-    for k in [
-        "netValueUsd",
-        "grossValueUsd",
-        "roundCostUsd",
-        "valueRounds",
-        "pairMultiplier",
-    ] {
-        assert!(j.get(k).is_some(), "missing camelCase key {k}");
     }
 }

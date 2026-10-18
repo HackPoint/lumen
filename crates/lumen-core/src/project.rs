@@ -30,6 +30,39 @@ pub fn is_subagent_path(path: &str) -> bool {
     path.contains("/subagents/") || path.contains("\\subagents\\")
 }
 
+/// The subagent a transcript belongs to, by its path: `<agent_id>` of
+/// `<session>/subagents/agent-<agent_id>.jsonl`, under either separator, which is the bare id the
+/// hooks record. `None` for the main agent's transcript; `Some("")` for a path under `subagents/`
+/// whose name says nothing usable, an id no call carries.
+pub fn subagent_of(path: &str) -> Option<&str> {
+    is_subagent_path(path).then(|| agent_file_id(path).unwrap_or(""))
+}
+
+/// The conversation a transcript is the transcript of, by its path alone: `(<session>, None)` for
+/// `<session>.jsonl`, `(<session>, Some(<agent_id>))` for `<session>/subagents/agent-<agent_id>.jsonl`,
+/// under either separator. A file can hold records of other conversations too (a resumed or forked
+/// transcript, or a subagent's written beside the session by an older Claude Code, as
+/// `agent-<id>.jsonl`), but only this one is the conversation's own.
+pub fn transcript_owner(path: &str) -> Option<(&str, Option<&str>)> {
+    let parts: Vec<&str> = path.split(['/', '\\']).collect();
+    let name = parts.last()?.strip_suffix(".jsonl")?;
+    if is_subagent_path(path) {
+        let at = parts.iter().rposition(|p| *p == "subagents")?;
+        let session = parts.get(at.checked_sub(1)?).filter(|s| !s.is_empty())?;
+        return Some((session, Some(agent_file_id(path)?)));
+    }
+    (!name.is_empty()).then_some((name, None))
+}
+
+/// `<agent_id>` from a transcript named `agent-<agent_id>.jsonl`, under either separator.
+pub fn agent_file_id(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.strip_prefix("agent-"))
+        .map(|name| name.strip_suffix(".jsonl").unwrap_or(name))
+        .filter(|id| !id.is_empty())
+}
+
 /// The encoded project directory from a transcript path, e.g.
 /// `-Users-me-dev-lumen` from `~/.claude/projects/-Users-me-dev-lumen/x.jsonl`.
 ///
@@ -103,6 +136,29 @@ pub fn label_for_transcript(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_transcripts_own_conversation_is_read_from_its_path() {
+        assert_eq!(
+            transcript_owner("/h/.claude/projects/-p/0b1c.jsonl"),
+            Some(("0b1c", None))
+        );
+        assert_eq!(
+            transcript_owner("/h/.claude/projects/-p/0b1c/subagents/agent-a7.jsonl"),
+            Some(("0b1c", Some("a7")))
+        );
+        assert_eq!(
+            transcript_owner("C:\\h\\.claude\\projects\\-p\\0b1c\\subagents\\agent-a7.jsonl"),
+            Some(("0b1c", Some("a7")))
+        );
+        // An older Claude Code's subagent transcript beside the session's: its own name, which is
+        // no session's.
+        assert_eq!(
+            transcript_owner("/h/.claude/projects/-p/agent-a7.jsonl"),
+            Some(("agent-a7", None))
+        );
+        assert_eq!(transcript_owner("/h/x.txt"), None);
+    }
+
     use super::*;
     use std::collections::HashSet;
 

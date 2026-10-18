@@ -1,12 +1,14 @@
 ---
 description: Render Lumen's fault report, show it, and file it only after you approve
 argument-hint: "[--include-source] [--repo owner/name]"
-allowed-tools: Bash(lumen report:*)
+allowed-tools: Bash(lumen faults:*), Bash(lumen report:*)
 ---
 
 Render the Lumen fault report and show it to the user before anything is filed.
 
-1. Run `lumen report --dry-run $ARGUMENTS` and show the full body verbatim.
+1. Run `lumen faults --dry-run $ARGUMENTS` and show the full body verbatim. If `faults` is
+   not a command, the CLI is older than 1.9.0, where the fault report was
+   `lumen report`: use `lumen report` in its place here and in step 4.
 2. Summarise in one or two lines: which fault leads, how many occurrences, and
    whether routing is degraded or merely noisy.
 3. If the body is empty (`no faults recorded`), say so and stop. Do not file an

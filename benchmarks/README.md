@@ -1,11 +1,11 @@
 # Lumen benchmarks
 
 Per-call token and latency figures for Lumen's read tools and hooks, measured through the real
-`lumen-mcp` binary on a pinned corpus, for two builds side by side: the last release (v1.7.0)
+`lumen-mcp` binary on a pinned corpus, for two builds side by side: the last release (v1.8.0)
 and the checkout you run it from. Everything is reproduced by one command.
 
 ```sh
-benchmarks/run.sh                 # macOS / Linux: tokens and latency, v1.7.0 against this checkout
+benchmarks/run.sh                 # macOS / Linux: tokens and latency, v1.8.0 against this checkout
 benchmarks/run.sh compare benchmarks/results/<label>-<os>.json   # latency again, against a committed run
 benchmarks\run.ps1 --latency-only # Windows (PowerShell)
 cargo run --release --locked -p lumen-bench -- --help
@@ -18,13 +18,13 @@ run, and it is not part of the app bundle. Its fast smoke test (a four-file fixt
 a few seconds) runs with the rest of `cargo test --workspace`; the corpus run does not.
 
 A run needs `git`, a Rust toolchain, network access to fetch the corpus (or a local mirror, see
-below), about 1 GiB of disk for the cache (the corpus plus the v1.7.0 build) and another GiB or
+below), about 1 GiB of disk for the cache (the corpus plus the v1.8.0 build) and another GiB or
 so for this checkout's release build, and a clean checkout: the
 candidate build refuses uncommitted changes outside `benchmarks/results` (override with
 `--allow-dirty` for a throwaway run, which the output then marks as a dirty tree). With the
-corpus and the v1.7.0 build already cached, a full run took about 4 minutes on the M4 laptop
-(most of it the latency series); the first run also fetches the corpus and makes two release
-builds, which is the longest part.
+corpus and the baseline build already cached, a full run took about 3 minutes on the M4 laptop
+for 1.9.0 and about 4 for 1.8.0 (most of it the latency series); the first run also fetches the
+corpus and makes two release builds, which is the longest part.
 
 ## Outputs
 
@@ -41,6 +41,71 @@ build is labelled `pre-<7 characters>` in the tables, so a result always says wh
 measurement of and never calls it "main" (main moves; the commit does not).
 
 ## What is committed here
+
+One measurement per release, each against the release before it, newest first. Every result file
+is kept; a later release adds its own and replaces none.
+
+| release | commit measured | against | tokens | latency |
+|---|---|---|---|---|
+| 1.9.0 | `5626660` | v1.8.0 | equal | equal; on Ubuntu one series 2% (30 us) slower, on Windows two 3% faster |
+| 1.8.0 | `4ca4fd1` | v1.7.0 | equal | a blocked Read 0.4 to 2.6 ms slower; a new identity hook before every Lumen call |
+
+### 1.9.0: commit 5626660 against v1.8.0
+
+`results/pre-release-56266602bba5-*` measure commit `56266602bba5cefe3f894ce0318bf19d29c32f66`,
+the last commit before the 1.9.0 version bump that changes anything the harness measures, against
+v1.8.0 (`12ad305679cf92b23167b032f56412a2a38e72a1`). They carry the pre-release stamp because the
+bump is a later commit; the commits after it touch this directory, this file, `README.md`,
+`CHANGELOG.md` and the version strings.
+
+| platform | run | machine |
+|---|---|---|
+| macOS 26.6.2 | tokens and latency, 200 runs per series | Apple M4 (4 performance and 6 efficiency cores), 24 GiB, on mains and in use: load average 7.2 before the latency series, 3.9 after |
+| Ubuntu 24.04 | latency only, 200 runs per series, the Benchmarks workflow (run 39118498843) | GitHub-hosted runner, Intel Xeon Platinum 8573C, 4 logical cores, 15.6 GiB, load average 4.0 before, 1.4 after |
+| Windows Server 2025 | the same | GitHub-hosted runner, AMD EPYC 7763, 4 logical cores, 16.0 GiB, CPU 2% busy before, 26% after |
+
+1.9.0 changes how Lumen counts what it saved (one savings engine, per-model prices, the
+calibration, the Home screen) and how a ledger is upgraded (one transaction, no write on opening a
+current ledger), not what the tools return or what the hooks do, so the result expected is equal
+tokens and equal latency. Medians, v1.8.0 then this commit:
+
+| | macOS | Ubuntu | Windows |
+|---|---:|---:|---:|
+| `hook.intercept_block.spawn`: a large file's Read, blocked | 4.59 to 3.54 ms | 1.47 to 1.50 ms | 6.95 to 7.09 ms |
+| `hook.intercept_pass.spawn`: a small file's Read, let through | 2.46 to 2.30 ms | 984 to 995 us | 5.58 to 5.60 ms |
+| `hook.floor`: a hook that does nothing | 2.42 to 2.27 ms | 934 to 947 us | 5.40 to 5.41 ms |
+| `hook.per_call_identity` | 3.03 to 3.12 ms | 1.05 to 1.04 ms | 5.82 to 5.86 ms |
+| `server.smart_read`, a file under 300 lines | 635 to 636 us | 1.23 to 1.24 ms | 1.76 to 1.75 ms |
+| `server.recall_file`, a file under 300 lines | 688 to 659 us | 1.26 to 1.29 ms | 1.82 to 1.81 ms |
+| `server.smart_read`, a file of 1000 to 2999 lines | 5.27 to 5.29 ms | 10.45 to 10.67 ms | 14.58 to 14.18 ms |
+| `server.repeat_unchanged`, a file under 300 lines | 2.02 to 2.03 ms | 1.59 to 1.65 ms | 2.52 to 2.49 ms |
+
+- **Tokens** (macOS only; they do not depend on the machine): equal for every file and mode. Both
+  builds' digests are `2d99da988a0f...`, the digest of 1.8.0's own committed run.
+- **macOS: no difference.** For every series, the five pass medians of one build overlap the
+  other's. The medians run from 0.77 to 1.23 of v1.8.0's on a laptop in use; the widest pass
+  medians, as in `hook.intercept_block.spawn` (3.8 to 5.1 ms for v1.8.0 alone), are wider than
+  the difference.
+- **Ubuntu: one loss.** `server.recall_file.<300` takes 30 us longer (1.26 to 1.29 ms, 2%), and the
+  slowest of v1.8.0's five pass medians is faster than the fastest of this commit's. Every other
+  series overlaps; their medians are within 0.99 to 1.05 of v1.8.0's, most of the server series 1
+  to 3% higher. Since v1.8.0, `lumen-mcp`'s own code changed only in the intercept hook (`hook.rs`)
+  and a comment in `tok.rs`; `lumen-core`, which it links, changed more, including the ledger
+  schema and how it is opened. Which change, if any, is the cost was not traced, and the same
+  series did not separate on macOS or Windows. It is published as a loss (#62).
+- **Windows: two gains.** `server.smart_read.1000-2999` (14.58 to 14.18 ms) and
+  `server.identity.placed` (6.49 to 6.31 ms) are 3% faster, with every pass median of this commit
+  below every one of v1.8.0's. Every other series overlaps; medians within 0.97 to 1.20 of
+  v1.8.0's (1.20 is `server.ping`, 61 to 73 us).
+- **An earlier run of the same release** measured `02baa69`, before the upgrade change (Benchmarks
+  run 39112297823, whose Ubuntu and Windows files are on its `bench-results/*-39112297823` branches;
+  none of that run is kept here). On Ubuntu it separated two other series,
+  `server.repeat_unchanged.<300` and `server.repeat_changed.<300`, by 40 us (2%), which this run
+  does not; tokens were equal and nothing separated on macOS or Windows. The runners drew other
+  CPUs (Ubuntu an AMD EPYC 7763 there, Windows an EPYC 9V45). Read a 2% difference from a shared
+  runner as one draw, not as a constant.
+
+### 1.8.0: commit 4ca4fd1 against v1.7.0
 
 `results/pre-release-4ca4fd1ffe21-*` measure commit `4ca4fd1ffe216f47e2c764be80cce4cbb56de6bc`,
 the last code commit before the 1.8.0 version bump, against v1.7.0. They carry the pre-release
@@ -104,26 +169,30 @@ above the floor. A let-through Read on Windows cost 7.6% more than in 1.7.0 (2.7
 run), and the floor was 4.0% apart in that run (0.5% in the first), so that runner was the
 noisier one. Read the sizes from a shared runner as one draw, not as a constant.
 
-## MEASURED and MODELLED
+## What is measured
 
 | | what | how |
 |---|---|---|
 | MEASURED | token counts | the reply text of the real server, counted with the meter's tokenizer |
 | MEASURED | latencies | a monotonic clock around the real binary |
-| MODELLED | every dollar figure | the economics model in `crates/lumen-core/src/econ.rs`, applied to measured token counts |
 
-A dollar figure is never a measurement and is always labelled `modelled`. The model's rates are
-`rates.rs`: USD per million tokens, input 5, output 25, cache read 0.5, cache write 6.25, which
-that file labels "Sonnet 3.5 / 3.7 / 4 pricing". The harness does not check them against a
-current price list. The model's other inputs (context size, output per round, rounds remaining)
-are `Econ::default()`, averages over the author's own sessions; another person's profile differs.
-The value of one saved token is `(cache_write + cache_read x rounds_remaining) / 1e6` dollars,
-and a "$/call" cell is the median saved tokens of that call times that value.
+No dollar figure. Until 1.9.0 each token table had a "modelled $/call" column, priced at
+Opus-class rates with a fixed rounds-remaining figure from the author's own sessions. What a
+saved token is worth depends on the turn that read the call's result, on its model, and on how
+many rounds followed it before a compaction; `lumen_core::savings` derives all three from a
+ledger's turns, and a corpus run has none. The results' `savings` section says so, and whether
+the engine's token counts are calibrated to Claude's.
 
 ## The tokenizer is a proxy
 
 Tokens are counted with `lumen_core::tokenizer::count_tokens`: `cl100k_base`, the same tokenizer
-the meter uses. It is not Claude's tokenizer. Counts compare one way of reading a file with
+the meter uses. It is not Claude's tokenizer: on raw file text the models measured from Claude
+Opus 4.7 on (Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5)
+count about 1.59× as many tokens (1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet
+4.6, Opus 4.5 and Haiku 4.5) about 1.24× as many (1.14–1.31×), from the 10th to the 90th
+percentile of 60 samples measured against Claude's own usage data
+([calibration](calibration/README.md), calibration of 2026-10-14; a `Read`'s line numbers and
+the tool-result wrapper are not in these ratios). Counts compare one way of reading a file with
 another; they are not a bill and not the number of tokens Claude would charge. The harness also
 re-counts every reply it receives and stops if the server's own figure disagrees, and it
 cross-checks each reply against the row the server wrote to its ledger.
@@ -215,7 +284,7 @@ differs, so the harness does not assume it: before measuring, it **runs each bui
 (`driver::probe_identity`). It sends `hook intercept` a PreToolUse payload for
 `mcp__lumen__smart_read` with a `tool_use_id` and a `session_id`, and looks for a record the build
 left beside its ledger. No record: the build reads its session from `CLAUDE_CODE_SESSION_ID` when it
-is spawned (v1.7.0 and today's main), and the harness gives every server it starts its own id
+is spawned (v1.7.0 and older), and the harness gives every server it starts its own id
 (`Identity::Env`, set in `Server::start`). A record: the build identifies each call from a record
 written by the PreToolUse hook (the design of PR #45, `lumen_call_<tool_use_id>.json` beside the
 ledger), and the harness plays Claude Code's part exactly: before every placed tool call it runs
@@ -257,7 +326,7 @@ does `--warmup N` runs (default 20) that are executed the same way as the record
 discarded. The samples of the five passes are pooled per series. The reason is the machine: a
 burst of other work (a build, a browser, another agent) on a laptop that is not idle used to
 land on one series of one build and move its median by tens of percent; spread over passes, it
-lands a little on every series of both builds. The v1.7.0-against-this-checkout comparison is
+lands a little on every series of both builds. The baseline-against-this-checkout comparison is
 therefore made in the same minutes, under the same conditions.
 
 | series | what is timed |
@@ -278,7 +347,7 @@ Process-spawn cost is separated from in-process cost: `*.spawn` includes the ope
 starting a process, `*.inproc` does not, and the summary also prints `spawn - floor`, which is
 what the hook itself adds for a build whose hook cannot be called in-process (the harness links
 only this checkout's hook code, so `*.inproc` exists only for a build made from the checkout, and
-is `n/a` for v1.7.0 and for any `--candidate-bin`). Every hook run
+is `n/a` for the baseline and for any `--candidate-bin`). Every hook run
 uses a fresh session id (the intercept keeps a once-per-session marker) and its exit code is
 asserted; the ledger row counts are checked afterwards, so a series cannot time a call that did
 not do its work. Server series use the ledger's routes the same way: a series whose calls took a
@@ -291,11 +360,11 @@ lower-median file by line count among those with a representative item and an ed
 listed in the JSON and the summary. Hooks only ever see source files, and the repository is
 Rust, so latency does not depend on the other corpora.
 
-Latency varies, and on a shared machine it varies more than 20%. Tokens are exact; latency is
-not, and this section says how far. All runs below are the full latency run (42 series medians
-across both builds, 45 in this release's run) on one Apple M4 laptop that other work was using, so
+Latency varies, and on a shared machine it varies more than 20%. Token counts are the same on
+every run; latency is not, and this section says how far. All runs below are the full latency run (42 series medians
+across both builds, 45 in 1.8.0's run) on one Apple M4 laptop that other work was using, so
 its load average ranged from about 4 to 25 across them ("the committed run" is the first run
-committed here, from the harness's development; this release's run replaced it):
+committed here, from the harness's development; 1.8.0's run replaced it):
 
 | pair of runs (same code, one machine) | series medians within 20% |
 |---|---|
@@ -304,7 +373,7 @@ committed here, from the harness's development; this release's run replaced it):
 | a full run against a latency-only run 18 minutes earlier | 18 of 42 |
 | the committed run against that same run, 21 minutes earlier | 15 of 42 |
 | `compare` (100 runs per series) against the committed run, a few minutes later, 1-minute load 3.6 against the committed run's 7.4 | 39 of 42 as measured, 32 of 34 after dividing by the floor; the floors were within 5%, and `compare` said the machine matched |
-| `compare` against this release's committed macOS run, two reviewers' re-runs, one about half an hour after the committed run started and one about an hour and a quarter after; 1-minute load 3.8 to 5.4 in the first and 5.0 to 8.0 in the second | 45 of 45 in the first and 42 of 45 in the second as measured (the three misses were in-process hooks that the re-run measured 21 to 23% lower; their pass medians span 13 to 27% of the median in the committed run); 37 of 37 after dividing by the floor in both; `compare` said the machine matched both times |
+| `compare` against 1.8.0's committed macOS run, two reviewers' re-runs, one about half an hour after the committed run started and one about an hour and a quarter after; 1-minute load 3.8 to 5.4 in the first and 5.0 to 8.0 in the second | 45 of 45 in the first and 42 of 45 in the second as measured (the three misses were in-process hooks that the re-run measured 21 to 23% lower; their pass medians span 13 to 27% of the median in the committed run); 37 of 37 after dividing by the floor in both; `compare` said the machine matched both times |
 
 In the back-to-back pair every process-spawn series (`hook.*.spawn`, `hook.floor`,
 `server.start`) and `server.ping` agreed within 7%; the four that did not were longer server
@@ -347,9 +416,10 @@ committed candidate; the output says both commits.
 - **Latency**: compare medians (p90 and p99 move with load). The load average before and after
   the whole latency run is recorded; a run under heavy load is not comparable with one without.
 - **Builds**: `builds[]` records the label, commit, profile, and the version the binary reports
-  for itself. Both builds are made by the harness from source with the same toolchain: v1.7.0 is
-  `git archive`d from commit `5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94` into the cache and built
-  there; the candidate is built from the checkout, or is a prebuilt binary given with
+  for itself. Both builds are made by the harness from source with the same toolchain: the baseline
+  (v1.8.0, unless `--baseline-sha` names another) is `git archive`d from its commit
+  (`12ad305679cf92b23167b032f56412a2a38e72a1`) into the cache and built there; the candidate is
+  built from the checkout, or is a prebuilt binary given with
   `--candidate-bin PATH --candidate-sha <40 characters>` (the checkout is then not built; the
   result records the file's name, never where it is, and the commit is the caller's word). The
   repository has no `[profile.release]`, so both are cargo's default release profile, and the JSON
@@ -377,8 +447,6 @@ file), and say whether it ran on mains or battery. Do not quote a latency figure
 - cl100k_base is a proxy (see above).
 - Latency is warm-start: the ledger file, the page cache and the tokenizer's tables are warm.
   The first call after boot is slower.
-- The dollar figures are a model of the author's usage with unverified rates; they say what a
-  saved token is worth under that model, not what anyone was charged.
 - Ubuntu and Windows: only the latency part runs there (`--latency-only`: `run.ps1` on Windows,
   or the Benchmarks workflow). The committed runs are from GitHub-hosted runners, which are shared
   virtual machines with 4 logical cores. Compare a platform's two builds with each other, not one

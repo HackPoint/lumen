@@ -1,0 +1,16 @@
+time	kind	id	attempt	model_id	input	cache_creation	cache_read	total	reply
+2026-10-14T00:23:34Z	baseline	-	1	claude-fable-5	2	950	0	952	OK
+2026-10-14T00:23:40Z	baseline	-	2	claude-fable-5	2	0	950	952	OK
+2026-10-14T00:23:46Z	baseline	-	3	claude-fable-5	2	0	950	952	OK
+2026-10-14T00:23:52Z	baseline	-	4	claude-fable-5	2	0	950	952	OK
+2026-10-14T00:23:57Z	baseline	-	5	claude-fable-5	2	0	950	952	OK
+2026-10-14T00:24:03Z	validate	rust-02	1	claude-fable-5	2	3183	0	3185	OK
+2026-10-14T00:24:08Z	validate	rust-02	2	claude-fable-5	2	0	3183	3185	OK
+2026-10-14T00:24:14Z	validate	prose-03	1	claude-fable-5	2	2909	0	2911	OK
+2026-10-14T00:24:20Z	validate	prose-03	2	claude-fable-5	2	0	2909	2911	OK
+2026-10-14T00:24:25Z	validate	tiny:x	1	claude-fable-5	2	952	0	954	OK
+2026-10-14T00:24:31Z	validate	tiny:x	2	claude-fable-5	2	0	952	954	OK
+2026-10-14T00:24:37Z	validate	tiny:hello world	1	claude-fable-5	2	954	0	956	OK
+2026-10-14T00:24:42Z	validate	tiny:hello world	2	claude-fable-5	2	0	954	956	OK
+2026-10-14T00:24:48Z	validate	rust-02+prose-03	1	claude-fable-5	2	5142	0	5144	OK
+2026-10-14T00:24:54Z	validate	rust-02+prose-03	2	claude-fable-5	2	0	5142	5144	OK

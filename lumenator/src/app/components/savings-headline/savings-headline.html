@@ -1,0 +1,68 @@
+<!-- Nothing at all without a summary or an error: see the class for why there is no placeholder. -->
+@if (summary(); as s) {
+    <section class="headline" aria-labelledby="headline-title">
+        <h2 class="visually-hidden" id="headline-title">What Lumen saved</h2>
+        <!-- The last good figures, kept when a refresh fails, and said to be so. -->
+        @if (error(); as e) {
+            <p class="headline__stale" role="status">
+                Not up to date: the latest refresh failed ({{ e }}). These figures are as of {{ asOf() }}.
+            </p>&ngsp;
+        }
+        @if (nothingRecorded()) {
+            <p class="headline__none">No Lumen activity recorded yet.</p>&ngsp;
+        } @else {
+            <div class="headline__periods">
+                <!-- Each &ngsp; is a space Angular keeps, so the figure, its unit and its tags read
+                     as words to anything that reads the text. Flex layout gives it no width. -->
+                @for (row of rows(); track row.key) {
+                    <section class="headline__period" [attr.aria-labelledby]="'headline-' + row.key">
+                        <div class="headline__head">
+                            <h3 class="headline__label" [id]="'headline-' + row.key">{{ row.label }}</h3>
+                            @if (!row.empty) {
+                                <button class="info-btn" type="button" [lumenTooltip]="row.band">ⓘ</button>
+                            }
+                        </div>&ngsp;
+                        @if (row.empty) {
+                            <p class="headline__quiet">No Lumen activity {{ row.when }}.</p>
+                        } @else {
+                            @if (row.share) {
+                                <p class="headline__share">{{ row.share }}</p>&ngsp;
+                            }
+                            <!-- Read out once, in words; the symbols are for the eye. -->
+                            <p class="headline__figure">
+                                <span class="visually-hidden">{{ row.tokensSpoken }}</span>
+                                <span class="headline__seen" aria-hidden="true"><strong class="headline__tokens" [class.is-loss]="row.tokensLoss">{{ row.tokens }}</strong>&ngsp;<span class="headline__unit">{{ row.tokensUnit }}</span></span>
+                            </p>&ngsp;
+                            <!-- The bold dollar figure is measured.net (the net on record), a floor, and nothing
+                                 else: "at least $X saved, net", or for a loss "net loss of at most $X". -->
+                            @if (row.usd !== null) {
+                                <p class="headline__figure">
+                                    <span class="visually-hidden">{{ row.usdSpoken }}</span>
+                                    <span class="headline__seen" aria-hidden="true"><span class="headline__floor">{{ row.usdLead }}</span>&ngsp;<strong class="headline__usd" [class.is-loss]="row.usdLoss">{{ row.usd }}</strong>@if (row.usdTail) {&ngsp;<span class="headline__unit">{{ row.usdTail }}</span>}@if (row.basis) {&ngsp;<span class="headline__basis">{{ row.basis }}</span>}</span>
+                                </p>&ngsp;
+                            } @else {
+                                <p class="headline__quiet">No dollars on record {{ row.when }}.</p>&ngsp;
+                            }
+                            @if (row.beside.length > 0) {
+                                <p class="headline__beside">
+                                    @for (b of row.beside; track b) {
+                                        <span class="headline__tag">{{ b }}</span>&ngsp;
+                                    }
+                                </p>&ngsp;
+                            }
+                            @if (row.partial) {
+                                <p class="headline__partial">Partial data: {{ row.partial }}.</p>
+                            }
+                        }
+                    </section>&ngsp;
+                }
+            </div>&ngsp;
+        }
+        <a class="headline__how" routerLink="/method">How it's measured</a>
+    </section>
+} @else if (error(); as e) {
+    <!-- No summary to fall back on: a sentence, and no figure that would read as one. -->
+    <section class="headline" aria-label="What Lumen saved">
+        <p class="headline__none" role="status">Lumen's savings could not be read: {{ e }}.</p>
+    </section>
+}
