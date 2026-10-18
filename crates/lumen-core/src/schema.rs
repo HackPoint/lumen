@@ -19,27 +19,50 @@ use crate::busy;
 /// "already applied" would leave a column or an index missing for good. It is
 /// waited for, and returned if the wait runs out; the next open runs the
 /// migration again. [`BACKFILLS`] are not read that way: they rewrite rows, not the
-/// schema, so a ledger that stays busy for one does not fail the open.
+/// schema, so a ledger that stays busy for one does not fail the open. They are also read before
+/// they are run, so a ledger with no row to rewrite is not asked for the write lock.
 pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     busy::retry_busy(|| sqlx::raw_sql(DDL).execute(pool)).await?;
+    busy::retry_busy(|| migrate(pool)).await?;
+    for backfill in BACKFILLS {
+        // Literals in BACKFILLS, as below.
+        let pending = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(backfill.pending))
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+        if pending != 0 {
+            busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(backfill.rewrite)).execute(pool))
+                .await
+                .ok();
+        }
+    }
+    Ok(())
+}
+
+/// [`MIGRATIONS`] in one transaction, which takes the write lock when the first statement that
+/// changes something does, and not at all when none does.
+///
+/// Run statement by statement, each ALTER was a write transaction of its own: a lock to win
+/// against every other opener and a commit to sync, 26 of them for a 1.1.4 ledger and 12 for a
+/// 1.5.0 one. An ALTER that finds its column already there fails before it touches the file, so
+/// on a current ledger the statements take no lock. A busy ledger rolls the whole transaction
+/// back, and [`busy::retry_busy`] runs it again against whatever the winner left.
+async fn migrate(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     for migration in MIGRATIONS {
         // AssertSqlSafe is sound here: every statement is a literal in
         // MIGRATIONS above, so no runtime value can reach the SQL.
-        let outcome =
-            busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(*migration)).execute(pool)).await;
+        let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
+            .execute(&mut *tx)
+            .await;
         if let Err(e) = outcome
             && busy::is_busy(&e)
         {
+            tx.rollback().await.ok();
             return Err(e);
         }
     }
-    for backfill in BACKFILLS {
-        // Literals in BACKFILLS, as above.
-        busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(*backfill)).execute(pool))
-            .await
-            .ok();
-    }
-    Ok(())
+    tx.commit().await
 }
 
 /// Open the ledger at `url` as a pool and bring it up to date: what the daemon runs before it
@@ -240,16 +263,29 @@ pub const MIGRATIONS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_transcript_scans_session ON transcript_scans(session_id)",
 ];
 
+/// A row rewrite and the read that says whether it has anything to do.
+pub struct Backfill {
+    /// A query for one integer, non-zero when [`Self::rewrite`] would change a row. It only reads,
+    /// so a ledger with nothing to rewrite is not asked for the write lock.
+    pub pending: &'static str,
+    pub rewrite: &'static str,
+}
+
 /// Row rewrites, run after [`MIGRATIONS`]: a ledger that stays busy for one is skipped, not an
 /// error, and the next open runs it again.
-pub const BACKFILLS: &[&str] = &[
+pub const BACKFILLS: &[Backfill] = &[
     // Mark the turns ingested from a subagent path. Idempotent, so safe to re-run on every open.
     // Either separator: a ledger written on Windows holds backslashes, and the savings summary
     // reads a turn's subagent from this column alone (LIKE has no escape character here, so the
     // backslash is literal).
-    "UPDATE turns SET is_subagent = 1 \
-     WHERE is_subagent = 0 \
-       AND (source_file LIKE '%/subagents/%' OR source_file LIKE '%\\subagents\\%')",
+    Backfill {
+        pending: "SELECT EXISTS (SELECT 1 FROM turns \
+            WHERE is_subagent = 0 \
+              AND (source_file LIKE '%/subagents/%' OR source_file LIKE '%\\subagents\\%'))",
+        rewrite: "UPDATE turns SET is_subagent = 1 \
+            WHERE is_subagent = 0 \
+              AND (source_file LIKE '%/subagents/%' OR source_file LIKE '%\\subagents\\%')",
+    },
 ];
 
 /// Column count of `read_events` on a current database — DDL plus every ALTER in
@@ -1257,5 +1293,157 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(rows, [(None, None), (None, None)]);
+    }
+
+    // ── write-lock pressure ──────────────────────────────────────────────────
+
+    /// A 1.5.1 ledger (its `read_events`, and `turns` as 1.8.0 left it) that has been through
+    /// DDL once, so what a test measures after that is the migrations alone.
+    fn old_ledger_after_ddl(dir: &TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("old.db");
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(READ_EVENTS_1_5_1).unwrap();
+        c.execute_batch(TURNS_THROUGH_1_8_0).unwrap();
+        c.execute_batch(DDL).unwrap();
+        path
+    }
+
+    /// A connection that has read the ledger, which is what keeps the log from being checkpointed
+    /// and deleted when the connection under test closes.
+    fn holding_the_log(db: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+        conn
+    }
+
+    /// How many transactions the write-ahead log holds, counted from its frames: a commit is the
+    /// frame that records the size of the database after it. The caller keeps a connection open
+    /// ([`holding_the_log`]).
+    fn commits_in_wal(db: &std::path::Path) -> usize {
+        let wal = std::fs::read(db.with_extension("db-wal")).unwrap_or_default();
+        let Some(header) = wal.get(..32) else {
+            return 0;
+        };
+        let page = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
+        wal[32..]
+            .chunks_exact(24 + page)
+            .filter(|frame| frame[4..8] != [0; 4])
+            .count()
+    }
+
+    /// Every ALTER was a write transaction of its own, each a lock to win against the other
+    /// openers and a commit to sync: 12 for this ledger, 26 for a 1.1.4 one, 8 of them added by
+    /// 1.9.0. The migrations are one transaction now.
+    #[test]
+    fn the_rusqlite_open_migrates_in_one_commit() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        let held_open = holding_the_log(&path);
+        let before = commits_in_wal(&path);
+        drop(crate::meter::connect_db(&path).unwrap());
+        assert_eq!(commits_in_wal(&path) - before, 1);
+        drop(held_open);
+    }
+
+    #[tokio::test]
+    async fn the_sqlx_open_migrates_in_one_commit() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        let held_open = holding_the_log(&path);
+        let before = commits_in_wal(&path);
+        let pool = SqlitePoolOptions::new()
+            .connect(&format!("sqlite:{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        init_schema(&pool).await.unwrap();
+        assert_eq!(commits_in_wal(&path) - before, 1);
+        drop(held_open);
+    }
+
+    /// Opening a current ledger writes nothing, so it must not queue behind a writer: the backfill
+    /// was an UPDATE, which asks for the write lock whether or not a row matches. Run on a thread
+    /// because, before the fix, the open sat in SQLite's busy wait until the writer let go.
+    fn opens_without_waiting_for_a_writer(open: impl FnOnce(&std::path::Path) + Send + 'static) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("current.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                open(&path);
+                done.send(()).ok();
+            }
+        });
+        let waited = finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_err();
+        writer.execute_batch("ROLLBACK").unwrap();
+        reader.join().unwrap();
+        assert!(
+            !waited,
+            "the open waited for a writer it had nothing to write beside"
+        );
+    }
+
+    #[test]
+    fn the_rusqlite_open_of_a_current_ledger_does_not_wait_for_a_writer() {
+        opens_without_waiting_for_a_writer(|path| {
+            crate::meter::connect_db(path).unwrap();
+        });
+    }
+
+    #[test]
+    fn the_sqlx_open_of_a_current_ledger_does_not_wait_for_a_writer() {
+        opens_without_waiting_for_a_writer(|path| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    open_pool(&format!("sqlite:{}?mode=rwc", path.display()))
+                        .await
+                        .unwrap();
+                });
+        });
+    }
+
+    /// The backfill still runs when a row needs it: the read that gates it must agree with it.
+    #[test]
+    fn the_backfill_still_marks_a_subagent_turn_and_only_that() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("l.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        let c = rusqlite::Connection::open(&path).unwrap();
+        for (id, file) in [
+            ("main", "/h/projects/p/abc.jsonl"),
+            ("unix", "/h/projects/p/abc/subagents/agent-1.jsonl"),
+            ("win", r"C:\h\projects\p\abc\subagents\agent-2.jsonl"),
+        ] {
+            c.execute(
+                "INSERT INTO turns (message_id, session_id, ts, input_tokens, output_tokens, \
+                 cache_read_input_tokens, cache_creation_input_tokens, source_file) \
+                 VALUES (?1, 's', 't', 1, 1, 0, 0, ?2)",
+                rusqlite::params![id, file],
+            )
+            .unwrap();
+        }
+        drop(crate::meter::connect_db(&path).unwrap());
+        let marked: Vec<(String, i64)> = c
+            .prepare("SELECT message_id, is_subagent FROM turns ORDER BY message_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            marked,
+            [("main".into(), 0), ("unix".into(), 1), ("win".into(), 1)]
+        );
     }
 }

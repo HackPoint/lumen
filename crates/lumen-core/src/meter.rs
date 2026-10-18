@@ -128,18 +128,35 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     restore_sidecar_write_bits(path);
     let conn = Connection::open(path)?;
     busy::retry_busy_blocking(|| conn.execute_batch(DDL))?;
-    for migration in MIGRATIONS {
-        let outcome = busy::retry_busy_blocking(|| conn.execute_batch(migration));
-        if let Err(e) = outcome
-            && busy::is_busy_rusqlite(&e)
-        {
-            return Err(e);
+    busy::retry_busy_blocking(|| migrate(&conn))?;
+    for backfill in BACKFILLS {
+        let pending = conn
+            .query_row(backfill.pending, [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0);
+        if pending != 0 {
+            busy::retry_busy_blocking(|| conn.execute_batch(backfill.rewrite)).ok();
         }
     }
-    for backfill in BACKFILLS {
-        busy::retry_busy_blocking(|| conn.execute_batch(backfill)).ok();
-    }
     Ok(conn)
+}
+
+/// [`MIGRATIONS`] in one transaction; see the sqlx `migrate` in [`crate::schema`], which this
+/// mirrors. A busy ledger rolls it back for the caller to run again.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("BEGIN")?;
+    let run = || -> rusqlite::Result<()> {
+        for migration in MIGRATIONS {
+            if let Err(e) = conn.execute_batch(migration)
+                && busy::is_busy_rusqlite(&e)
+            {
+                return Err(e);
+            }
+        }
+        conn.execute_batch("COMMIT")
+    };
+    run().inspect_err(|_| {
+        conn.execute_batch("ROLLBACK").ok();
+    })
 }
 
 /// Public entry point for external crates (e.g. lumen-cli) that need a DB connection.
