@@ -111,9 +111,27 @@ fn bench(args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// `versions` is implemented (V2): a bare invocation must not start a run, so it refuses and says
+/// what to name; `--help` still works.
+#[test]
+fn a_bare_versions_command_starts_nothing() {
+    for args in [vec!["versions"], vec!["versions", "--tokens-only"]] {
+        let o = bench(&args);
+        assert!(!o.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains("--versions") && err.contains("--all"),
+            "{args:?}: {err}"
+        );
+    }
+    let help = bench(&["versions", "--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("versions"));
+}
+
 #[test]
 fn the_new_subcommands_are_stubs_that_exit_non_zero() {
-    for sub in ["versions", "competitors", "e2e"] {
+    for sub in ["competitors", "e2e"] {
         for args in [vec![sub], vec![sub, "run", "--out", "x"]] {
             let o = bench(&args);
             assert!(!o.status.success(), "{args:?}");

@@ -11,6 +11,8 @@
 
 use crate::sandbox::Sandbox;
 use crate::util::{Ctx, Res};
+use crate::versions::caps::saved_agrees;
+use lumen_core::tokenizer::count_tokens;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -133,6 +135,13 @@ pub struct Reply {
     pub text: String,
     pub full: i64,
     pub returned: i64,
+    /// The server's own `saved_tokens`, as reported. For a version the map says clamps it is
+    /// recorded and never used.
+    pub saved_reported: i64,
+    /// `full - returned`, signed. For a clamped version `returned` is the harness's re-count of
+    /// the reply text, so a reply longer than the file is a negative figure, as it is for every
+    /// other version.
+    pub saved_signed: i64,
 }
 
 pub struct Server {
@@ -152,6 +161,8 @@ pub struct Server {
     /// Distinguishes this server's tool-use ids from any other's in the same ledger directory.
     tag: u64,
     calls: u64,
+    /// The capability map says this version floors `saved_tokens` at zero.
+    clamped: bool,
 }
 
 /// A source of `Server::tag`s: no two servers of one run share one.
@@ -215,6 +226,7 @@ impl Server {
             identity,
             tag: SERVER_TAG.fetch_add(1, Ordering::Relaxed),
             calls: 0,
+            clamped: false,
         };
         let init = s.rpc(
             "initialize",
@@ -226,6 +238,12 @@ impl Server {
             .ok_or_else(|| format!("initialize named no server version: {init}"))?
             .to_string();
         Ok(s)
+    }
+
+    /// Say what the capability map says about this version's `saved_tokens`: clamped at zero
+    /// (1.0.0) or signed. Set before the first call; the default is signed.
+    pub fn set_clamped(&mut self, clamped: bool) {
+        self.clamped = clamped;
     }
 
     pub fn rpc(&mut self, method: &str, params: Value) -> Res<Value> {
@@ -338,15 +356,31 @@ impl Server {
             meta("returned_tokens")?,
             meta("saved_tokens")?,
         );
-        if saved != full - returned {
+        // The figure is judged as the map says the version computes it. A clamped version must
+        // report exactly `max(0, full - returned)`; anything else means the map is wrong about
+        // this build, which stops the run. Its signed saving is then taken from the re-counted
+        // text, never from what it reported.
+        if !saved_agrees(self.clamped, full, returned, saved) {
             return Err(format!(
-                "{tool}: _meta is inconsistent: {full} - {returned} != {saved}"
+                "{tool}: _meta is inconsistent: {full} - {returned} != {saved}{}",
+                if self.clamped {
+                    " (and not the zero floor the capability map says this version applies)"
+                } else {
+                    ""
+                }
             ));
         }
+        let saved_signed = if self.clamped {
+            full - count_tokens(&text) as i64
+        } else {
+            saved
+        };
         Ok(Reply {
             text,
             full,
             returned,
+            saved_reported: saved,
+            saved_signed,
         })
     }
 
@@ -400,26 +434,72 @@ impl Drop for Server {
 #[derive(Debug, Clone)]
 pub struct LedgerRow {
     pub tool: String,
+    /// [`NO_ROUTE`] when this ledger has no `routed_via` column.
     pub routed_via: String,
     pub returned: i64,
     pub full: i64,
+    /// `None` when the row has none, or the ledger has no `repeat_plan` column.
     pub repeat_plan: Option<String>,
 }
 
-/// Every Lumen read row, oldest first.
-pub fn ledger_rows(db: &Path) -> Res<Vec<LedgerRow>> {
+/// What `routed_via` says in a ledger that has no such column: a figure that cannot exist, said
+/// so, and never an empty string that would pass for a route.
+pub const NO_ROUTE: &str = "n/a — no routed_via column";
+
+/// The columns of `read_events` that this ledger has. Old ledgers lack columns that newer ones
+/// carry, and a query that names one fails on them: the cross-check asks what exists first.
+pub fn read_event_columns(db: &Path) -> Res<Vec<String>> {
     let conn = lumen_core::meter::open_read_only(db).ctx("open the ledger")?;
     let mut st = conn
-        .prepare(
-            "SELECT tool, routed_via, tokens_returned, full_tokens, repeat_plan FROM read_events \
-             WHERE tool LIKE '%smart_read' OR tool LIKE '%recall_file' ORDER BY rowid",
-        )
-        .ctx("prepare the ledger query")?;
+        .prepare("PRAGMA table_info(read_events)")
+        .ctx("read the table's columns")?;
+    let cols = st
+        .query_map([], |r| r.get::<_, String>(1))
+        .ctx("read the table's columns")?;
+    cols.collect::<Result<Vec<_>, _>>()
+        .ctx("read a column name")
+}
+
+/// The SELECT list for the columns this ledger has: a column it lacks is a typed NULL, so the row
+/// keeps its shape. The three a cross-check cannot do without are required.
+fn read_row_query(cols: &[String]) -> Res<String> {
+    let has = |c: &str| cols.iter().any(|x| x == c);
+    for need in ["tool", "tokens_returned", "full_tokens"] {
+        if !has(need) {
+            return Err(format!(
+                "the ledger's read_events has no {need} column (it has {}): the harness cannot \
+                 cross-check this build",
+                cols.join(", ")
+            ));
+        }
+    }
+    let opt = |c: &str| {
+        if has(c) {
+            c.to_string()
+        } else {
+            "NULL".to_string()
+        }
+    };
+    Ok(format!(
+        "SELECT tool, {}, tokens_returned, full_tokens, {} FROM read_events \
+         WHERE tool LIKE '%smart_read' OR tool LIKE '%recall_file' ORDER BY rowid",
+        opt("routed_via"),
+        opt("repeat_plan")
+    ))
+}
+
+/// Every Lumen read row, oldest first. Only the columns the ledger has are queried.
+pub fn ledger_rows(db: &Path) -> Res<Vec<LedgerRow>> {
+    let sql = read_row_query(&read_event_columns(db)?)?;
+    let conn = lumen_core::meter::open_read_only(db).ctx("open the ledger")?;
+    let mut st = conn.prepare(&sql).ctx("prepare the ledger query")?;
     let rows = st
         .query_map([], |r| {
             Ok(LedgerRow {
                 tool: r.get(0)?,
-                routed_via: r.get(1)?,
+                routed_via: r
+                    .get::<_, Option<String>>(1)?
+                    .unwrap_or_else(|| NO_ROUTE.to_string()),
                 returned: r.get(2)?,
                 full: r.get(3)?,
                 repeat_plan: r.get(4)?,
@@ -501,5 +581,147 @@ mod tests {
             probe_identity(&silent, &dir.path().join("p2")).unwrap(),
             Identity::Env
         );
+    }
+
+    /// A stand-in for a server: answers `initialize` and every `tools/call` with fixed text and
+    /// the `_meta` figures given, and exits when its stdin closes. A version of 1.0.0's kind:
+    /// a reply longer than the file reports `saved_tokens` 0, the floor.
+    #[cfg(unix)]
+    fn server_stub(dir: &Path, full: i64, returned: i64, saved: i64) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let body = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"serverInfo":{{"name":"s","version":"0.2.0"}}}}}}\n' "$id";;
+    *'"tools/call"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"isError":false,"content":[{{"type":"text","text":"alpha beta gamma delta epsilon zeta eta theta"}}],"_meta":{{"full_tokens":{full},"returned_tokens":{returned},"saved_tokens":{saved}}}}}}}\n' "$id";;
+    *) printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id";;
+  esac
+done
+"#
+        );
+        let path = dir.join(format!("srv-{full}-{returned}-{saved}"));
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn call_stub(bin: &Path, root: &Path, clamped: bool) -> Res<Reply> {
+        let iso = Sandbox::create(root).unwrap();
+        let mut s = Server::start(bin, root, &iso, "bench-stub", false, Identity::Env)?;
+        s.set_clamped(clamped);
+        s.smart_read("x.rs")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clamped_version_does_not_abort_and_its_saving_is_recomputed_from_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        // The file is 3 tokens, the reply says it is 9 and reports a saving of 0: the floor.
+        let bin = server_stub(dir.path(), 3, 9, 0);
+        let r = call_stub(&bin, &dir.path().join("a"), true).unwrap();
+        assert_eq!(r.saved_reported, 0, "the self-reported value is recorded");
+        let recount = count_tokens(&r.text) as i64;
+        assert_eq!(r.saved_signed, 3 - recount, "and the signed one recomputed");
+        assert!(r.saved_signed < 0, "a reply longer than the file is a loss");
+        // The same reply from a build the map says is signed is a disagreement: stop.
+        let e = call_stub(&bin, &dir.path().join("b"), false).unwrap_err();
+        assert!(e.contains("_meta is inconsistent"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clamped_version_that_reports_neither_the_floor_nor_the_saving_stops_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        // Clamping says 0 for a loss: -6 and 7 are both wrong for full 3, returned 9.
+        for saved in [-6, 7] {
+            let bin = server_stub(dir.path(), 3, 9, saved);
+            let e = call_stub(&bin, &dir.path().join(format!("c{saved}")), true).unwrap_err();
+            assert!(e.contains("zero floor"), "{e}");
+        }
+        // A saving that is positive is the same either way.
+        let bin = server_stub(dir.path(), 20, 9, 11);
+        let r = call_stub(&bin, &dir.path().join("d"), true).unwrap();
+        assert_eq!(r.saved_signed, 20 - count_tokens(&r.text) as i64);
+    }
+
+    /// A ledger as an old build left it: no `routed_via`, no `repeat_plan`.
+    fn old_ledger(dir: &Path, with_routed_via: bool) -> PathBuf {
+        let db = dir.join("old.db");
+        let c = lumen_core::meter::connect_db(&db).unwrap();
+        let extra = if with_routed_via {
+            ", routed_via TEXT"
+        } else {
+            ""
+        };
+        c.execute_batch(&format!(
+            "DROP TABLE read_events; \
+             CREATE TABLE read_events (ts TEXT, tool TEXT, path TEXT, tokens_returned INTEGER, \
+             full_tokens INTEGER, saved_tokens INTEGER{extra}); \
+             INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens) \
+             VALUES ('t', 'smart_read', 'a.rs', 9, 3, 0), ('t', 'Read', 'b.rs', 5, 5, 0), \
+             ('t', 'mcp__lumen__recall_file', 'a.rs', 2, 3, 1);"
+        ))
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn the_ledger_check_asks_only_for_the_columns_the_ledger_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = old_ledger(dir.path(), false);
+        let cols = read_event_columns(&db).unwrap();
+        assert!(cols.contains(&"tool".to_string()));
+        assert!(!cols.contains(&"repeat_plan".to_string()));
+        assert!(!cols.contains(&"routed_via".to_string()));
+        // The current query would fail on this table; the column-aware one does not.
+        let conn = lumen_core::meter::open_read_only(&db).unwrap();
+        assert!(
+            conn.prepare("SELECT routed_via, repeat_plan FROM read_events")
+                .is_err()
+        );
+        let rows = ledger_rows(&db).unwrap();
+        assert_eq!(rows.len(), 2, "the Read row is not a Lumen read");
+        assert_eq!(rows[0].returned, 9);
+        assert_eq!(rows[0].full, 3);
+        assert_eq!(rows[0].repeat_plan, None);
+        assert_eq!(rows[0].routed_via, NO_ROUTE);
+        assert_eq!(rows[1].tool, "mcp__lumen__recall_file");
+    }
+
+    #[test]
+    fn a_ledger_without_the_columns_a_cross_check_needs_is_refused_by_name() {
+        let cols: Vec<String> = ["tool", "full_tokens"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let e = read_row_query(&cols).unwrap_err();
+        assert!(e.contains("tokens_returned"), "{e}");
+        // With the columns present the query names exactly those.
+        let all: Vec<String> = ["tool", "tokens_returned", "full_tokens", "routed_via"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let q = read_row_query(&all).unwrap();
+        assert!(q.contains("routed_via") && !q.contains("repeat_plan, ") && q.contains("NULL"));
+    }
+
+    #[test]
+    fn a_ledger_with_the_columns_reads_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("new.db");
+        let c = lumen_core::meter::connect_db(&db).unwrap();
+        c.execute_batch(
+            "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+             routed_via) VALUES ('t', 'smart_read', 'a.rs', 9, 30, 21, 'smart_read')",
+        )
+        .unwrap();
+        drop(c);
+        let rows = ledger_rows(&db).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].routed_via, "smart_read");
+        assert_eq!((rows[0].returned, rows[0].full), (9, 30));
     }
 }

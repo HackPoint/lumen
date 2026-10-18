@@ -44,6 +44,7 @@ use crate::sandbox::Sandbox;
 use crate::stats::{Lat, lat};
 use crate::tokens::Prepared;
 use crate::util::{Ctx, Res};
+use crate::versions::caps::Caps;
 use lumen_mcp::hook::{Env, run_with};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -98,6 +99,11 @@ impl Series {
 
     pub fn na(id: &str, what: &str, reason: &str) -> Series {
         Series::with_status(id, what, format!("n/a: {reason}"))
+    }
+
+    /// A cell the capability map says cannot exist for this build: `n/a — <reason>`.
+    pub fn na_because(id: &str, what: &str, reason: &str) -> Series {
+        Series::with_status(id, what, format!("n/a — {reason}"))
     }
 
     fn with_status(id: &str, what: &str, status: String) -> Series {
@@ -422,6 +428,60 @@ fn identity_series(build: &Build, iso: &Sandbox, cfg: &LatencyConfig) -> Res<Ser
     Series::measured(IDENTITY_ID, IDENTITY_WHAT, None, &ns)
 }
 
+/// Every `hook.*` series of a build whose hooks are not `lumen-mcp hook ...`, in the order
+/// [`hooks`] writes them, each `n/a — <reason>`. `why` is the reason for the spawn and in-process
+/// series; the Bash meter and identity have their own where the map gives one.
+fn na_hooks(caps: &Caps, why: &str, out: &mut Vec<Series>) {
+    let bash = caps.na_bash_meter().filter(|_| !caps.no_lumen);
+    let identity = caps.na_identity().filter(|_| !caps.no_lumen);
+    let rows: [(&str, &str, Option<&str>); 9] = [
+        (FLOOR_ID, "process floor", None),
+        (
+            "hook.intercept_pass.spawn",
+            "PreToolUse Read under the threshold",
+            None,
+        ),
+        (
+            "hook.intercept_block.spawn",
+            "PreToolUse Read over the threshold",
+            None,
+        ),
+        ("hook.meter_read.spawn", "PostToolUse Read", None),
+        ("hook.meter_bash.spawn", "PostToolUse Bash", bash.as_deref()),
+        (
+            "hook.intercept_pass.inproc",
+            "run_with, warm: PreToolUse Read under the threshold",
+            Some(INPROC_NA),
+        ),
+        (
+            "hook.intercept_block.inproc",
+            "run_with, warm: PreToolUse Read over the threshold",
+            Some(INPROC_NA),
+        ),
+        (
+            "hook.meter_read.inproc",
+            "run_with, warm: PostToolUse Read",
+            Some(INPROC_NA),
+        ),
+        (
+            "hook.meter_bash.inproc",
+            "run_with, warm: PostToolUse Bash",
+            Some(INPROC_NA),
+        ),
+    ];
+    for (id, what, own) in rows {
+        out.push(Series::na_because(id, what, own.unwrap_or(why)));
+    }
+    out.push(Series::na_because(
+        IDENTITY_ID,
+        IDENTITY_WHAT,
+        identity.as_deref().unwrap_or(why),
+    ));
+}
+
+/// Why no prebuilt build has an in-process series.
+const INPROC_NA: &str = "in-process hooks need the hook library linked into the harness, which only a build from this checkout has; no release asset does";
+
 fn hooks(
     build: &Build,
     subjects: &[Subject],
@@ -430,6 +490,17 @@ fn hooks(
     in_process: bool,
     out: &mut Vec<Series>,
 ) -> Res<()> {
+    // Before anything is created or spawned: a version the map says has no `hook` subcommand is
+    // never asked for one, because `lumen-mcp hook ...` on those binaries starts an MCP server.
+    if let Some(caps) = &build.caps
+        && !caps.may_spawn_hook()
+    {
+        let why = caps
+            .na_hook_subcommand()
+            .unwrap_or_else(|| "no Lumen: there are no hooks".to_string());
+        na_hooks(caps, &why, out);
+        return Ok(());
+    }
     let spawn_iso = Sandbox::create(&work.join("hooks-spawn"))?;
     let proc_iso = Sandbox::create(&work.join("hooks-inproc"))?;
     let tag = build.label.as_str();
@@ -668,7 +739,10 @@ fn settle(parts: Vec<Pending>, db: &Path, out: &mut Vec<Series>) -> Res<()> {
         }
         at += p.calls;
         let Some(id) = p.id else { continue };
-        let all_expected = routes.len() == 1 && routes.contains_key(p.expect);
+        // A ledger with no `routed_via` column cannot say how a call was routed: that is recorded
+        // as such and is not "mixed".
+        let all_expected = routes.len() == 1
+            && (routes.contains_key(p.expect) || routes.contains_key(crate::driver::NO_ROUTE));
         let mut s = Series::measured(&id, &p.what, p.subject, &p.ns)?;
         if !all_expected {
             s.status = format!(
@@ -695,7 +769,7 @@ fn servers(
     put_files(&scratch, subjects)?;
     let ns = sample(cfg, |i| {
         let t0 = Instant::now();
-        let s = Server::start(
+        let mut s = Server::start(
             &build.bin,
             &scratch,
             &start_iso,
@@ -704,6 +778,7 @@ fn servers(
             build.identity,
         )?;
         let d = t0.elapsed();
+        s.set_clamped(build.clamped());
         s.finish()?;
         Ok(d)
     })?;
@@ -726,6 +801,7 @@ fn servers(
         false,
         build.identity,
     )?;
+    s.set_clamped(build.clamped());
     let version = s.version.clone();
     let mut parts = Vec::new();
     let ns = sample(cfg, |_| {
@@ -770,66 +846,89 @@ fn servers(
     settle(parts, &iso.db, &mut plain)?;
     out.append(&mut plain);
 
-    // Repeat reads on: the gate, answering "unchanged" and "changed".
-    let scratch2 = work.join("srv-files-repeat");
-    put_files(&scratch2, subjects)?;
-    let iso2 = Sandbox::create(&work.join("srv-repeat"))?;
-    let mut s = Server::start(
-        &build.bin,
-        &scratch2,
-        &iso2,
-        "bench-lat-repeat",
-        true,
-        build.identity,
-    )?;
-    let mut parts = Vec::new();
-    for sub in subjects {
-        let rel = sub.rel.as_str();
-        let file = scratch2.join(rel);
-        // The base: the first read of the file in this session. Not timed, not a series.
-        let ns = sample(&LatencyConfig { runs: 1, warmup: 0 }, |_| {
-            timed_call(&mut s, |s| s.smart_read(rel).map(|_| ()))
-        })?;
-        parts.push(Pending {
-            id: None,
-            what: String::new(),
-            subject: None,
-            ns,
-            calls: 1,
-            expect: "smart_read",
-        });
-        // Unchanged: the stub does not replace the base, so every call is the same question.
-        let ns = sample(cfg, |_| {
-            timed_call(&mut s, |s| s.smart_read(rel).map(|_| ()))
-        })?;
-        parts.push(Pending {
-            id: Some(format!("server.repeat_unchanged.{}", sub.bucket)),
-            what: "smart_read, repeat reads on, file unchanged since the last read: the stub"
-                .to_string(),
-            subject: Some(sub.label()),
-            ns,
-            calls: n,
-            expect: "smart_read_unchanged",
-        });
-        // Changed: the file alternates between two contents that differ in one item, so every
-        // call finds it changed since the last and answers a delta. The write is not timed.
-        let ns = sample(cfg, |i| {
-            let content = if i % 2 == 0 { &sub.alt } else { &sub.src };
-            std::fs::write(&file, content.as_bytes()).ctx(&format!("write {}", file.display()))?;
-            timed_call(&mut s, |s| s.smart_read(rel).map(|_| ()))
-        })?;
-        parts.push(Pending {
-            id: Some(format!("server.repeat_changed.{}", sub.bucket)),
-            what: "smart_read, repeat reads on, one item changed since the last read: the delta"
-                .to_string(),
-            subject: Some(sub.label()),
-            ns,
-            calls: n,
-            expect: "smart_read_delta",
-        });
+    // Repeat reads on: the gate, answering "unchanged" and "changed". A version without repeat
+    // reads has no gate to time: its cells say so.
+    if let Some(why) = build.caps.as_ref().and_then(Caps::na_repeat) {
+        for sub in subjects {
+            for (id, what) in [
+                (
+                    "server.repeat_unchanged",
+                    "smart_read, repeat reads on, file unchanged: the stub",
+                ),
+                (
+                    "server.repeat_changed",
+                    "smart_read, repeat reads on, one item changed: the delta",
+                ),
+            ] {
+                let mut na = Series::na_because(&format!("{id}.{}", sub.bucket), what, &why);
+                na.subject = Some(sub.label());
+                out.push(na);
+            }
+        }
+    } else {
+        let scratch2 = work.join("srv-files-repeat");
+        put_files(&scratch2, subjects)?;
+        let iso2 = Sandbox::create(&work.join("srv-repeat"))?;
+        let mut s = Server::start(
+            &build.bin,
+            &scratch2,
+            &iso2,
+            "bench-lat-repeat",
+            true,
+            build.identity,
+        )?;
+        s.set_clamped(build.clamped());
+        let mut parts = Vec::new();
+        for sub in subjects {
+            let rel = sub.rel.as_str();
+            let file = scratch2.join(rel);
+            // The base: the first read of the file in this session. Not timed, not a series.
+            let ns = sample(&LatencyConfig { runs: 1, warmup: 0 }, |_| {
+                timed_call(&mut s, |s| s.smart_read(rel).map(|_| ()))
+            })?;
+            parts.push(Pending {
+                id: None,
+                what: String::new(),
+                subject: None,
+                ns,
+                calls: 1,
+                expect: "smart_read",
+            });
+            // Unchanged: the stub does not replace the base, so every call is the same question.
+            let ns = sample(cfg, |_| {
+                timed_call(&mut s, |s| s.smart_read(rel).map(|_| ()))
+            })?;
+            parts.push(Pending {
+                id: Some(format!("server.repeat_unchanged.{}", sub.bucket)),
+                what: "smart_read, repeat reads on, file unchanged since the last read: the stub"
+                    .to_string(),
+                subject: Some(sub.label()),
+                ns,
+                calls: n,
+                expect: "smart_read_unchanged",
+            });
+            // Changed: the file alternates between two contents that differ in one item, so every
+            // call finds it changed since the last and answers a delta. The write is not timed.
+            let ns = sample(cfg, |i| {
+                let content = if i % 2 == 0 { &sub.alt } else { &sub.src };
+                std::fs::write(&file, content.as_bytes())
+                    .ctx(&format!("write {}", file.display()))?;
+                timed_call(&mut s, |s| s.smart_read(rel).map(|_| ()))
+            })?;
+            parts.push(Pending {
+                id: Some(format!("server.repeat_changed.{}", sub.bucket)),
+                what:
+                    "smart_read, repeat reads on, one item changed since the last read: the delta"
+                        .to_string(),
+                subject: Some(sub.label()),
+                ns,
+                calls: n,
+                expect: "smart_read_delta",
+            });
+        }
+        s.finish()?;
+        settle(parts, &iso2.db, out)?;
     }
-    s.finish()?;
-    settle(parts, &iso2.db, out)?;
 
     claim_series(build, subjects, cfg, work, &scratch, out)?;
     Ok(version)
@@ -853,6 +952,21 @@ fn claim_series(
     out: &mut Vec<Series>,
 ) -> Res<()> {
     if build.identity != Identity::Hook {
+        // The two-build mode has always left these out. A version run says why they are absent.
+        if let Some(why) = build.caps.as_ref().and_then(Caps::na_identity) {
+            for (id, what) in [
+                (
+                    CLAIM_PLACED_ID,
+                    "smart_read with the hook's record in place: the server claims it",
+                ),
+                (
+                    CLAIM_UNPLACED_ID,
+                    "smart_read with no record and no _meta id",
+                ),
+            ] {
+                out.push(Series::na_because(id, what, &why));
+            }
+        }
         return Ok(());
     }
     let Some(m) = subjects.iter().find(|s| s.bucket == BUCKETS[1].name) else {
@@ -867,6 +981,7 @@ fn claim_series(
         false,
         build.identity,
     )?;
+    s.set_clamped(build.clamped());
     let rel = m.rel.as_str();
     let mut placed = Vec::with_capacity(cfg.runs);
     let mut unplaced = Vec::with_capacity(cfg.runs);
@@ -1043,10 +1158,77 @@ fn merge_passes(passes: Vec<Vec<Series>>) -> Res<Vec<Series>> {
     Ok(out)
 }
 
+/// The order the builds are measured in, in pass `pass`: every build takes a turn at being
+/// first. Pass 0 is the order given; each later pass starts one build further along. For two
+/// builds that is the alternate-and-flip the harness has always done; for N it is a rotation, so
+/// no build is first (or always last) in every pass whenever there are at least two passes.
+pub fn pass_order(builds: usize, pass: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..builds).collect();
+    if builds > 0 {
+        order.rotate_left(pass % builds);
+    }
+    order
+}
+
+/// A build with nothing to time (no Lumen): every series is `n/a — <reason>`.
+fn no_lumen_latency(build: &Build, subjects: &[Subject], load: &str) -> BuildLatency {
+    let why = "no Lumen: there is no hook, no server and no daemon to time";
+    let mut series = Vec::new();
+    if let Some(caps) = &build.caps {
+        na_hooks(caps, why, &mut series);
+    }
+    for (id, what) in [
+        ("server.start", "spawn lumen-mcp and answer `initialize`"),
+        ("server.ping", "JSON-RPC round trip with no work"),
+    ] {
+        series.push(Series::na_because(id, what, why));
+    }
+    for sub in subjects {
+        for (prefix, what) in [
+            ("server.smart_read", "smart_read: the outline"),
+            ("server.recall_file", "recall_file for one item"),
+            (
+                "server.repeat_unchanged",
+                "smart_read, repeat reads on: the stub",
+            ),
+            (
+                "server.repeat_changed",
+                "smart_read, repeat reads on: the delta",
+            ),
+        ] {
+            let mut na = Series::na_because(&format!("{prefix}.{}", sub.bucket), what, why);
+            na.subject = Some(sub.label());
+            series.push(na);
+        }
+    }
+    for (id, what) in [
+        (
+            CLAIM_PLACED_ID,
+            "smart_read with the hook's record in place",
+        ),
+        (
+            CLAIM_UNPLACED_ID,
+            "smart_read with no record and no _meta id",
+        ),
+    ] {
+        series.push(Series::na_because(id, what, why));
+    }
+    let derived = derive(&series);
+    BuildLatency {
+        label: build.label.clone(),
+        reported_version: "n/a — no Lumen".to_string(),
+        load_before: load.to_string(),
+        load_after: load.to_string(),
+        series,
+        derived,
+    }
+}
+
 /// All latency series for every build, pooled over [`PASSES`] passes in which the builds take
-/// turns (the order flips every pass), so a drift in the machine's state falls on both builds
-/// alike. `cfg.warmup` is per series per pass. A build's hooks are run in-process only when it
-/// was built from this checkout ([`Build::inproc`]): the harness links the checkout's library.
+/// turns ([`pass_order`]: the first build moves along every pass), so a drift in the machine's
+/// state falls on every build alike. `cfg.warmup` is per series per pass. A build's hooks are
+/// run in-process only when it was built from this checkout ([`Build::inproc`]): the harness
+/// links the checkout's library. A "no Lumen" build is not run: its series say so.
 pub fn measure_builds(
     builds: &[Build],
     subjects: &[Subject],
@@ -1059,14 +1241,15 @@ pub fn measure_builds(
         warmup: cfg.warmup,
     };
     let load_before = load_text();
+    // Only builds that can be run take part in the passes (and so in the rotation).
+    let active: Vec<usize> = (0..builds.len())
+        .filter(|i| !builds[*i].is_no_lumen())
+        .collect();
     let mut pooled: Vec<Vec<Vec<Series>>> = builds.iter().map(|_| Vec::new()).collect();
     let mut versions: Vec<String> = builds.iter().map(|_| String::new()).collect();
     for pass in 0..passes {
-        let mut order: Vec<usize> = (0..builds.len()).collect();
-        if pass % 2 == 1 {
-            order.reverse();
-        }
-        for bi in order {
+        for slot in pass_order(active.len(), pass) {
+            let bi = active[slot];
             let build = &builds[bi];
             eprintln!(
                 "lumen-bench: latency pass {}/{passes}, {} ({per_pass} runs)",
@@ -1090,6 +1273,10 @@ pub fn measure_builds(
     let load_after = load_text();
     let mut out = Vec::with_capacity(builds.len());
     for ((build, p), version) in builds.iter().zip(pooled).zip(versions) {
+        if build.is_no_lumen() {
+            out.push(no_lumen_latency(build, subjects, &load_before));
+            continue;
+        }
         let series = merge_passes(p)?;
         let derived = derive(&series);
         out.push(BuildLatency {
@@ -1174,6 +1361,7 @@ mod tests {
             source: String::new(),
             identity: Identity::Env,
             inproc: false,
+            caps: None,
         };
         let s = identity_series(&build, &iso, &cfg).unwrap();
         assert!(s.lat.is_none());
@@ -1225,5 +1413,139 @@ mod tests {
         // Passes that do not line up are an error, not a quiet truncation.
         let ragged = vec![pass(&[1], "measured", 1), vec![]];
         assert!(merge_passes(ragged).is_err());
+    }
+
+    #[test]
+    fn two_builds_alternate_exactly_as_they_always_did() {
+        for pass in 0..PASSES {
+            let mut old: Vec<usize> = (0..2).collect();
+            if pass % 2 == 1 {
+                old.reverse();
+            }
+            assert_eq!(pass_order(2, pass), old, "pass {pass}");
+        }
+    }
+
+    #[test]
+    fn the_pass_order_rotates_so_no_build_is_first_in_every_pass() {
+        for n in 2..=11usize {
+            let first: Vec<usize> = (0..PASSES).map(|p| pass_order(n, p)[0]).collect();
+            for b in 0..n {
+                assert!(
+                    first.iter().any(|f| *f != b),
+                    "{n} builds: build {b} is first in every pass: {first:?}"
+                );
+            }
+            // Every pass is a permutation of the builds.
+            for p in 0..PASSES {
+                let mut o = pass_order(n, p);
+                o.sort_unstable();
+                assert_eq!(o, (0..n).collect::<Vec<_>>());
+            }
+            // And no build is always last either.
+            let last: Vec<usize> = (0..PASSES)
+                .map(|p| *pass_order(n, p).last().unwrap())
+                .collect();
+            for b in 0..n {
+                assert!(last.iter().any(|l| *l != b), "{n} builds: {b} always last");
+            }
+        }
+        assert_eq!(pass_order(4, 0), vec![0, 1, 2, 3]);
+        assert_eq!(pass_order(4, 1), vec![1, 2, 3, 0]);
+        assert_eq!(pass_order(1, 3), vec![0]);
+        assert!(pass_order(0, 3).is_empty());
+    }
+
+    fn fake_subject(bucket: &str) -> Subject {
+        Subject {
+            bucket: bucket.to_string(),
+            rel: "a.rs".to_string(),
+            lines: 10,
+            bytes: 100,
+            recall_item: "f".to_string(),
+            abs: PathBuf::from("a.rs"),
+            src: String::new(),
+            alt: String::new(),
+        }
+    }
+
+    #[test]
+    fn no_lumen_has_no_hook_server_or_daemon_series_and_every_one_says_so() {
+        let b = Build::no_lumen();
+        let l = no_lumen_latency(&b, &[fake_subject("<300")], "load");
+        assert!(l.reported_version.starts_with("n/a"));
+        assert!(!l.series.is_empty());
+        for s in &l.series {
+            assert!(s.lat.is_none() && s.raw.is_empty(), "{} has a figure", s.id);
+            assert!(s.status.starts_with("n/a — "), "{}: {}", s.id, s.status);
+        }
+        assert!(l.series.iter().any(|s| s.id == "hook.per_call_identity"));
+        assert!(
+            l.series
+                .iter()
+                .any(|s| s.id == "server.repeat_unchanged.<300")
+        );
+        assert!(l.derived.iter().all(|d| d.median_ns.is_none()));
+    }
+
+    #[test]
+    fn a_version_without_a_hook_subcommand_gets_na_hook_rows_and_spawns_nothing() {
+        // `bin` does not exist: any spawn would be an error. The hook series are n/a, in the
+        // order `hooks` writes them, each with a reason of its own kind.
+        let m = crate::manifest::VersionsManifest::load_committed().unwrap();
+        let caps = Caps::from_entry("1.0.0", m.get("1.0.0").unwrap()).unwrap();
+        let build = Build {
+            label: "1.0.0".to_string(),
+            role: "version",
+            sha: "f80a0eb47fdb9b486f174f444ad61f45cce42d54".to_string(),
+            dirty: false,
+            bin: PathBuf::from("/does/not/exist/lumen-mcp"),
+            profile: "release",
+            profile_note: String::new(),
+            source: String::new(),
+            identity: Identity::Env,
+            inproc: false,
+            caps: Some(caps),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        hooks(
+            &build,
+            &[],
+            &LatencyConfig { runs: 1, warmup: 0 },
+            tmp.path(),
+            false,
+            &mut out,
+        )
+        .unwrap();
+        let ids: Vec<&str> = out.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "hook.floor",
+                "hook.intercept_pass.spawn",
+                "hook.intercept_block.spawn",
+                "hook.meter_read.spawn",
+                "hook.meter_bash.spawn",
+                "hook.intercept_pass.inproc",
+                "hook.intercept_block.inproc",
+                "hook.meter_read.inproc",
+                "hook.meter_bash.inproc",
+                "hook.per_call_identity",
+            ]
+        );
+        for s in &out {
+            assert!(
+                s.lat.is_none() && s.status.starts_with("n/a — "),
+                "{}: {}",
+                s.id,
+                s.status
+            );
+        }
+        let by = |id: &str| out.iter().find(|s| s.id == id).unwrap().status.clone();
+        assert!(by("hook.meter_bash.spawn").contains("no Bash meter"));
+        assert!(by("hook.meter_read.spawn").contains("no `lumen-mcp hook` subcommand"));
+        assert!(by("hook.meter_read.inproc").contains("no release asset"));
+        assert!(by("hook.per_call_identity").contains("no per-call identity"));
     }
 }
