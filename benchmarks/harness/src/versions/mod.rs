@@ -9,6 +9,7 @@
 //! builds it returns and the [`caps::Caps`] each carries.
 
 pub mod caps;
+pub mod daemon;
 
 use crate::builds::{self, Build};
 use crate::corpus::{self, Corpus};

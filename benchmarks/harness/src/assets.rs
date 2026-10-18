@@ -434,13 +434,24 @@ impl MountGuard {
             return Ok(());
         }
         self.attached = false;
-        run(
-            Command::new("hdiutil")
-                .args(["detach", "-quiet"])
-                .arg(&self.mount),
-            "hdiutil detach",
-        )
-        .or_else(|_| {
+        // A volume the system is still looking at (indexing, a busy machine) refuses a plain
+        // detach for a moment: ask politely a few times before forcing.
+        let mut polite = Err(String::new());
+        for attempt in 0..4 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            polite = run(
+                Command::new("hdiutil")
+                    .args(["detach", "-quiet"])
+                    .arg(&self.mount),
+                "hdiutil detach",
+            );
+            if polite.is_ok() {
+                break;
+            }
+        }
+        polite.or_else(|_| {
             run(
                 Command::new("hdiutil")
                     .args(["detach", "-force", "-quiet"])

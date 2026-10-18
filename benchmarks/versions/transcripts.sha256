@@ -1,0 +1,9 @@
+# The digest and counts of the standard synthetic transcript set (harness/src/versions/daemon.rs,
+# Spec::standard: seed, 40 MiB, 40 files). A test regenerates the set and compares every line.
+# After a deliberate change to the generator:
+#   cargo test -p lumen-bench print_committed_digest -- --ignored --nocapture
+digest=ea519a62bfcb06c38b01a1aee6f7c32c35c314cb08024c549d403dcb60715edf
+files=40
+bytes=39568703
+lines=23532
+turns=6724

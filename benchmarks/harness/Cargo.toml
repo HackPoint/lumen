@@ -28,3 +28,11 @@ tempfile = "3"
 # already in Cargo.lock (the Tauri build uses it), so this adds no package.
 toml = "1.1"
 
+
+# Process CPU time and memory for the idle measurements (versions/daemon.rs). Both are already in
+# Cargo.lock (libc 0.2.190, windows-sys 0.61.2); Windows takes only the three modules it calls.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

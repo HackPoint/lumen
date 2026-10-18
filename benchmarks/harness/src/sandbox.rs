@@ -365,6 +365,41 @@ fn shown(p: &Path) -> String {
 /// The real ledgers, checked before and after a run.
 pub struct RealLedgerGuard {
     paths: Vec<PathBuf>,
+    /// Failures of an after-check that ran while a panic unwound ([`GuardScope`]'s `Drop`): the
+    /// panic carries its own message, so these are printed and kept for whoever can still look.
+    drop_failures: std::sync::Mutex<Vec<String>>,
+}
+
+/// An open guard: the before-check passed, and the after-check runs when this ends, by
+/// [`GuardScope::finish`] or, if the run panics, by `Drop`. A guard whose after-check a panic skips
+/// would let a run that wrote a real ledger look like a run that only crashed.
+pub struct GuardScope<'a> {
+    guard: &'a RealLedgerGuard,
+    done: bool,
+}
+
+impl GuardScope<'_> {
+    /// The after-check, as a result.
+    pub fn finish(mut self) -> Res<()> {
+        self.done = true;
+        self.guard.check("after")
+    }
+}
+
+impl Drop for GuardScope<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        if let Err(e) = self.guard.check("after") {
+            eprintln!("{e}");
+            self.guard
+                .drop_failures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(e);
+        }
+    }
 }
 
 impl RealLedgerGuard {
@@ -375,13 +410,30 @@ impl RealLedgerGuard {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .filter(|h| !h.is_empty())
             .ok_or("the real-ledger guard needs HOME or USERPROFILE to find the ledgers")?;
-        Ok(RealLedgerGuard {
-            paths: real_ledger_paths(Path::new(&home)),
-        })
+        Ok(RealLedgerGuard::with_paths(real_ledger_paths(Path::new(
+            &home,
+        ))))
     }
 
     pub fn with_paths(paths: Vec<PathBuf>) -> RealLedgerGuard {
-        RealLedgerGuard { paths }
+        RealLedgerGuard {
+            paths,
+            drop_failures: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The before-check, and a scope whose after-check also runs on panic.
+    pub fn begin(&self) -> Res<GuardScope<'_>> {
+        self.check("before")?;
+        Ok(GuardScope {
+            guard: self,
+            done: false,
+        })
+    }
+
+    /// Failures the after-check found while unwinding from a panic.
+    pub fn take_drop_failures(&self) -> Vec<String> {
+        std::mem::take(&mut *self.drop_failures.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// Stop with an error when a real ledger holds a benchmark row. `when` is "before" or
@@ -572,6 +624,55 @@ mod tests {
                 .check("before")
                 .is_err()
         );
+    }
+
+    /// Each prefix the harness's runs write is named here, apart from the constant: dropping one
+    /// from `BENCH_PREFIXES` must turn this red, because a run that writes under it would pass the
+    /// guard unseen.
+    #[test]
+    fn every_session_prefix_a_benchmark_writes_trips_the_guard() {
+        let t = tempfile::tempdir().unwrap();
+        for (i, prefix) in ["lumen-bench-", "bench-"].iter().enumerate() {
+            assert!(
+                BENCH_PREFIXES.contains(prefix),
+                "{prefix} is missing from BENCH_PREFIXES"
+            );
+            let db = t.path().join(format!("p{i}.db"));
+            plant(&db, &format!("{prefix}run-1"));
+            let g = RealLedgerGuard::with_paths(vec![db]);
+            let e = g.check("after").unwrap_err();
+            assert!(e.contains("REFUSED"), "{prefix}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_after_check_runs_when_the_run_panics() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("lumen.db");
+        plant(&db, "0f8e2c1a-real-session");
+        let g = RealLedgerGuard::with_paths(vec![db.clone()]);
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _scope = g.begin().unwrap();
+            plant(&db, "lumen-bench-planted");
+            panic!("the run died");
+        }));
+        assert!(died.is_err());
+        let seen = g.take_drop_failures();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the after-check must run on a panic: {seen:?}"
+        );
+        assert!(
+            seen[0].contains("REFUSED") && seen[0].contains("after"),
+            "{seen:?}"
+        );
+        // A clean run of the same scope reports nothing on drop and returns its error from finish.
+        let clean = RealLedgerGuard::with_paths(vec![t.path().join("none.db")]);
+        clean.begin().unwrap().finish().unwrap();
+        assert!(clean.take_drop_failures().is_empty());
+        let e = g.begin().err().expect("a planted row refuses before");
+        assert!(e.contains("before"), "{e}");
     }
 
     #[test]

@@ -638,21 +638,32 @@ fn a_panic_while_mounted_still_detaches() {
     let src = t.path().join("vol");
     sidecar_tree(&src, "Lumen.app/Contents/MacOS");
     let dmg = t.path().join("g.dmg");
-    let st = Command::new("hdiutil")
-        .args([
-            "create",
-            "-quiet",
-            "-fs",
-            "HFS+",
-            "-volname",
-            "LumenPanicFixture",
-            "-srcfolder",
-        ])
-        .arg(&src)
-        .arg(&dmg)
-        .status()
-        .unwrap();
-    assert!(st.success());
+    // `hdiutil create` is the part that fails under load (the failure seen was this step's exit
+    // status, not the guard): try again a few times, and show what it said if it never works.
+    let mut said = String::new();
+    let created = (0..5).any(|n| {
+        if n > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let _ = std::fs::remove_file(&dmg);
+        let out = Command::new("hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "LumenPanicFixture",
+                "-srcfolder",
+            ])
+            .arg(&src)
+            .arg(&dmg)
+            .output()
+            .unwrap();
+        said = String::from_utf8_lossy(&out.stderr).into_owned();
+        out.status.success()
+    });
+    assert!(created, "hdiutil create failed 5 times: {said}");
     let mount = t.path().join("mnt");
     std::fs::create_dir(&mount).unwrap();
     let r = std::panic::catch_unwind(|| {
@@ -661,12 +672,18 @@ fn a_panic_while_mounted_still_detaches() {
         panic!("boom");
     });
     assert!(r.is_err());
-    let info = Command::new("hdiutil").arg("info").output().unwrap();
-    assert!(
-        // `hdiutil info` names the image file, not the volume.
-        !String::from_utf8_lossy(&info.stdout).contains("g.dmg"),
-        "a panic left the image mounted"
-    );
+    // `hdiutil info` names the image file, not the volume. The detach has returned by now, but
+    // under load the kernel can take a moment to drop the image from the list, so ask for up to
+    // 15 s before calling it a leak; an image that is still there after that is a real leak.
+    let still_mounted = || {
+        let info = Command::new("hdiutil").arg("info").output().unwrap();
+        String::from_utf8_lossy(&info.stdout).contains("g.dmg")
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while still_mounted() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(!still_mounted(), "a panic left the image mounted");
 }
 
 #[test]
