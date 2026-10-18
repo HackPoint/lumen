@@ -131,6 +131,12 @@ telemetry_env = { DO_NOT_TRACK = "1" } # the README documents no telemetry; set 
 platform = "linux-x86_64"
 name = "squeez-linux-x86_64"
 sha256 = "0aca3560464b643a98519a149ee4568720931164beaba3910b27ec1547142825"
+# Added with C2 (the Layer 1 replay runs on the maintainer's macOS arm64 machine too). Same release,
+# same checksums.sha256 above (it lists this file); GitHub's digest of the asset.
+[[arm.asset]]
+platform = "macos-arm64"
+name = "squeez-macos-universal"
+sha256 = "8e29e1f608eb0f2d6974c0ee020205491bdaa160b525a854ffb0b3eb7f21c939"
 
 # --- RTK ---------------------------------------------------------------------------------------
 [[arm]]
@@ -158,6 +164,11 @@ telemetry_env = { DO_NOT_TRACK = "1" } # telemetry is off until `rtk telemetry e
 platform = "linux-x86_64"
 name = "rtk-x86_64-unknown-linux-musl.tar.gz"
 sha256 = "5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436"
+# Added with C2: the macOS arm64 asset of the same release, listed in the same checksums.txt.
+[[arm.asset]]
+platform = "macos-arm64"
+name = "rtk-aarch64-apple-darwin.tar.gz"
+sha256 = "4aae2f60cfc49c9e81b8c8c57020aa0cb824da608c78b4f0cf5c0988e19e824e"
 
 # --- Headroom ----------------------------------------------------------------------------------
 [[arm]]
@@ -180,9 +191,18 @@ telemetry_env = { HEADROOM_BEACON = "off", DO_NOT_TRACK = "1", HF_HUB_OFFLINE = 
 platform = "linux-x86_64"
 name = "headroom_ai-0.41.0-cp310-abi3-manylinux_2_28_x86_64.whl" # same sha256 on PyPI and the GitHub release
 sha256 = "f4db5e5119a73af3ed952b1c10caff2430831d899eb17d995a27574ae6e6b306"
+# Added with C2: the macOS arm64 wheel of the same release (GitHub's digest; PyPI serves the same file).
+[[arm.asset]]
+platform = "macos-arm64"
+name = "headroom_ai-0.41.0-cp310-abi3-macosx_11_0_arm64.whl"
+sha256 = "b842d36e161f9f0d1fc4d56de1d870e22a3e4d05c94d2272d9a306b38f406242"
 [arm.model]
 repo = "chopratejas/kompress-v2-base" # Hugging Face, apache-2.0
-commit = "e00cc5e60ff73b01674ef8fa6da6c5acf6d54181" # last modified 2026-09-17
+# The revision Headroom 0.41.0 itself pins and asks the Hub for (headroom/onnx_runtime.py
+# `_PINNED_REVISIONS`, 2026-06-10), and so the one a run at defaults loads. The first draft of this
+# file recorded the then-newest upload (e00cc5e60ff7, 2026-09-17), which Headroom at this version
+# never loads; the weights fetched and used are these.
+commit = "b1563631b35bfdcee37587ad530147497d820d4c"
 
 # --- Caveman -----------------------------------------------------------------------------------
 [[arm]]

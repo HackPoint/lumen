@@ -84,18 +84,136 @@ Question: for the same tool output, how many tokens reach the model, and does th
   no home paths, user names or employer names in it (a documentation example's `/home/sweet/` is
   rewritten to `/work/` and the item says so). A download is checked against its pinned sha256
   before use, so a moved source stops the record instead of changing the corpus.
-- **Replay** (C2): each tool is driven through the mechanism it really uses, on the recorded
-  bytes. squeez and RTK: the PreToolUse Bash rewrite through PATH shims that replay the recorded
-  stdout and exit code, and the PostToolUse `updatedToolOutput` path. Headroom: its proxy in
-  front of a local echo upstream that captures the request body. Lumen: the Read block, then
-  `smart_read` / `recall_file` / `compress_logs`. Caveman changes the model's output style and
-  has no mechanism on tool output: its Layer 1 cells are `n/a` with that reason, never 0.
-- **Measure:** tokens in what reaches the model, re-counted with Lumen's cl100k counter (a
-  calibrated estimate, not an exact count of any model's tokenizer), and whether every needle is
-  still present byte for byte.
+- **Replay** (C2, `benchmarks/harness/src/competitors/replay.rs`, run with
+  `benchmarks/run.sh competitors replay`): each item is given the tool call a model would have made
+  (a file read and a JSON file of a repository: `Read`; `git grep` output: `Grep`; `git ls-tree`,
+  `git show --stat` and a downloaded JSON document: `Bash` with that command; test and build logs:
+  `Bash` with `cargo test`, `pytest`, `cargo build` or `tsc --noEmit`, exiting 101, 1, 101 or 2 when the log reports a failure), the
+  same for every arm. Each arm is then driven through the mechanism it really uses, installed from
+  its own pin into a scratch HOME inside a `Sandbox` (an allowlisted environment, so nothing of the
+  user's HOME, ledger or `~/.claude` is visible), with telemetry off:
+  - **none**: the raw bytes.
+  - **Lumen 1.9.0** (the release asset, via `assets.rs`): a `Read` goes through the real
+    `lumen-mcp hook intercept`; a source file of 300 lines or more is blocked (exit 2; the block
+    message is part of what the model receives), then `smart_read` (the redirect, one round).
+    That is Lumen's first answer. Then the follow-ups: one `recall_file` for each needle the
+    first answer lacks, at the lines the needle is on, one round and its tokens each (see
+    "Follow-ups" below). A log goes to `compress_logs` (CLAUDE.md's own routing; no hook sits on
+    Bash output). Output Lumen has no tool for (shell, grep, JSON documents) passes through
+    unchanged.
+  - **squeez** and **RTK**: the hooks the tool's own installer wrote into the scratch
+    `settings.json` (`squeez setup`; `rtk init -g --auto-patch`) are run, for the events and tool
+    names their `matcher` selects, with the JSON Claude Code sends, in settings order. PreToolUse
+    `updatedInput` replaces the call's input (squeez wraps a command in `squeez wrap`, and adds
+    `limit` to a `Read` and `head_limit` to a `Grep`); the replaced command runs under `sh -c` with
+    PATH shims first, which print the recorded stdout byte for byte and exit with the recorded
+    status, so the wrapper sees the "real" output of the real command; a shim answers only the
+    invocation it was made for and passes any other call (RTK asks `git rev-parse` first) to the
+    real program, and every call is logged. A wrapper that never calls the recorded program is
+    `n/a`, never a measurement. PostToolUse `updatedToolOutput` replaces the result. RTK registers
+    only a PreToolUse hook on Bash, so a `Read` or `Grep` reaches it unchanged: that is its real
+    behaviour, and the row says "left the input alone". Payload shapes, from squeez's own
+    `hooks/posttooluse.sh` and `src/commands/compress_output.rs` at the pinned commit (which parse
+    and emit them) and RTK's `hooks/claude/rtk-rewrite.sh`: PreToolUse
+    `{session_id, transcript_path, cwd, permission_mode, hook_event_name, tool_name, tool_input,
+    tool_use_id}` with `tool_input` `{file_path}` / `{command}` / `{pattern, output_mode, -n}`;
+    PostToolUse adds `tool_response`: for `Read`
+    `{"type":"text","file":{filePath,content,numLines,startLine,totalLines}}`, for `Grep`
+    `{mode,numFiles,filenames,content,numLines}`, for `Bash` `{stdout,stderr,interrupted,isImage}`;
+    a rewrite comes back as `hookSpecificOutput.updatedInput` / `.updatedToolOutput`. The shims are
+    POSIX `sh`: on Windows these arms are `n/a`.
+  - **Headroom**: `headroom proxy --port N --workers 1`, which is what `headroom wrap claude`
+    starts, with `ANTHROPIC_TARGET_API_URL` pointed at a local echo upstream (`replay/echo.rs`,
+    bound to 127.0.0.1) that keeps every request body. Each item is sent as the request Claude Code
+    would make after the tool ran (prompt, the model's `tool_use`, the result as the newest
+    `tool_result`); the `tool_result` in the body the proxy forwards is the output. The prompt
+    carries a nonce, because the proxy's response cache is on by default and would answer a
+    repeated request itself. The proxy runs with `HEADROOM_OFFLINE=1` (its own air-gap switch: it
+    dials nothing but its upstream), `HF_HUB_OFFLINE=1` and `LITELLM_LOCAL_MODEL_COST_MAP=True`, so
+    no connection leaves the machine, and the replay waits until its Kompress model has loaded
+    (about a minute), since a request before that is forwarded uncompressed. Defaults otherwise:
+    mode `cache`, which freezes earlier messages and never touches `Read`/`Glob` results
+    (`excluded_tool`); `--mode token` is not measured. The model weights are the revisions
+    Headroom 0.41.0 itself pins (`headroom.onnx_runtime._PINNED_REVISIONS`, read from the installed
+    package; Kompress `b1563631b35b`), which is what a run at defaults asks the Hub for. `tools.toml`
+    records exactly that revision (its first draft recorded the newest upload, `e00cc5e60ff7`, which
+    this Headroom never loads), and the prefetch stops if the two differ.
+  - **Caveman**: `n/a — changes the model's replies, not tool output (measured in Layer 2)`. That is
+    its output-style skill. Its 4.0.x input-side proxy (`caveman-proxy`, installed by
+    `cave setup --install`, binaries checksummed by the installer from release `bin-v4.0.1`)
+    does compress tool output, but `cave setup --json` states that without the agent-side
+    recovery MCP server (`caveman-mcp`) streaming requests pass through uncompressed, and Claude
+    Code always streams; a faithful replay needs a Claude Code session that registers that server,
+    which is Layer 2. Layer 1 does not guess at it.
+  Installs are pre-fetched with `--prefetch` (the only step that uses the network): every asset is
+  checked against its sha256 in `tools.toml` (and, for squeez and RTK, against the release's own
+  pinned checksum file) before use, Headroom is installed with `uv` into the cache from its pinned
+  wheel with `--exclude-newer` at the resolving date, and nothing is installed globally. `tools.toml`
+  carries the macOS arm64 asset of each (added with C2, same releases, GitHub's digests).
+- **Measure:** two columns for every arm.
+  - *First answer only*: the tokens of what the arm hands the model for the call, and which needles
+    it still states.
+  - *With follow-ups*: the same after the follow-ups an ideal asker makes (below), with their
+    tokens added, the needles stated then, and the extra rounds (round trips beyond the original
+    call; Lumen's redirect to `smart_read` is one).
+  Tokens are re-counted with Lumen's cl100k counter and converted with the calibration table
+  (`lumen_core::calibration`, for `claude-sonnet-5-5`; a file's own text is converted as a file,
+  anything an arm made from it as an answer, with the wider band; not an exact count of any
+  model's tokenizer). The wall time is the replay itself: hooks, the command, the tool calls, the
+  proxy round trip and the follow-ups; not installation, not Headroom's start-up. Claude Code's own
+  wrapping of a result (the `cat -n` line numbers of a `Read`, the `Exit code N` line of a failed
+  command) is added for no arm, so what differs between arms is what the arm did. A wrapper that
+  asks for terser output by changing a command's flags (RTK's `pytest` and `cargo` wrappers) is
+  shown the recorded, unchanged output, since the recording was made once.
+- **Follow-ups.** A tool that drops something usually says how to get it back. For every arm whose
+  recovery path works at the tool's documented defaults, the replay makes the same ideal
+  follow-up: while a needle's fact is missing, one call through that path, one round and its
+  tokens counted. An arm with no such path gets none, and the row says so:
+  - Lumen: `recall_file` at the lines of each missing needle (the block message names it).
+  - Headroom: the marker `Retrieve more: hash=<hex>` names `headroom_retrieve`, the MCP server
+    `headroom wrap claude` registers unless `--no-mcp` (`headroom/cli/wrap.py`,
+    `_setup_headroom_mcp`: "without this registration those markers point at nothing"). The
+    replay asks the proxy's `/v1/retrieve`, which is what that tool calls, and counts the JSON the
+    tool hands the model (retrieval is by hash and returns the whole original, so one call
+    recovers every needle).
+  - RTK: the marker `[full output: rtk recall <id>]` is a command the model runs through Bash;
+    the recall store is written from the first install (`src/core/retriever.rs`, `tee.rs` at
+    the pin). The replay runs the installed `rtk recall <id>` in the case's HOME.
+  - squeez: none. Its marker names `squeez_retrieve`, an MCP tool; `squeez setup` registers no MCP
+    server (README: `claude mcp add squeez -- squeez mcp` is a manual step; T0 records it as off by
+    default), and the replay stops if the install did register one. The `squeez protocol` text
+    that mentions the session file is itself delivered by that MCP server or a manual command.
+  - Caveman: not replayed (above).
+  The follow-up is ideal: the asker always knows exactly what it is missing and asks at once. That
+  flatters every arm that has a path, and the first-answer column shows the figure without it.
+- **Needles.** A needle states a fact; it counts as present when the fact is, not when the bytes
+  are. The matcher (`fact_present`): whitespace is not part of a fact (both sides compared with
+  all whitespace removed); a needle of several lines is a set, each line present in any order; for
+  a `grep` item a hit grouped under its file's name (`path` then `LINE:text`) states the same fact
+  as `path:LINE:text`. A changed number or word, a line that is gone, a hit under another file, or
+  words in another order is a lost fact (the tests check both directions). A tool that rewrites
+  text into words of its own loses the fact even if it means the same.
+  The needles asked, by category and kind (`needle_kind`; 172 in all):
+
+  | category | signature | error line | test name | value | other |
+  |---|---:|---:|---:|---:|---:|
+  | file reads (11 items) | 24 | | | | 32 |
+  | grep (7) | 6 | | | 3 | 12 |
+  | shell (6) | | | | 18 | |
+  | JSON (9) | | | | 32 | |
+  | test logs (11) | | 7 | 21 | | |
+  | build logs (6) | | 17 | | | |
+  | all | 30 | 24 | 21 | 53 | 44 |
+
+  What an outline keeps (a definition line, and an import) is 17% of the needles overall, and in
+  the only category an outline applies to, file reads, 43% are definitions and 57% are imports,
+  comments, body lines and assertions (an outline keeps imports too, so the "other" share is not
+  all out of its reach). A test checks that definitions stay under a quarter of the needles. The
+  mix is therefore not tilted toward what an outline keeps, and the corpus is unchanged.
 - **Row decision (C3):** the winner of a row is the tool with the fewest tokens among the tools
-  that keep every needle. A tool that drops a needle does not win the row however few tokens it
-  sends. Counts are deterministic, so equal counts are a tie; there is no noise band.
+  that keep every needle, on the with-follow-ups column (its tokens include the follow-ups, and the
+  extra rounds are shown beside it; the first-answer column is shown too). A tool that drops a
+  needle does not win the row however few tokens it sends. Counts are deterministic, so equal counts are a tie; there is no noise band.
 
 ## Layer 2: end to end
 
