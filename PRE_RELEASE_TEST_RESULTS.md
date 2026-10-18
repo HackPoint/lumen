@@ -53,7 +53,7 @@ $ ls -la /Applications/Lumen.app/Contents/MacOS/
 -rwxr-xr-x  lumen-tok      4,224,384
 
 $ /usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" Contents/Info.plist
-io.hackpoint.lumen
+(the legacy bundle identifier)
 
 $ /usr/libexec/PlistBuddy -c "Print CFBundleVersion" Contents/Info.plist
 0.1.0
@@ -63,7 +63,7 @@ $ ls -lh /Applications/Lumen.app/Contents/Resources/icon.icns
 ```
 
 **PASS** — DMG 16 MB, mounts with Lumen.app + Applications symlink; all 4 binaries
-present; identifier `io.hackpoint.lumen`; version `0.1.0`; icon.icns present.
+present; identifier (the legacy one); version `0.1.0`; icon.icns present.
 
 ---
 
@@ -93,7 +93,7 @@ See MANUAL_TEST.md §1.2 for the exact manual check.
 ### TEST 1C — Fresh-profile simulation (full reset)
 
 Reset: `mv ~/.claude ~/.claude.bak`, `mv ~/.claude.json ~/.claude.json.bak`,
-`mv ~/Library/Application\ Support/io.hackpoint.lumen ~/.../io.hackpoint.lumen.bak`
+`mv <the legacy data directory> <the legacy data directory>.bak`
 
 After launching `/Applications/Lumen.app` and waiting for setup to complete:
 
@@ -110,7 +110,7 @@ After launching `/Applications/Lumen.app` and waiting for setup to complete:
   "args": [],
   "command": "/Applications/Lumen.app/Contents/MacOS/lumen-mcp",
   "env": {
-    "LUMEN_DB": "/Users/user/Library/Application Support/io.hackpoint.lumen/lumen.db",
+    "LUMEN_DB": "/Users/user/Library/Application Support/<the legacy data directory>/lumen.db",
     "LUMEN_TOK": "/Applications/Lumen.app/Contents/MacOS/lumen-tok"
   },
   "type": "stdio"
@@ -126,7 +126,7 @@ PostToolUse/mcp__lumen__compress_logs: ~/.claude/lumen/lumen_meter.sh
 PreToolUse/Read:                       ~/.claude/lumen/lumen_read_intercept.sh
 
 // lumen_meter.sh paths
-LUMEN_DB="/Users/user/Library/Application Support/io.hackpoint.lumen/lumen.db"
+LUMEN_DB="/Users/user/Library/Application Support/<the legacy data directory>/lumen.db"
 LUMEN_TOK="/Applications/Lumen.app/Contents/MacOS/lumen-tok"
 ```
 
@@ -135,7 +135,7 @@ No dev-tree paths. Scripts are executable. All 5 hooks registered.
 
 **Note for fresh-machine simulation**: `mv ~/.claude ~/.claude.bak` alone is
 insufficient — the marker file is at `~/.claude/lumen/.setup_done`, which travels
-with `~/.claude`. The AppSupport dir (`io.hackpoint.lumen/`) must also be moved out.
+with `~/.claude`. The AppSupport dir (the legacy data directory) must also be moved out.
 MANUAL_TEST.md §Prerequisites documents the full three-directory reset.
 
 ---

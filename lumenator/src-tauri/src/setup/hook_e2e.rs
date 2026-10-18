@@ -681,14 +681,23 @@ fn fixture_bytes(name: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
-/// A script as 1.5.1 installed it, for a user whose home is `home`.
+/// A script as 1.5.1 installed it, for a user whose home is `home`: its default paths are in
+/// the data directory 1.5.1 baked, which is the legacy one.
 fn v151_script(name: &str, home: &Path) -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/v1.5.1")
         .join(name);
     std::fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
-        .replace("__HOME__", &shell_path(&home.to_string_lossy()))
+        .replace(
+            "__APP_DIR__",
+            &shell_path(
+                &home
+                    .join("Library/Application Support")
+                    .join(lumen_core::legacy::LEGACY_APP_ID)
+                    .to_string_lossy(),
+            ),
+        )
 }
 
 /// A stub `lumen-mcp` at `at`, answering to `name`.
@@ -2719,13 +2728,12 @@ fn verify_hooks_fails_hooks_whose_lumen_mcp_is_gone() {
 // sidecar) as placeholders. The legacy directory is substituted at test time from
 // `legacy::LEGACY_APP_ID`, so no fixture carries it.
 //
-// The new identifier is a fake one: until the flip `APP_ID` is the legacy id, and a
-// fake is what makes the whole move happen here. The sidecar the hooks exec is the
-// real one (built with the unflipped constants), so what carries a write from the old
-// path into the backup is the link, not the redirect; the redirect has its own tests
-// in lumen-core.
+// The ids are the real ones: a directory named by `LEGACY_APP_ID` is a pre-flip install,
+// and `APP_ID` is where this build moves it. The sidecar the hooks exec is the real one,
+// so once the marker is written the old shims' writes (to the old path) are redirected
+// into the new ledger, and Setup is the real `run_setup_in`.
 
-const UPGRADE_NEW_ID: &str = "fake.new.app";
+const UPGRADE_NEW_ID: &str = lumen_core::meter::APP_ID;
 
 fn upgrade_shim(version: &str, name: &str, app_dir: &Path, mcp: &Path) -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2828,12 +2836,13 @@ fn upgrade_from(version: &str, login_on: bool) {
         .file_type()
         .is_symlink());
 
-    // 3. Before Setup the old hooks still fire, through the link, into the backup.
+    // 3. Before Setup the old hooks still fire. They write the old path, which the redirect
+    // maps to the new ledger now that the marker is there; the backup is left as it was.
     rig.meter(&read, &env);
-    assert_eq!(ledger_rows(&backup.join("lumen.db")), 2);
-    assert_eq!(ledger_rows(&new_db), 1);
+    assert_eq!(ledger_rows(&new_db), 2);
+    assert_eq!(ledger_rows(&backup.join("lumen.db")), 1);
 
-    // 4. The next launch carries that row over, once.
+    // 4. The next launch finds nothing to carry over, however often it runs.
     for _ in 0..2 {
         let report = at_start(&ctx, &AppOps);
         assert!(report.problems.is_empty(), "{report:?}");
@@ -2854,13 +2863,14 @@ fn upgrade_from(version: &str, login_on: bool) {
     assert!(!ensure_autostart_once(&item, &login_marker, APP_EXE));
     assert_eq!(item.0.get(), login_on);
 
-    // 6. Setup rewrites what is Lumen's and keeps the rest.
-    let steps = run_setup_with(
-        &rig.home,
-        &item,
-        &new_db.to_string_lossy(),
-        &real.to_string_lossy(),
+    // 6. Setup rewrites what is Lumen's and keeps the rest. The real `run_setup_in` bakes an
+    // exported LUMEN_DB in place of the data-dir ledger (`baked_paths`), which would make the
+    // assertions below compare against the developer's own ledger path, so say so instead.
+    assert!(
+        std::env::var_os("LUMEN_DB").is_none(),
+        "unset LUMEN_DB to run the upgrade tests: Setup bakes it into the config they check"
     );
+    let steps = run_setup_in(&rig.home, &item);
     assert!(
         steps
             .iter()
@@ -2895,7 +2905,7 @@ fn upgrade_from(version: &str, login_on: bool) {
     assert_eq!(ledger_rows(&new_db), 3);
     assert_eq!(
         ledger_rows(&backup.join("lumen.db")),
-        2,
+        1,
         "the backup is only read"
     );
 }

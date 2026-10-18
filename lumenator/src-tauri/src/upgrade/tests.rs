@@ -1,5 +1,5 @@
-//! The wiring end to end, with fake identifiers (the real pair is the same until
-//! the flip, which makes the real wiring a no-op).
+//! The wiring end to end, with fake identifiers. (The real pair differs since the flip;
+//! the same-identifier state, where nothing moves, is made here with a fake pair.)
 
 use super::*;
 use crate::health::StartupHealth;
@@ -311,7 +311,7 @@ fn the_real_generic_source_applies_on_macos_only() {
 
 #[test]
 fn with_the_same_identifier_twice_nothing_moves() {
-    // The state of every real install until the flip.
+    // The state of every real install before the flip, and of a build whose two ids agree.
     let t = TempDir::new().unwrap();
     let mut c = ctx(t.path());
     c.new_id = OLD.into();
@@ -322,6 +322,38 @@ fn with_the_same_identifier_twice_nothing_moves() {
     assert!(std::fs::symlink_metadata(c.old_dir()).unwrap().is_dir());
     assert!(!c.old_dir().join(MARKER_NAME).exists());
     assert_eq!(c.db_path(), old_db);
+}
+
+#[test]
+fn with_the_same_identifier_twice_the_generic_bundle_is_still_imported_when_there_is_no_ledger() {
+    // `moving()` is false, so the whole directory step is skipped; the ledger-only source
+    // must not be, or a build whose ids agree would start empty beside a history.
+    let t = TempDir::new().unwrap();
+    let mut c = ctx(t.path());
+    c.new_id = OLD.into();
+    let (_held, generic_db) = generic_ledger_with_wal_rows(t.path());
+    assert!(!c.new_db().exists());
+    let r = at_start(&c, &AppOps);
+    assert!(r.problems.is_empty(), "{r:?}");
+    assert_eq!(paths(&c.new_db()).len(), 5, "every row came, WAL rows too");
+    assert!(generic_db.exists(), "the source stays where it is");
+    assert!(
+        !c.new_dir().join(MARKER_NAME).exists(),
+        "no directory move happened"
+    );
+}
+
+#[test]
+fn with_the_same_identifier_twice_the_generic_bundle_never_replaces_a_ledger() {
+    let t = TempDir::new().unwrap();
+    let mut c = ctx(t.path());
+    c.new_id = OLD.into();
+    let old_db = seed_old(t.path(), 2);
+    let before = paths(&old_db);
+    generic_ledger_with_wal_rows(t.path());
+    let r = at_start(&c, &AppOps);
+    assert!(r.problems.is_empty(), "{r:?}");
+    assert_eq!(paths(&c.new_db()), before);
 }
 
 // ── the Setup prompt ───────────────────────────────────────────────────────

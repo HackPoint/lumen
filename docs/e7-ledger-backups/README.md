@@ -5,7 +5,7 @@ unification, kept so that unification can be reversed or independently re-derive
 
 | file | rows | what it was |
 |---|---|---|
-| `app_before_e7.db` | 4,140 read_events | `~/Library/Application Support/io.hackpoint.lumen/lumen.db` — the ledger the GUI reads |
+| `app_before_e7.db` | 4,140 read_events | `lumen.db` in the legacy data directory — the ledger the GUI reads |
 | `repo_before_e7.db` | 195 read_events | `<repo>/lumen.db` — a second ledger written whenever the hook ran with `LUMEN_DB` unset |
 
 `SHA256SUMS.txt` records, in order: the two pre-state checksums, the post-unification

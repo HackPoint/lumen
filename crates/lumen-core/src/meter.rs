@@ -934,6 +934,38 @@ mod tests {
         }
         let per = t.elapsed().as_nanos() as f64 / f64::from(n);
         eprintln!("resolve_db_path: {per:.0} ns/call");
+        // What it cost before the migration existed (the precedence alone), and one stat of
+        // a file that is not there, on this machine now: the budget is the first plus two
+        // of the second.
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(resolve_db_path_unmapped(
+                None,
+                Some(std::hint::black_box(&h)),
+            ));
+        }
+        let unmapped = t.elapsed().as_nanos() as f64 / f64::from(n);
+        // As deep as the real ones: the marker and the old directory.
+        let missing = app_data_dir_in(home.path()).join("no-such-entry");
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(std::fs::symlink_metadata(std::hint::black_box(&missing)).is_ok());
+        }
+        let stat = t.elapsed().as_nanos() as f64 / f64::from(n);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(crate::legacy::data_roots(Some(std::hint::black_box(
+                home.path(),
+            ))));
+        }
+        eprintln!(
+            "  data_roots: {:.0} ns",
+            t.elapsed().as_nanos() as f64 / f64::from(n)
+        );
+        eprintln!(
+            "  precedence alone: {unmapped:.0} ns; one stat: {stat:.0} ns; budget (alone + 2 stats): {:.0} ns",
+            unmapped + 2.0 * stat
+        );
         // After the flip the two ids differ: the cost of the extra stat.
         let (new, old) = ("t.new", "t.old");
         let canon = home.path().join(new).join("lumen.db");

@@ -633,7 +633,7 @@ unless turned off. Fresh installs and upgrades from 1.7.0 both get them.
 - **Turning it off.** `LUMEN_REPEAT_READS=off` (also `0`, `false`) in the environment the MCP
   server gets, which applies from the next Claude Code session; or the persisted setting, a
   `lumen_settings.json` holding `{"repeat_reads": false}` in the Lumen data directory beside the
-  ledger (macOS `~/Library/Application Support/io.hackpoint.lumen/`), read on every Lumen call
+  ledger (macOS: the legacy data directory under `~/Library/Application Support/`), read on every Lumen call
   (about 30 microseconds), so it applies to the next call with no restart. The environment
   variable wins over the file when both say something. `ab` is still accepted for the
   experiment, by the environment variable only. With it off the answers are byte-identical to
@@ -1037,7 +1037,7 @@ to reach the fault reporter to report it. It did not reproduce here.
 
 **The diagnostic asked for did not exist.** `tauri_plugin_log` was registered under
 `if cfg!(debug_assertions)`, and no other logger exists in the crate, so in a released build every
-`log::error!` went to a no-op sink and `~/Library/Logs/io.hackpoint.lumen/Lumen.log` was never
+`log::error!` went to a no-op sink and `Lumen.log` in the legacy log directory was never
 created. The 1.5.1 CHANGELOG and a comment on the issue both asked the reporter for a line from
 that file. Logging is now registered unconditionally, at `Warn` in release, with `LUMEN_LOG` to
 raise it and `Stdout` retained so running the binary from a terminal shows its output.
@@ -1508,7 +1508,7 @@ makes the tray fail, which remains undiagnosed and does not reproduce here on th
 version; it is the difference between a degraded app and an unusable one.
 
 **Correction.** This entry originally said the identifying line was `TRAY: build failed:` in
-`~/Library/Logs/io.hackpoint.lumen/Lumen.log`. That file does not exist in a released build:
+`Lumen.log` in the legacy log directory. That file does not exist in a released build:
 the logger was registered only under `cfg!(debug_assertions)`, so every `log::error!` in the
 shipped binary went to a no-op sink. The instruction was wrong when it was written, and it
 was also sent to the reporter of #5. Release logging is fixed in the next version; until
@@ -1516,7 +1516,7 @@ then the diagnostics that do work are in
 [docs/troubleshooting-the-tray.md](docs/troubleshooting-the-tray.md).
 
 The same report caught the cask uninstalling a LaunchAgent that does not exist: it
-unloaded `io.hackpoint.lumen`, but `launchctl` matches on the agent's Label and the plugin
+unloaded the app's bundle identifier, but `launchctl` matches on the agent's Label and the plugin
 writes `Lumen.plist` with Label `Lumen`. Every uninstall left a login item behind, still
 trying to launch a deleted app at each boot.
 
@@ -2282,7 +2282,7 @@ Setup after that release.
   The `trust` step is required because Homebrew refuses casks from a tap outside
   `homebrew/cask` until they are explicitly trusted.
 
-  Data in `~/Library/Application Support/io.hackpoint.lumen/` is untouched.
+  Data in the legacy data directory is untouched.
 
 ## [1.1.3] — 2026-07-28
 
@@ -2371,7 +2371,7 @@ Setup after that release.
 - fix(gui): store data in the per-OS location instead of hard-coding macOS's.
   `~/Library/Application Support/` was used on every platform, so on Linux the
   database landed in a literal `~/Library/…` directory. Linux now uses
-  `~/.local/share/io.hackpoint.lumen/` (XDG) and Windows `%APPDATA%`.
+  the legacy data directory under `~/.local/share/` (XDG) and Windows `%APPDATA%`.
 - fix(gui): gate the legacy `com.tauri.dev` database migration to macOS. It
   probed a macOS-only path, which could never match elsewhere.
 - fix(core): fall back to `USERPROFILE` when `HOME` is unset, so the database
@@ -2422,7 +2422,7 @@ Setup after that release.
   written to `~/.claude.json` pointed inside the ejected `/Volumes/…` mount, so
   Claude Code failed to launch the server with
   `ENOENT … posix_spawn '/Volumes/…/lumen-mcp'`. The sidecars are now copied to
-  `~/Library/Application Support/io.hackpoint.lumen/bin/` and registered there.
+  `bin/` in the legacy data directory and registered there.
 
 ## [1.0.0] — 2026-06-09
 
