@@ -72,9 +72,12 @@
 
 .stat {
   display: flex;
+  /* A cell too narrow for both moves the figure under its label, whole, rather than breaking
+     the label from its ⓘ or the figure from its tag. */
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.25rem 0.5rem;
   padding: 0.45rem 0.1rem;
   border-bottom: 1px solid var(--lumen-border);
 }
@@ -82,9 +85,12 @@
 .stat__label {
   color: var(--lumen-text-dim);
   font-size: 0.78rem;
+  white-space: nowrap;
 }
 
 .stat__value {
+  margin-left: auto;
+  white-space: nowrap;
   font-family: var(--lumen-font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--lumen-text);
