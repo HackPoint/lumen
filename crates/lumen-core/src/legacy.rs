@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+pub mod merge;
+
 /// The identifier Lumen used before the data directory moved.
 pub const LEGACY_APP_ID: &str = "io.hackpoint.lumen";
 
