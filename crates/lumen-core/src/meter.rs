@@ -86,6 +86,25 @@ pub fn canonical_db_path_in(home: &std::path::Path) -> std::path::PathBuf {
 /// Separated so the ordering can be tested directly: mutating LUMEN_DB / HOME in
 /// a test is racy across threads and `unsafe` in edition 2024.
 pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
+    resolve_db_path_with(lumen_db, home, APP_ID, crate::legacy::LEGACY_APP_ID)
+}
+
+/// [`resolve_db_path`] with the identifiers passed in, for tests with fake ones.
+fn resolve_db_path_with(
+    lumen_db: Option<&str>,
+    home: Option<&str>,
+    new_id: &str,
+    legacy_id: &str,
+) -> Option<std::path::PathBuf> {
+    resolve_db_path_unmapped(lumen_db, home)
+        .map(|p| crate::legacy::effective_with(&p, new_id, legacy_id))
+}
+
+/// The precedence policy alone, before the legacy-directory mapping.
+fn resolve_db_path_unmapped(
+    lumen_db: Option<&str>,
+    home: Option<&str>,
+) -> Option<std::path::PathBuf> {
     // 1. Explicit env var.
     if let Some(p) = lumen_db
         && !p.is_empty()
@@ -895,6 +914,55 @@ mod tests {
         }
     }
 
+    /// Timing probe, not a guard: `cargo test -p lumen-core --release resolve_db_path_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn resolve_db_path_timing() {
+        let home = TempDir::new().unwrap();
+        let h = home.path().to_string_lossy().to_string();
+        std::fs::create_dir_all(app_data_dir_in(home.path())).unwrap();
+        let n = 200_000u32;
+        for _ in 0..1000 {
+            std::hint::black_box(resolve_db_path(None, Some(&h)));
+        }
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(resolve_db_path(None, Some(std::hint::black_box(&h))));
+        }
+        let per = t.elapsed().as_nanos() as f64 / f64::from(n);
+        eprintln!("resolve_db_path: {per:.0} ns/call");
+        // After the flip the two ids differ: the cost of the extra stat.
+        let (new, old) = ("t.new", "t.old");
+        let canon = home.path().join(new).join("lumen.db");
+        let ph = home.path().join(old);
+        std::fs::create_dir_all(&ph).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(crate::legacy::effective_with(
+                std::hint::black_box(&canon),
+                new,
+                old,
+            ));
+        }
+        eprintln!(
+            "effective_with, pending (1 stat): {:.0} ns/call",
+            t.elapsed().as_nanos() as f64 / f64::from(n)
+        );
+        std::fs::remove_dir(&ph).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(crate::legacy::effective_with(
+                std::hint::black_box(&canon),
+                new,
+                old,
+            ));
+        }
+        eprintln!(
+            "effective_with, fresh (2 stats): {:.0} ns/call",
+            t.elapsed().as_nanos() as f64 / f64::from(n)
+        );
+    }
+
     // ── resolve_db_path precedence ───────────────────────────────────────────
 
     #[test]
@@ -976,6 +1044,62 @@ mod tests {
         let b = resolve_db_path(None, Some(&h));
         assert_eq!(a, b);
         assert_eq!(a, Some(canonical_db_path_in(home.path())));
+    }
+
+    #[test]
+    fn a_stale_pointer_or_env_path_is_redirected_only_with_the_marker() {
+        // RED against the unmapped policy: it returns the stale path as written.
+        let home = TempDir::new().unwrap();
+        let root = home.path().join("root");
+        let (old, new) = (root.join("fake.old"), root.join("fake.new"));
+        std::fs::create_dir_all(&old).unwrap();
+        let stale = old.join("lumen.db");
+        let h = home.path().to_string_lossy().to_string();
+        std::fs::write(
+            home.path().join(".lumen_db_path"),
+            stale.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let via_pointer = || resolve_db_path_with(None, Some(&h), "fake.new", "fake.old");
+        let via_env =
+            || resolve_db_path_with(Some(&stale.to_string_lossy()), None, "fake.new", "fake.old");
+        assert_eq!(via_pointer(), Some(stale.clone()), "no marker, no move");
+        assert_eq!(via_env(), Some(stale.clone()));
+
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join(crate::legacy::MARKER_NAME), b"{}").unwrap();
+        assert_eq!(via_pointer(), Some(new.join("lumen.db")));
+        assert_eq!(via_env(), Some(new.join("lumen.db")));
+    }
+
+    #[test]
+    fn a_custom_lumen_db_outside_the_app_dir_is_untouched_by_the_mapping() {
+        let home = TempDir::new().unwrap();
+        let root = home.path().join("root");
+        std::fs::create_dir_all(root.join("fake.old")).unwrap();
+        std::fs::create_dir_all(root.join("fake.new")).unwrap();
+        std::fs::write(
+            root.join("fake.new").join(crate::legacy::MARKER_NAME),
+            b"{}",
+        )
+        .unwrap();
+        let custom = home.path().join("mine").join("ledger.db");
+        let got = resolve_db_path_with(
+            Some(&custom.to_string_lossy()),
+            None,
+            "fake.new",
+            "fake.old",
+        );
+        assert_eq!(got, Some(custom));
+    }
+
+    #[test]
+    fn with_no_marker_and_no_old_directory_the_canonical_path_is_unchanged() {
+        // Behaviour-preserving for every install today.
+        let home = TempDir::new().unwrap();
+        let got = resolve_db_path(None, Some(&home.path().to_string_lossy()));
+        assert_eq!(got, Some(canonical_db_path_in(home.path())));
     }
 
     #[test]
