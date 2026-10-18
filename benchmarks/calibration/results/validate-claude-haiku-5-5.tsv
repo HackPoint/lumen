@@ -1,0 +1,16 @@
+time	kind	id	attempt	model_id	input	cache_creation	cache_read	total	reply
+2026-10-13T19:35:21Z	baseline	-	1	claude-haiku-5-5	2	955	0	957	OK
+2026-10-13T19:35:25Z	baseline	-	2	claude-haiku-5-5	2	0	955	957	OK
+2026-10-13T19:35:29Z	baseline	-	3	claude-haiku-5-5	2	0	955	957	OK
+2026-10-13T19:35:34Z	baseline	-	4	claude-haiku-5-5	2	0	955	957	OK
+2026-10-13T19:35:38Z	baseline	-	5	claude-haiku-5-5	2	0	955	957	OK
+2026-10-13T19:35:43Z	validate	rust-02	1	claude-haiku-5-5	2	3188	0	3190	OK
+2026-10-13T19:35:48Z	validate	rust-02	2	claude-haiku-5-5	2	0	3188	3190	OK
+2026-10-13T19:35:52Z	validate	prose-03	1	claude-haiku-5-5	2	2914	0	2916	OK
+2026-10-13T19:35:57Z	validate	prose-03	2	claude-haiku-5-5	2	0	2914	2916	OK
+2026-10-13T19:36:01Z	validate	tiny:x	1	claude-haiku-5-5	2	957	0	959	OK
+2026-10-13T19:36:06Z	validate	tiny:x	2	claude-haiku-5-5	2	0	957	959	OK
+2026-10-13T19:36:11Z	validate	tiny:hello world	1	claude-haiku-5-5	2	959	0	961	OK
+2026-10-13T19:36:15Z	validate	tiny:hello world	2	claude-haiku-5-5	2	0	959	961	OK
+2026-10-13T19:36:20Z	validate	rust-02+prose-03	1	claude-haiku-5-5	2	5147	0	5149	OK
+2026-10-13T19:36:24Z	validate	rust-02+prose-03	2	claude-haiku-5-5	2	0	5147	5149	OK

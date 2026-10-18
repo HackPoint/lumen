@@ -1,0 +1,21 @@
+<!-- Shown while the settings file has no answer, and after a choice that could not be saved. -->
+@if (visible()) {
+    <section class="prompt" role="group" aria-labelledby="billing-prompt-head">
+        <p class="prompt__head" id="billing-prompt-head">How do you pay for Claude Code?</p>
+        <p class="prompt__body">
+            So Lumen can say what a saving is worth to you. You can change it later in Settings.
+        </p>
+        <div class="prompt__choices">
+            @for (c of choices; track c.mode) {
+                <button type="button" class="prompt__btn" [disabled]="billing.saving()"
+                        (click)="choose(c.mode)">{{ c.label }}</button>
+            }
+        </div>
+        @if (billing.writeError(); as err) {
+            <p class="prompt__error" role="alert">Not saved: {{ err }}</p>
+        }
+    </section>
+}
+
+<!-- Always in the page, so its text is announced when it changes. -->
+<p class="prompt__status" role="status" aria-live="polite" tabindex="-1" #status>{{ confirmation() }}</p>

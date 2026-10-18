@@ -12,10 +12,17 @@
 #   - the icon is on screen, and the main window opens
 #   - the window says why: the icon had been hidden by macOS, and Quit Lumen is how to stop it
 #   - the window says which version this is, in its header and in About: the one tauri.conf.json
-#     declares. macOS has no WebDriver, so this is where the version is read off a built app there
+#     declares. macOS has no WebDriver, so this is where the version is read off a built app there.
+#     About has been on the Settings screen since 1.9.0, reached here by pressing the Settings tab
+#     through the accessibility API; the WebDriver e2e (lumenator/e2e) checks it on Linux and
+#     Windows by clicking the same tab
 #
 # Then the control: a launch with nothing planted must do none of that, and keep its window
-# closed.
+# closed. Last, on GitHub Actions only, a launch with HOME set to a fresh temporary directory
+# holding the e2e's fixture ledger (lumenator/e2e/fixture-ledger.mjs), its window opened with
+# `lumen show`, saved as home-macos.png beside the WebDriver e2e's home-linux.png and
+# home-windows.png: Home's headline on the same ledger on all three. No ledger of the runner's is
+# read or written for it.
 #
 # It writes the app's preferences and launches it as the logged-in user, which on a real
 # machine registers a login item and rewrites Lumen's hooks. So it runs on CI runners only:
@@ -110,6 +117,42 @@ function run(argv) {
     }
   }
   return out.join('\n');
+}
+JXA
+
+# Press the control in the PID's windows whose accessible name starts with the given text: a tab
+# in the window's navigation. A web view exposes a link's text as its title or description, not
+# as a static text, so the texts above never list the tabs. Prints what it pressed, or fails
+# listing the controls it saw.
+PRESS_JS="$OUT/press.js"
+cat >"$PRESS_JS" <<'JXA'
+function run(argv) {
+  const pid = Number(argv[0]);
+  const wanted = argv[1];
+  const se = Application('System Events');
+  const procs = se.processes.whose({ unixId: pid });
+  if (procs.length === 0) throw new Error(`no process ${pid}`);
+  const attr = (el, name) => {
+    try {
+      return String(el[name]() || '');
+    } catch (e) {
+      return '';
+    }
+  };
+  const seen = [];
+  for (const w of procs[0].windows()) {
+    for (const el of w.entireContents()) {
+      const role = attr(el, 'role');
+      if (!['AXRadioButton', 'AXTab', 'AXLink', 'AXButton'].includes(role)) continue;
+      const label = ['title', 'description', 'name', 'value'].map(a => attr(el, a)).find(Boolean) || '';
+      seen.push(`${role} "${label}"`);
+      if (label.trim().startsWith(wanted)) {
+        el.actions.byName('AXPress').perform();
+        return `pressed ${role} "${label}"`;
+      }
+    }
+  }
+  throw new Error(`no control named ${wanted} among: ${seen.join(', ')}`);
 }
 JXA
 
@@ -262,9 +305,10 @@ else
   fail "the window does not explain the restored icon"
 fi
 
-# The version, which the window shows in its header as "Lumen <version>" and again in About. The
-# accessibility API gives one line per text node, so each is matched as a whole line; text
-# recognition may split or misread a line, so there a miss is a limitation, not a failure.
+# The version, which the window shows in its header as "Lumen <version>" and, since 1.9.0, in
+# About on the Settings screen. The accessibility API gives one line per text node, so each is
+# matched as a whole line; text recognition may split or misread a line, so there a miss is a
+# limitation, not a failure.
 if [ -z "$TEXT" ]; then
   : # reported as a limitation above
 elif [ "$HOW" = "the accessibility API" ]; then
@@ -273,10 +317,33 @@ elif [ "$HOW" = "the accessibility API" ]; then
   else
     fail "the header does not say \"Lumen $VERSION\""
   fi
-  if grep -qxF "$VERSION" <<<"$TEXT"; then
-    ok "About says $VERSION"
+  # About is on Settings. Only a Settings screen that is showing and lacks the version is a
+  # failure: a tab this runner's accessibility API cannot press, or a screen that has not
+  # changed when the wait is over, is the runner's limit, and the WebDriver e2e covers About.
+  if PRESSED=$(osascript -l JavaScript "$PRESS_JS" "$PID" Settings 2>&1); then
+    echo "$PRESSED"
+    ON_SETTINGS=0
+    for _ in $(seq 1 30); do
+      sleep 0.5
+      osascript -l JavaScript "$TEXTS_JS" "$PID" >"$OUT/settings-text.txt" 2>/dev/null
+      # "About" is Settings' heading and on no other screen.
+      if grep -qxF "About" "$OUT/settings-text.txt"; then
+        ON_SETTINGS=1
+        grep -qxF "$VERSION" "$OUT/settings-text.txt" && break
+      fi
+    done
+    if [ -n "$MAIN_ID" ]; then
+      screencapture -x -o -l "$MAIN_ID" "$OUT/settings-window.png" 2>&1
+    fi
+    if [ "$ON_SETTINGS" = 0 ]; then
+      limited "pressed the Settings tab, but the window did not show Settings within 15 s; About not checked here"
+    elif grep -qxF "$VERSION" "$OUT/settings-text.txt"; then
+      ok "About, on Settings, says $VERSION"
+    else
+      fail "About, on Settings, does not say $VERSION (what it says: $OUT/settings-text.txt)"
+    fi
   else
-    fail "About does not say $VERSION"
+    limited "could not press the Settings tab through the accessibility API, so About is not checked here: $PRESSED"
   fi
 elif grep -qF "Lumen $VERSION" <<<"$TEXT"; then
   ok "the header says \"Lumen $VERSION\" (by text recognition)"
@@ -321,6 +388,62 @@ else
   fail "the window server lists no menu-bar icon of the control's on screen"
 fi
 stop_app "$CPID"
+
+echo
+echo "== 7. Home on a fixture ledger, for the release's screenshot (home-macos.png)"
+# In a home of its own: the app keeps its ledger, settings and pointer file under $HOME, so a
+# fresh temporary one holds the fixture and nothing else, and no ledger of the runner's is read
+# or written. The fixture is the WebDriver e2e's (lumenator/e2e/fixture-ledger.mjs), which only
+# ever writes a ledger it creates, so the three platforms' pictures show the same ledger.
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
+  limited "step 7 runs on GitHub Actions only (GITHUB_ACTIONS=true); no home-macos.png"
+else
+  FIXHOME=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lumen-home.XXXXXX")
+  FIXDB="$FIXHOME/Library/Application Support/$DOMAIN/lumen.db"
+  case "$FIXDB" in
+    "$FIXHOME"/*) ;;
+    *) echo "refusing: $FIXDB is not inside $FIXHOME" >&2; exit 2 ;;
+  esac
+  mkdir -p "$FIXHOME/.claude/lumen"
+  : >"$FIXHOME/.claude/lumen/.setup_done"
+  if FIXTURE=$(HOME="$FIXHOME" node "$ROOT/lumenator/e2e/fixture-ledger.mjs" --db "$FIXDB" --mcp "$ROOT/target/release/lumen-mcp" --billing subscription 2>&1); then
+    ok "wrote the fixture ledger in a home of its own: $FIXTURE"
+    HOME="$FIXHOME" LUMEN_DB="$FIXDB" "$ROOT/target/release/lumen" >"$OUT/lumen-line.txt" 2>&1 \
+      && echo "lumen: $(cat "$OUT/lumen-line.txt")"
+    HLOG="$OUT/home-stdout.log"
+    HOME="$FIXHOME" "$EXE" >"$HLOG" 2>&1 &
+    HPID=$!
+    echo "pid $HPID"
+    # Past the presence checks, then the window opened the way a user opens it from a terminal.
+    wait_for "$HLOG" "TRAY: presence check" 30 && sleep 9
+    HOME="$FIXHOME" "$ROOT/target/release/lumen" show 2>&1 | sed 's/^/lumen show: /'
+    HOME_ID=""
+    for _ in $(seq 1 20); do
+      windows_of "$HPID" >"$OUT/windows-home.txt"
+      HOME_ID=$(sed -n 's/^layer=0 onscreen=1 .* id=\([0-9]*\) owner=.*$/\1/p' "$OUT/windows-home.txt" | head -n1)
+      [ -n "$HOME_ID" ] && break
+      sleep 0.5
+    done
+    if [ -z "$HOME_ID" ]; then
+      limited "lumen show did not bring the main window on screen; no home-macos.png"
+    else
+      # The summary is fetched again when the window gets focus; give it a moment to render.
+      sleep 3
+      screencapture -x -o -l "$HOME_ID" "$OUT/home-macos.png" 2>&1
+      osascript -l JavaScript "$TEXTS_JS" "$HPID" >"$OUT/home-text.txt" 2>/dev/null
+      if grep -q "tokens saved, net" "$OUT/home-text.txt"; then
+        ok "Home shows the headline: $(grep -m1 'fewer tokens from file and tool reads' "$OUT/home-text.txt")"
+      elif [ -s "$OUT/home-macos.png" ]; then
+        limited "the accessibility API did not read the headline; the picture is $OUT/home-macos.png"
+      else
+        limited "neither the accessibility API nor a screenshot read the window"
+      fi
+    fi
+    stop_app "$HPID"
+  else
+    limited "could not write the fixture ledger: $FIXTURE"
+  fi
+fi
 
 echo
 if [ "$FAILED" != 0 ]; then

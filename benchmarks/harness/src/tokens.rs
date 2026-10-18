@@ -376,8 +376,6 @@ pub struct ModeStat {
     /// Median over files of (file tokens - returned tokens). Negative means the call cost more
     /// than reading the file.
     pub saved_median: Option<i64>,
-    /// MODELLED, not measured: `saved_median` x the econ model's value of a saved token.
-    pub modelled_usd_median: Option<f64>,
     /// How the server routed each call, from its own ledger.
     pub routes: BTreeMap<String, usize>,
 }
@@ -407,16 +405,7 @@ pub struct Aggregates {
     pub by_bucket_language: Vec<Named>,
 }
 
-/// Round to micro-dollars so the JSON carries no float noise.
-pub fn usd(x: f64) -> f64 {
-    (x * 1e6).round() / 1e6
-}
-
-fn mode_stat(
-    files: &[&FileResult],
-    pick: impl Fn(&FileResult) -> Option<(i64, &str)>,
-    value_per_token: f64,
-) -> ModeStat {
+fn mode_stat(files: &[&FileResult], pick: impl Fn(&FileResult) -> Option<(i64, &str)>) -> ModeStat {
     let mut returned = Vec::new();
     let mut saved = Vec::new();
     let mut routes = BTreeMap::new();
@@ -427,28 +416,26 @@ fn mode_stat(
             *routes.entry(route.to_string()).or_insert(0) += 1;
         }
     }
-    let saved_median = dist(&saved).map(|d| d.median);
     ModeStat {
         returned: dist(&returned),
-        saved_median,
-        modelled_usd_median: saved_median.map(|s| usd(s as f64 * value_per_token)),
+        saved_median: dist(&saved).map(|d| d.median),
         routes,
     }
 }
 
-fn group(files: &[&FileResult], vpt: f64) -> GroupStat {
+fn group(files: &[&FileResult]) -> GroupStat {
     let full: Vec<i64> = files.iter().map(|f| f.full).collect();
     GroupStat {
         files: files.len(),
         full: dist(&full),
-        outline: mode_stat(files, |f| Some((f.outline, f.outline_route.as_str())), vpt),
-        recall: mode_stat(files, |f| f.recall.zip(f.recall_route.as_deref()), vpt),
-        stub: mode_stat(files, |f| Some((f.stub, f.stub_route.as_str())), vpt),
-        delta: mode_stat(files, |f| f.delta.zip(f.delta_route.as_deref()), vpt),
+        outline: mode_stat(files, |f| Some((f.outline, f.outline_route.as_str()))),
+        recall: mode_stat(files, |f| f.recall.zip(f.recall_route.as_deref())),
+        stub: mode_stat(files, |f| Some((f.stub, f.stub_route.as_str()))),
+        delta: mode_stat(files, |f| f.delta.zip(f.delta_route.as_deref())),
     }
 }
 
-pub fn aggregate(files: &[FileResult], vpt: f64) -> Aggregates {
+pub fn aggregate(files: &[FileResult]) -> Aggregates {
     let all: Vec<&FileResult> = files.iter().collect();
     let sel = |b: Option<&str>, l: Option<&str>| -> Vec<&FileResult> {
         files
@@ -465,7 +452,7 @@ pub fn aggregate(files: &[FileResult], vpt: f64) -> Aggregates {
             by_bucket.push(Named {
                 bucket: Some(b.name.to_string()),
                 language: None,
-                stat: group(&fs, vpt),
+                stat: group(&fs),
             });
         }
         for l in LANGS {
@@ -474,7 +461,7 @@ pub fn aggregate(files: &[FileResult], vpt: f64) -> Aggregates {
                 by_bucket_language.push(Named {
                     bucket: Some(b.name.to_string()),
                     language: Some(l.name().to_string()),
-                    stat: group(&fs, vpt),
+                    stat: group(&fs),
                 });
             }
         }
@@ -485,12 +472,12 @@ pub fn aggregate(files: &[FileResult], vpt: f64) -> Aggregates {
             by_language.push(Named {
                 bucket: None,
                 language: Some(l.name().to_string()),
-                stat: group(&fs, vpt),
+                stat: group(&fs),
             });
         }
     }
     Aggregates {
-        all: group(&all, vpt),
+        all: group(&all),
         by_bucket,
         by_language,
         by_bucket_language,

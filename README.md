@@ -23,12 +23,13 @@ It watches your session files locally and surfaces things Claude Code doesn't sh
 
 | Signal | Where it appears |
 | --- | --- |
-| **Context fill** — tokens used / window size, live | Menu-bar icon · tray popover · main window gauge |
-| **Compaction warning** — amber at 80%, red at 95% | Tray popover · OS notification |
-| **Session cost** — input + output + cache tokens, priced | Main window cost tiles |
+| **What Lumen saved** — tokens and dollars, net, this week and all time | Home, at the top (from 1.9.0) · `lumen` · tray |
+| **Context fill** — tokens used / window size, live | Menu-bar icon · tray popover · Details screen gauge |
+| **Compaction warning** — amber at 80%, red at 95% | Tray popover · OS notification · Details screen |
+| **Session cost** — input + output + cache tokens, priced | Tray popover · Settings screen, beside the spend alerts |
 | **Caching savings** — what Claude Code's cache actually saved | Optimizer screen (labeled "reported by Claude Code") |
-| **Net value of interception** — tokens saved, priced, less the round they cost | Optimizer screen hero metric |
-| **Context hotspots** — which files your context actually goes into | Hotspots screen |
+| **Lumen optimized** — tokens Lumen's tools kept out of context, with the token ratio and per-tool breakdowns | Optimizer screen · Details screen |
+| **What to do** — files read in full again and again, and what to change | Why screen, shown in the window's tabs only while there is something to act on |
 
 No account, and no telemetry: none of the above leaves your machine. Lumen makes two
 network requests in total, both described under [Security & privacy](#security--privacy)
@@ -203,7 +204,15 @@ on macOS, wherever your desktop puts indicators on Linux and Windows.
 | Action | Result |
 | --- | --- |
 | **Left-click** the tray icon | Quick popover — context gauge, current cost, mode badge |
-| **Right-click** → "Open Lumen" | Full window with **Context** and **Optimizer** tabs |
+| **Right-click** → "Open Lumen" | Full window with **Home**, **Optimizer**, **Details** and **Settings** tabs, and **Why** when it has something to say |
+
+Home answers three questions: how much Lumen saved, whether it is working, and what to do.
+Every other figure is on Details (the context gauge, the token ratio, the breakdowns) or
+Settings (spend and its alert thresholds, the Repeat reads switch, billing mode, Report a
+fault, the version). After Setup, Home asks once how you pay for Claude Code — a
+subscription (Pro/Max) or the API, per token — because that decides what a saving is
+worth to you; change it later on Settings. The answer is kept as `billing_mode` in
+`lumen_settings.json`, beside `repeat_reads`.
 
 The tray icon pulses with ring animations; its color reflects context fill status
 (green → amber at 80% → red at 95%).
@@ -212,8 +221,8 @@ The tray icon pulses with ring animations; its color reflects context fill statu
 
 ## How to run the CLI (`lumen`)
 
-The `lumen` terminal command is a **live dashboard** — the same data as the GUI,
-rendered in your terminal.
+The `lumen` terminal command prints one headline line; `lumen dash` is the **live
+dashboard** — the same data as the GUI, rendered in your terminal.
 
 > **Correction.** Earlier versions of this document said hooks fire only in the
 > Claude Code CLI and not in the VS Code extension, and built a "Full mode vs Soft
@@ -242,9 +251,22 @@ Open Lumen → click **"Install CLI"** — this symlinks the bundled binary into
 ### Run
 
 ```bash
-lumen          # live terminal dashboard
-# Press q or Ctrl-C to quit
+lumen          # one line: what Lumen saved this week and all time, net, and whether it is
+               # working; names lumen report and lumen dash
+lumen dash     # live terminal dashboard; --no-anim turns the ring animation off
+               # press q or Ctrl-C to quit; piped, it prints one line and exits
+lumen report   # the savings in detail: each period with its band, how it is measured, the
+               # calls that gained and lost most (--json: the whole summary, per call)
+lumen faults   # render a fault report, and file it with --yes (see Filing a fault report)
+lumen doctor   # everything a bug report needs, in one paste
+lumen show     # ask a running Lumen to show its window (macOS)
 ```
+
+Until 1.9.0 bare `lumen` was the dashboard and `lumen report` was the fault report. Both old
+spellings still work: `lumen --no-anim` opens the dashboard, and `lumen report` with any of the
+fault report's flags (`--dry-run`, `--yes`, `--repo`, `--include-source`, `--faults`) runs
+`lumen faults`. Each says so in one line on stderr, as does `--no-anim` given to any command
+but `lumen dash`, where it does nothing.
 
 The dashboard reads from the same local SQLite database as the GUI. It works best
 with the Lumen daemon running (the GUI starts the daemon automatically); if the daemon
@@ -263,7 +285,31 @@ is not running, the CLI falls back to polling the database directly.
 Every number in Lumen comes from your local session files or is computed locally.
 Here is what each one means, where it comes from, and any honesty caveat.
 
-### Context tab
+### Home
+
+The top of Home is the savings headline: tokens saved and dollars saved, net, this week and all
+time, both in bold, from the savings engine's summary of your own ledger. The tokens are Claude's,
+estimated from Lumen's `cl100k_base` counts by the calibration (below), so they read "≈", with
+the band on the ⓘ. The dollar figure is the net on record, a floor: a gain reads "at least $X
+saved, net", and a loss, whose floor is the most it can be, "net loss of at most $X" (or "net
+loss under half a cent"), in red. On a subscription,
+or before you have said how you pay, the dollars are "at API prices", since a plan is not billed
+per token, after the share of tokens Lumen kept out of context ("≈ 92% fewer tokens from file
+and tool reads this week"). What may be worth more (modelled) and the calls with tokens and no
+dollars (unpriced) are tags beside the figure, never in it. Under it: whether Lumen is working
+(a loss whose band reaches a gain says Lumen *may* have cost more than it saved), and the one
+thing to do, with its step (Run Setup, or `lumen doctor`). "How it's measured", from the
+headline and from Details, has every rule, the price table and its date, the calibration (its
+date, the Claude Code version it was measured through, and the ratio each group of rows was
+converted at), each figure's band and count, and the newest 200 calls. The figures are
+refreshed every minute and when the window gets focus; if a refresh fails, the last figures
+stay, marked as not up to date. Bare `lumen` and the tray say the same figures in the same words.
+
+### Details and Settings
+
+The context gauge and its window selector are on **Details** (they were the top of the Context
+tab until 1.9.0). The session cost tiles, the usage report and the spend alert thresholds are
+on **Settings**.
 
 #### Context gauge (the ring)
 
@@ -303,8 +349,43 @@ The running **dollar total for the active session**, computed locally from:
 - Cache-read tokens × cache-read price
 - Cache-write tokens × cache-write price
 
-Prices are hard-coded to the published Anthropic rate table per model. Lumen cannot
-see your negotiated pricing or credits.
+Each model's tokens are priced at that model's list price, from Anthropic's published
+pricing page; the table is `PRICES` in `crates/lumen-core/src/rates.rs`, with the date it
+was last checked. A session that mixes models, such as a subagent on Haiku inside an Opus
+session, has each part priced at its own rate. Until 1.9.0 every token was priced at
+Opus-class rates whatever the model, which overstated a Sonnet session about 1.7 times and
+a Haiku one five times.
+
+No figure is shown as more complete than it is. One that is a floor, because part of it
+could not be priced or was priced low, is tagged **at least** (in `lumen dash` it reads
+`at least $…`), and hovering the tag says why:
+
+- A model the table has no price for (`<synthetic>`, an id from Bedrock, a model newer
+  than the table, or one Lumen cannot price, such as Claude Haiku 5.5, whose rate depends
+  on each request's prompt length) adds no dollars. Its tokens are still counted. With
+  nothing priced at all the figure shows `—` and is tagged **no price**; before the app has
+  loaded the price table, the tag says so instead.
+- Fast mode is priced at its own rate: each turn records the speed it ran at
+  (`usage.speed`), and a fast turn on Claude Opus 5.5, Opus 5 or Opus 4.8 costs the
+  fast-mode price. A turn ingested before 1.9.0 recorded no speed; on those three models it
+  is priced at the standard rate, and the figure is a floor.
+- A cache write recorded as a 1-hour write is priced at the 1-hour rate, and one recorded as
+  a 5-minute write at the 5-minute rate. A turn ingested before 1.9.0 recorded neither; its
+  writes are priced at the 5-minute rate, the lower of the two, and the figure is a floor.
+- A spend alert fires on a floor that is over its limit. When a floor is under the limit,
+  whether the limit was crossed is unknown, and the Alert Thresholds section on Settings
+  says so.
+- US-only inference is priced at its own rate: each turn records where it ran
+  (`usage.inference_geo`), and a turn that ran US-only (`"us"`) on Claude Opus 4.6, Sonnet 4.6
+  or any later model costs 1.1 times every price, input, output, cache writes and cache reads,
+  fast mode's included. One routed globally (`"global"`) costs the list price, and so does every
+  turn of an older model, which cannot run US-only. A turn that recorded no region, every one
+  ingested before 1.9.0, is priced at the global rate on the 4.6 and later models, and the
+  figure is a floor. So is one that recorded `"not_available"`, which Claude Code writes when it
+  has no region to report: Anthropic's pricing pages do not say which rate such a turn paid,
+  and a request that names no region runs in the workspace's default one, which can be the US.
+- These are the first-party API's prices. Lumen cannot see batch discounts, your negotiated
+  pricing or credits.
 
 #### Cost breakdown (output / fresh input / cache read / cache write)
 
@@ -314,7 +395,7 @@ for code generation, while cache reads dominate for long-running agentic session
 
 #### Saved by caching
 
-The dollar value of tokens that hit Claude Code's prompt cache, calculated as:
+The dollar value of tokens that hit Claude Code's prompt cache, calculated per model as:
 `cache_read_tokens × (input_price − cache_read_price)`.
 
 **This is reported by Claude Code, not caused by Lumen.** The label always reads
@@ -343,37 +424,110 @@ Monday-based week.
 > **Screenshot needed** — `docs/assets/screenshot-optimizer.png`
 > Capture: the Optimizer tab showing effectiveness %, Lumen optimized, Saved by caching, and a by-tool breakdown row.
 
-#### Effectiveness %
+#### Effectiveness % (on Details)
 
-**The optimizer's hero metric is dollars, not the token ratio.** The token ratio was the
-headline until 1.3.1, and it flattered the product. Returning 87% fewer tokens sounds
+**From 1.9.0 the Optimizer screen has no dollar hero.** The net value figure described below
+is retired: the savings engine's figures are the headline on Home, and How it's measured shows
+how each was worked out, call by call; the token ratio,
+the by-tool and by-channel breakdowns and the provenance counts are on the Details screen.
+
+**Until 1.9.0 the optimizer's hero metric was dollars, not the token ratio.** The token ratio
+was the headline until 1.3.1, and it flattered the product. Returning 87% fewer tokens sounds
 decisive, but an intercepted read also *costs* something — the read was blocked, so the
 model spends an extra round calling a Lumen tool instead. The honest question is whether
 the tokens saved are worth more than the round they cost:
 
 ```text
-value of saving S tokens = S × (cache_write + cache_read × R) / 1e6
-cost of the extra round  = (context × cache_read + output × output_rate) / 1e6 × pairs
+value of saving S tokens = S × (one-time price + Σ cache-read price over the R rounds that follow)
+cost of an extra round   = the turn that read the result, priced as it ran
+net                      = value − extra rounds × that cost, signed
 ```
 
-`R` is how many rounds the saving keeps paying for, bounded by the next compaction. Every
-other input comes from the call itself.
+From 1.9.0 every term is derived per call, from your own ledger, by one engine
+(`lumen_core::savings`) that the app, `lumen`, `lumen report` and the tray all read. The turn that
+read a call's result is found in the call's own conversation (a subagent's call in the subagent's
+transcript), and its model, speed, region and cache duration price both the saving and the extra
+round: a dollar is always the price of the model that consumed the tokens.
 
-**No dollar figure is published here.** This section used to quote one for the author's
-machine, and it rested on `R`: not derived per call, but one assumed constant, 65 rounds
-(`DEFAULT_ROUNDS_REMAINING` in `crates/lumen-core/src/econ.rs`), and the value side of the
-formula is linear in it. Until `R` is derived per call, a dollar total
-is that assumption multiplied out. The Optimizer screen still computes the figure from your
-own ledger; read it with that in mind. The token ratio beneath it is measured.
+- **What a call saved** is what a built-in Read would have put in context, less what the call
+  returned, in Claude's tokens: each `cl100k_base` count the ledger records is converted by the
+  calibration table (below), by the file's type and the model of the turn that read the result,
+  at the median ratio, with the smallest to the largest ratio any sample came out at as its band.
+  A row with no such turn, or one read by a model the calibration did not measure, takes the
+  type's ratio over both tokenizers, weighted alike, with a band that spans them. What Lumen
+  returned (an outline, a slice, a stub, a delta) is not the raw file text the calibration
+  measured, so it takes the file's median with the widest band any sample gave: the smallest to
+  the largest ratio of every sample the model was sent, of every type (every sample of every
+  model where the model is not known). A Read returns at most 25,000 of Claude's tokens of a file
+  (Claude Code's documented default, and a file over 256 KB is refused whole, after which the
+  model reads a page), so a file whose calibrated count is larger counts as 25,000.
+- **`R`** is the turns after the one that read the result, up to the first compaction or rewind
+  the daemon recorded in that transcript, or the first turn whose prompt is smaller than the one
+  before it: context was taken out there (a compaction, a rewind, cleared tool results), whether
+  or not the ledger recorded it, and the result may have gone with it. That end is labelled
+  inferred.
+- **The figure shown, in bold, as "at least"** is the one on record: every call priced at the
+  turn that read it, less every extra round it cost, and the Reads the intercept blocked, each
+  priced at the turn that read the block (or, where only an escape-valve fault records it, the
+  turn that retried it). It is a floor, so it takes the tokens a call saved at the low end of
+  their calibrated band: the file at the smallest ratio its row measured, less Lumen's answer at
+  the largest of its band (for a repeat read, the earlier answer at its smallest less the stub
+  or delta at its largest), never at the median ratio and never at a percentile, so it holds
+  call by call. An extra round is the turn's own recorded usage, the provider's count, and is
+  not calibrated. Where a conversation began before the daemon recorded compactions and shows no
+  shrink to end `R`, `R` may be too long, so the saving is taken at `R = 0` (the price of
+  putting the tokens in context once) and its rounds in full.
+  "On record" rather than "measured": the provider's usage data is measured, and this figure
+  also rests on calibrated estimates.
+- **Modelled**, beside it and never added to it: what those calls are worth beyond `R = 0`.
+- **Tokens only**: a call with no session to find its turns in (most rows before 1.1.5), no turn
+  that read it, or a model with no price. Its tokens count; its dollars are not guessed from
+  other calls'.
+- **Extra rounds**: each Read the intercept blocked is one, on evidence. The hook writes no row
+  for a block, but the transcript of the agent that tried the Read records it (the Read, then an
+  error holding the block's message), and the daemon reads every transcript for them, from its
+  first line, recording which it has read and how far. Where a transcript does not record the
+  block of a file (it was deleted before the daemon read it), the escape valve's faults stand for
+  it: once per session, agent and file, and where the ledger cannot tell whose Read a fault was
+  (before 1.9.0, and before the meter recorded agents in 1.8.0), one block per agent that could
+  have read the file then (the main agent and each subagent with a turn within five minutes),
+  never more than the faults, so the cost is never understated. Where a transcript does record
+  the block, the faults on that file are its later Reads and add nothing, but for an agent whose
+  transcript was not read through. A call that may have followed a blocked Read is charged one,
+  labelled modelled, unless a transcript read through the call records a block of the same file in
+  the same conversation before it: then that block, counted on its own, is the call's round, and
+  it answers for that one call only.
 
-**Tool calls and built-in `Read` events are measured to the token.**
+Every figure is a band, low to high. A token figure's central value is at the median ratios; a
+dollar figure's is the conservative one, and the bold figure's is its band's low end. `lumen
+report` prints the rules in full.
 
-`smart_read`, `recall_file` and `compress_logs` count tokens in-process with a BPE
-tokenizer (`cl100k_base`, not Claude's own) and have no estimation path, so their figures
-are exact in its units.
+**Tool calls and built-in `Read` events are counted with a stand-in for Claude's tokenizer.**
+
+`smart_read`, `recall_file` and `compress_logs` count tokens in-process with `cl100k_base`,
+OpenAI's BPE tokenizer, because Claude's is not available offline. Every figure is a
+tokenizer's count, never a guess, but it is a count in `cl100k_base`'s units, and Claude
+counts the same text differently. Measured against Claude's own usage data on 60 samples of
+raw file text from public repositories ([benchmarks/calibration](benchmarks/calibration/README.md),
+Claude Code 2.1.296, calibration of 2026-10-14), the models measured from Claude Opus 4.7 on
+(Opus 4.7, Opus 4.8, Opus 5, Sonnet 5, Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count about
+1.59× as many tokens (1.44–1.70×), and the earlier models measured (Opus 4.6, Sonnet 4.6, Opus
+4.5 and Haiku 4.5) about 1.24× as many (1.14–1.31×). Each band is the 10th to the 90th
+percentile of the samples (a savings figure's band, and the floor at its low end, take the
+smallest to the largest ratio any sample came out at instead); by kind of file the median on
+the models from Opus 4.7 on runs from 1.44× for logs to 1.70× for shell scripts. The samples
+are raw text: a `Read` also sends a line number on every line, every answer comes in a
+tool-result wrapper, and an answer Lumen makes from a file (an outline, a slice, a stub) is
+text of its own, none of which is in these ratios. Every sample came out higher in Claude's
+count than in `cl100k_base`'s, on every model measured, but the samples are English and include
+no CSS, HTML, YAML, SQL or non-Latin text.
+`lumen_core::calibration` turns a count into an estimate of Claude's with its band, and every
+savings figure goes through it. The usage figures elsewhere in the app (context fill, consumption windows, cache
+reads) are not counted by Lumen: they are the provider's own, read from Claude Code's
+transcripts.
 
 Since 1.6.0 built-in `Read` events are counted by `lumen-mcp hook meter`, with the same
-tokenizer, and it has no estimation path either: a file that is not text is recorded as 0
+tokenizer, and it never falls back to a guess either: a file that is not text is recorded as 0
 tokens with provenance `unsupported`, and a meter that cannot write its row records a fault
 instead of a guess. Before 1.6.0 a shell hook shelled out to `lumen-tok` and fell back to
 `bytes ÷ 4` when it could not; before 1.1.5 it did so **silently**, and on installs set up
@@ -386,23 +540,25 @@ there is no honest way to recover it after the fact.
 #### Lumen optimized (caused)
 
 `SUM(saved_tokens)` across all `smart_read`, `recall_file`, and `compress_logs` calls
-that Lumen actually made. This number starts small and grows with every session.
+that Lumen actually made. This number starts small and grows with every session. It has no
+dollar figure: a read records no model, so there is no price to put on it.
 
 **This is the only number Lumen claims credit for.** It is small, verifiable, and
-derived directly from the database — not estimated, not extrapolated.
+derived directly from the database: a sum of `cl100k_base` counts, with nothing guessed or
+extrapolated. It is in `cl100k_base`'s units; see above for how far those are from Claude's.
 
 #### Saved by caching (reported)
 
 Shown alongside "Lumen optimized" for context, but in a clearly separate row.
 See [Saved by caching](#saved-by-caching) above. The two numbers are **never added together.**
 
-#### By tool
+#### By tool (on Details)
 
 A breakdown of Lumen-optimized tokens by which tool produced them:
 `smart_read`, `recall_file`, or `compress_logs`. Useful for understanding which
 reads are being intercepted and which file types are generating the most savings.
 
-#### By channel
+#### By channel (on Details)
 
 Reads intercepted by the PreToolUse hook, in either client. Interception is
 enforced wherever hooks run: a Read of a file over the line threshold is blocked and
@@ -473,20 +629,38 @@ caching savings display.
 
 ## How much you save
 
-The hero metric on the Optimizer screen is the **net dollar value** of interception: what
-the tokens Lumen avoided are worth, less what the extra round cost. It is computed from your
-own ledger with one assumed input, how many rounds a saving keeps paying for, so no figure
-is quoted here; [Effectiveness %](#effectiveness-) says why.
+Until 1.9.0 the hero metric on the Optimizer screen was the **net dollar value** of
+interception: what the tokens Lumen avoided are worth, less what the extra round cost, computed
+with one assumed input, how many rounds a saving keeps paying for. 1.9.0 derives that input
+per call ([Effectiveness %](#effectiveness--on-details) says how), and `lumen` and `lumen report`
+show the result for your own ledger. No figure is quoted here: yours depends on your sessions.
+
+**Each release against the one before it.** Every release is benchmarked against the previous one
+on macOS, Ubuntu and Windows, through the real `lumen-mcp` binary on a pinned public corpus: the
+tokens each tool returns, per file and mode, and the latency of every hook and tool call.
+[benchmarks/README.md](benchmarks/README.md) has every figure, the machines and the method.
+
+| release | against | tokens returned | latency |
+|---|---|---|---|
+| 1.9.0 | 1.8.0 | equal | equal, except `recall_file` on a file under 300 lines on Ubuntu, 2% (30 µs) slower, and two calls on Windows 3% faster |
+| 1.8.0 | 1.7.0 | equal | a blocked Read 0.4 to 2.6 ms slower; an identity hook now runs before every Lumen call |
 
 The token ratio — **84% fewer tokens per intercepted read** on the author's machine — is
-shown underneath it. It is real and measured to the token, but on its own it is not a
-result: a smaller reply that forces a second round is a loss however good the ratio looks.
+on the Details screen. It is a ratio of two `cl100k_base` counts, not of Claude's, and on its
+own it is not a result: a smaller reply that forces a second round is a loss however good the
+ratio looks.
 
 Every intercepted read reports `full_tokens` vs `returned_tokens`, counted with the
-`cl100k_base` BPE tokenizer. That is a real tokenizer but not the one Claude bills with, so
-the counts are exact in its units and an approximation of Claude's. No estimation, no
-extrapolation, and no scaling up — 96.6% of that saving rests on a real tokenizer count
-rather than a bytes/4 guess, which is asserted by a test rather than asserted here.
+`cl100k_base` BPE tokenizer. That is a real tokenizer but not the one Claude bills with: the
+counts are deterministic in its units and approximate Claude's, which come out higher: on raw
+file text the models measured from Claude Opus 4.7 on (Opus 4.7, Opus 4.8, Opus 5, Sonnet 5,
+Fable 5, Opus 5.5, Sonnet 5.5 and Haiku 5.5) count about 1.59× as many tokens (1.44–1.70×), and
+the earlier models measured (Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5) about 1.24× as many
+(1.14–1.31×), from the 10th to the 90th percentile of the 60 samples in the
+[calibration](benchmarks/calibration/README.md) (calibration of 2026-10-14; a `Read`'s line
+numbers and the tool-result wrapper are not in these ratios). Nothing is guessed, extrapolated or scaled up — 96.6% of
+that saving rests on a tokenizer count rather than a bytes/4 guess, which is asserted by a test
+rather than asserted here.
 
 **→ [Does the optimizer actually save anything?](docs/efficiency.md)** is the full
 measurement, including the things that would make the figure above dishonest: **8 of 1,608
@@ -550,8 +724,8 @@ The `lumen` server should appear as Connected.
 
 ### The Optimizer screen shows data
 
-After any session where Claude reads a large file via a Lumen tool, the effectiveness
-ratio and token counts appear on the Optimizer tab.
+After any session where Claude reads a large file via a Lumen tool, the token counts appear
+on the Optimizer tab, and the effectiveness ratio on the Details tab.
 
 ### Trigger an interception (Full mode / CLI)
 
@@ -635,7 +809,7 @@ Claude with no way to read the file at all:
   a hook lets through a read it would have redirected, loses an event it should have
   metered, or a tool call crashes and is answered with an error. It contains the file path,
   its line count, what went wrong, and the session id
-  — **never file contents**. `lumen report` reads these; nothing is sent anywhere unless
+  — **never file contents**. `lumen faults` reads these; nothing is sent anywhere unless
   you explicitly file a report. Set `LUMEN_CAPTURE=0` to keep the hooks and record nothing.
 
 If `lumen-mcp` is gone — Lumen moved or removed — both scripts let the event through, say
@@ -673,8 +847,9 @@ With that set, Lumen makes no unprompted network request of any kind.
 **→ [Filing a fault report](docs/filing-a-fault-report.md)** walks through it with
 screenshots. The short version:
 
-Nothing is sent until you ask for it — via `lumen report --yes`, or the **File issue**
-button under **Report a fault** on the Hotspots screen. You see the exact text first,
+Nothing is sent until you ask for it — via `lumen faults --yes` (`lumen report --yes`
+before 1.9.0, which still works), or the **File issue** button under **Report a fault** on the
+Settings screen. You see the exact text first,
 and it is the text that gets sent; it is never re-generated at send time.
 
 `lumen` comes from the `lumen-cli` formula; a cask-only install leaves it off your `PATH`.
@@ -748,7 +923,7 @@ Claude Code already dedups it. It was an opt-in flag in 1.7.0 (`LUMEN_REPEAT_REA
 
 **Turning it off.** Any of these, and the environment variable wins when it says something:
 
-- the **Repeat reads** switch on the Context tab of the Lumen app's main window. It writes the
+- the **Repeat reads** switch on the Settings screen of the Lumen app's main window. It writes the
   settings file below, so a change applies to the next Lumen read in every running Claude Code
   session, with no restart, and it is still there after Lumen or Claude Code restarts.
 - the environment variable, in the `env` block of `~/.claude/settings.json` (or wherever Claude
@@ -777,7 +952,7 @@ stub text names `fresh=true` and the server honours it whether or not it was adv
 A value that cannot be told is never guessed at: an unrecognised `LUMEN_REPEAT_READS`, or a
 settings file that is not valid JSON, is not a boolean or cannot be read, turns repeat reads
 **off** (every answer in full), is recorded as a `repeat_reads_config` fault (the app's fault
-count and `lumen report` pick it up), and `lumen doctor` names it and says what to fix. Write
+count and `lumen faults` pick it up), and `lumen doctor` names it and says what to fix. Write
 the file as UTF-8 **without a byte-order mark**: a BOM, UTF-16 or an empty file is rejected as
 corrupt, which is off plus the fault. A mistyped key (`repeat_read`) is only an unknown key: it
 is ignored and repeat reads stay **on**, so check the state `lumen doctor` prints after editing.
@@ -852,10 +1027,10 @@ rate and the `fresh=true` rate are measured live, in the `ab` split.
 
 **What the Optimizer tab shows (1.8.0).** A Repeat reads card, below the other figures, counts
 what repeat reads have done over the ledger's lifetime. It is counted apart from the rest: these
-answers are in none of the token totals (Lumen optimized, Today, This week), the by-tool and
-by-channel breakdowns or the net value, and the card never calls anything a saving. (The
-provenance counts at the top of the tab, how many metered events have unverified token
-provenance, still include these rows: they count every row that carries a token count.)
+answers are in none of the token totals (Lumen optimized, Today, This week) or the by-tool and
+by-channel breakdowns, and the card never calls anything a saving. (The provenance counts on
+the Details tab, how many metered events have unverified token provenance, still include these
+rows: they count every row that carries a token count.)
 
 - *Unchanged answers served* and *Edits served as a delta*: how many repeat reads got the
   one-sentence note and how many got a delta.
@@ -863,7 +1038,7 @@ provenance, still include these rows: they count every row that carries a token 
   Read its baseline carefully: it is counted against reading the whole file again. With repeat
   reads off a read returns the outline (for `recall_file`, the symbols asked for), which is
   usually far smaller than the file, so this is more than repeat reads gain over having them off,
-  and it is not shown as a saving. It counts only answers whose token count was measured: when
+  and it is not shown as a saving. It counts only answers whose tokens the tokenizer counted: when
   that is fewer than all of them the card says how many, and when it is none the figure is a dash.
 - *Full result asked for again (`fresh=true`)*: n of m, where m is the unchanged answers, the
   deltas and the `fresh` requests together, so it is how often the model did not take a repeat

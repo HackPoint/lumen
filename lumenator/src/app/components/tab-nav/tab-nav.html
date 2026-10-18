@@ -1,0 +1,18 @@
+<nav class="tab-nav" role="tablist" aria-label="Main navigation">
+    <a class="tab-nav__tab"
+       routerLink="/"
+       routerLinkActive="is-active"
+       [routerLinkActiveOptions]="{exact: true}"
+       role="tab">Home</a>
+    <a class="tab-nav__tab" routerLink="/optimizer" routerLinkActive="is-active" role="tab">Optimizer</a>
+    <a class="tab-nav__tab" routerLink="/details" routerLinkActive="is-active" role="tab">Details</a>
+    @if (showWhy()) {
+        <a class="tab-nav__tab" routerLink="/why" routerLinkActive="is-active" role="tab">Why</a>
+    }
+    <!-- The badge is on Settings because that is where Report a fault is. -->
+    <a class="tab-nav__tab"
+       routerLink="/settings"
+       routerLinkActive="is-active"
+       role="tab">Settings@if (s.faultCount() > 0) {<span class="tab-nav__badge"
+             [attr.aria-label]="s.faultCount() + ' faults recorded'">{{ s.faultCount() }}</span>}</a>
+</nav>

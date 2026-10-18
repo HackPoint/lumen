@@ -170,8 +170,20 @@ const ALLOWED: &[Allowed] = &[
     ),
     allow(
         "crates/lumen-core/src/meter.rs",
+        NumberForError,
+        "backfill.pending",
+        "Whether a row rewrite has anything to do: a read that failed (the table or column is not there) leaves the rewrite not run, as its own failure would have been swallowed.",
+    ),
+    allow(
+        "crates/lumen-core/src/meter.rs",
         DroppedWrite,
-        "execute_batch(backfill)",
+        "execute_batch(\"ROLLBACK\")",
+        "The migrations are already being given up on with their own error; a rollback that finds no transaction left has nothing to undo.",
+    ),
+    allow(
+        "crates/lumen-core/src/meter.rs",
+        DroppedWrite,
+        "execute_batch(backfill.rewrite)",
         "A row rewrite, not a schema change, and idempotent: a ledger that stayed busy for it \
          keeps its rows as they were and the next open runs it again.",
     ),
@@ -259,8 +271,14 @@ const ALLOWED: &[Allowed] = &[
     ),
     allow(
         "crates/lumen-core/src/schema.rs",
+        NumberForError,
+        "backfill.pending",
+        "Whether a row rewrite has anything to do: a read that failed (the table or column is not there) leaves the rewrite not run, as its own failure would have been swallowed.",
+    ),
+    allow(
+        "crates/lumen-core/src/schema.rs",
         DroppedWrite,
-        "AssertSqlSafe(*backfill)",
+        "AssertSqlSafe(backfill.rewrite)",
         "A row rewrite, not a schema change, and idempotent: a ledger that stayed busy for it \
          keeps its rows as they were and the next open runs it again.",
     ),
@@ -301,6 +319,13 @@ const ALLOWED: &[Allowed] = &[
         OrDefault,
         "rec.message.model",
         "The model label in the live broadcast; the ledger row binds the Option itself.",
+    ),
+    allow(
+        "crates/lumen-daemon/src/main.rs",
+        OrDefault,
+        "by_session.remove(s)",
+        "Unreachable: every session the snapshot's first query returns has rows in the second, \
+         read in the same transaction.",
     ),
     allow(
         "crates/lumen-daemon/src/main.rs",

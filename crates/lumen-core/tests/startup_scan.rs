@@ -646,13 +646,20 @@ struct Exempt {
 /// Functions startup reaches that use `?`. In each, the `?` hands an error back to a caller that
 /// deals with it, so none can abort startup. The scan fails if one stops using `?` (the entry is
 /// stale) or if its caller stops dealing with the error.
-const EXEMPT: [Exempt; 3] = [
+const EXEMPT: [Exempt; 4] = [
     Exempt {
         name: "build_tray_menu_items",
         file: "health.rs",
         caller: None,
         handled: Handled::ByMatch,
         why: "the closure matches its result and degrades to no tray menu on `Err`",
+    },
+    Exempt {
+        name: "savings_summary_with",
+        file: "lib.rs",
+        caller: Some("refresh_tray_savings"),
+        handled: Handled::By("unwrap_or_else"),
+        why: "the tray refresh setup spawns logs an `Err` and shows no savings line",
     },
     Exempt {
         name: "write_atomic",

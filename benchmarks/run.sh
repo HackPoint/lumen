@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # The one command that reproduces the benchmarks (macOS and Linux). See benchmarks/README.md.
 #
-#   benchmarks/run.sh                      full run: tokens and latency, v1.7.0 against this checkout
+#   benchmarks/run.sh                      full run: tokens and latency, v1.8.0 against this checkout
 #   benchmarks/run.sh --latency-only       the part a CI job runs
 #   benchmarks/run.sh --help               every option
 #

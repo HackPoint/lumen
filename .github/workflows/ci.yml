@@ -101,7 +101,7 @@ jobs:
   #
   # Two chains, both driving real binaries with no stubs between the ends:
   #   read path   — a source file -> the lumen-mcp binary over stdio -> SQLite ->
-  #                 the Optimizer and Hotspots aggregates the GUI renders
+  #                 the Optimizer and Why (Hotspots until 1.9.0) aggregates the GUI renders
   #   ingest path — a Claude Code transcript line -> the lumen-daemon binary ->
   #                 SQLite + a live WebSocket frame -> the same aggregates
   #
@@ -264,9 +264,10 @@ jobs:
 
   # ── The built app, driven through WebDriver ──────────────────────────────────
   # The debug build of the app itself, launched by tauri-driver: whether it opens its window
-  # when it should and only then, says why when it does, and whether the Optimizer and Hotspots
-  # screens show what a ledger the real lumen-mcp wrote holds. lumenator/e2e/app.e2e.mjs says
-  # what each test covers.
+  # when it should and only then, says why when it does, and whether the Optimizer and Why
+  # screens show what a ledger the real lumen-mcp wrote holds, About on Settings the version, and
+  # Home's headline the figures `lumen` gives for a fixture ledger, with a screenshot of Home kept
+  # as an artifact. lumenator/e2e/app.e2e.mjs says what each test covers.
   #
   # Linux and Windows only. tauri-driver needs the platform's own WebDriver behind it,
   # WebKitWebDriver on Linux and msedgedriver on Windows; macOS has none for its web view, so
@@ -285,6 +286,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Where the e2e saves its screenshot of Home (home-linux.png, home-windows.png). In the
+      # workspace, which the unelevated Windows run is granted; uploaded by the last step.
+      LUMEN_E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
 
     steps:
       - uses: actions/checkout@v7
@@ -437,6 +442,15 @@ jobs:
           whoami /groups | Select-String 'Mandatory Label'
           & $gsudo --integrity Medium pwsh -NoProfile -File $run
           exit $LASTEXITCODE
+
+      # Home on a fixture ledger, as this platform renders it: for the release PR.
+      - name: Keep the screenshot of Home
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: home-${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+          path: ${{ github.workspace }}/e2e-artifacts
+          if-no-files-found: warn
 
       # What was still running when a step failed or timed out: the app, its daemon, the drivers.
       - name: What was running

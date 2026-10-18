@@ -14,7 +14,10 @@
                     <span class="win__reset">resets ~{{ t }} <span class="tag">approx</span></span>
                 }
             </div>
-            <div class="win__cost">{{ fmt(cost5h()) }}</div>
+            <div class="win__cost">{{ money(priced5h()) }}</div>
+            @if (tag(priced5h()); as t) {
+                <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+            }
             <div class="win__meta">
                 <span>{{ fmtTokens(report().rolling5h.totalTokens) }} tokens</span>
                 <span>{{ report().rolling5h.turns }} turns</span>
@@ -29,7 +32,10 @@
                             [lumenTooltip]="'Rolling consumption over 7 days (not a plan-limit %). Opus vs. other split shown below.'">ⓘ</button>
                 </span>
             </div>
-            <div class="win__cost">{{ fmt(cost7d()) }}</div>
+            <div class="win__cost">{{ money(priced7d()) }}</div>
+            @if (tag(priced7d()); as t) {
+                <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+            }
             <div class="win__meta">
                 <span>{{ fmtTokens(tokens7d()) }} tokens</span>
                 <span>{{ turns7d() }} turns</span>
@@ -49,7 +55,10 @@
                 <button class="info-btn" type="button"
                         [lumenTooltip]="'Calendar totals (local time; week starts Monday).'">ⓘ</button>
             </span>
-            <span class="roll__cost">{{ fmt(costToday()) }}</span>
+            <span class="roll__cost">{{ money(pricedToday()) }}</span>
+            @if (tag(pricedToday()); as t) {
+                <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+            }
             <span class="roll__tok">{{ fmtTokens(report().today.totalTokens) }} tok</span>
         </div>
         <div class="roll">
@@ -58,7 +67,10 @@
                 <button class="info-btn" type="button"
                         [lumenTooltip]="'Calendar totals (local time; week starts Monday).'">ⓘ</button>
             </span>
-            <span class="roll__cost">{{ fmt(costWeek()) }}</span>
+            <span class="roll__cost">{{ money(pricedWeek()) }}</span>
+            @if (tag(pricedWeek()); as t) {
+                <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+            }
             <span class="roll__tok">{{ fmtTokens(report().thisWeek.totalTokens) }} tok</span>
         </div>
         <div class="roll">
@@ -67,7 +79,10 @@
                 <button class="info-btn" type="button"
                         [lumenTooltip]="'All recorded history, from the first session Lumen watched.'">ⓘ</button>
             </span>
-            <span class="roll__cost">{{ fmt(costAll()) }}</span>
+            <span class="roll__cost">{{ money(pricedAll()) }}</span>
+            @if (tag(pricedAll()); as t) {
+                <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+            }
             <span class="roll__tok">{{ fmtTokens(report().allTime.totalTokens) }} tok</span>
         </div>
     </div>
@@ -79,7 +94,10 @@
             <button class="info-btn" type="button"
                     [lumenTooltip]="'Reported by Claude Code — not caused by Lumen. Never added to Lumen\'s savings number.'">ⓘ</button>
         </div>
-        <div class="saved__value">{{ fmt(savedByCaching()) }}</div>
+        <div class="saved__value">{{ savedMoney(pricedAll()) }}</div>
+        @if (savedTag(pricedAll()); as t) {
+            <span class="partial-tag" [lumenTooltip]="t.why">{{ t.label }}</span>
+        }
         <div class="saved__sub">reported — caching by Claude Code, not Lumen</div>
     </div>
 </section>

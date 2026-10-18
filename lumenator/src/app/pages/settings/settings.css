@@ -1,0 +1,470 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Settings. Each section is the same card. The threshold, Repeat reads and About
+   rules came from Home, and the fault report's from Hotspots, when they moved here
+   in 1.9.0.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.card,
+.limits,
+.repeat,
+.about,
+.fr {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--lumen-bg-secondary);
+    border: 1px solid var(--lumen-border);
+    border-radius: var(--lumen-radius-sm);
+    padding: 0.8rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.card__title,
+.limits__title,
+.repeat__title,
+.about__title {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--lumen-text-dim);
+}
+
+/* ── Billing mode ── */
+.card__intro {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.7rem;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+}
+
+.billing {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+}
+
+.billing__choice {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+}
+
+.billing__radio {
+    margin: 0;
+    accent-color: var(--lumen-brand);
+}
+
+.billing__label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text);
+}
+
+.card__state,
+.card__error {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+    /* A path or an error from the OS is long and arbitrary; it wraps rather than widening the window. */
+    overflow-wrap: anywhere;
+}
+
+.card__state--problem {
+    color: var(--lumen-warn);
+}
+
+.card__error {
+    color: var(--lumen-alert);
+}
+
+.card__unknown {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+/* ── Spend: Claude Code's, the figures the thresholds are compared with ── */
+.spend {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+
+/* ── Alert thresholds ── */
+.limits__fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+}
+
+.limits__field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    cursor: default;
+}
+
+.limits__label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.72rem;
+    color: var(--lumen-text-dim);
+}
+
+.limits__input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border);
+    border-radius: 8px;
+    padding: 0.32rem 0.5rem;
+    transition: border-color 0.15s ease;
+}
+
+.limits__input-wrap:focus-within {
+    border-color: var(--lumen-border-strong);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--lumen-brand) 15%, transparent);
+}
+
+.limits__currency {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.8rem;
+    color: var(--lumen-text-dim);
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.limits__input {
+    background: transparent;
+    border: 0;
+    outline: none;
+    font-family: var(--lumen-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: var(--lumen-text);
+    width: 100%;
+    min-width: 0;
+}
+
+.limits__input::-webkit-inner-spin-button,
+.limits__input::-webkit-outer-spin-button {
+    opacity: 0.35;
+}
+
+/* ── D5: native notification toggle ── */
+.limits__toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    cursor: pointer;
+    width: fit-content;
+    padding: 0.1rem 0;
+}
+
+.toggle__track {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border);
+    border-radius: 999px;
+    flex-shrink: 0;
+    transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.toggle__track.is-on {
+    background: color-mix(in srgb, var(--lumen-brand) 25%, var(--lumen-bg-elevated));
+    border-color: color-mix(in srgb, var(--lumen-brand) 70%, transparent);
+}
+
+.toggle__knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    background: var(--lumen-text-dim);
+    border-radius: 50%;
+    transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.toggle__track.is-on .toggle__knob {
+    transform: translateX(14px);
+    background: var(--lumen-brand);
+}
+
+.limits__toggle-label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text-dim);
+}
+
+/* ── accessibility helper for hidden checkbox ── */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+}
+
+.limits__hint {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.64rem;
+    color: var(--lumen-text-dim);
+    opacity: 0.65;
+}
+
+/* ── About ── */
+.about__list {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.about__term {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text-dim);
+}
+
+.about__version {
+    margin: 0;
+    font-family: var(--lumen-font-mono);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--lumen-text);
+    /* A pre-release tag can be long; it wraps rather than widening the column. */
+    overflow-wrap: anywhere;
+}
+
+/* ── Repeat reads ── */
+.repeat__intro,
+.repeat__note {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.7rem;
+    line-height: 1.45;
+    color: var(--lumen-text-dim);
+    /* A path or an error from the OS is long and arbitrary; it wraps rather than widening the window. */
+    overflow-wrap: anywhere;
+}
+
+.repeat__note {
+    font-size: 0.64rem;
+    opacity: 0.8;
+}
+
+.repeat__toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    cursor: pointer;
+    width: fit-content;
+    padding: 0.1rem 0;
+}
+
+/* The checkbox is visually hidden, so keyboard focus has to show on the track. */
+.repeat__toggle-row:focus-within .toggle__track {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--lumen-brand) 25%, transparent);
+}
+
+.repeat__toggle-label {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.78rem;
+    color: var(--lumen-text);
+}
+
+.repeat__state {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.76rem;
+    line-height: 1.45;
+    color: var(--lumen-text);
+    overflow-wrap: anywhere;
+}
+
+.repeat__state--problem {
+    color: var(--lumen-warn);
+}
+
+.repeat__unknown {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.repeat__retry,
+.card__retry {
+    font-family: var(--lumen-font-sans);
+    font-size: 0.74rem;
+    color: var(--lumen-text);
+    background: var(--lumen-bg-elevated);
+    border: 1px solid var(--lumen-border-strong);
+    border-radius: 8px;
+    padding: 0.28rem 0.7rem;
+    cursor: pointer;
+}
+
+.repeat__error {
+    margin: 0;
+    font-family: var(--lumen-font-sans);
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--lumen-alert);
+    overflow-wrap: anywhere;
+}
+
+/* ── Fault report ─────────────────────────────────────────────────────────────
+   Styled from the --lumen-* tokens, not the bare --border/--text-dim names the
+   older rules in this file use. Those variables do not exist, so those rules fall
+   back to hard-coded dark greys and stay dark on a light desktop. Using the real
+   tokens is what makes this section follow the theme like the rest of the app.
+
+   Quiet: this is a maintenance affordance, not a measurement, and the only saturated
+   element is the button whose consequence leaves the machine. Moved here from
+   Hotspots in 1.9.0. */
+
+/* One row: label, count, actions. Wraps rather than squeezing the button. */
+.fr__bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.fr__label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--lumen-text-dim);
+}
+
+.fr__info {
+    cursor: help;
+    opacity: 0.75;
+}
+
+.fr__count {
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--lumen-warn) 16%, transparent);
+    color: var(--lumen-warn);
+    font-size: 0.62rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.fr__actions {
+    display: flex;
+    gap: 0.4rem;
+    margin-left: auto;
+}
+
+.fr__btn {
+    font: inherit;
+    font-size: 0.7rem;
+    padding: 0.28rem 0.7rem;
+    border-radius: 8px;
+    border: 1px solid var(--lumen-border-strong);
+    background: var(--lumen-bg-elevated);
+    color: var(--lumen-text);
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.fr__btn:hover:not(:disabled) {
+    border-color: var(--lumen-brand);
+}
+
+.fr__btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* Filing is the one irreversible action on this screen, so it is the one that looks
+   like a commitment. Brand green, matching the savings accent used elsewhere. */
+.fr__btn--primary {
+    border-color: color-mix(in srgb, var(--lumen-brand) 55%, transparent);
+    background: color-mix(in srgb, var(--lumen-brand) 14%, transparent);
+    color: var(--lumen-brand);
+}
+
+.fr__btn--primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--lumen-brand) 24%, transparent);
+}
+
+.fr__btn--ghost {
+    background: transparent;
+    color: var(--lumen-text-dim);
+}
+
+.fr__note {
+    font-size: 0.68rem;
+    line-height: 1.4;
+    color: var(--lumen-text-dim);
+    margin: 0.5rem 0 0;
+}
+
+.fr__note code {
+    font-family: var(--lumen-font-mono);
+    font-size: 0.94em;
+}
+
+.fr__note--filed a {
+    color: var(--lumen-brand);
+}
+
+/* Amber left rule, the same device .hs__rec uses for advice. */
+.fr__error {
+    font-size: 0.68rem;
+    line-height: 1.4;
+    margin: 0.5rem 0 0;
+    padding-left: 0.5rem;
+    border-left: 2px solid color-mix(in srgb, var(--lumen-alert) 60%, transparent);
+    color: var(--lumen-alert);
+}
+
+.fr__preview {
+    margin-top: 0.3rem;
+}
+
+/* Scrolls rather than growing the window: the body can be forty lines, and the whole
+   point is that every one of them can be read before filing. */
+.fr__body {
+    margin: 0.35rem 0 0;
+    padding: 0.6rem 0.7rem;
+    max-height: 14rem;
+    overflow: auto;
+    border-radius: 8px;
+    border: 1px solid var(--lumen-border);
+    background: var(--lumen-bg-secondary);
+    font-family: var(--lumen-font-mono);
+    font-size: 0.62rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--lumen-text);
+}

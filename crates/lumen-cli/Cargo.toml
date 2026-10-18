@@ -1,6 +1,6 @@
 [package]
 name = "lumen-cli"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2024"
 rust-version.workspace = true
 
@@ -21,3 +21,7 @@ dirs = "7"
 
 [dev-dependencies]
 tempfile = "3"
+# The savings parity test compares `lumen report --json` with the app's own loader, which is
+# lumen-stats over sqlx. Dev-only: the `lumen` binary does not link either.
+lumen-stats = { path = "../lumen-stats" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

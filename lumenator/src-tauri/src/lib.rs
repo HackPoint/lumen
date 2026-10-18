@@ -390,6 +390,8 @@ pub fn run() {
             // does not reproduce on the maintainer's machine.
             let restored = health::clear_hidden_status_item_prefs();
 
+            // No savings line yet: the refresh below adds it once the summary is computed, off
+            // the startup path.
             let menu = match health::build_tray_menu_items(app) {
                 Ok(m) => Some(m),
                 // Was three `?`, which aborted Tauri startup entirely and left nothing running.
@@ -504,6 +506,11 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connect_daemon(handle));
 
+            // The tray's savings line, kept in step with the summary, in the menu just built.
+            if let Some(menu) = menu.clone() {
+                tauri::async_runtime::spawn(refresh_tray_savings(app.handle().clone(), menu));
+            }
+
             // One reachability gate, covering a failed menu, a failed build and (after the
             // check scheduled on Ready) an invisible icon — identically. Previously each case
             // was handled where it happened, or not at all.
@@ -519,11 +526,15 @@ pub fn run() {
             get_usage,
             get_sessions,
             get_optimizer_stats,
+            lumen_savings_summary,
             get_context_report,
+            lumen_prices,
             get_fault_report,
             get_fault_count,
             get_repeat_reads_setting,
             set_repeat_reads_setting,
+            get_billing_mode_setting,
+            set_billing_mode_setting,
             check_for_update,
             file_fault_report,
             show_main_window,
@@ -856,6 +867,218 @@ async fn get_optimizer_stats() -> Result<lumen_stats::OptimizerReport, String> {
     lumen_stats::get_optimizer_stats(&pool).await
 }
 
+/// What Lumen saved: the savings engine's summary of the ledger (`lumen_core::savings`), for the
+/// headline, Details and "How it's measured". The frontend renders it and computes nothing; the
+/// CLI's `lumen report --json` is the same document from the same rows.
+#[tauri::command]
+async fn lumen_savings_summary() -> Result<lumen_core::savings::SavingsSummary, String> {
+    savings_summary_now().await
+}
+
+/// The summary as of now, on a pool of its own.
+async fn savings_summary_now() -> Result<lumen_core::savings::SavingsSummary, String> {
+    let pool = lumen_stats::connect_default().await?;
+    savings_summary_with(&pool).await
+}
+
+/// The summary as of now, from `pool`. The facts beside the ledger are the ones the CLI reads:
+/// the billing choice in Lumen's settings file, and whether settings.json registers the identity
+/// hook.
+async fn savings_summary_with(
+    pool: &sqlx::SqlitePool,
+) -> Result<lumen_core::savings::SavingsSummary, String> {
+    use lumen_core::savings::{BillingView, Calibrated, Facts};
+    let billing_mode = match lumen_core::meter::db_path() {
+        Some(db) => BillingView::of(&lumen_core::settings::billing_mode_for(&db)),
+        None => BillingView::Unreadable,
+    };
+    let identity_hook_registered =
+        tauri::async_runtime::spawn_blocking(setup::identity_hook_registered_now)
+            .await
+            .map_err(|e| format!("identity hook check failed: {e}"))?;
+    let facts = Facts {
+        billing_mode,
+        identity_hook_registered,
+    };
+    let spool = lumen_core::faults::spool_path();
+    lumen_stats::savings_summary(
+        pool,
+        lumen_core::repeat::now_ms(),
+        spool.as_deref(),
+        &facts,
+        &Calibrated,
+    )
+    .await
+}
+
+/// How often the tray looks at the ledger for its savings line: a call shows within two minutes.
+const TRAY_SAVINGS_REFRESH: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// However still the ledger, the summary is made again at least this often, because it reads the
+/// clock too: a new week starts empty, a session stops running, seven days pass with no call.
+const TRAY_SAVINGS_RECOMPUTE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// What the summary would read differently: the newest row of each table, and the fault spool's
+/// size and time. `None` when it cannot be told, which makes the summary again.
+async fn savings_inputs(
+    pool: &sqlx::SqlitePool,
+) -> Option<(
+    lumen_stats::SavingsFingerprint,
+    Option<(u64, std::time::SystemTime)>,
+)> {
+    let rows = match lumen_stats::savings_fingerprint(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::warn!("TRAY: cannot tell whether the ledger changed: {e}");
+            return None;
+        }
+    };
+    let spool = lumen_core::faults::spool_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
+    Some((rows, spool))
+}
+
+/// Keep the tray menu's savings line in step with the summary: put in under the version line,
+/// reworded when it changes, and taken out (not shown empty or stale) when the summary has
+/// nothing to say or cannot be made.
+///
+/// One pool for the life of the loop, and the summary made again only when the ledger changed or
+/// [`TRAY_SAVINGS_RECOMPUTE`] has passed: at ten times a heavy user's ledger a summary is the
+/// better part of a second of work, and a still ledger needs none of it.
+async fn refresh_tray_savings(app: tauri::AppHandle, menu: tauri::menu::Menu<tauri::Wry>) {
+    let mut shown: Option<(tauri::menu::MenuItem<tauri::Wry>, String)> = None;
+    let mut pool: Option<sqlx::SqlitePool> = None;
+    let mut made: Option<(
+        (
+            lumen_stats::SavingsFingerprint,
+            Option<(u64, std::time::SystemTime)>,
+        ),
+        std::time::Instant,
+    )> = None;
+    loop {
+        if pool.is_none() {
+            pool = match lumen_stats::connect_default().await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    log::warn!("TRAY: no savings line: {e}");
+                    shown = show_savings_line(&app, &menu, shown, None);
+                    None
+                }
+            };
+        }
+        if let Some(p) = &pool {
+            let inputs = savings_inputs(p).await;
+            let fresh = match (&made, &inputs) {
+                (Some((was, at)), Some(now)) => was == now && at.elapsed() < TRAY_SAVINGS_RECOMPUTE,
+                _ => false,
+            };
+            if !fresh {
+                let line = savings_summary_with(p)
+                    .await
+                    .map(|s| lumen_core::savings::text::tray_line(&s))
+                    .unwrap_or_else(|e| {
+                        log::warn!("TRAY: no savings line: {e}");
+                        None
+                    });
+                shown = show_savings_line(&app, &menu, shown, line);
+                made = inputs.map(|i| (i, std::time::Instant::now()));
+            }
+        }
+        tokio::time::sleep(TRAY_SAVINGS_REFRESH).await;
+    }
+}
+
+/// The menu with `line` as its savings line, or none, from what `shown` it had. Returns what it
+/// shows now. A step that fails is logged and leaves the menu as it was.
+fn show_savings_line(
+    app: &tauri::AppHandle,
+    menu: &tauri::menu::Menu<tauri::Wry>,
+    shown: Option<(tauri::menu::MenuItem<tauri::Wry>, String)>,
+    line: Option<String>,
+) -> Option<(tauri::menu::MenuItem<tauri::Wry>, String)> {
+    match (shown, line) {
+        (Some((item, was)), Some(now)) if was == now => Some((item, was)),
+        (Some((item, was)), Some(now)) => match item.set_text(&now) {
+            Ok(()) => Some((item, now)),
+            Err(e) => {
+                log::warn!("TRAY: could not reword the savings line: {e}");
+                Some((item, was))
+            }
+        },
+        (Some((item, was)), None) => match menu.remove(&item) {
+            Ok(()) => None,
+            Err(e) => {
+                log::warn!("TRAY: could not take the savings line out: {e}");
+                Some((item, was))
+            }
+        },
+        (None, Some(now)) => {
+            let item = match tauri::menu::MenuItem::with_id(
+                app,
+                health::TRAY_SAVINGS_ID,
+                &now,
+                false,
+                None::<&str>,
+            ) {
+                Ok(item) => item,
+                Err(e) => {
+                    log::warn!("TRAY: could not make the savings line: {e}");
+                    return None;
+                }
+            };
+            match menu.insert(&item, health::TRAY_SAVINGS_POSITION) {
+                Ok(()) => Some((item, now)),
+                Err(e) => {
+                    log::warn!("TRAY: could not add the savings line: {e}");
+                    None
+                }
+            }
+        }
+        (None, None) => None,
+    }
+}
+
+/// The price of every model Lumen knows, for the frontend to price each model's tokens with.
+///
+/// The frontend holds no price of its own, and `crates/lumen-core/tests/frontend_prices.rs`
+/// fails if it gets one, so every dollar figure in the app comes from this table. A model
+/// that is missing or unpriced has no dollar figure, and a total that leaves it out says so.
+#[tauri::command]
+fn lumen_prices() -> PriceTable {
+    price_table()
+}
+
+/// `lumen_core::rates::PRICES`, with the date it was checked and each row's source.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PriceTable {
+    as_of: &'static str,
+    models: Vec<PriceTableRow>,
+}
+
+#[derive(serde::Serialize)]
+struct PriceTableRow {
+    #[serde(flatten)]
+    row: lumen_core::rates::PriceRow,
+    /// Where the row's provider publishes its prices.
+    source: &'static str,
+}
+
+fn price_table() -> PriceTable {
+    use lumen_core::rates;
+    PriceTable {
+        as_of: rates::PRICES_AS_OF,
+        models: rates::PRICES
+            .iter()
+            .map(|row| PriceTableRow {
+                row: *row,
+                source: row.provider.source(),
+            })
+            .collect(),
+    }
+}
+
 /// Where this project's context has gone.
 ///
 /// Diagnosis, not savings: it reads the ledger and returns nothing that claims a saving,
@@ -1042,7 +1265,7 @@ async fn get_fault_count() -> Result<u64, String> {
     .map_err(|e| format!("fault count task failed: {e}"))
 }
 
-/// What the Home window's "Repeat reads" switch shows.
+/// What the Settings screen's "Repeat reads" switch shows.
 ///
 /// The settings file, or the default when there is none, and nothing else. In the MCP server
 /// `LUMEN_REPEAT_READS` outranks the file, but one set in a Claude Code MCP config is not in
@@ -1147,6 +1370,76 @@ async fn set_repeat_reads_setting(on: bool) -> Result<RepeatReadsSetting, String
         .map_err(|e| format!("repeat reads setting task failed: {e}"))?
 }
 
+/// What the Settings screen's Billing mode setting, and Home's first-run question, show.
+///
+/// `mode` is `None` until the user has answered: not asked yet, which the window asks about
+/// rather than guessing. A file that cannot be used, or a value that is not a mode, is `None`
+/// with the reason in `problem`, so the window says what is wrong instead of asking again as if
+/// nothing had been said.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingModeSetting {
+    /// `"subscription"` or `"api"`, as the file spells it.
+    pub mode: Option<&'static str>,
+    /// Why the file's answer could not be used; `None` when it could.
+    pub problem: Option<String>,
+    /// Where the file is (or would be), so the text can name it.
+    pub file: String,
+}
+
+/// [`get_billing_mode_setting`] for a ledger it is given, so a test drives it without
+/// resolving the ledger from the environment.
+fn billing_mode_setting_at(db: &std::path::Path) -> BillingModeSetting {
+    let file = lumen_core::settings::settings_path(db)
+        .display()
+        .to_string();
+    match lumen_core::settings::billing_mode_for(db) {
+        Ok(mode) => BillingModeSetting {
+            mode: mode.map(lumen_core::settings::BillingMode::as_str),
+            problem: None,
+            file,
+        },
+        Err(why) => BillingModeSetting {
+            mode: None,
+            problem: Some(why),
+            file,
+        },
+    }
+}
+
+fn set_billing_mode_at(db: &std::path::Path, mode: &str) -> Result<BillingModeSetting, String> {
+    // Refused before anything is written, so a mistyped value from the window never reaches
+    // the file, where every reader would then have to reject it. Repeated back short, as the
+    // settings file's own bad values are.
+    let mode = lumen_core::settings::BillingMode::parse(mode).ok_or_else(|| {
+        let shown: String = mode.chars().take(64).collect();
+        format!("{shown:?} is not a billing mode: subscription or api")
+    })?;
+    lumen_core::settings::write_billing_mode(db, mode).map_err(|e| {
+        format!(
+            "cannot write {}: {e}",
+            lumen_core::settings::settings_path(db).display()
+        )
+    })?;
+    Ok(billing_mode_setting_at(db))
+}
+
+/// How the user pays for Claude Code, as the settings file has it.
+#[tauri::command]
+async fn get_billing_mode_setting() -> Result<BillingModeSetting, String> {
+    tauri::async_runtime::spawn_blocking(|| ledger_path().map(|db| billing_mode_setting_at(&db)))
+        .await
+        .map_err(|e| format!("billing mode setting task failed: {e}"))?
+}
+
+/// Write the billing mode, then say what the file now holds.
+#[tauri::command]
+async fn set_billing_mode_setting(mode: String) -> Result<BillingModeSetting, String> {
+    tauri::async_runtime::spawn_blocking(move || set_billing_mode_at(&ledger_path()?, &mode))
+        .await
+        .map_err(|e| format!("billing mode setting task failed: {e}"))?
+}
+
 /// Width of the tray popover. Fixed: it is positioned under the tray icon and a varying
 /// width would make it jump horizontally as rows appear.
 const PANEL_WIDTH: f64 = 320.0;
@@ -1247,6 +1540,60 @@ mod tests {
     fn px(rgba: &[u8], x: u32, y: u32) -> (u8, u8, u8, u8) {
         let i = ((y * ICON_SIZE + x) * 4) as usize;
         (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3])
+    }
+
+    // ── prices ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_price_table_carries_every_row_its_date_and_its_source() {
+        let json = serde_json::to_value(price_table()).unwrap();
+        assert_eq!(json["asOf"], lumen_core::rates::PRICES_AS_OF);
+        let models = json["models"].as_array().unwrap();
+        assert_eq!(models.len(), lumen_core::rates::PRICES.len());
+        for (row, sent) in lumen_core::rates::PRICES.iter().zip(models) {
+            assert_eq!(sent["model"], row.model);
+            assert_eq!(sent["provider"], "anthropic");
+            assert_eq!(sent["source"], row.provider.source());
+            assert_eq!(sent["note"], row.note);
+            match row.prices {
+                // The wire names the frontend reads.
+                Some(p) => {
+                    assert_eq!(sent["prices"]["input"], p.input);
+                    assert_eq!(sent["prices"]["output"], p.output);
+                    assert_eq!(sent["prices"]["cacheWrite5m"], p.cache_write_5m);
+                    assert_eq!(sent["prices"]["cacheWrite1h"], p.cache_write_1h);
+                    assert_eq!(sent["prices"]["cacheRead"], p.cache_read);
+                }
+                None => assert!(sent["prices"].is_null(), "{}", row.model),
+            }
+            match row.fast {
+                Some(p) => {
+                    assert_eq!(sent["fast"]["input"], p.input);
+                    assert_eq!(sent["fast"]["cacheRead"], p.cache_read);
+                }
+                None => assert!(sent["fast"].is_null(), "{}", row.model),
+            }
+            // What US-only inference multiplies the prices by, or null on a model without it.
+            assert_eq!(
+                sent["usOnly"],
+                serde_json::json!(row.us_only),
+                "{}",
+                row.model
+            );
+        }
+    }
+
+    #[test]
+    fn an_unpriced_model_is_sent_with_its_reason_and_no_prices() {
+        let json = serde_json::to_value(price_table()).unwrap();
+        let haiku_5_5 = json["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["model"] == "claude-haiku-5-5")
+            .expect("listed, so the frontend can say why it has no price");
+        assert!(haiku_5_5["prices"].is_null());
+        assert!(!haiku_5_5["note"].as_str().unwrap().is_empty());
     }
 
     // ── status colours ───────────────────────────────────────────────────────
@@ -1656,6 +2003,107 @@ mod tests {
         );
     }
 
+    // ── billing mode ─────────────────────────────────────────────────────────
+
+    fn billing(dir: &tempfile::TempDir) -> BillingModeSetting {
+        billing_mode_setting_at(&ledger_in(dir))
+    }
+
+    #[test]
+    fn with_no_settings_file_the_billing_mode_is_not_asked_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            billing(&dir),
+            BillingModeSetting {
+                mode: None,
+                problem: None,
+                file: settings_file(&dir).display().to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn choosing_a_billing_mode_writes_it_and_reads_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        for mode in ["subscription", "api"] {
+            let v = set_billing_mode_at(&ledger_in(&dir), mode).unwrap();
+            assert_eq!((v.mode, v.problem.as_deref()), (Some(mode), None));
+            assert_eq!(billing(&dir).mode, Some(mode), "and a later read sees it");
+        }
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings_file(&dir)).unwrap()).unwrap();
+        assert_eq!(on_disk, serde_json::json!({ "billing_mode": "api" }));
+    }
+
+    #[test]
+    fn choosing_a_billing_mode_leaves_the_repeat_reads_switch_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        set_repeat_reads_at(&ledger_in(&dir), false).unwrap();
+        set_billing_mode_at(&ledger_in(&dir), "subscription").unwrap();
+        assert!(!shown(&dir).on);
+        assert_eq!(shown(&dir).problem, None);
+    }
+
+    #[test]
+    fn a_billing_mode_the_window_should_never_send_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "API", "pro", "max", "subscription "] {
+            let err = set_billing_mode_at(&ledger_in(&dir), bad).unwrap_err();
+            assert!(err.contains("not a billing mode"), "{bad:?}: {err}");
+        }
+        let err = set_billing_mode_at(&ledger_in(&dir), &"x".repeat(10_000)).unwrap_err();
+        assert!(
+            err.len() < 200,
+            "a long value is repeated back short: {err}"
+        );
+        assert!(!settings_file(&dir).exists());
+    }
+
+    #[test]
+    fn a_billing_mode_the_file_cannot_hold_is_shown_as_a_problem_not_as_unasked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), r#"{"billing_mode": "pro"}"#).unwrap();
+        let v = billing(&dir);
+        assert_eq!(v.mode, None);
+        assert!(
+            v.problem.as_deref().unwrap_or("").contains("must be"),
+            "{v:?}"
+        );
+        // Choosing repairs a bad value.
+        let v = set_billing_mode_at(&ledger_in(&dir), "api").unwrap();
+        assert_eq!((v.mode, v.problem), (Some("api"), None));
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_used_is_not_replaced_by_a_billing_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(settings_file(&dir), "{not json").unwrap();
+        assert!(billing(&dir).problem.is_some());
+        let err = set_billing_mode_at(&ledger_in(&dir), "api").unwrap_err();
+        assert!(err.contains("left as it is"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(settings_file(&dir)).unwrap(),
+            "{not json"
+        );
+        assert!(
+            !shown(&dir).on,
+            "repeat reads stay off, as the unusable file has them"
+        );
+    }
+
+    #[test]
+    fn the_billing_mode_goes_to_the_window_under_the_keys_it_reads() {
+        let v = BillingModeSetting {
+            mode: Some("api"),
+            problem: None,
+            file: "/d/lumen_settings.json".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&v).unwrap(),
+            serde_json::json!({ "mode": "api", "problem": null, "file": "/d/lumen_settings.json" })
+        );
+    }
+
     // ── commands the window invokes ──────────────────────────────────────────
 
     /// Every `.ts` file the app ships: specs and the fake bridge only describe calls.
@@ -1738,10 +2186,15 @@ mod tests {
                 invoked.push(name);
             }
         }
-        for needed in ["get_repeat_reads_setting", "set_repeat_reads_setting"] {
+        for needed in [
+            "get_repeat_reads_setting",
+            "set_repeat_reads_setting",
+            "get_billing_mode_setting",
+            "set_billing_mode_setting",
+        ] {
             assert!(
                 invoked.iter().any(|n| n == needed),
-                "the switch needs {needed}, and the scan found only {invoked:?}"
+                "the settings need {needed}, and the scan found only {invoked:?}"
             );
         }
     }
@@ -1764,6 +2217,31 @@ mod tests {
         assert!(
             invoked.iter().any(|n| n == needed),
             "the prompt needs {needed}, and the scan found only {invoked:?}"
+        );
+        assert!(
+            registered_commands().iter().any(|n| n == needed),
+            "the window asks {needed}, which no handler answers"
+        );
+    }
+
+    /// The window's savings figures are the engine's, through this one command; the session
+    /// service swallows a failure, so a rename on either side would leave the figures blank
+    /// without a sound.
+    #[test]
+    fn the_window_asks_the_savings_summary_of_a_command_the_backend_answers() {
+        let mut files = Vec::new();
+        frontend_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app"),
+            &mut files,
+        );
+        let invoked: Vec<String> = files
+            .iter()
+            .flat_map(|f| invoked_commands(&std::fs::read_to_string(f).unwrap()))
+            .collect();
+        let needed = "lumen_savings_summary";
+        assert!(
+            invoked.iter().any(|n| n == needed),
+            "the window needs {needed}, and the scan found only {invoked:?}"
         );
         assert!(
             registered_commands().iter().any(|n| n == needed),
@@ -1822,7 +2300,12 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/app/tauri-bridge.ts"),
         )
         .unwrap();
-        for command in ["get_repeat_reads_setting", "set_repeat_reads_setting"] {
+        for command in [
+            "get_repeat_reads_setting",
+            "set_repeat_reads_setting",
+            "get_billing_mode_setting",
+            "set_billing_mode_setting",
+        ] {
             assert_eq!(
                 invoke_arg_keys(&bridge, command),
                 command_params(command),

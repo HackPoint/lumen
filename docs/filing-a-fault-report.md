@@ -16,10 +16,13 @@ Two rules hold throughout:
 
 ### 1. Find it
 
-The **Hotspots** tab carries a badge with the number of faults waiting. The
-**Report a fault** row sits directly under the navigation.
+The **Settings** tab carries a badge with the number of faults waiting. The
+**Report a fault** row is on that screen, just above About.
 
 ![The Hotspots tab badged with a fault count, and the Report a fault row](assets/fault-report/fault-1-badge.png)
+
+*The screenshots are from 1.8.0, when the badge and the row were on the Hotspots tab; from
+1.9.0 they are on Settings, and otherwise the same.*
 
 If the badge is absent, nothing has been recorded and there is nothing to report. The
 row is still there, and **Check for faults** still works.
@@ -62,13 +65,17 @@ anything.
 ## From the terminal
 
 ```bash
-lumen report --dry-run      # render and print it; sends nothing
-lumen report                # print it, then refuse to file — a deliberate stop
-lumen report --yes          # file it
+lumen faults --dry-run      # render and print it; sends nothing
+lumen faults                # print it, then refuse to file — a deliberate stop
+lumen faults --yes          # file it
 ```
 
-`--yes` is required. Without it, `lumen report` prints the body and exits `2` with a
+`--yes` is required. Without it, `lumen faults` prints the body and exits `2` with a
 notice, so filing is never something that happens because a flag was forgotten.
+
+Before 1.9.0 this was `lumen report`. With any of these flags `lumen report` still runs it,
+and says on stderr that the command is now `lumen faults`; `lumen report` on its own is the
+savings detail now.
 
 ### If `lumen` is not a command
 
@@ -77,7 +84,7 @@ install (`brew install --cask lumen-app`) puts nothing on your `PATH` — the CL
 the bundle, where you can still call it directly:
 
 ```bash
-/Applications/Lumen.app/Contents/MacOS/lumen-cli report --dry-run
+/Applications/Lumen.app/Contents/MacOS/lumen-cli faults --dry-run
 ```
 
 That path matters in exactly the case this page exists for. If the app itself will not

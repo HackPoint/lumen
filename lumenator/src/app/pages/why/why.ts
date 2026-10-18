@@ -3,16 +3,20 @@ import {
     Component,
     computed,
     inject,
-    OnInit,
 } from '@angular/core';
-import { RouterLink, RouterLinkActive } from '@angular/router';
 import { Firefly } from '../../components/firefly/firefly';
+import { TabNav } from '../../components/tab-nav/tab-nav';
 import { SessionService } from '../../session.service';
 import { LumenTooltip } from '../../directives/tooltip.directive';
+import { recommendations } from '../../recommendation';
 import type { FileHotspot } from '../../components/index';
 
 /**
- * Where the context actually goes, in every project the ledger holds.
+ * Why: what to do about where the context goes, then where it goes, in every project the ledger
+ * holds. Hotspots until 1.9.0.
+ *
+ * In the navigation only while there is something to do (see `isRecommendation` for the rule),
+ * and reachable by its URL at any time, when it says there is nothing to act on.
  *
  * Diagnosis, not savings — and the distinction is the point. Every other figure in the
  * product claims a benefit and therefore has to defend a counterfactual; this one only
@@ -23,19 +27,19 @@ import type { FileHotspot } from '../../components/index';
  * context goes" survives contact with the data in a way that "we saved you X%" has not.
  */
 @Component({
-    selector: 'hotspots',
-    imports: [RouterLink, RouterLinkActive, Firefly, LumenTooltip],
-    templateUrl: './hotspots.html',
-    styleUrl: './hotspots.css',
+    selector: 'why',
+    imports: [Firefly, TabNav, LumenTooltip],
+    templateUrl: './why.html',
+    styleUrl: './why.css',
     changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class Hotspots implements OnInit {
+export class Why {
+    // The report is fetched by the navigation on this page, which needs it to decide whether
+    // this screen is in it; fetching it here as well would ask the ledger twice per visit.
     readonly s = inject(SessionService);
 
-    ngOnInit(): void {
-        this.s.refreshContextReport();
-        this.s.refreshFaultCount();
-    }
+    /** The files to act on, with the backend's advice for each. */
+    readonly todo = computed(() => recommendations(this.s.contextReport()));
 
     readonly files = computed(() => this.s.contextFiles());
     readonly hasData = computed(() => this.s.contextTotalTokens() > 0);
@@ -65,38 +69,5 @@ export class Hotspots implements OnInit {
      */
     unchangedPct(f: FileHotspot): number {
         return f.reads > 0 ? (100 * f.unchangedRereads) / f.reads : 0;
-    }
-
-    // ── Fault report ──────────────────────────────────────────────────────────
-    //
-    // Deliberately two clicks. The first renders locally and shows the exact text; the
-    // second publishes it to a public tracker. Collapsing them into one button would
-    // make an irreversible outward-facing action the default outcome of curiosity.
-
-    readonly report = computed(() => this.s.faultReport());
-    readonly reportLoading = computed(() => this.s.faultReportLoading());
-    readonly reportNone = computed(() => this.s.faultsNone());
-    readonly filing = computed(() => this.s.faultFiling());
-    readonly filed = computed(() => this.s.faultFiled());
-    /** True once something actually exists on the tracker — a handoff does not count. */
-    readonly published = computed(() => {
-        const f = this.filed();
-        return f !== null && !f.handoff;
-    });
-    readonly reportError = computed(() => this.s.faultError());
-
-    /** Whether this body has already been sent somewhere — sending twice is pointless. */
-    readonly alreadyFiled = computed(() => this.filed() !== null);
-
-    preview(): void {
-        this.s.refreshFaultReport();
-    }
-
-    file(): void {
-        this.s.fileFaultReport();
-    }
-
-    dismiss(): void {
-        this.s.dismissFaultReport();
     }
 }

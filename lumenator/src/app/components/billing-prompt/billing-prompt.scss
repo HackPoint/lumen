@@ -1,0 +1,98 @@
+/* No box of its own, as the identity hook prompt beside it: a hidden prompt must not take a gap
+   in Home's column. */
+:host {
+  display: contents;
+}
+
+/* The identity hook prompt's shape in the restored-icon notice's neutral colours: nothing is
+   wrong, the app is asking a question. */
+.prompt {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--lumen-border);
+  border-left-width: 3px;
+  border-radius: 6px;
+}
+
+.prompt__head {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumen-text);
+}
+
+.prompt__body {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--lumen-text-dim);
+}
+
+.prompt__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prompt__btn {
+  font-family: var(--lumen-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lumen-text);
+  background: var(--lumen-bg-elevated);
+  border: 1px solid var(--lumen-border-strong);
+  border-radius: 6px;
+  padding: 0.28rem 0.7rem;
+  cursor: pointer;
+}
+
+.prompt__btn:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.prompt__btn:focus-visible {
+  outline: 2px solid var(--lumen-brand);
+  outline-offset: 2px;
+}
+
+.prompt__error {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--lumen-alert);
+  overflow-wrap: anywhere;
+}
+
+/* What was saved, where the prompt was. It takes focus from the button that went with the
+   prompt, so it shows a focus ring when the keyboard put it there. */
+.prompt__status {
+  width: 100%;
+  margin: 0 0 14px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--lumen-text-dim);
+  text-align: center;
+}
+
+/* Empty, it is taken out of the flow rather than hidden: an empty flex item would still cost
+   Home's column a gap, and a hidden region is not announced when its text arrives. */
+.prompt__status:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.prompt__status:focus {
+  outline: none;
+}
+
+.prompt__status:focus-visible {
+  outline: 2px solid var(--lumen-brand);
+  outline-offset: 2px;
+}
