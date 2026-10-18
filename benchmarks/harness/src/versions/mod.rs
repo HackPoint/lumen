@@ -10,6 +10,7 @@
 
 pub mod caps;
 pub mod daemon;
+pub mod script_hooks;
 
 use crate::builds::{self, Build};
 use crate::corpus::{self, Corpus};

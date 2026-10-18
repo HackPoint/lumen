@@ -84,7 +84,12 @@ pub struct Series {
 }
 
 impl Series {
-    fn measured(id: &str, what: &str, subject: Option<String>, ns: &[i64]) -> Res<Series> {
+    pub(crate) fn measured(
+        id: &str,
+        what: &str,
+        subject: Option<String>,
+        ns: &[i64],
+    ) -> Res<Series> {
         Ok(Series {
             id: id.to_string(),
             what: what.to_string(),
@@ -157,7 +162,7 @@ pub struct Subject {
 }
 
 impl Subject {
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         format!(
             "{} ({} lines, bucket {})",
             self.rel, self.lines, self.bucket
@@ -208,7 +213,7 @@ pub fn pick_subjects(corpus_root: &Path, prep: &[Prepared]) -> Vec<Subject> {
 
 // ── payloads ─────────────────────────────────────────────────────────────────
 
-fn pre_read(session: &str, abs: &Path) -> Vec<u8> {
+pub(crate) fn pre_read(session: &str, abs: &Path) -> Vec<u8> {
     let p = abs.to_string_lossy();
     json!({
         "session_id": session, "transcript_path": "/dev/null",
@@ -221,7 +226,7 @@ fn pre_read(session: &str, abs: &Path) -> Vec<u8> {
     .into_bytes()
 }
 
-fn post_read(session: &str, s: &Subject) -> Vec<u8> {
+pub(crate) fn post_read(session: &str, s: &Subject) -> Vec<u8> {
     let p = s.abs.to_string_lossy();
     json!({
         "session_id": session, "transcript_path": "/dev/null",
@@ -255,7 +260,10 @@ fn post_bash(session: &str, s: &Subject) -> Vec<u8> {
 // ── timing ───────────────────────────────────────────────────────────────────
 
 /// `warmup` discarded runs, then `runs` recorded ones; `one(i)` returns the interval to record.
-fn sample(cfg: &LatencyConfig, mut one: impl FnMut(usize) -> Res<Duration>) -> Res<Vec<i64>> {
+pub(crate) fn sample(
+    cfg: &LatencyConfig,
+    mut one: impl FnMut(usize) -> Res<Duration>,
+) -> Res<Vec<i64>> {
     let mut v = Vec::with_capacity(cfg.runs);
     for i in 0..cfg.warmup + cfg.runs {
         let d = one(i)?;
@@ -279,7 +287,7 @@ fn hook_cmd(bin: &Path, iso: &Sandbox, args: &[&str]) -> Command {
 
 /// Spawn, write the payload, wait. The interval opens before the process exists and closes when
 /// it has exited.
-fn time_spawn(cmd: &mut Command, payload: &[u8]) -> Res<(i32, Duration)> {
+pub(crate) fn time_spawn(cmd: &mut Command, payload: &[u8]) -> Res<(i32, Duration)> {
     let t0 = Instant::now();
     let mut child = cmd.spawn().ctx("spawn the hook")?;
     {
@@ -499,6 +507,11 @@ fn hooks(
             .na_hook_subcommand()
             .unwrap_or_else(|| "no Lumen: there are no hooks".to_string());
         na_hooks(caps, &why, out);
+        // A version before 1.6.0 has script hooks: time the tag's own scripts (V3), which
+        // replace the five spawn rows just written. No Lumen has no hooks at all.
+        if !caps.no_lumen {
+            crate::versions::script_hooks::overlay(build, subjects, cfg, work, out)?;
+        }
         return Ok(());
     }
     let spawn_iso = Sandbox::create(&work.join("hooks-spawn"))?;

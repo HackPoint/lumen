@@ -230,6 +230,12 @@ impl Caps {
                     .to_string(),
             );
         }
+        if !self.hook_cli && !self.no_lumen {
+            v.push(format!(
+                "hooks are {}",
+                crate::versions::script_hooks::LABEL
+            ));
+        }
         if self.saved_clamped {
             v.push(
                 "saved_tokens is clamped at zero in this version: the self-reported value is \

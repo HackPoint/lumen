@@ -129,6 +129,10 @@ fn a_build_without_hook_gets_n_a_rows_and_is_never_spawned_with_hook() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("spawns.log");
     let bin = spy(dir.path(), "lumen-mcp", &mcp_bin(), &log);
+    // The script hooks count with the asset's `lumen-tok`, which sits beside `lumen-mcp`.
+    let tok = dir.path().join("lumen-tok");
+    std::fs::write(&tok, "#!/bin/sh\ncat >/dev/null\necho 42\n").unwrap();
+    std::fs::set_permissions(&tok, std::fs::Permissions::from_mode(0o755)).unwrap();
     let builds = vec![build("1.1.5", bin, caps_of("1.1.5")), Build::no_lumen()];
     let p = plan(dir.path(), builds, true, true);
     let out = run::execute(&p).expect("the run");
@@ -154,11 +158,29 @@ fn a_build_without_hook_gets_n_a_rows_and_is_never_spawned_with_hook() {
             .status
             .clone()
     };
+    // 1.1.5's hooks are scripts (V3): the four it has are timed from the tag, and labelled so,
+    // or `n/a` with the reason when this checkout has no tags (CI clones without them).
     for id in [
         "hook.floor",
         "hook.intercept_pass.spawn",
         "hook.intercept_block.spawn",
         "hook.meter_read.spawn",
+    ] {
+        let s = old.series.iter().find(|s| s.id == id).unwrap();
+        assert!(
+            s.what
+                .starts_with("script hook (bash + python3), interpreted from the tag"),
+            "{id}: {}",
+            s.what
+        );
+        assert!(
+            s.status == "measured"
+                || (s.status.starts_with("n/a — ") && s.status.contains("not in this checkout")),
+            "{id}: {}",
+            s.status
+        );
+    }
+    for id in [
         "hook.meter_bash.spawn",
         "hook.per_call_identity",
         "server.identity.placed",
