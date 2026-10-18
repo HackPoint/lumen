@@ -128,11 +128,14 @@ queries only the columns `PRAGMA table_info` shows.
   directory (1.0.0 puts `lumen.db` in the cwd by default). `LUMEN_DB`, `LUMEN_PROJECTS_DIR`,
   `LUMEN_FAULT_SPOOL` and `LUMEN_LOG` point into scratch, `LUMEN_WS_ADDR` to a free port,
   `LUMEN_UPDATE_CHECK=0` (the only value that disables the check), and inherited `LUMEN_*` and
-  `CLAUDE*` variables are removed.
+  `CLAUDE*` variables are removed. The environment is an allowlist (`PATH`, locale, and on
+  Windows the system variables), not a blocklist: a proxy, a key or a tool's own `*_HOME` cannot
+  slip through by not matching a pattern. `harness/src/sandbox.rs` is the one place that does it.
 - **Real-ledger guard:** before and after a run the real ledgers (the legacy data
   directory, which is the app identifier before 1.10.0, the current data directory, and
   `~/.lumen_db_path`) are opened read-only and must hold zero rows whose session starts with
-  `lumen-bench-`. A hit stops the run. The legacy path is taken from lumen-core's
+  `lumen-bench-` (or the harness's own `bench-`; a real session id is a UUID). A hit stops the
+  run. The ledgers are opened with a `?mode=ro` URI and a missing one is skipped, never created. The legacy path is taken from lumen-core's
   `legacy::LEGACY_APP_ID`, never written as a literal in the harness or in these files.
 - 1.0.0's daemon reads `$HOME/.claude/projects` and its fixed port can collide with a running
   Lumen app, whose GUI could then talk to the bench daemon: the port is checked free first.

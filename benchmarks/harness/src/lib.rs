@@ -19,6 +19,7 @@ pub mod latency;
 pub mod manifest;
 pub mod report;
 pub mod run;
+pub mod sandbox;
 pub mod stats;
 pub mod tokens;
 pub mod util;

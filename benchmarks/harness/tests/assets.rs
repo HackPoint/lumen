@@ -398,7 +398,7 @@ fn a_dmg_gives_its_three_sidecars_and_is_detached_afterwards() {
     );
     let info = Command::new("hdiutil").arg("info").output().unwrap();
     assert!(
-        !String::from_utf8_lossy(&info.stdout).contains("LumenFixture"),
+        !String::from_utf8_lossy(&info.stdout).contains("Lumen_0.0.0_aarch64.dmg"),
         "the image must be detached"
     );
 }
@@ -411,4 +411,272 @@ fn a_dmg_off_macos_is_na() {
     std::fs::write(&dmg, "x").unwrap();
     let err = extract(&dmg, "a.dmg", &t.path().join("out")).unwrap_err();
     assert!(err.starts_with("n/a"), "{err}");
+}
+
+// --- hostile archives: nothing escapes, nothing is followed ----------------------------------
+
+/// A ustar archive written by hand, so it can hold what `tar -c` will not make: `..`, absolute
+/// names, a link pointing out. `kind` is the type flag: b'0' file, b'2' symlink (the `data` is
+/// then the link target).
+fn tar_bytes(entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, kind, data) in entries {
+        let mut h = [0u8; 512];
+        let put = |h: &mut [u8; 512], at: usize, s: &[u8]| h[at..at + s.len()].copy_from_slice(s);
+        put(&mut h, 0, name.as_bytes());
+        put(&mut h, 100, b"0000644\0");
+        put(&mut h, 108, b"0000000\0");
+        put(&mut h, 116, b"0000000\0");
+        let size = if *kind == b'0' { data.len() } else { 0 };
+        put(&mut h, 124, format!("{size:011o}\0").as_bytes());
+        put(&mut h, 136, b"00000000000\0");
+        put(&mut h, 148, b"        ");
+        h[156] = *kind;
+        if *kind == b'2' {
+            put(&mut h, 157, data);
+        }
+        put(&mut h, 257, b"ustar\0");
+        put(&mut h, 263, b"00");
+        let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+        put(&mut h, 148, format!("{sum:06o}\0 ").as_bytes());
+        out.extend(h);
+        if *kind == b'0' {
+            out.extend(*data);
+            out.extend(vec![0u8; (512 - data.len() % 512) % 512]);
+        }
+    }
+    out.extend(vec![0u8; 1024]);
+    out
+}
+
+/// What a hostile archive must leave behind: no file outside `dest`, and the planted outside
+/// file unread and unchanged.
+fn assert_nothing_escaped(t: &Path, dest: &Path) {
+    assert!(!t.join("pwned-dotdot").exists(), "`../` escaped");
+    assert!(!dest.parent().unwrap().join("pwned-dotdot").exists());
+    assert!(
+        !t.join("abs").join("pwned-abs").exists(),
+        "an absolute name escaped"
+    );
+    assert_eq!(
+        std::fs::read_to_string(t.join("outside").join("secret")).unwrap(),
+        "secret\n"
+    );
+}
+
+fn outside(t: &Path) -> PathBuf {
+    let o = t.join("outside");
+    std::fs::create_dir_all(&o).unwrap();
+    std::fs::write(o.join("secret"), "secret\n").unwrap();
+    o
+}
+
+#[test]
+fn a_tar_with_dotdot_and_absolute_names_writes_nothing_outside() {
+    let t = tempfile::tempdir().unwrap();
+    outside(t.path());
+    let abs = t.path().join("abs").join("pwned-abs");
+    let a = t.path().join("hostile.tgz");
+    std::fs::write(
+        &a,
+        tar_bytes(&[
+            ("ok/lumen", b'0', b"cli"),
+            ("../pwned-dotdot", b'0', b"x"),
+            ("../../pwned-dotdot", b'0', b"x"),
+            (abs.to_str().unwrap(), b'0', b"x"),
+        ]),
+    )
+    .unwrap();
+    let dest = t.path().join("dest").join("out");
+    // Whether the machine's tar skips the bad members or stops, they are not written.
+    let _ = extract(&a, "hostile.tgz", &dest);
+    assert_nothing_escaped(t.path(), &dest);
+}
+
+#[test]
+fn a_tar_with_an_escaping_symlink_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let out = outside(t.path());
+    let a = t.path().join("hostile.tgz");
+    std::fs::write(
+        &a,
+        tar_bytes(&[
+            ("lumen", b'0', b"cli"),
+            ("link", b'2', out.to_str().unwrap().as_bytes()),
+            ("file-link", b'2', b"../../outside/secret"),
+        ]),
+    )
+    .unwrap();
+    let dest = t.path().join("dest").join("out");
+    let err = extract(&a, "hostile.tgz", &dest).unwrap_err();
+    assert!(
+        err.contains("REFUSED") && err.contains("symbolic link"),
+        "{err}"
+    );
+    assert!(
+        !err.contains(t.path().to_str().unwrap()),
+        "no scratch path in {err}"
+    );
+    assert_nothing_escaped(t.path(), &dest);
+}
+
+/// A zip whose central header says its first entry is a unix symlink.
+fn zip_with_symlink(name: &str, target: &str) -> Vec<u8> {
+    let mut z = zip_bytes(&[(name, target.as_bytes())]);
+    let at = z
+        .windows(4)
+        .position(|w| w == 0x0201_4b50u32.to_le_bytes())
+        .unwrap();
+    z[at + 4] = 20;
+    z[at + 5] = 3; // made by: unix
+    z[at + 38..at + 42].copy_from_slice(&(0o120_777u32 << 16).to_le_bytes());
+    z
+}
+
+#[test]
+fn a_zip_with_dotdot_absolute_and_symlink_entries_writes_nothing_outside() {
+    let t = tempfile::tempdir().unwrap();
+    let out = outside(t.path());
+    let abs = t.path().join("abs").join("pwned-abs");
+    let a = t.path().join("hostile.zip");
+    std::fs::write(
+        &a,
+        zip_bytes(&[
+            ("lumen.exe", b"cli"),
+            ("../pwned-dotdot", b"x"),
+            ("../../pwned-dotdot", b"x"),
+            (abs.to_str().unwrap(), b"x"),
+        ]),
+    )
+    .unwrap();
+    let dest = t.path().join("dest").join("out");
+    let _ = extract(&a, "hostile.zip", &dest);
+    assert_nothing_escaped(t.path(), &dest);
+
+    let b = t.path().join("link.zip");
+    std::fs::write(&b, zip_with_symlink("link", out.to_str().unwrap())).unwrap();
+    let dest2 = t.path().join("dest2");
+    // Info-ZIP makes the link, bsdtar may write it as a file; either way it is never followed
+    // out: a link is refused, a file holds only the target's text.
+    match extract(&b, "link.zip", &dest2) {
+        Err(e) => assert!(e.contains("REFUSED"), "{e}"),
+        Ok(files) => {
+            for f in files {
+                assert!(
+                    !std::fs::symlink_metadata(&f)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+            }
+        }
+    }
+    assert_nothing_escaped(t.path(), &dest2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_sidecar_in_a_deb_is_refused_not_copied() {
+    use std::os::unix::fs::symlink;
+    let t = tempfile::tempdir().unwrap();
+    let out = outside(t.path());
+    let tree = t.path().join("tree");
+    sidecar_tree(&tree, "usr/bin");
+    std::fs::remove_file(tree.join("usr/bin/lumen-mcp")).unwrap();
+    symlink(out.join("secret"), tree.join("usr/bin/lumen-mcp")).unwrap();
+    let data = t.path().join("data.tar.gz");
+    tar_gz(&tree, &data);
+    let deb = t.path().join("a.deb");
+    std::fs::write(
+        &deb,
+        ar_bytes(&[
+            ("debian-binary", b"2.0\n"),
+            ("data.tar.gz", &std::fs::read(&data).unwrap()),
+        ]),
+    )
+    .unwrap();
+    let dest = t.path().join("dest").join("out");
+    let err = extract(&deb, "a.deb", &dest).unwrap_err();
+    assert!(err.contains("REFUSED"), "{err}");
+    assert!(
+        !dest.join("lumen-mcp").exists(),
+        "the target must not be copied"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_usr_bin_in_a_deb_is_refused() {
+    use std::os::unix::fs::symlink;
+    let t = tempfile::tempdir().unwrap();
+    let out = outside(t.path());
+    for s in assets::SIDECARS {
+        std::fs::write(out.join(s), "outside sidecar").unwrap();
+    }
+    let tree = t.path().join("tree");
+    std::fs::create_dir_all(tree.join("usr")).unwrap();
+    symlink(&out, tree.join("usr/bin")).unwrap();
+    let data = t.path().join("data.tar.gz");
+    tar_gz(&tree, &data);
+    let deb = t.path().join("a.deb");
+    std::fs::write(
+        &deb,
+        ar_bytes(&[("data.tar.gz", &std::fs::read(&data).unwrap())]),
+    )
+    .unwrap();
+    let dest = t.path().join("dest").join("out");
+    let err = extract(&deb, "a.deb", &dest).unwrap_err();
+    assert!(err.contains("REFUSED"), "{err}");
+    assert!(!dest.join("lumen-mcp").exists());
+}
+
+/// The guard detaches when a panic unwinds through it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_panic_while_mounted_still_detaches() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("vol");
+    sidecar_tree(&src, "Lumen.app/Contents/MacOS");
+    let dmg = t.path().join("g.dmg");
+    let st = Command::new("hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-fs",
+            "HFS+",
+            "-volname",
+            "LumenPanicFixture",
+            "-srcfolder",
+        ])
+        .arg(&src)
+        .arg(&dmg)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let mount = t.path().join("mnt");
+    std::fs::create_dir(&mount).unwrap();
+    let r = std::panic::catch_unwind(|| {
+        let g = assets::MountGuard::attach(&dmg, &mount).unwrap();
+        assert!(g.path().join("Lumen.app").exists());
+        panic!("boom");
+    });
+    assert!(r.is_err());
+    let info = Command::new("hdiutil").arg("info").output().unwrap();
+    assert!(
+        // `hdiutil info` names the image file, not the volume.
+        !String::from_utf8_lossy(&info.stdout).contains("g.dmg"),
+        "a panic left the image mounted"
+    );
+}
+
+#[test]
+fn curl_refuses_a_redirect_off_https() {
+    let a: Vec<String> = assets::curl_args("https://x/y", Path::new("/d"))
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    let at = |f: &str| a.iter().position(|x| x == f).unwrap();
+    assert_eq!(a[at("--proto") + 1], "=https");
+    assert_eq!(a[at("--proto-redir") + 1], "=https");
+    assert_eq!(a.last().unwrap(), "https://x/y");
 }

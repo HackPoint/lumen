@@ -9,6 +9,7 @@
 //! sent after a call is not read until that row is written: an untimed `tools/list` after a
 //! timed call is how the next timing is kept free of the previous call's ledger write.
 
+use crate::sandbox::Sandbox;
 use crate::util::{Ctx, Res};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -80,7 +81,7 @@ pub fn lumen_call_payload(session: &str, tool_use_id: &str) -> Vec<u8> {
 
 /// Files beside the ledger whose name carries `tool_use_id`: the hook's record of that call. The
 /// id is unique to the call, so nothing else can match.
-pub fn records_for(iso: &Isolation, tool_use_id: &str) -> Vec<PathBuf> {
+pub fn records_for(iso: &Sandbox, tool_use_id: &str) -> Vec<PathBuf> {
     let Ok(dir) = std::fs::read_dir(iso.dir()) else {
         return Vec::new();
     };
@@ -92,9 +93,9 @@ pub fn records_for(iso: &Isolation, tool_use_id: &str) -> Vec<PathBuf> {
 
 /// Run `hook intercept` once on `payload` against the isolated ledger, untimed. Returns its exit
 /// code.
-pub fn run_intercept(bin: &Path, iso: &Isolation, payload: &[u8]) -> Res<i32> {
+pub fn run_intercept(bin: &Path, iso: &Sandbox, payload: &[u8]) -> Res<i32> {
     let mut cmd = Command::new(bin);
-    isolate(&mut cmd, iso);
+    iso.apply(&mut cmd);
     cmd.args(["hook", "intercept"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -116,7 +117,7 @@ pub fn run_intercept(bin: &Path, iso: &Isolation, payload: &[u8]) -> Res<i32> {
 /// nothing. Nothing is read from the `hook` usage text, which does not change when a build gains
 /// this behaviour.
 pub fn probe_identity(bin: &Path, root: &Path) -> Res<Identity> {
-    let iso = Isolation::create(root)?;
+    let iso = Sandbox::create(root)?;
     let id = "toolu_bench_probe";
     run_intercept(bin, &iso, &lumen_call_payload("bench-probe", id))?;
     Ok(if records_for(&iso, id).is_empty() {
@@ -124,55 +125,6 @@ pub fn probe_identity(bin: &Path, root: &Path) -> Res<Identity> {
     } else {
         Identity::Hook
     })
-}
-
-/// Where a run keeps everything it writes, so nothing touches a real ledger or the real
-/// temp directory (the intercept hook's markers live under `temp_dir()`).
-#[derive(Clone)]
-pub struct Isolation {
-    pub db: PathBuf,
-    pub projects: PathBuf,
-    pub tmp: PathBuf,
-}
-
-impl Isolation {
-    /// The directory the ledger is in: where a hook's per-call records go.
-    pub fn dir(&self) -> &Path {
-        self.db.parent().unwrap_or_else(|| Path::new("."))
-    }
-
-    /// Directories under `root`, created. The ledger file is not: the build under test creates it
-    /// with its own schema on its first write, so a baseline build never opens a database laid
-    /// out by a newer one.
-    pub fn create(root: &Path) -> Res<Isolation> {
-        let iso = Isolation {
-            db: root.join("ledger.db"),
-            projects: root.join("projects"),
-            tmp: root.join("tmp"),
-        };
-        std::fs::create_dir_all(&iso.projects).ctx("create the projects dir")?;
-        std::fs::create_dir_all(&iso.tmp).ctx("create the tmp dir")?;
-        Ok(iso)
-    }
-}
-
-/// Strip everything that could change an answer or point at the user's own data, then point
-/// the child at the isolated directories. Any `LUMEN_*` or `CLAUDE*` variable inherited from
-/// the caller (a ranked-outline flag, a line-number switch, a session id) would silently make
-/// two runs measure different things.
-pub fn isolate(cmd: &mut Command, iso: &Isolation) {
-    for (k, _) in std::env::vars_os() {
-        if let Some(k) = k.to_str()
-            && (k.starts_with("LUMEN_") || k.starts_with("CLAUDE"))
-        {
-            cmd.env_remove(k);
-        }
-    }
-    cmd.env("LUMEN_DB", &iso.db)
-        .env("LUMEN_PROJECTS_DIR", &iso.projects)
-        .env("TMPDIR", &iso.tmp)
-        .env("TMP", &iso.tmp)
-        .env("TEMP", &iso.tmp);
 }
 
 /// A tool call's answer.
@@ -194,7 +146,7 @@ pub struct Server {
     /// arrived: the round trip a client sees. Request building and reply parsing are outside it.
     pub last_rtt: Duration,
     bin: PathBuf,
-    iso: Isolation,
+    iso: Sandbox,
     session: String,
     identity: Identity,
     /// Distinguishes this server's tool-use ids from any other's in the same ledger directory.
@@ -217,13 +169,13 @@ impl Server {
     pub fn start(
         bin: &Path,
         cwd: &Path,
-        iso: &Isolation,
+        iso: &Sandbox,
         session: &str,
         repeat_reads: bool,
         identity: Identity,
     ) -> Res<Server> {
         let mut cmd = Command::new(bin);
-        isolate(&mut cmd, iso);
+        iso.apply(&mut cmd);
         if identity == Identity::Env {
             cmd.env("CLAUDE_CODE_SESSION_ID", session);
         }
@@ -511,7 +463,7 @@ mod tests {
     #[test]
     fn records_are_found_by_the_call_id_in_their_name() {
         let dir = tempfile::tempdir().unwrap();
-        let iso = Isolation::create(dir.path()).unwrap();
+        let iso = Sandbox::create(dir.path()).unwrap();
         assert!(records_for(&iso, "toolu_1").is_empty());
         std::fs::write(iso.dir().join("lumen_call_toolu_1.json"), "{}").unwrap();
         std::fs::write(iso.dir().join("lumen_call_toolu_2.json"), "{}").unwrap();

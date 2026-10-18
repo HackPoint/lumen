@@ -3,6 +3,7 @@ use lumen_bench::compare;
 use lumen_bench::corpus::{self, Corpus};
 use lumen_bench::latency::{LatencyConfig, MIN_RUNS};
 use lumen_bench::run::{self, Plan};
+use lumen_bench::sandbox::RealLedgerGuard;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -279,8 +280,19 @@ fn main_inner() -> Result<(), String> {
         work: cache.join("work-run"),
     };
 
+    // Nothing a run spawns may touch a real ledger: checked read-only before it starts and again
+    // when it ends, whatever the run did.
+    let guard = RealLedgerGuard::new()?;
+    guard.check("before")?;
+    let result = measure(&plan, committed, &out);
+    let after = guard.check("after");
+    result?;
+    after
+}
+
+fn measure(plan: &Plan, committed: Option<compare::Committed>, out: &Path) -> Result<(), String> {
     if let Some(committed) = committed {
-        let (subjects, now) = run::latency_only(&plan)?;
+        let (subjects, now) = run::latency_only(plan)?;
         let sides = compare::sides(&committed, &plan.builds, &now)?;
         let now_subjects: Vec<String> = subjects.iter().map(|s| s.rel.clone()).collect();
         let corpus_sha = plan
@@ -295,8 +307,8 @@ fn main_inner() -> Result<(), String> {
         return Ok(());
     }
 
-    let output = run::execute(&plan)?;
-    for p in run::write_outputs(&out, &output)? {
+    let output = run::execute(plan)?;
+    for p in run::write_outputs(out, &output)? {
         println!("wrote {}", p.display());
     }
     Ok(())

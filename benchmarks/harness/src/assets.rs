@@ -172,6 +172,27 @@ fn hash_file(p: &Path) -> Res<String> {
     Ok(sha256_hex(&bytes))
 }
 
+/// The arguments of the `curl` fallback: HTTPS only, and a redirect may not leave HTTPS either
+/// (`--proto` alone covers the first request, not where it is sent next).
+pub fn curl_args(url: &str, dest: &Path) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<std::ffi::OsString> = [
+        "-fsSL",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--retry",
+        "2",
+        "-o",
+    ]
+    .iter()
+    .map(Into::into)
+    .collect();
+    v.push(dest.into());
+    v.push(url.into());
+    v
+}
+
 /// The default [`Downloader`]: `gh release download` when `gh` runs, else plain HTTPS with `curl`.
 pub fn download(src: Source<'_>, name: &str, dest: &Path) -> Res<()> {
     let dir = dest.parent().ok_or("a download needs a directory")?;
@@ -199,9 +220,7 @@ pub fn download(src: Source<'_>, name: &str, dest: &Path) -> Res<()> {
         src.repo, src.tag, name
     );
     let out = Command::new("curl")
-        .args(["-fsSL", "--proto", "=https", "--retry", "2", "-o"])
-        .arg(&got)
-        .arg(&url)
+        .args(curl_args(&url, &got))
         .stdin(Stdio::null())
         .output()
         .ctx("run curl")?;
@@ -259,13 +278,21 @@ pub fn extract(asset: &Path, name: &str, dest: &Path) -> Res<Vec<PathBuf>> {
     }
 }
 
+/// Every file under `dir`, sorted. A symbolic link anywhere is refused, not followed: an
+/// archive's own links are not trusted, and nothing here reads through one.
 fn list_files(dir: &Path) -> Res<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for e in std::fs::read_dir(&d).ctx(&format!("read {}", d.display()))? {
-            let p = e.ctx("read a directory entry")?.path();
-            if p.is_dir() {
+            let e = e.ctx("read a directory entry")?;
+            let p = e.path();
+            // `DirEntry::file_type` does not follow links.
+            let ft = e.file_type().ctx(&format!("stat {}", p.display()))?;
+            if ft.is_symlink() {
+                return Err(refused_link(&p, dir));
+            }
+            if ft.is_dir() {
                 stack.push(p);
             } else {
                 out.push(p);
@@ -274,6 +301,14 @@ fn list_files(dir: &Path) -> Res<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+fn refused_link(link: &Path, root: &Path) -> String {
+    let rel = link.strip_prefix(root).unwrap_or(link);
+    format!(
+        "REFUSED: the archive holds a symbolic link ({}); links in an archive are never followed",
+        rel.display()
+    )
 }
 
 fn run(cmd: &mut Command, what: &str) -> Res<()> {
@@ -323,19 +358,103 @@ fn unzip(archive: &Path, dest: &Path) -> Res<()> {
     }
 }
 
-fn copy_sidecars(from: &Path, dest: &Path, windows: bool) -> Res<Vec<PathBuf>> {
+/// Copy the three sidecars from `from`, a directory inside `root`, into `dest`. Nothing is
+/// followed through a symbolic link: no component of `from` below `root` may be one, a sidecar
+/// must be a regular file and not a link, and the resolved file must still be inside `root`.
+fn copy_sidecars(root: &Path, from: &Path, dest: &Path, windows: bool) -> Res<Vec<PathBuf>> {
+    let rel = from
+        .strip_prefix(root)
+        .map_err(|_| format!("{} is not inside {}", from.display(), root.display()))?;
+    let mut at = root.to_path_buf();
+    for c in rel.components() {
+        at.push(c);
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(refused_link(&at, root));
+        }
+    }
+    let real_root = root.canonicalize().ctx("resolve the archive root")?;
     let mut out = Vec::new();
     for s in SIDECARS {
         let file = exe_name(s, windows);
         let src = from.join(&file);
-        if !src.is_file() {
-            return Err(format!("the package has no {file} in {}", from.display()));
+        let meta = std::fs::symlink_metadata(&src)
+            .map_err(|_| format!("the package has no {file} in {}", rel.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(refused_link(&src, root));
+        }
+        if !meta.is_file() {
+            return Err(format!("the package has no {file} in {}", rel.display()));
+        }
+        let real = src.canonicalize().ctx(&format!("resolve {file}"))?;
+        if !real.starts_with(&real_root) {
+            return Err(refused_link(&src, root));
         }
         let to = dest.join(&file);
-        std::fs::copy(&src, &to).ctx(&format!("copy {file}"))?;
+        std::fs::copy(&real, &to).ctx(&format!("copy {file}"))?;
         out.push(to);
     }
     Ok(out)
+}
+
+/// A mounted disk image, detached when this goes out of scope, panic or not.
+pub struct MountGuard {
+    mount: PathBuf,
+    attached: bool,
+}
+
+impl MountGuard {
+    /// `hdiutil attach` of `asset` read-only at `mount`; never browsable, never verified-and-run.
+    pub fn attach(asset: &Path, mount: &Path) -> Res<MountGuard> {
+        run(
+            Command::new("hdiutil")
+                .args([
+                    "attach",
+                    "-readonly",
+                    "-nobrowse",
+                    "-noverify",
+                    "-mountpoint",
+                ])
+                .arg(mount)
+                .arg(asset),
+            "hdiutil attach",
+        )?;
+        Ok(MountGuard {
+            mount: mount.to_path_buf(),
+            attached: true,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.mount
+    }
+
+    /// Detach now and say how it went; a second call, and the drop after it, do nothing.
+    pub fn detach(&mut self) -> Res<()> {
+        if !self.attached {
+            return Ok(());
+        }
+        self.attached = false;
+        run(
+            Command::new("hdiutil")
+                .args(["detach", "-quiet"])
+                .arg(&self.mount),
+            "hdiutil detach",
+        )
+        .or_else(|_| {
+            run(
+                Command::new("hdiutil")
+                    .args(["detach", "-force", "-quiet"])
+                    .arg(&self.mount),
+                "hdiutil detach -force",
+            )
+        })
+    }
+}
+
+impl Drop for MountGuard {
+    fn drop(&mut self) {
+        let _ = self.detach();
+    }
 }
 
 fn extract_dmg(asset: &Path, dest: &Path) -> Res<Vec<PathBuf>> {
@@ -343,43 +462,18 @@ fn extract_dmg(asset: &Path, dest: &Path) -> Res<Vec<PathBuf>> {
         return Err("n/a: a .dmg can only be opened on macOS (hdiutil)".into());
     }
     let mount = tempfile::tempdir().ctx("a mount point")?;
-    run(
-        Command::new("hdiutil")
-            .args([
-                "attach",
-                "-readonly",
-                "-nobrowse",
-                "-noverify",
-                "-mountpoint",
-            ])
-            .arg(mount.path())
-            .arg(asset),
-        "hdiutil attach",
-    )?;
+    // Detached on every exit, a panic included.
+    let mut vol = MountGuard::attach(asset, mount.path())?;
     let copied = (|| {
         // The app is the one `*.app` on the volume; the sidecars sit in Contents/MacOS.
-        let app = std::fs::read_dir(mount.path())
+        let app = std::fs::read_dir(vol.path())
             .ctx("read the mounted volume")?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .find(|p| p.extension().is_some_and(|x| x == "app"))
             .ok_or("the .dmg holds no .app")?;
-        copy_sidecars(&app.join("Contents").join("MacOS"), dest, false)
+        copy_sidecars(vol.path(), &app.join("Contents").join("MacOS"), dest, false)
     })();
-    // Always detach, whatever the copy did.
-    let detach = run(
-        Command::new("hdiutil")
-            .args(["detach", "-quiet"])
-            .arg(mount.path()),
-        "hdiutil detach",
-    )
-    .or_else(|_| {
-        run(
-            Command::new("hdiutil")
-                .args(["detach", "-force", "-quiet"])
-                .arg(mount.path()),
-            "hdiutil detach -force",
-        )
-    });
+    let detach = vol.detach();
     let files = copied?;
     detach?;
     Ok(files)
@@ -431,7 +525,7 @@ fn extract_deb(asset: &Path, dest: &Path) -> Res<Vec<PathBuf>> {
     let tree = scratch.path().join("tree");
     std::fs::create_dir(&tree).ctx("create the tree directory")?;
     untar(&tarball, &tree)?;
-    copy_sidecars(&tree.join("usr").join("bin"), dest, false)
+    copy_sidecars(&tree, &tree.join("usr").join("bin"), dest, false)
 }
 
 /// Candidates for 7-Zip, in the order they are tried.

@@ -38,9 +38,9 @@
 use crate::builds::Build;
 use crate::corpus::{BUCKETS, Lang, bucket_of};
 use crate::driver::{
-    Identity, Isolation, Server, isolate, ledger_rows, ledger_tool_count, lumen_call_payload,
-    records_for,
+    Identity, Server, ledger_rows, ledger_tool_count, lumen_call_payload, records_for,
 };
+use crate::sandbox::Sandbox;
 use crate::stats::{Lat, lat};
 use crate::tokens::Prepared;
 use crate::util::{Ctx, Res};
@@ -260,9 +260,9 @@ fn sample(cfg: &LatencyConfig, mut one: impl FnMut(usize) -> Res<Duration>) -> R
     Ok(v)
 }
 
-fn hook_cmd(bin: &Path, iso: &Isolation, args: &[&str]) -> Command {
+fn hook_cmd(bin: &Path, iso: &Sandbox, args: &[&str]) -> Command {
     let mut c = Command::new(bin);
-    isolate(&mut c, iso);
+    iso.apply(&mut c);
     c.arg("hook")
         .args(args)
         .stdin(Stdio::piped())
@@ -290,7 +290,7 @@ fn time_spawn(cmd: &mut Command, payload: &[u8]) -> Res<(i32, Duration)> {
 
 struct SpawnSeries<'a> {
     build: &'a Build,
-    iso: &'a Isolation,
+    iso: &'a Sandbox,
     cfg: &'a LatencyConfig,
 }
 
@@ -321,7 +321,7 @@ impl SpawnSeries<'_> {
 }
 
 fn run_in_process(
-    iso: &Isolation,
+    iso: &Sandbox,
     cfg: &LatencyConfig,
     id: &str,
     args: &[&str],
@@ -384,7 +384,7 @@ const IDENTITY_WHAT: &str = "per-call identity hook: PreToolUse `hook intercept`
 /// at most the one record, so the hook's prune pass reads the same few entries it would in a
 /// session. An exit other than 0 or a missing record stops the run: the series would not be
 /// measuring the path it names.
-fn identity_series(build: &Build, iso: &Isolation, cfg: &LatencyConfig) -> Res<Series> {
+fn identity_series(build: &Build, iso: &Sandbox, cfg: &LatencyConfig) -> Res<Series> {
     if build.identity != Identity::Hook {
         return Ok(Series::with_status(
             IDENTITY_ID,
@@ -430,8 +430,8 @@ fn hooks(
     in_process: bool,
     out: &mut Vec<Series>,
 ) -> Res<()> {
-    let spawn_iso = Isolation::create(&work.join("hooks-spawn"))?;
-    let proc_iso = Isolation::create(&work.join("hooks-inproc"))?;
+    let spawn_iso = Sandbox::create(&work.join("hooks-spawn"))?;
+    let proc_iso = Sandbox::create(&work.join("hooks-inproc"))?;
     let tag = build.label.as_str();
     let small = subjects.iter().find(|s| s.bucket == BUCKETS[0].name);
     let medium = subjects.iter().find(|s| s.bucket == BUCKETS[1].name);
@@ -690,7 +690,7 @@ fn servers(
     out: &mut Vec<Series>,
 ) -> Res<String> {
     // Spawn plus `initialize`, to the reply.
-    let start_iso = Isolation::create(&work.join("srv-start"))?;
+    let start_iso = Sandbox::create(&work.join("srv-start"))?;
     let scratch = work.join("srv-files");
     put_files(&scratch, subjects)?;
     let ns = sample(cfg, |i| {
@@ -717,7 +717,7 @@ fn servers(
     let n = cfg.warmup + cfg.runs;
 
     // Repeat reads off, asked for (`Server::start` sets the variable): on is the default from 1.8.0.
-    let iso = Isolation::create(&work.join("srv-plain"))?;
+    let iso = Sandbox::create(&work.join("srv-plain"))?;
     let mut s = Server::start(
         &build.bin,
         &scratch,
@@ -773,7 +773,7 @@ fn servers(
     // Repeat reads on: the gate, answering "unchanged" and "changed".
     let scratch2 = work.join("srv-files-repeat");
     put_files(&scratch2, subjects)?;
-    let iso2 = Isolation::create(&work.join("srv-repeat"))?;
+    let iso2 = Sandbox::create(&work.join("srv-repeat"))?;
     let mut s = Server::start(
         &build.bin,
         &scratch2,
@@ -858,7 +858,7 @@ fn claim_series(
     let Some(m) = subjects.iter().find(|s| s.bucket == BUCKETS[1].name) else {
         return Ok(());
     };
-    let iso = Isolation::create(&work.join("srv-identity"))?;
+    let iso = Sandbox::create(&work.join("srv-identity"))?;
     let mut s = Server::start(
         &build.bin,
         scratch,
@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn a_build_that_records_no_identity_gets_an_n_a_slot_that_says_so() {
         let tmp = tempfile::tempdir().unwrap();
-        let iso = Isolation::create(tmp.path()).unwrap();
+        let iso = Sandbox::create(tmp.path()).unwrap();
         let cfg = LatencyConfig { runs: 1, warmup: 0 };
         let build = Build {
             label: "old".to_string(),

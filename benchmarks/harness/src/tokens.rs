@@ -21,8 +21,9 @@
 
 use crate::builds::Build;
 use crate::corpus::{BUCKETS, Corpus, LANGS, SourceFile, bucket_of};
-use crate::driver::{Identity, Isolation, LedgerRow, Reply, Server, ledger_rows};
+use crate::driver::{Identity, LedgerRow, Reply, Server, ledger_rows};
 use crate::edit::{self, Edit, Rep};
+use crate::sandbox::Sandbox;
 use crate::stats::{Dist, dist};
 use crate::util::{Ctx, Res, sha256_hex};
 use lumen_core::tokenizer::count_tokens;
@@ -138,7 +139,7 @@ fn off_pass(
     work: &Path,
     tag: &str,
 ) -> Res<(Vec<Off>, String)> {
-    let iso = Isolation::create(&work.join(format!("off-{}", c.name)))?;
+    let iso = Sandbox::create(&work.join(format!("off-{}", c.name)))?;
     let session = format!("bench-off-{}", c.name);
     let mut s = Server::start(bin, &c.root, &iso, &session, false, identity)?;
     let version = s.version.clone();
@@ -225,7 +226,7 @@ fn on_pass(
         std::fs::create_dir_all(parent).ctx(&format!("create {}", parent.display()))?;
         std::fs::write(&dest, p.src.as_bytes()).ctx(&format!("write {}", dest.display()))?;
     }
-    let iso = Isolation::create(&base)?;
+    let iso = Sandbox::create(&base)?;
     let mut s = Server::start(
         bin,
         &scratch,
