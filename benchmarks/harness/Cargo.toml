@@ -24,3 +24,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 tempfile = "3"
+
+# Dev-only, test-only: parses the committed method files (benchmarks/{competitors,versions}/*.toml).
+# `toml` 1.1.6 is already in Cargo.lock (the Tauri build uses it), so this adds no package.
+[dev-dependencies]
+toml = "1.1"

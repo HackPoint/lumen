@@ -1,0 +1,211 @@
+# The arms of the competitor comparison (Layer 1 replay and Layer 2 end to end).
+#
+# Committed before any run (METHOD.md, "Honesty rule"). Every pin is a full 40-character git
+# commit or a 64-hex sha256; an abbreviated value is a test failure
+# (benchmarks/harness/tests/pins.rs). Resolved on 2026-10-18 with `git ls-remote` and
+# `gh release view --json assets` (GitHub's own sha256 digest of each asset); where a project
+# publishes a checksum file it was downloaded and the rows below match it.
+#
+# Nothing here was installed or run to produce it. No arm is paid. The arms run at their
+# defaults except for the telemetry switches in `telemetry_env`, a deviation METHOD.md records.
+
+[meta]
+resolved_on = "2026-10-18"
+model = "claude-sonnet-5-5"
+
+[claude_code]
+# Pinned for every arm: `npm i @anthropic-ai/claude-code@2.1.292` (the npm `stable` dist-tag on
+# the resolving date), with DISABLE_AUTOUPDATER=1.
+package = "@anthropic-ai/claude-code"
+version = "2.1.292"
+npm_integrity = "sha512-ptT9UcOsyR2VLNgfHgF87To8B7tCrZktIpYC4dEGt+9MG42NAWsljEGBZ3spdHcJ2akednszESVNti7hWxZrJg=="
+env = { DISABLE_AUTOUPDATER = "1" }
+
+# --- no Lumen ----------------------------------------------------------------------------------
+[[arm]]
+id = "none"
+name = "no Lumen"
+kind = "none"
+shared = true # run once, cited by both the competitor and the version reports
+install = ["nothing: stock Claude Code at the pinned version, no hooks, no MCP servers"]
+
+# --- Lumen 1.9.0 -------------------------------------------------------------------------------
+[[arm]]
+id = "lumen-1.9.0"
+name = "Lumen 1.9.0"
+kind = "lumen"
+shared = true
+repo = "https://github.com/HackPoint/lumen"
+license = "MIT"
+version = "1.9.0"
+tag = "v1.9.0"
+commit = "a74421383ea1b4cad801c72ca0fb370014cf4974"
+install = [
+  "download lumen_1.9.0_amd64.deb from the v1.9.0 release and check the sha256 below",
+  "unpack it without installing (ar x, then tar): usr/bin/{lumen-mcp,lumen-daemon,lumen-tok} are the sidecars",
+  "there is no headless Setup: the arm writes into the run's fresh HOME the same mcpServers entry and hooks that Setup writes (lumenator/src-tauri/src/setup.rs), and E1 checks the result against what setup.rs produces",
+  "lumen-daemon is not started: the ledger is not part of what an E2E run measures",
+]
+telemetry_env = { LUMEN_UPDATE_CHECK = "0" } # Lumen has no telemetry; this stops the update check
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "lumen_1.9.0_amd64.deb"
+sha256 = "8b1b334c39002b91bbdeb2e2d6f38087d4234e9273a7d587db64094edb69e9d8"
+
+# --- Lumen 1.1.5 standing in for 1.0.0 ---------------------------------------------------------
+# 1.0.0 has no Linux app asset, so it cannot run in the Linux containers. 1.1.5 is the first
+# version with a .deb and stands in for it, labelled in every table. Pins of the other Lumen
+# versions are in benchmarks/versions/manifest.toml; this block repeats the E2E ones.
+[[arm]]
+id = "lumen-1.1.5"
+name = "Lumen 1.1.5 (stands in for 1.0.0)"
+kind = "lumen"
+stands_in_for = "1.0.0"
+repo = "https://github.com/HackPoint/lumen"
+license = "MIT"
+version = "1.1.5"
+tag = "v1.1.5"
+commit = "737eb71fcb0dc44b328576631aabf3652faa7541"
+install = [
+  "as lumen-1.9.0, from lumen_1.1.5_amd64.deb; its hooks are bash and python3 scripts, run from the tag's committed .claude/hooks with LUMEN_TOK pointing at the unpacked lumen-tok",
+]
+telemetry_env = { LUMEN_UPDATE_CHECK = "0" }
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "lumen_1.1.5_amd64.deb"
+sha256 = "d400a0c7832207d36a8f3984004ddce967be6cc03fe5dca27210d9dd55dc3bfe"
+
+[[arm]]
+id = "lumen-1.6.0"
+name = "Lumen 1.6.0"
+kind = "lumen"
+repo = "https://github.com/HackPoint/lumen"
+license = "MIT"
+version = "1.6.0"
+tag = "v1.6.0"
+commit = "9d84f7c2124e0ef0ad1d5f8d94e1113e161143cf"
+install = ["as lumen-1.9.0, from lumen_1.6.0_amd64.deb"]
+telemetry_env = { LUMEN_UPDATE_CHECK = "0" }
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "lumen_1.6.0_amd64.deb"
+sha256 = "5f3fe3b27bb1fda4bf7f2e65fb2e7dfd49f050813e1a7f6d2e45221e552b8e49"
+
+[[arm]]
+id = "lumen-1.8.0"
+name = "Lumen 1.8.0"
+kind = "lumen"
+repo = "https://github.com/HackPoint/lumen"
+license = "MIT"
+version = "1.8.0"
+tag = "v1.8.0"
+commit = "12ad305679cf92b23167b032f56412a2a38e72a1"
+install = ["as lumen-1.9.0, from lumen_1.8.0_amd64.deb"]
+telemetry_env = { LUMEN_UPDATE_CHECK = "0" }
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "lumen_1.8.0_amd64.deb"
+sha256 = "b071b64b92dba96f1c59894e8ef05d2646f4011f2dac0e051afdc8fa51cc036a"
+
+# --- squeez ------------------------------------------------------------------------------------
+[[arm]]
+id = "squeez"
+name = "squeez"
+kind = "competitor"
+repo = "https://github.com/claudioemmanuel/squeez"
+license = "Apache-2.0"
+version = "1.48.18"
+tag = "v1.48.18"
+commit = "fa10c0dde7a81bdc5bea41dbaf5fa9c975624872" # the tag is annotated; this is the commit it points at
+hooks_into_claude_code = "PreToolUse rewrites Bash to `squeez wrap`; PostToolUse rewrites Read/Grep/Glob output (updatedToolOutput); SessionStart, PreCompact, PostCompact, SubagentStop. The MCP server is optional and off by default."
+install_script = { path = "install.sh", sha256 = "cb88b19de09c7f7b541f99041c302e05351a71753923b6c5eee6c9f85d002048" } # at the tag
+install = [
+  "install.sh downloads `releases/latest/download/...`, so it is not run: download the squeez-linux-x86_64 asset of v1.48.18 instead",
+  "check the asset's sha256 below (it also matches the release's checksums.sha256, itself pinned below)",
+  "put it at $HOME/.claude/squeez/bin/squeez, mode 0755, as install.sh does",
+  "run `squeez setup` (defaults: registers into every detected host, here only Claude Code)",
+]
+checksum_file = { name = "checksums.sha256", sha256 = "6b7c7b39f421bf465f391535242b5e292269eb529af27bc2e784c016b5d1b22d" }
+telemetry_env = { DO_NOT_TRACK = "1" } # the README documents no telemetry; set anyway
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "squeez-linux-x86_64"
+sha256 = "0aca3560464b643a98519a149ee4568720931164beaba3910b27ec1547142825"
+
+# --- RTK ---------------------------------------------------------------------------------------
+[[arm]]
+id = "rtk"
+name = "RTK"
+kind = "competitor"
+repo = "https://github.com/rtk-ai/rtk"
+# The default `rtk-<target>` asset is the Apache-2.0 CLI plus the BUSL-1.1 compression engine;
+# BUSL-1.1 production use is free, and no term forbids publishing a benchmark. The Apache-2.0
+# only edition is `rtk-oss-<target>` (RTK_EDITION=oss); it is not the default and is not used.
+license = "Apache-2.0 (CLI) + BUSL-1.1 (engine, in the default binary)"
+version = "1.0.1"
+tag = "v1.0.1"
+commit = "4ef8730cf3a0dea11c8d64a9b90bc0616fe52100" # lightweight tag
+hooks_into_claude_code = "PreToolUse Bash rewrite (git status becomes rtk git status); the default edition adds PostToolUse compression."
+install_script = { path = "install.sh", sha256 = "7ca3997314f631b8ad267e5add9af4b7a2f0351bdab0b1c5a9b7ed4008d0434a" } # at the tag
+install = [
+  "RTK_VERSION=v1.0.1 sh install.sh (it verifies the archive against the release's checksums.txt and refuses on a mismatch); on x86_64 Linux it takes rtk-x86_64-unknown-linux-musl.tar.gz, sha256 below",
+  "rtk init -g --auto-patch (the recommended global hook-first setup, patching settings.json without a prompt)",
+  "the optional rtk-proxy daemon is declined: not installed, not started",
+]
+checksum_file = { name = "checksums.txt", sha256 = "3dc6975d97c9faa43aa997a5d68a3255ceccea43ffa2d9d9ac22950b1b2d93a2" }
+telemetry_env = { DO_NOT_TRACK = "1" } # telemetry is off until `rtk telemetry enable`; never run
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "rtk-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436"
+
+# --- Headroom ----------------------------------------------------------------------------------
+[[arm]]
+id = "headroom"
+name = "Headroom"
+kind = "competitor"
+repo = "https://github.com/headroomlabs-ai/headroom" # chopratejas/headroom redirects here; nyckm/headroom is a fork
+license = "Apache-2.0 (the paid Enterprise tier is excluded)"
+version = "0.41.0"
+tag = "v0.41.0"
+commit = "76133cff59b71284399bf760c5578dc373c97231" # lightweight tag
+hooks_into_claude_code = "`headroom wrap claude`: a local proxy, ANTHROPIC_BASE_URL=http://127.0.0.1:<port>; also installs Serena for the wrapped project."
+install = [
+  "uv tool install --python 3.13 --exclude-newer 2026-10-18T00:00:00Z \"headroom-ai[all]==0.41.0\" (the wheel's sha256 is below; --exclude-newer fixes the unpinned transitive dependencies to what existed on the resolving date)",
+  "fetch the Kompress-v2-base weights once, at the pinned revision below, then run with HF_HUB_OFFLINE=1 so the run does not depend on a moving model",
+  "launch Claude Code as `headroom wrap claude -- <claude args>`",
+]
+telemetry_env = { HEADROOM_BEACON = "off", DO_NOT_TRACK = "1", HF_HUB_OFFLINE = "1" }
+[[arm.asset]]
+platform = "linux-x86_64"
+name = "headroom_ai-0.41.0-cp310-abi3-manylinux_2_28_x86_64.whl" # same sha256 on PyPI and the GitHub release
+sha256 = "f4db5e5119a73af3ed952b1c10caff2430831d899eb17d995a27574ae6e6b306"
+[arm.model]
+repo = "chopratejas/kompress-v2-base" # Hugging Face, apache-2.0
+commit = "e00cc5e60ff73b01674ef8fa6da6c5acf6d54181" # last modified 2026-09-17
+
+# --- Caveman -----------------------------------------------------------------------------------
+[[arm]]
+id = "caveman"
+name = "Caveman"
+kind = "competitor"
+repo = "https://github.com/JuliusBrussee/caveman"
+license = "Apache-2.0" # Caveman Cloud (login, "Auto") is separate commercial software and is not used
+version = "4.0.1"
+tag = "v4.0.1"
+commit = "d262ab3882952a59312ff3537cd86d894523c5ab" # the tag is annotated; this is the commit it points at
+hooks_into_claude_code = "the Claude Code plugin (skill, hooks and a statusline badge that set the output style); 4.0 adds local parts it calls rocks, all on after install."
+install_script = { path = "install.sh", sha256 = "c129b946a1f7f2e9eeeff5c1a747d7b43b2630c6b9e5fc7aa8297cece9cd3804" } # at the tag
+install = [
+  "the README's `npx @caveman-ai/cli@latest` is interactive and unpinned; the non-interactive pinned path is the tag's own script: curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v4.0.1/install.sh | bash -s -- --only claude --non-interactive",
+  "no `caveman login`, no Auto, no providers",
+  "the pilot checks `caveman status` and records which rocks are on; anything the script leaves off at defaults stays off",
+]
+# Scripted `claude -p` starts with caveman OFF whatever the install did (INSTALL.md), so the arm
+# turns it on the documented way (extra_env). Without it the arm would measure stock Claude Code.
+telemetry_env = { DO_NOT_TRACK = "1" } # `caveman telemetry off` is the same switch; the CLI sends usage stats by default
+extra_env = { CAVEMAN_DEFAULT_MODE = "caveman" } # not telemetry: the arm's one other non-default setting, recorded in METHOD.md
+npm = { package = "@caveman-ai/cli", version = "4.0.1", integrity = "sha512-ik1hgVGrhkha9YcZKSijfcS97nKjwYKyI4rvs7+7spTsNyBWClhgC2lAzgDkj3n5OvFcaROzNOHQ3jcS3AYCxw==" }
+
+# Not in scope: ojuschugh1/sqz (a different compressor), reachingforthejack/rtk (a different tool
+# that shares RTK's name), and any paid tier.
