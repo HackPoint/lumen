@@ -92,7 +92,7 @@ fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 fn eff(root: &Path) -> PathBuf {
-    effective_with(&root.join(NEW).join("lumen.db"), NEW, OLD)
+    effective_with(&root.join(NEW).join("lumen.db"), NEW, OLD, &[root])
 }
 
 // --- child processes -------------------------------------------------------

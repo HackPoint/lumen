@@ -61,13 +61,90 @@ impl SetupStep {
 /// Returns true when setup has not been completed yet.
 #[tauri::command]
 pub fn lumen_setup_needed() -> bool {
-    !marker_path().exists()
+    setup_needed_with(
+        &home(),
+        lumen_core::meter::APP_ID,
+        lumen_core::legacy::LEGACY_APP_ID,
+    )
+}
+
+/// Setup has not completed, or it did and `~/.claude.json` still points into the
+/// legacy data directory (the redirect keeps that working until Setup moves it).
+pub(crate) fn setup_needed_with(home: &Path, new_id: &str, legacy_id: &str) -> bool {
+    !marker_path_in(home).exists() || config_references_legacy_with(home, new_id, legacy_id)
+}
+
+/// Whether `~/.claude.json` still points Lumen's MCP entry into the legacy data
+/// directory. False when the two identifiers are the same.
+pub(crate) fn config_references_legacy_with(home: &Path, new_id: &str, legacy_id: &str) -> bool {
+    !legacy_references_with(home, new_id, legacy_id).is_empty()
+}
+
+/// The `command` and `env` values of `mcpServers.lumen` that sit inside the legacy
+/// data directory, as "what value".
+fn legacy_references_with(home: &Path, new_id: &str, legacy_id: &str) -> Vec<String> {
+    if new_id == legacy_id {
+        return Vec::new();
+    }
+    let Ok(root) = read_config_object(&claude_json_path_in(home)) else {
+        return Vec::new();
+    };
+    let Some(entry) = root.get("mcpServers").and_then(|m| m.get("lumen")) else {
+        return Vec::new();
+    };
+    let prefixes: Vec<String> = lumen_core::legacy::data_roots(Some(home))
+        .iter()
+        .map(|r| fold_path(&r.join(legacy_id).to_string_lossy()))
+        .collect();
+    let inside = |v: &str| {
+        let v = fold_path(v);
+        prefixes
+            .iter()
+            .any(|p| v == *p || v.starts_with(&format!("{p}/")))
+    };
+    let mut hits = Vec::new();
+    if let Some(c) = entry.get("command").and_then(|c| c.as_str()) {
+        if inside(c) {
+            hits.push(format!("command {c}"));
+        }
+    }
+    if let Some(env) = entry.get("env").and_then(|e| e.as_object()) {
+        for (k, v) in env {
+            if let Some(p) = v.as_str() {
+                if inside(p) {
+                    hits.push(format!("{k} {p}"));
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// A path as one comparable string: forward slashes, no trailing one, and
+/// lower-case where the file system folds case.
+fn fold_path(p: &str) -> String {
+    let s = p.replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    if cfg!(any(windows, target_os = "macos")) {
+        s.to_ascii_lowercase()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Run all setup steps. Returns one entry per step.
 #[tauri::command]
 pub fn lumen_run_setup(app: AppHandle) -> Vec<SetupStep> {
-    run_setup(&PluginAutoStart(&app))
+    use tauri::Manager;
+    let steps = run_setup(&PluginAutoStart(&app));
+    // Setup rewrites the paths old shims wrote through; take what they wrote since the start.
+    if let Some(ctx) = crate::upgrade::Ctx::current() {
+        let report = crate::upgrade::merge_again(&ctx);
+        if let Some(health) = app.try_state::<crate::health::StartupHealth>() {
+            report.apply(&health, "SETUP");
+        }
+    }
+    steps
 }
 
 /// Remove all Lumen configuration from ~/.claude/. Returns one entry per action.
@@ -320,10 +397,6 @@ fn global_settings_path_in(home: &Path) -> PathBuf {
 #[cfg_attr(not(test), allow(dead_code))]
 fn lumen_dir() -> PathBuf {
     lumen_dir_in(&home())
-}
-
-fn marker_path() -> PathBuf {
-    marker_path_in(&home())
 }
 
 /// How to run Setup again, as a person at the keyboard can do it. There is no menu item for
@@ -753,6 +826,14 @@ fn validate_cli() -> ArtifactStatus {
 }
 
 fn validate_mcp_in(home: &Path) -> ArtifactStatus {
+    validate_mcp_with(
+        home,
+        lumen_core::meter::APP_ID,
+        lumen_core::legacy::LEGACY_APP_ID,
+    )
+}
+
+pub(crate) fn validate_mcp_with(home: &Path, new_id: &str, legacy_id: &str) -> ArtifactStatus {
     // An unreadable file is reported as one. "No lumen entry — run Setup" would send
     // the user to a Setup that refuses the same file.
     let mcp = match read_config_object(&claude_json_path_in(home)) {
@@ -790,7 +871,18 @@ fn validate_mcp_in(home: &Path) -> ArtifactStatus {
                     }
                 }
             }
-            if dead.is_empty() {
+            // Still working through the redirect, but Setup is what moves it.
+            let stale = legacy_references_with(home, new_id, legacy_id);
+            if dead.is_empty() && !stale.is_empty() {
+                ArtifactStatus {
+                    id: "mcp".into(),
+                    healthy: false,
+                    detail: format!(
+                        "points into the legacy data directory: {} — run Setup",
+                        stale.join("; ")
+                    ),
+                }
+            } else if dead.is_empty() {
                 ArtifactStatus {
                     id: "mcp".into(),
                     healthy: true,
@@ -3235,7 +3327,6 @@ mod tests {
         // Guards against the wrappers drifting from the *_in functions.
         let h = home();
         assert_eq!(lumen_dir(), lumen_dir_in(&h));
-        assert_eq!(marker_path(), marker_path_in(&h));
         assert_eq!(app_support_dir(), app_support_dir_in(&h));
     }
 

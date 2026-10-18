@@ -105,6 +105,47 @@ fn name_eq(a: &std::ffi::OsStr, b: &str) -> bool {
     }
 }
 
+/// Whether two directory paths name the same place, folding case where the
+/// file system does. Component-wise, so a trailing separator does not matter.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let mut x = a.components();
+    let mut y = b.components();
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return true,
+            (Some(Component::Normal(p)), Some(Component::Normal(q))) => {
+                if !name_eq(p, &q.to_string_lossy()) {
+                    return false;
+                }
+            }
+            (Some(p), Some(q)) => {
+                if p != q {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Where the platform keeps per-user application data directories, for the
+/// anchoring in [`effective_with`]: the one under `home` and the one the
+/// platform reports (which honours XDG on Linux).
+pub fn data_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(h) = home
+        && let Some(p) = crate::meter::app_data_dir_in(h).parent()
+    {
+        v.push(p.to_path_buf());
+    }
+    if let Some(d) = dirs::data_dir()
+        && !v.contains(&d)
+    {
+        v.push(d);
+    }
+    v
+}
+
 /// The path to use for `path`, given the identifiers of the new and old
 /// directories. Separate from [`effective`] so tests can use fake identifiers.
 ///
@@ -120,15 +161,26 @@ fn name_eq(a: &std::ffi::OsStr, b: &str) -> bool {
 /// one cannot lose a row the migration already carried. Whoever reads the
 /// contents must treat a parse failure as "copied, nothing known about the
 /// high-water marks".
-pub fn effective_with(path: &Path, new_id: &str, legacy_id: &str) -> PathBuf {
+///
+/// Only a directory that sits directly in one of `roots` (the platform data
+/// directory) counts. A user's own `LUMEN_DB=/elsewhere/<id>/x.db` is never
+/// redirected, even when a directory named like the other identifier is next
+/// to it.
+pub fn effective_with(path: &Path, new_id: &str, legacy_id: &str, roots: &[&Path]) -> PathBuf {
     if new_id == legacy_id {
         return path.to_path_buf();
     }
-    // Find the closest ancestor named like one of the two; the tail is the file.
+    // Find the closest anchored ancestor named like one of the two; the tail is the file.
     for dir in path.ancestors().skip(1) {
         let Some(name) = dir.file_name() else {
             continue;
         };
+        if !dir
+            .parent()
+            .is_some_and(|p| roots.iter().any(|r| same_dir(p, r)))
+        {
+            continue;
+        }
         let (here_is_old, other) = if name_eq(name, legacy_id) {
             (true, new_id)
         } else if name_eq(name, new_id) {
@@ -174,7 +226,10 @@ pub fn effective_with(path: &Path, new_id: &str, legacy_id: &str) -> PathBuf {
 
 /// [`effective_with`] for this build's identifiers.
 pub fn effective(path: &Path) -> PathBuf {
-    effective_with(path, crate::meter::APP_ID, LEGACY_APP_ID)
+    let home = dirs::home_dir();
+    let roots = data_roots(home.as_deref());
+    let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    effective_with(path, crate::meter::APP_ID, LEGACY_APP_ID, &refs)
 }
 
 #[cfg(test)]
@@ -206,15 +261,18 @@ mod tests {
         let stale = old.join("lumen.db");
 
         assert_eq!(
-            effective_with(&stale, NEW, OLD),
+            effective_with(&stale, NEW, OLD, &[root.path()]),
             stale,
             "no marker, no move"
         );
         mark(&new);
-        assert_eq!(effective_with(&stale, NEW, OLD), new.join("lumen.db"));
+        assert_eq!(
+            effective_with(&stale, NEW, OLD, &[root.path()]),
+            new.join("lumen.db")
+        );
         // Deeper files (shims under bin/) follow too.
         assert_eq!(
-            effective_with(&old.join("bin").join("x"), NEW, OLD),
+            effective_with(&old.join("bin").join("x"), NEW, OLD, &[root.path()]),
             new.join("bin").join("x")
         );
     }
@@ -225,17 +283,26 @@ mod tests {
         let old = root.path().join(OLD);
         std::fs::create_dir_all(&old).unwrap();
         let canonical = root.path().join(NEW).join("lumen.db");
-        assert_eq!(effective_with(&canonical, NEW, OLD), old.join("lumen.db"));
+        assert_eq!(
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
+            old.join("lumen.db")
+        );
         // Same answer when the new directory exists but is unmarked (WebKit makes it on Linux).
         std::fs::create_dir_all(root.path().join(NEW)).unwrap();
-        assert_eq!(effective_with(&canonical, NEW, OLD), old.join("lumen.db"));
+        assert_eq!(
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
+            old.join("lumen.db")
+        );
     }
 
     #[test]
     fn a_fresh_install_resolves_to_the_new_directory() {
         let root = TempDir::new().unwrap();
         let canonical = root.path().join(NEW).join("lumen.db");
-        assert_eq!(effective_with(&canonical, NEW, OLD), canonical);
+        assert_eq!(
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
+            canonical
+        );
     }
 
     #[test]
@@ -244,7 +311,10 @@ mod tests {
         std::fs::create_dir_all(root.path().join(OLD)).unwrap();
         mark(&root.path().join(NEW));
         let canonical = root.path().join(NEW).join("lumen.db");
-        assert_eq!(effective_with(&canonical, NEW, OLD), canonical);
+        assert_eq!(
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
+            canonical
+        );
     }
 
     #[test]
@@ -260,8 +330,45 @@ mod tests {
             PathBuf::from("/"),
             PathBuf::new(),
         ] {
-            assert_eq!(effective_with(&p, NEW, OLD), p);
+            assert_eq!(effective_with(&p, NEW, OLD, &[root.path()]), p);
         }
+    }
+
+    #[test]
+    fn only_a_directory_in_the_data_root_is_redirected() {
+        // A custom ledger in a directory that happens to be named like the new
+        // identifier, with a directory named like the old one beside it, is the
+        // user's own file. Red without the anchor: both were redirected.
+        let root = TempDir::new().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir_all(data.join(OLD)).unwrap();
+        mark(&data.join(NEW));
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join(OLD)).unwrap();
+        mark(&elsewhere.join(NEW));
+        let nested = data.join("deeper");
+        std::fs::create_dir_all(nested.join(OLD)).unwrap();
+        mark(&nested.join(NEW));
+
+        let anchors = [data.as_path()];
+        for custom in [
+            elsewhere.join(NEW).join("x.db"),
+            elsewhere.join(OLD).join("x.db"),
+            nested.join(OLD).join("x.db"),
+            nested.join(NEW).join("x.db"),
+        ] {
+            assert_eq!(effective_with(&custom, NEW, OLD, &anchors), custom);
+        }
+        // The anchored one still moves, with or without a trailing separator.
+        assert_eq!(
+            effective_with(&data.join(OLD).join("x.db"), NEW, OLD, &anchors),
+            data.join(NEW).join("x.db")
+        );
+        let slash = PathBuf::from(format!("{}/", data.display()));
+        assert_eq!(
+            effective_with(&data.join(OLD).join("x.db"), NEW, OLD, &[slash.as_path()]),
+            data.join(NEW).join("x.db")
+        );
     }
 
     #[test]
@@ -270,7 +377,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join(OLD)).unwrap();
         mark(&root.path().join(NEW));
         let p = root.path().join(OLD).join("..").join("x").join("lumen.db");
-        assert_eq!(effective_with(&p, NEW, OLD), p);
+        assert_eq!(effective_with(&p, NEW, OLD, &[root.path()]), p);
     }
 
     #[cfg(unix)]
@@ -283,7 +390,10 @@ mod tests {
         std::fs::create_dir_all(&backup).unwrap();
         std::os::unix::fs::symlink(&backup, root.path().join(OLD)).unwrap();
         let canonical = root.path().join(NEW).join("lumen.db");
-        assert_eq!(effective_with(&canonical, NEW, OLD), canonical);
+        assert_eq!(
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
+            canonical
+        );
     }
 
     #[test]
@@ -291,7 +401,10 @@ mod tests {
         let root = TempDir::new().unwrap();
         std::fs::write(root.path().join(OLD), b"x").unwrap();
         let canonical = root.path().join(NEW).join("lumen.db");
-        assert_eq!(effective_with(&canonical, NEW, OLD), canonical);
+        assert_eq!(
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
+            canonical
+        );
     }
 
     #[test]
@@ -304,11 +417,11 @@ mod tests {
         std::fs::write(new.join(MARKER_NAME), b"{ not json").unwrap();
 
         assert_eq!(
-            effective_with(&old.join("lumen.db"), NEW, OLD),
+            effective_with(&old.join("lumen.db"), NEW, OLD, &[root.path()]),
             new.join("lumen.db")
         );
         assert_eq!(
-            effective_with(&new.join("lumen.db"), NEW, OLD),
+            effective_with(&new.join("lumen.db"), NEW, OLD, &[root.path()]),
             new.join("lumen.db")
         );
         assert!(read_marker(&new).unwrap().is_err());
@@ -321,7 +434,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join(NEW).join(MARKER_NAME)).unwrap();
         let canonical = root.path().join(NEW).join("lumen.db");
         assert_eq!(
-            effective_with(&canonical, NEW, OLD),
+            effective_with(&canonical, NEW, OLD, &[root.path()]),
             root.path().join(OLD).join("lumen.db")
         );
     }
@@ -359,7 +472,7 @@ mod tests {
         } else {
             shouty.clone()
         };
-        assert_eq!(effective_with(&shouty, NEW, OLD), expect);
+        assert_eq!(effective_with(&shouty, NEW, OLD, &[root.path()]), expect);
     }
 
     #[test]
@@ -367,7 +480,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let p = root.path().join(OLD).join("lumen.db");
         std::fs::create_dir_all(root.path().join(OLD)).unwrap();
-        assert_eq!(effective_with(&p, OLD, OLD), p);
+        assert_eq!(effective_with(&p, OLD, OLD, &[root.path()]), p);
     }
 
     #[cfg(windows)]
@@ -382,7 +495,7 @@ mod tests {
             root.path().display(),
             OLD.to_ascii_uppercase()
         );
-        let got = effective_with(Path::new(&raw), NEW, OLD);
+        let got = effective_with(Path::new(&raw), NEW, OLD, &[root.path()]);
         assert_eq!(got, root.path().join(NEW).join("bin").join("x.exe"));
     }
 
@@ -390,7 +503,10 @@ mod tests {
     #[test]
     fn a_backslash_is_not_a_separator_on_unix() {
         let p = PathBuf::from(format!("C:\\Users\\u\\{OLD}\\lumen.db"));
-        assert_eq!(effective_with(&p, NEW, OLD), p);
+        assert_eq!(
+            effective_with(&p, NEW, OLD, &[Path::new("C:\\Users\\u")]),
+            p
+        );
     }
 
     #[test]

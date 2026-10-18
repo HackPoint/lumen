@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 const APP_SRC: &str = "lumenator/src-tauri/src";
 const APP_MANIFEST: &str = "lumenator/src-tauri/Cargo.toml";
 /// The production files of the app. Anything else under `APP_SRC` must be a test-only module.
-const APP_FILES: [&str; 4] = ["lib.rs", "health.rs", "setup.rs", "main.rs"];
+const APP_FILES: [&str; 5] = ["lib.rs", "health.rs", "setup.rs", "main.rs", "upgrade.rs"];
 const SKIP_DIRS: [&str; 6] = [
     ".git",
     "target",

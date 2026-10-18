@@ -86,7 +86,9 @@ pub fn canonical_db_path_in(home: &std::path::Path) -> std::path::PathBuf {
 /// Separated so the ordering can be tested directly: mutating LUMEN_DB / HOME in
 /// a test is racy across threads and `unsafe` in edition 2024.
 pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
-    resolve_db_path_with(lumen_db, home, APP_ID, crate::legacy::LEGACY_APP_ID)
+    let roots = crate::legacy::data_roots(home.map(std::path::Path::new));
+    let refs: Vec<&std::path::Path> = roots.iter().map(std::path::PathBuf::as_path).collect();
+    resolve_db_path_with(lumen_db, home, APP_ID, crate::legacy::LEGACY_APP_ID, &refs)
 }
 
 /// [`resolve_db_path`] with the identifiers passed in, for tests with fake ones.
@@ -95,9 +97,10 @@ fn resolve_db_path_with(
     home: Option<&str>,
     new_id: &str,
     legacy_id: &str,
+    roots: &[&std::path::Path],
 ) -> Option<std::path::PathBuf> {
     resolve_db_path_unmapped(lumen_db, home)
-        .map(|p| crate::legacy::effective_with(&p, new_id, legacy_id))
+        .map(|p| crate::legacy::effective_with(&p, new_id, legacy_id, roots))
 }
 
 /// The precedence policy alone, before the legacy-directory mapping.
@@ -942,6 +945,7 @@ mod tests {
                 std::hint::black_box(&canon),
                 new,
                 old,
+                &[home.path()],
             ));
         }
         eprintln!(
@@ -955,6 +959,7 @@ mod tests {
                 std::hint::black_box(&canon),
                 new,
                 old,
+                &[home.path()],
             ));
         }
         eprintln!(
@@ -1061,9 +1066,17 @@ mod tests {
         )
         .unwrap();
 
-        let via_pointer = || resolve_db_path_with(None, Some(&h), "fake.new", "fake.old");
-        let via_env =
-            || resolve_db_path_with(Some(&stale.to_string_lossy()), None, "fake.new", "fake.old");
+        let via_pointer =
+            || resolve_db_path_with(None, Some(&h), "fake.new", "fake.old", &[root.as_path()]);
+        let via_env = || {
+            resolve_db_path_with(
+                Some(&stale.to_string_lossy()),
+                None,
+                "fake.new",
+                "fake.old",
+                &[root.as_path()],
+            )
+        };
         assert_eq!(via_pointer(), Some(stale.clone()), "no marker, no move");
         assert_eq!(via_env(), Some(stale.clone()));
 
@@ -1090,6 +1103,7 @@ mod tests {
             None,
             "fake.new",
             "fake.old",
+            &[root.as_path()],
         );
         assert_eq!(got, Some(custom));
     }

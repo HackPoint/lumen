@@ -3,6 +3,7 @@
 #![allow(clippy::type_complexity)] // complex sqlx query types are self-documenting inline
 mod health;
 mod setup;
+mod upgrade;
 use crate::health::StartupHealth;
 use futures_util::StreamExt;
 use std::sync::Mutex;
@@ -276,55 +277,38 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION")
             );
 
+            // Move an older data directory over, before anything opens a ledger or spawns
+            // the daemon, and say what could not be done. Nothing here is fatal: a ledger
+            // that has not moved yet is simply used where it is (`upgrade::Ctx::db_path`).
+            let upgrade_ctx = upgrade::Ctx::current();
+            if let Some(ctx) = &upgrade_ctx {
+                let report = upgrade::at_start(ctx, &upgrade::AppOps);
+                report.apply(&health, "STARTUP");
+            }
+
             // resolve a stable DB path in the app-data dir
-            let db_path = app
-                .path()
-                .app_data_dir()
-                .map(|d| {
-                    // The daemon's open of the ledger fails next and says so; this says why.
-                    if let Err(e) = std::fs::create_dir_all(&d) {
-                        log::error!("STARTUP: cannot create {}: {e}", d.display());
+            let db_path = match &upgrade_ctx {
+                Some(ctx) => {
+                    let p = ctx.db_path();
+                    if let Some(d) = p.parent() {
+                        // The daemon's open of the ledger fails next and says so; this says why.
+                        if let Err(e) = std::fs::create_dir_all(d) {
+                            log::error!("STARTUP: cannot create {}: {e}", d.display());
+                        }
                     }
-                    d.join("lumen.db")
-                })
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|e| {
+                    p.to_string_lossy().to_string()
+                }
+                None => {
                     log::error!(
-                        "STARTUP: no app-data directory ({e}); the ledger is lumen.db in the \
+                        "STARTUP: no app-data directory; the ledger is lumen.db in the \
                          working directory, where lumen-mcp will not find it"
                     );
                     "lumen.db".to_string()
-                });
+                }
+            };
 
             unsafe {
                 std::env::set_var("LUMEN_DB", &db_path);
-            }
-
-            // One-time migration from the old com.tauri.dev bundle identifier.
-            // macOS-only: that identifier never shipped on any other platform, and
-            // the path below is a macOS layout, so elsewhere this could only ever
-            // look for a file that cannot exist.
-            #[cfg(target_os = "macos")]
-            if !std::path::Path::new(&db_path).exists() {
-                if let Some(home) = dirs::home_dir() {
-                    let old_db = home.join("Library/Application Support/com.tauri.dev/lumen.db");
-                    if old_db.exists() {
-                        // This logged success whatever the copy did. A failure is not retried:
-                        // the daemon creates a ledger at db_path next, and this runs only while
-                        // there is none. The old file is left as it was.
-                        match std::fs::copy(&old_db, &db_path) {
-                            Ok(_) => {
-                                log::info!("Migrated DB from com.tauri.dev to io.hackpoint.lumen")
-                            }
-                            Err(e) => log::error!(
-                                "STARTUP: could not copy {} to {db_path}: {e}. History from \
-                                 before the rename stays in the old file; this starts an empty \
-                                 ledger.",
-                                old_db.display()
-                            ),
-                        }
-                    }
-                }
             }
 
             // Write pointer file so lumen-mcp can auto-discover the same DB path.

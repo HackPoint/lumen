@@ -2711,3 +2711,211 @@ fn verify_hooks_fails_hooks_whose_lumen_mcp_is_gone() {
     assert!(!rig.spool.exists(), "{:?}", rig.faults());
     assert_eq!(scratch_left(&rig), Vec::<PathBuf>::new());
 }
+
+// ── An upgrade across the data-directory move ────────────────────────────────
+//
+// The shims in `tests/fixtures/v1.9.0` and `v1.8.0` are what those tags' Setup
+// generated, with `__APP_DIR__` (the data directory they baked) and `__MCP__` (the
+// sidecar) as placeholders. The legacy directory is substituted at test time from
+// `legacy::LEGACY_APP_ID`, so no fixture carries it.
+//
+// The new identifier is a fake one: until the flip `APP_ID` is the legacy id, and a
+// fake is what makes the whole move happen here. The sidecar the hooks exec is the
+// real one (built with the unflipped constants), so what carries a write from the old
+// path into the backup is the link, not the redirect; the redirect has its own tests
+// in lumen-core.
+
+const UPGRADE_NEW_ID: &str = "fake.new.app";
+
+fn upgrade_shim(version: &str, name: &str, app_dir: &Path, mcp: &Path) -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(format!("v{version}"))
+        .join(name);
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    assert!(
+        text.contains("__APP_DIR__") && text.contains("__MCP__"),
+        "{} lost its placeholders",
+        p.display()
+    );
+    text.replace("__APP_DIR__", &shell_path(&app_dir.to_string_lossy()))
+        .replace("__MCP__", &shell_path(&mcp.to_string_lossy()))
+}
+
+fn ledger_rows(db: &Path) -> i64 {
+    Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap_or_else(|e| panic!("open {}: {e}", db.display()))
+        .query_row("SELECT count(*) FROM read_events", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// An install made by `version`, then this build's first launch, then Setup.
+fn upgrade_from(version: &str, login_on: bool) {
+    use crate::upgrade::{at_start, merge_again, AppOps, Ctx};
+    let rig = Rig::with_home("Jane Doe", SHIM_TOOLS);
+    let real = rig.real_mcp();
+    let root = app_support_dir_in(&rig.home)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let ctx = Ctx {
+        root: root.clone(),
+        new_id: UPGRADE_NEW_ID.into(),
+        old_id: lumen_core::legacy::LEGACY_APP_ID.into(),
+        date: "2026-10-18".into(),
+        logs: None,
+        ledger_only: Vec::new(),
+    };
+    let (old, new_db) = (ctx.old_dir(), ctx.new_db());
+    std::fs::create_dir_all(&old).unwrap();
+    let old_db = old.join("lumen.db");
+
+    // What `version` left on disk.
+    let dir = lumen_dir_in(&rig.home);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["lumen_meter.sh", "lumen_read_intercept.sh"] {
+        let at = dir.join(name);
+        std::fs::write(&at, upgrade_shim(version, name, &old, &real)).unwrap();
+        set_mode(&at, 0o755).unwrap();
+    }
+    let audit = json!({"type": "command", "command": "/usr/local/bin/audit-read"});
+    let settings = global_settings_path_in(&rig.home);
+    write_json(
+        &settings,
+        &json!({"model": "opus", "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}]}}),
+    );
+    let step = step_install_hooks_in(&rig.home);
+    assert_eq!(step.status, StepStatus::Ok, "{step:?}");
+    let claude_json = claude_json_path_in(&rig.home);
+    let github =
+        json!({"type": "stdio", "command": "/usr/local/bin/github-mcp", "args": [], "env": {}});
+    write_json(
+        &claude_json,
+        &json!({"numStartups": 7, "mcpServers": {
+            "lumen": {"type": "stdio", "command": real.to_string_lossy(), "args": [],
+                      "env": {"LUMEN_DB": old_db.to_string_lossy()}},
+            "github": github
+        }}),
+    );
+    std::fs::write(marker_path_in(&rig.home), "").unwrap();
+    let login_marker = autostart_marker_in(&rig.home);
+    std::fs::write(&login_marker, APP_EXE).unwrap();
+    let item = LoginItem(Cell::new(login_on));
+    let config_before = (
+        std::fs::read(&claude_json).unwrap(),
+        std::fs::read(&settings).unwrap(),
+    );
+
+    let env = rig.claude_env(READ_SESSION);
+    let file = rig.file("hello.rs", HELLO);
+    let read = rig.captured("read_post.json", Some(&file));
+
+    // 1. The old hooks work before this build has ever run.
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&old_db), 1);
+
+    // 2. This build's first launch moves the data, retires the old directory, links it.
+    let report = at_start(&ctx, &AppOps);
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(ledger_rows(&new_db), 1);
+    let marker = lumen_core::legacy::read_marker(&ctx.new_dir())
+        .unwrap()
+        .unwrap();
+    let backup = PathBuf::from(&marker.backup);
+    assert!(backup.is_dir());
+    assert!(std::fs::symlink_metadata(&old)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    // 3. Before Setup the old hooks still fire, through the link, into the backup.
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&backup.join("lumen.db")), 2);
+    assert_eq!(ledger_rows(&new_db), 1);
+
+    // 4. The next launch carries that row over, once.
+    for _ in 0..2 {
+        let report = at_start(&ctx, &AppOps);
+        assert!(report.problems.is_empty(), "{report:?}");
+        assert_eq!(ledger_rows(&new_db), 2);
+    }
+
+    // 5. Startup left both configs alone, the prompt asks for Setup, and the login item
+    // is as the user had it.
+    assert!(std::fs::read(&claude_json).unwrap() == config_before.0);
+    assert!(std::fs::read(&settings).unwrap() == config_before.1);
+    let legacy_id = lumen_core::legacy::LEGACY_APP_ID;
+    assert!(setup_needed_with(&rig.home, UPGRADE_NEW_ID, legacy_id));
+    let mcp = validate_mcp_with(&rig.home, UPGRADE_NEW_ID, legacy_id);
+    assert!(
+        !mcp.healthy && mcp.detail.contains("legacy data directory"),
+        "{mcp:?}"
+    );
+    assert!(!ensure_autostart_once(&item, &login_marker, APP_EXE));
+    assert_eq!(item.0.get(), login_on);
+
+    // 6. Setup rewrites what is Lumen's and keeps the rest.
+    let steps = run_setup_with(
+        &rig.home,
+        &item,
+        &new_db.to_string_lossy(),
+        &real.to_string_lossy(),
+    );
+    assert!(
+        steps
+            .iter()
+            .all(|s| matches!(s.status, StepStatus::Ok | StepStatus::Warn)),
+        "{steps:?}"
+    );
+    let cfg: Value = serde_json::from_slice(&std::fs::read(&claude_json).unwrap()).unwrap();
+    assert_eq!(
+        cfg["mcpServers"]["lumen"]["env"]["LUMEN_DB"],
+        new_db.to_string_lossy().as_ref()
+    );
+    assert_eq!(cfg["mcpServers"]["github"], github);
+    assert_eq!(cfg["numStartups"], 7);
+    let saved = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        saved.contains("audit-read") && saved.contains("\"model\""),
+        "{saved}"
+    );
+    assert!(!setup_needed_with(&rig.home, UPGRADE_NEW_ID, legacy_id));
+    assert!(validate_mcp_with(&rig.home, UPGRADE_NEW_ID, legacy_id).healthy);
+    assert_eq!(
+        item.0.get(),
+        login_on,
+        "Setup keeps the login item as it was"
+    );
+
+    // 7. After Setup the hooks write the new ledger directly, and the late merge is a no-op.
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&new_db), 3);
+    let report = merge_again(&ctx);
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(ledger_rows(&new_db), 3);
+    assert_eq!(
+        ledger_rows(&backup.join("lumen.db")),
+        2,
+        "the backup is only read"
+    );
+}
+
+#[test]
+fn an_upgrade_from_1_9_0_keeps_the_hooks_firing_and_the_login_item_on() {
+    upgrade_from("1.9.0", true);
+}
+
+#[test]
+fn an_upgrade_from_1_9_0_keeps_the_login_item_off() {
+    upgrade_from("1.9.0", false);
+}
+
+#[test]
+fn an_upgrade_from_1_8_0_keeps_the_hooks_firing_and_the_login_item_off() {
+    upgrade_from("1.8.0", false);
+}
+
+#[test]
+fn an_upgrade_from_1_8_0_keeps_the_login_item_on() {
+    upgrade_from("1.8.0", true);
+}

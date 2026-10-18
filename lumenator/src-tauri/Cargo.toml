@@ -57,6 +57,11 @@ objc2-app-kit = { version = "0.3", features = ["NSStatusItem"] }
 objc2 = "0.6"
 tray-icon = "=0.25.1"
 
+# The directory link that retires the old data directory on Windows, where a symlink needs
+# a privilege most users lack. Here and nowhere else: not in lumen-core, not in the hooks.
+[target.'cfg(windows)'.dependencies]
+junction = "2.1.0"
+
 [dev-dependencies]
 tempfile = "3"
 # Reads the ledger the installed hooks write in `setup::hook_e2e`. Same version and
