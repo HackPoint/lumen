@@ -23,7 +23,7 @@ It watches your session files locally and surfaces things Claude Code doesn't sh
 
 | Signal | Where it appears |
 | --- | --- |
-| **What Lumen saved** — tokens and dollars, net, this week and all time | Home, at the top (from 1.9.0; until the savings summary lands it shows nothing rather than a guess) |
+| **What Lumen saved** — tokens and dollars, net, this week and all time | Home, at the top (from 1.9.0) · `lumen` · tray |
 | **Context fill** — tokens used / window size, live | Menu-bar icon · tray popover · Details screen gauge |
 | **Compaction warning** — amber at 80%, red at 95% | Tray popover · OS notification · Details screen |
 | **Session cost** — input + output + cache tokens, priced | Tray popover · Settings screen, beside the spend alerts |
@@ -427,7 +427,8 @@ Monday-based week.
 #### Effectiveness % (on Details)
 
 **From 1.9.0 the Optimizer screen has no dollar hero.** The net value figure described below
-was taken off it until the savings summary replaces it with its own figures; the token ratio,
+is retired: the savings engine's figures are the headline on Home, and How it's measured shows
+how each was worked out, call by call; the token ratio,
 the by-tool and by-channel breakdowns and the provenance counts are on the Details screen.
 
 **Until 1.9.0 the optimizer's hero metric was dollars, not the token ratio.** The token ratio
@@ -633,6 +634,16 @@ interception: what the tokens Lumen avoided are worth, less what the extra round
 with one assumed input, how many rounds a saving keeps paying for. 1.9.0 derives that input
 per call ([Effectiveness %](#effectiveness--on-details) says how), and `lumen` and `lumen report`
 show the result for your own ledger. No figure is quoted here: yours depends on your sessions.
+
+**Each release against the one before it.** Every release is benchmarked against the previous one
+on macOS, Ubuntu and Windows, through the real `lumen-mcp` binary on a pinned public corpus: the
+tokens each tool returns, per file and mode, and the latency of every hook and tool call.
+[benchmarks/README.md](benchmarks/README.md) has every figure, the machines and the method.
+
+| release | against | tokens returned | latency |
+|---|---|---|---|
+| 1.9.0 | 1.8.0 | equal | equal, except `recall_file` on a file under 300 lines on Ubuntu, 2% (30 µs) slower, and two calls on Windows 3% faster |
+| 1.8.0 | 1.7.0 | equal | a blocked Read 0.4 to 2.6 ms slower; an identity hook now runs before every Lumen call |
 
 The token ratio — **84% fewer tokens per intercepted read** on the author's machine — is
 on the Details screen. It is a ratio of two `cl100k_base` counts, not of Claude's, and on its
