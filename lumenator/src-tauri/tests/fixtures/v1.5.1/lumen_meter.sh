@@ -13,7 +13,7 @@
 # hardcoded there was no way to exercise this script without writing to the real
 # ledger, so the installed hook — the one that actually runs — was the only part of
 # the pipeline that could not be tested.
-LUMEN_DB="${LUMEN_DB:-__HOME__/Library/Application Support/io.hackpoint.lumen/lumen.db}"
+LUMEN_DB="${LUMEN_DB:-__APP_DIR__/lumen.db}"
 LUMEN_TOK="${LUMEN_TOK:-/Applications/Lumen.app/Contents/MacOS/lumen-tok}"
 
 set -uo pipefail

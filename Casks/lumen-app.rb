@@ -42,21 +42,26 @@ cask "lumen-app" do
   # Quitting first: the app was launched above and by its login item, so an
   # uninstall that left it running would keep a tray icon for a deleted app.
   # `launchctl` takes the agent's Label, not the bundle id. The autostart plugin writes
-  # ~/Library/LaunchAgents/Lumen.plist with Label "Lumen", so unloading
-  # "io.hackpoint.lumen" matched nothing and every uninstall left the login item behind,
+  # ~/Library/LaunchAgents/Lumen.plist with Label "Lumen", so unloading the bundle
+  # identifier matched nothing and every uninstall left the login item behind,
   # still trying to launch a deleted app at each boot. Reported in issue #5.
   uninstall quit:       "io.hackpoint.lumen",
             launchctl:  "Lumen"
 
   zap trash: [
-    "~/Library/Application Support/io.hackpoint.lumen",
-    "~/Library/Caches/io.hackpoint.lumen",
-    "~/Library/Logs/io.hackpoint.lumen",
-    "~/Library/WebKit/io.hackpoint.lumen",
+    # `io.*.lumen` takes the identifier this app had before 1.10.0 as well as today's, and
+    # `io.*.lumen.*.migrated*` the dated backup the 1.10.0 migration leaves, so no old name is
+    # spelled here. Neither matches another app's `io.<vendor>.lumen-notes` or `.lumens`.
+    "~/Library/Application Support/io.*.lumen",
+    "~/Library/Application Support/io.*.lumen.*.migrated*",
+    "~/Library/Caches/io.*.lumen",
+    "~/Library/Logs/io.*.lumen",
+    "~/Library/Logs/io.*.lumen.*.migrated*",
+    "~/Library/WebKit/io.*.lumen",
     # The login item the app registers on first run.
     # The file the plugin actually writes. The bundle-id name below is kept for
     # installs made before the agent was renamed, since zap should clean those too.
     "~/Library/LaunchAgents/Lumen.plist",
-    "~/Library/LaunchAgents/io.hackpoint.lumen.plist",
+    "~/Library/LaunchAgents/io.*.lumen.plist",
   ]
 end

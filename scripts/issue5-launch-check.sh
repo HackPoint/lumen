@@ -37,7 +37,7 @@ APP=${1:?usage: issue5-launch-check.sh <Lumen.app> <output dir>}
 OUT=${2:?usage: issue5-launch-check.sh <Lumen.app> <output dir>}
 
 if [ -z "${CI:-}" ]; then
-  echo "refusing to run: this writes io.hackpoint.lumen's preferences and launches Lumen as you." >&2
+  echo "refusing to run: this writes the app's preferences and launches Lumen as you." >&2
   echo "It is for CI runners only; see the header." >&2
   exit 2
 fi
@@ -46,7 +46,7 @@ if [ "$(uname -s)" != Darwin ]; then
   exit 2
 fi
 
-DOMAIN=io.hackpoint.lumen
+DOMAIN=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")
 KEYS=("NSStatusItem Visible Item-0" "NSStatusItem VisibleCC Item-0")
 EXE="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
 

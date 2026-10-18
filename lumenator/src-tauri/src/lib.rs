@@ -233,7 +233,7 @@ pub fn run() {
 
             // Registered unconditionally. This used to be `if cfg!(debug_assertions)`, and
             // since no other logger exists in this crate, every log::error! in a released
-            // build went to a no-op sink — so ~/Library/Logs/io.hackpoint.lumen/Lumen.log was
+            // build went to a no-op sink — so the log file under the app log directory was
             // never created. Both the 1.5.1 CHANGELOG and a comment on issue #5 asked the
             // reporter for a line from that file. There was nothing to find.
             //

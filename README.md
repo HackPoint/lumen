@@ -84,7 +84,7 @@ untrusted tap"*. That applies to every third-party cask, not just this one.
 > brew uninstall --cask lumen && brew install --cask lumen-app
 > ```
 >
-> Your data in `~/Library/Application Support/io.hackpoint.lumen/` is untouched.
+> Your data in the Lumen data directory is untouched.
 
 Homebrew clears the quarantine flag automatically. Lumen opens normally with no
 "damaged" dialog. The app is still un-notarized (proper Apple Developer ID signing

@@ -9,8 +9,9 @@ The upgrade test (`setup::hook_e2e`) puts them in a temp home next to a 1.5.1-sh
 are rewritten, the configs are left byte-identical until Setup is re-run, and a re-run
 keeps the user's settings and other MCP servers.
 
-There is one edit: the home directory in each script's default paths was replaced with
-`__HOME__`. The test substitutes the temp home back in. Every other byte is as installed.
+There is one edit: the data directory in each script's default paths was replaced with
+`__APP_DIR__`. The test substitutes the legacy directory in a temp home, taken from
+`legacy::LEGACY_APP_ID`, so no fixture carries the identifier. Every other byte is as installed.
 
 | file | what it shows |
 | --- | --- |

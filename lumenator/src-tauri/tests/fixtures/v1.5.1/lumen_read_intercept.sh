@@ -18,7 +18,7 @@ INPUT=$(cat)
 HOOK_ENABLED="${LUMEN_HOOK_ENABLED:-1}"
 THRESHOLD="${LUMEN_LINE_THRESHOLD:-300}"
 LUMEN_MCP_BIN="${LUMEN_MCP_BIN:-/Applications/Lumen.app/Contents/MacOS/lumen-mcp}"
-SPOOL="${LUMEN_FAULT_SPOOL:-__HOME__/Library/Application Support/io.hackpoint.lumen/faults.jsonl}"
+SPOOL="${LUMEN_FAULT_SPOOL:-__APP_DIR__/faults.jsonl}"
 
 if [ "$HOOK_ENABLED" = "0" ]; then
     exit 0

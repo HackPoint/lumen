@@ -493,7 +493,7 @@ fn is_ephemeral_path(p: &std::path::Path) -> bool {
 
 // Resolve a sidecar binary to a path that survives the DMG being ejected. If the
 // bundled binary lives on an ephemeral mount, copy it into a stable, user-writable
-// location (`…/io.hackpoint.lumen/bin/<name>`) and return that; otherwise return
+// location (`<data dir>/bin/<name>`) and return that; otherwise return
 // the resolved path unchanged. Copying the standalone Mach-O preserves its
 // embedded code signature, so it still launches.
 fn stable_binary(name: &str) -> Option<PathBuf> {
@@ -3238,9 +3238,9 @@ mod tests {
 
     #[test]
     fn a_user_local_path_is_not_ephemeral() {
-        assert!(!is_ephemeral_path(Path::new(
-            "/Users/someone/Library/Application Support/io.hackpoint.lumen/bin/lumen-mcp"
-        )));
+        assert!(!is_ephemeral_path(Path::new(&format!(
+            "/Users/someone/Library/Application Support/{APP_ID}/bin/lumen-mcp"
+        ))));
     }
 
     #[test]
@@ -3275,17 +3275,19 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(
             app_support_dir_in(h),
-            Path::new("/tmp/fake-home/Library/Application Support/io.hackpoint.lumen")
+            Path::new(&format!(
+                "/tmp/fake-home/Library/Application Support/{APP_ID}"
+            ))
         );
         #[cfg(target_os = "windows")]
         assert_eq!(
             app_support_dir_in(h),
-            Path::new("/tmp/fake-home/AppData/Roaming/io.hackpoint.lumen")
+            Path::new(&format!("/tmp/fake-home/AppData/Roaming/{APP_ID}"))
         );
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             app_support_dir_in(h),
-            Path::new("/tmp/fake-home/.local/share/io.hackpoint.lumen"),
+            Path::new(&format!("/tmp/fake-home/.local/share/{APP_ID}")),
             "Linux follows the XDG default"
         );
     }
@@ -5561,7 +5563,7 @@ mod tests {
 
     /// The cask must uninstall the LaunchAgent that actually exists.
     ///
-    /// It targeted `io.hackpoint.lumen` — the bundle id — while the autostart plugin writes
+    /// It targeted the bundle id while the autostart plugin writes
     /// `Lumen.plist` with Label `Lumen`. `launchctl` matches on the Label, so every
     /// uninstall left the login item in place, still trying to launch a deleted app at
     /// each boot. Reported from the field as part of issue #5.
@@ -5585,6 +5587,11 @@ mod tests {
         assert!(
             text.contains("~/Library/LaunchAgents/Lumen.plist"),
             "zap must remove the plist the plugin actually writes"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("uninstall quit:") && l.contains(&format!("\"{APP_ID}\""))),
+            "the cask must quit the app by its current bundle id"
         );
     }
 }

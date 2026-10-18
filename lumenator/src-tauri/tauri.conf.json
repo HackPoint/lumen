@@ -42,6 +42,7 @@
     }
   },
   "bundle": {
+    "publisher": "HackPoint",
     "externalBin": [
       "binaries/lumen-daemon",
       "binaries/lumen-mcp",
