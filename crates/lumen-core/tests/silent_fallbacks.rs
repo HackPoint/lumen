@@ -163,6 +163,21 @@ const ALLOWED: &[Allowed] = &[
         "The batch is already in the ledger; one left behind may be counted twice, never lost.",
     ),
     allow(
+        "crates/lumen-core/src/legacy/migrate.rs",
+        DroppedWrite,
+        "remove_dir_all(",
+        "Cleaning up the staging directory after the outcome is decided; a leftover is deleted \
+         by the next run before it stages, and nothing reads it.",
+    )
+    .times(2),
+    allow(
+        "crates/lumen-core/src/legacy/migrate.rs",
+        DroppedWrite,
+        "sync_all()",
+        "A directory fsync is a durability hint (and does not exist on Windows); the files \
+         themselves are synced with their errors returned.",
+    ),
+    allow(
         "crates/lumen-core/src/meter.rs",
         OrDefault,
         "CLAUDE_CODE_ENTRYPOINT",

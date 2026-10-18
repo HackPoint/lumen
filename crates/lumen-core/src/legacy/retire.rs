@@ -256,9 +256,61 @@ fn step(what: &str, e: rusqlite::Error) -> Fail {
     }
 }
 
-/// Check a snapshot against its source: `integrity_check` is `ok` and every
-/// table has the same row count. Returns the total rows.
-fn verify_snapshot(
+/// SHA-256 over every row of `table` (all columns, in rowid order, or in column
+/// order for a WITHOUT ROWID table), each value tagged with its type.
+fn table_digest(c: &rusqlite::Connection, table: &str) -> Result<String, String> {
+    use rusqlite::types::ValueRef;
+    use sha2::{Digest, Sha256};
+    let ident = format!("\"{}\"", table.replace('"', "\"\""));
+    let cols = c
+        .prepare(&format!("SELECT * FROM {ident}"))
+        .map_err(|e| format!("digest {table}: {e}"))?
+        .column_count();
+    let by_rowid = format!("SELECT * FROM {ident} ORDER BY rowid");
+    let by_cols = {
+        let order: Vec<String> = (1..=cols).map(|i| i.to_string()).collect();
+        format!("SELECT * FROM {ident} ORDER BY {}", order.join(","))
+    };
+    let mut st = match c.prepare(&by_rowid) {
+        Ok(s) => s,
+        Err(_) => c
+            .prepare(&by_cols)
+            .map_err(|e| format!("digest {table}: {e}"))?,
+    };
+    let mut rows = st.query([]).map_err(|e| format!("digest {table}: {e}"))?;
+    let mut h = Sha256::new();
+    while let Some(row) = rows.next().map_err(|e| format!("digest {table}: {e}"))? {
+        for i in 0..cols {
+            match row.get_ref(i).map_err(|e| format!("digest {table}: {e}"))? {
+                ValueRef::Null => h.update([0u8]),
+                ValueRef::Integer(v) => {
+                    h.update([1u8]);
+                    h.update(v.to_le_bytes());
+                }
+                ValueRef::Real(v) => {
+                    h.update([2u8]);
+                    h.update(v.to_bits().to_le_bytes());
+                }
+                ValueRef::Text(b) => {
+                    h.update([3u8]);
+                    h.update((b.len() as u64).to_le_bytes());
+                    h.update(b);
+                }
+                ValueRef::Blob(b) => {
+                    h.update([4u8]);
+                    h.update((b.len() as u64).to_le_bytes());
+                    h.update(b);
+                }
+            }
+        }
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Check a snapshot against its source: `integrity_check` is `ok`, and every
+/// table has the same row count and the same content digest. Returns the
+/// total rows.
+pub(super) fn verify_snapshot(
     src: &rusqlite::Connection,
     snapshot: &rusqlite::Connection,
 ) -> Result<i64, String> {
@@ -283,6 +335,9 @@ fn verify_snapshot(
             .map_err(|e| e.to_string())?;
         if a != b {
             return Err(format!("table {t}: {a} rows at the source, {b} copied"));
+        }
+        if table_digest(src, &t)? != table_digest(snapshot, &t)? {
+            return Err(format!("table {t}: the copied rows differ from the source"));
         }
         total += b;
     }

@@ -6,6 +6,7 @@
 //! source list, the marker's shape, and [`effective`], which every
 //! `resolve_db_path` caller goes through so that a stale path keeps working.
 
+pub mod migrate;
 pub mod retire;
 
 use serde::{Deserialize, Serialize};
