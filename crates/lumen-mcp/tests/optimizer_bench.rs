@@ -359,7 +359,7 @@ struct Measured {
 /// of pure noise, which is larger than most real improvements and would make a committed baseline
 /// fail at random.
 ///
-/// An absolute path is no better: `/Users/user/...` and `/home/runner/...` tokenize differently,
+/// An absolute path is no better: `/Users/<name>/...` and `/home/runner/...` tokenize differently,
 /// so a baseline blessed on a laptop could never match in CI.
 ///
 /// A short relative path is identical on every machine. Cargo runs a test with the package root as

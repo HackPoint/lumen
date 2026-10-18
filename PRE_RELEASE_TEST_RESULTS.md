@@ -230,7 +230,7 @@ Lumen      ESTABLISHED  127.0.0.1:NNN->127.0.0.1:9999
 Seeded state before uninstall:
 
 ```text
-mcpServers: context-optimizer, lumen, playwright, example-dash-couchbase, test-unrelated-server
+mcpServers: context-optimizer, lumen, playwright, example-db-server, test-unrelated-server
 hooks:
   PostToolUse/Read                     <- lumen
   PostToolUse/mcp__lumen__smart_read   <- lumen
@@ -243,7 +243,7 @@ hooks:
 After run_uninstall():
 
 ```text
-mcpServers: context-optimizer, playwright, example-dash-couchbase, test-unrelated-server
+mcpServers: context-optimizer, playwright, example-db-server, test-unrelated-server
 hooks:
   PostToolUse/Bash: echo test-unrelated-hook  <- preserved
 
