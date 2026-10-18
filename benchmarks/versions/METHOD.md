@@ -57,13 +57,25 @@ shipped with: a version's own self-reported saving is recorded where it exists a
 re-counted reply. A build is identified by its asset sha256, not by what it reports
 (`serverInfo.version` of 1.0.0 says 0.2.0).
 
-**Reference session** (labelled MODELLED in every cell): `claude-sonnet-5-5` at the prices in
-`crates/lumen-core/src/rates.rs` (`PRICES`, as of 2026-10-13: $2 input, $10 output, $2.50 five
-minute cache write, $0.10 cache read per million), a 60k-token prompt, 400 output tokens, the
-session closed more than an hour before the clock so the cache term is not a lower bound. Two
-values of R (the reread term): R = 0, the floor, and R = the median observed in the no-Lumen E2E
-arm once it exists. Opus 5.5 is a sensitivity column. Haiku 5.5 has no price in the engine today,
-so its dollar cells are `n/a`, never 0.
+**Reference sessions** (labelled MODELLED in every cell; `reference_session.toml`):
+- **Primary:** `claude-sonnet-5-5` at the prices in `crates/lumen-core/src/rates.rs` (`PRICES`, as of
+  2026-10-13: $2 input, $10 output, $2.50 five minute cache write, $0.10 cache read per million),
+  with the context and output sizes lumen-core measured on 19,161 main-agent turns
+  (`econ::DEFAULT_CONTEXT_TOKENS` = 362,965 and `DEFAULT_OUTPUT_TOKENS` = 1,085, read from
+  lumen-core, not copied). The prompt is split 10 uncached, a cache write (five minute) equal to the
+  prior round's output (1,085; this write is modelled here, since `econ.rs` has no write term, and
+  it adds about $0.0027 a round on Sonnet 5.5, against Lumen) and the rest read from the cache
+  (361,870), as in `Econ::round_cost`. The primary is measured, not chosen, and it is the
+  conservative choice for Lumen: an extra round costs what a whole prompt of that size costs, about
+  $0.05 on Sonnet 5.5 (0.049770), so a saving has to pay for the rounds it causes.
+- **Sensitivities, always shown beside the primary:** Opus 5.5 and Haiku 5.5 at the primary sizes,
+  and a **small prompt** (60,000-token prompt, 400 output tokens, 400 written, 59,590 read: a round of
+  about $0.011). The small prompt flatters Lumen and is labelled so; it is never the headline.
+- The session closed more than an hour before the clock, with `events_from` earlier than its
+  start, so the cache term is not a lower bound.
+- Two values of R (the reread term): R = 0, the floor, and R = the median observed in the no-Lumen
+  E2E arm once it exists. Haiku 5.5 has no price in the engine today, so its dollar cells are
+  `n/a`, never 0.
 
 Flows: outline; outline then recall (the engine charges the follow-up round); outline then stub;
 edit then delta; for files of 300 lines or more, a blocked Read then `smart_read`, with a recorded

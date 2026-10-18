@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod report;
 pub mod run;
 pub mod sandbox;
+pub mod score;
 pub mod stats;
 pub mod tokens;
 pub mod util;
