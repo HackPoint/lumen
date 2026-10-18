@@ -1341,7 +1341,14 @@ mod tests {
         let new_dir = t.path().join("new");
         std::fs::create_dir_all(&new_dir).unwrap();
         let new_db = new_ledger(&new_dir);
-        let old = old_ledger(&t.path().join("a b#c%d?e"), V190);
+        // `?` is the URI's query separator, but Windows does not allow it in a file name; there
+        // `&` stands in, and the space, `#` and `%` still need escaping.
+        let odd = if cfg!(windows) {
+            "a b#c%d&e"
+        } else {
+            "a b#c%d?e"
+        };
+        let old = old_ledger(&t.path().join(odd), V190);
         add_turn(&old, "m");
         let r = merge_late(&new_db, &[&old], &marker()).unwrap();
         assert_eq!(r.rows(), 1, "{r:?}");
