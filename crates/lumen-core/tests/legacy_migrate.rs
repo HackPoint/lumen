@@ -4,7 +4,7 @@
 //! open in WAL while writing, one to be killed halfway through a copy.
 
 use lumen_core::legacy::migrate::{LOCK_NAME, Options, Outcome, Phase, STAGE_DIR, migrate};
-use lumen_core::legacy::{MARKER_NAME, Take, effective_with, read_marker};
+use lumen_core::legacy::{MARKER_NAME, Marker, Take, effective_with, read_marker};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,14 @@ fn opts() -> Options {
     o.probe_tries = 2;
     o.probe_delay = Duration::from_millis(20);
     o
+}
+
+/// The marker of a committed migration; any other outcome fails with its full text.
+fn migrated(out: Outcome) -> Marker {
+    match out {
+        Outcome::Migrated(m) => m,
+        other => panic!("expected Migrated, got {other:?}"),
+    }
 }
 
 fn rows(db: &Path) -> i64 {
@@ -199,9 +207,7 @@ fn the_copy_is_complete() {
     }
     assert!(old.join("lumen.db-wal").exists());
 
-    let Outcome::Migrated(m) = migrate(&old, &new, &opts()) else {
-        panic!("not migrated")
-    };
+    let m = migrated(migrate(&old, &new, &opts()));
     assert_eq!(rows(&new.join("lumen.db")), 6, "the wal's row came along");
     assert!(!new.join("lumen.db-wal").exists());
     for f in [
@@ -232,7 +238,7 @@ fn a_second_run_does_nothing() {
     let root = TempDir::new().unwrap();
     let (old, new) = (root.path().join(OLD), root.path().join(NEW));
     seed_old(&old, true);
-    assert!(matches!(migrate(&old, &new, &opts()), Outcome::Migrated(_)));
+    migrated(migrate(&old, &new, &opts()));
     let before = (tree(&new), tree(&old));
     let marker = std::fs::read(new.join(MARKER_NAME)).unwrap();
     assert_eq!(migrate(&old, &new, &opts()), Outcome::NothingToDo);
@@ -258,7 +264,7 @@ fn a_file_already_in_new_is_moved_aside_never_overwritten() {
     seed_old(&old, false);
     std::fs::create_dir_all(&new).unwrap();
     std::fs::write(new.join("lumen_settings.json"), "mine").unwrap();
-    assert!(matches!(migrate(&old, &new, &opts()), Outcome::Migrated(_)));
+    migrated(migrate(&old, &new, &opts()));
     assert_eq!(
         std::fs::read(new.join("lumen_settings.json.pre-legacy")).unwrap(),
         b"mine"
@@ -305,7 +311,7 @@ fn verify_catches_a_staged_file_that_changed() {
         assert_eq!(tree(&old), before);
         assert_eq!(eff(root.path()), old.join("lumen.db"));
         // And the next run, without the fault, succeeds.
-        assert!(matches!(migrate(&old, &new, &opts()), Outcome::Migrated(_)));
+        migrated(migrate(&old, &new, &opts()));
     }
 }
 
@@ -352,7 +358,7 @@ fn a_live_old_ledger_defers_instead_of_splitting() {
     assert!(child.0.wait().unwrap().success());
     let l_rows = rows(&old.join("lumen.db"));
     assert!(l_rows > 20);
-    assert!(matches!(migrate(&old, &new, &opts()), Outcome::Migrated(_)));
+    migrated(migrate(&old, &new, &opts()));
     assert_eq!(rows(&new.join("lumen.db")), l_rows);
     assert_eq!(eff(root.path()), new.join("lumen.db"));
 }
@@ -378,9 +384,7 @@ fn a_run_killed_mid_copy_leaves_the_old_directory_whole_and_reruns() {
     assert!(root.path().join(LOCK_NAME).exists());
 
     // The OS dropped the lock and the ledger's lock with the process.
-    let Outcome::Migrated(_) = migrate(&old, &new, &opts()) else {
-        panic!("the rerun did not migrate")
-    };
+    migrated(migrate(&old, &new, &opts()));
     assert_eq!(rows(&new.join("lumen.db")), 20);
     assert!(!new.join(STAGE_DIR).exists());
     assert_eq!(eff(root.path()), new.join("lumen.db"));
@@ -398,7 +402,7 @@ fn a_second_migrator_defers_while_the_first_holds_the_mutex() {
         other => panic!("{other:?}"),
     }
     drop(f);
-    assert!(matches!(migrate(&old, &new, &opts()), Outcome::Migrated(_)));
+    migrated(migrate(&old, &new, &opts()));
 }
 
 #[test]
@@ -407,9 +411,7 @@ fn a_spool_with_a_partial_last_line_is_staged_up_to_the_newline() {
     let (old, new) = (root.path().join(OLD), root.path().join(NEW));
     seed_old(&old, false);
     std::fs::write(old.join("faults.jsonl"), "{\"k\":1}\n{\"k\":2}\n{\"k\":3").unwrap();
-    let Outcome::Migrated(m) = migrate(&old, &new, &opts()) else {
-        panic!()
-    };
+    let m = migrated(migrate(&old, &new, &opts()));
     assert_eq!(m.spool_offset, 16);
     assert_eq!(
         std::fs::read(new.join("faults.jsonl")).unwrap(),
@@ -431,7 +433,7 @@ fn the_ledger_is_a_snapshot_taken_through_the_held_connection() {
         .unwrap();
     }
     let src_len = std::fs::metadata(old.join("lumen.db")).unwrap().len();
-    assert!(matches!(migrate(&old, &new, &opts()), Outcome::Migrated(_)));
+    migrated(migrate(&old, &new, &opts()));
     let dst_len = std::fs::metadata(new.join("lumen.db")).unwrap().len();
     assert!(dst_len < src_len, "{dst_len} vs {src_len}: not a byte copy");
     assert_eq!(rows(&new.join("lumen.db")), 20);
@@ -457,7 +459,7 @@ fn the_old_ledger_stays_exclusively_locked_until_the_commit() {
     HELD_LEDGER.set(old.join("lumen.db")).unwrap();
     let mut o = opts();
     o.hook = Some(probe_the_lock);
-    assert!(matches!(migrate(&old, &new, &o), Outcome::Migrated(_)));
+    migrated(migrate(&old, &new, &o));
     assert!(SAW_BUSY.load(Ordering::SeqCst), "a reader got in mid-copy");
     assert_eq!(rows(&old.join("lumen.db")), 20, "and it is free afterwards");
 }
@@ -483,8 +485,6 @@ fn a_ledger_over_one_gibibyte_migrates() {
     assert!(std::fs::metadata(old.join("lumen.db")).unwrap().len() > 1 << 30);
     let mut o = opts();
     o.probe_tries = 1;
-    let Outcome::Migrated(_) = migrate(&old, &new, &o) else {
-        panic!("not migrated")
-    };
+    migrated(migrate(&old, &new, &o));
     assert_eq!(rows(&new.join("lumen.db")), 22);
 }

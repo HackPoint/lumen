@@ -389,7 +389,12 @@ fn copy_verify_commit(old: &Path, new: &Path, stage: &Path, opts: &Options) -> O
             }
             Err(e) => return failed("stage", format!("snapshot of the ledger: {e}")),
         }
-        match File::open(&target).and_then(|f| f.sync_all()) {
+        // Write access: on Windows FlushFileBuffers refuses a read-only handle.
+        match File::options()
+            .write(true)
+            .open(&target)
+            .and_then(|f| f.sync_all())
+        {
             Ok(()) => {}
             Err(e) => return failed("stage", e),
         }
