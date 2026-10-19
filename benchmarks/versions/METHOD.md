@@ -206,12 +206,11 @@ queries only the columns `PRAGMA table_info` shows.
   `CLAUDE*` variables are removed. The environment is an allowlist (`PATH`, locale, and on
   Windows the system variables), not a blocklist: a proxy, a key or a tool's own `*_HOME` cannot
   slip through by not matching a pattern. `harness/src/sandbox.rs` is the one place that does it.
-- **Real-ledger guard:** before and after a run the real ledgers (the legacy data
-  directory, which is the app identifier before 1.10.0, the current data directory, and
-  `~/.lumen_db_path`) are opened read-only and must hold zero rows whose session starts with
+- **Real-ledger guard:** before and after a run the real ledgers (the current data directory,
+  every folder directly under the platform's data root that holds a `lumen.db` (so a previous
+  install is guarded whatever its folder is called), and `~/.lumen_db_path`) are opened read-only and must hold zero rows whose session starts with
   `lumen-bench-` (or the harness's own `bench-`; a real session id is a UUID). A hit stops the
-  run. The ledgers are opened with a `?mode=ro` URI and a missing one is skipped, never created. The legacy path is taken from lumen-core's
-  `legacy::LEGACY_APP_ID`, never written as a literal in the harness or in these files.
+  run. The ledgers are opened with a `?mode=ro` URI and a missing one is skipped, never created.
 - 1.0.0's daemon reads `$HOME/.claude/projects` and its fixed port can collide with a running
   Lumen app, whose GUI could then talk to the bench daemon: the port is checked free first.
 - A downloaded asset is untrusted: verified by sha256, unpacked into a fresh directory, never run
