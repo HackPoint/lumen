@@ -39,6 +39,7 @@ fn needles(legacy_id: &str) -> Vec<(&'static str, String)> {
         ("the legacy identifier", legacy_id.to_ascii_lowercase()),
         ("the company name", company),
         ("a related product name", String::from("redacted")),
+        ("a private project name", String::from("redacted")),
         ("the owner's username", String::from("redacted")),
     ]
 }
