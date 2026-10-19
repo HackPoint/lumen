@@ -6,12 +6,16 @@
 //! source list, the marker's shape, and [`effective`], which every
 //! `resolve_db_path` caller goes through so that a stale path keeps working.
 
+pub mod discover;
+pub mod marker;
 pub mod migrate;
+pub mod redirect;
 pub mod retire;
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 pub mod merge;
 
@@ -128,10 +132,28 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Where the platform keeps per-user application data directories, for the
-/// anchoring in [`effective_with`]: the one under `home` and the one the
-/// platform reports (which honours XDG on Linux).
+/// Where the platform keeps per-user application data directories, for the anchoring in
+/// [`redirect::redirect_in`] and the scan in [`discover::discover`]: the one under `home` and
+/// the one the platform reports (which honours XDG on Linux).
 pub fn data_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    data_roots_cached(home).to_vec()
+}
+
+/// [`data_roots`], computed once per `home` for the life of the process: the roots do not
+/// change, and a hook asks on every call.
+pub(crate) fn data_roots_cached(home: Option<&Path>) -> Arc<[PathBuf]> {
+    type Cache = Mutex<HashMap<Option<PathBuf>, Arc<[PathBuf]>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let mut map = CACHE
+        .get_or_init(Cache::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    map.entry(home.map(Path::to_path_buf))
+        .or_insert_with(|| compute_data_roots(home).into())
+        .clone()
+}
+
+fn compute_data_roots(home: Option<&Path>) -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(h) = home
         && let Some(p) = crate::meter::app_data_dir_in(h).parent()

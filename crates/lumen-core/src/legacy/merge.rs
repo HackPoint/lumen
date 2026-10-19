@@ -189,7 +189,7 @@ fn quote(ident: &str) -> String {
 /// verbatim drive path (`\\?\C:\x`) is the drive path; a UNC path (`\\host\share`,
 /// `\\?\UNC\host\share`) is refused, because SQLite's URI form has no portable
 /// spelling for it.
-fn ro_uri(path: &str) -> Result<String, String> {
+pub(super) fn ro_uri(path: &str) -> Result<String, String> {
     let s = path.strip_prefix(r"\\?\").unwrap_or(path);
     let verbatim = s.len() != path.len();
     if s.starts_with(r"\\")
