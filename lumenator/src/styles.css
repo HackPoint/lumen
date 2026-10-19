@@ -128,6 +128,8 @@ body {
 .partial-tag {
   align-self: flex-start;
   width: fit-content;
+  /* "AT LEAST" is one tag: it never breaks across two lines. */
+  white-space: nowrap;
   margin-top: 0.15rem;
   padding: 0.02rem 0.3rem;
   border: 1px solid var(--lumen-warn);
