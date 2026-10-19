@@ -475,7 +475,7 @@ pub struct RunValue {
 pub trait RunKey {
     fn values(&self) -> Result<Vec<RunValue>, String>;
     /// Remove the Run value and its `StartupApproved` value.
-    fn remove(&self, name: &str) -> Result<(), String>;
+    fn delete_entry(&self, name: &str) -> Result<(), String>;
 }
 
 /// Lumen's values of the Run key.
@@ -539,10 +539,11 @@ pub fn scan(env: &Env) -> Result<Vec<Entry>, String> {
             Some(k) => scan_registry(k, &env.exe, env.plugin_name),
             None => Ok(Vec::new()),
         },
-        p => Ok(env
-            .dir
-            .map(|d| scan_files(p, d, &env.exe, env.plugin_name))
-            .unwrap_or_default()),
+        p => match env.dir {
+            Some(d) => Ok(scan_files(p, d, &env.exe, env.plugin_name)),
+            // No folder to look in on this platform: there is nothing to find.
+            None => Ok(Vec::new()),
+        },
     }
 }
 
@@ -661,7 +662,7 @@ fn settle(env: &Env, e: &Entry) -> Result<(), String> {
     } else {
         let key = env.run_key.ok_or("no Run key")?;
         write_run_json(env, e)?;
-        key.remove(&e.name)
+        key.delete_entry(&e.name)
     }
 }
 
@@ -713,7 +714,7 @@ mod registry {
             Ok(out)
         }
 
-        fn remove(&self, name: &str) -> Result<(), String> {
+        fn delete_entry(&self, name: &str) -> Result<(), String> {
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
             let run = hkcu
                 .open_subkey_with_flags(RUN, KEY_SET_VALUE)
@@ -918,7 +919,7 @@ mod tests {
         fn values(&self) -> Result<Vec<RunValue>, String> {
             Ok(self.values.borrow().clone())
         }
-        fn remove(&self, name: &str) -> Result<(), String> {
+        fn delete_entry(&self, name: &str) -> Result<(), String> {
             self.values.borrow_mut().retain(|v| v.name != name);
             Ok(())
         }
