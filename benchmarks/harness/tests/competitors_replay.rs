@@ -228,6 +228,25 @@ fn the_echo_upstream_reads_chunked_bodies_and_stays_on_loopback() {
     assert_eq!(echo.requests()[0].body, b"hello world");
 }
 
+#[test]
+fn a_closing_reply_ends_cleanly_even_with_bytes_the_server_did_not_read() {
+    // Bytes after a `connection: close` request stay unread; a plain close then answers with a
+    // reset, which Windows CI hit as "connection reset" in place of the reply's end.
+    let echo = EchoUpstream::start().unwrap();
+    use std::io::{Read, Write};
+    for _ in 0..20 {
+        let mut s = std::net::TcpStream::connect(echo.addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut req = b"POST /v1/messages HTTP/1.1\r\nhost: x\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}".to_vec();
+        req.extend(std::iter::repeat_n(b'x', 64 * 1024));
+        s.write_all(&req).unwrap();
+        let mut reply = Vec::new();
+        s.read_to_end(&mut reply)
+            .expect("the reply ends with a close, not a reset");
+        assert!(reply.starts_with(b"HTTP/1.1 200"));
+    }
+}
+
 // ---------------------------------------------------------------------------- hooks and shims
 
 #[cfg(unix)]
