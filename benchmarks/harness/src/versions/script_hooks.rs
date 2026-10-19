@@ -94,7 +94,7 @@ pub const PINS: &[(&str, &str, &str)] = &[
     (
         "v1.5.1",
         "791fa95b091ffadb101e6bf82cd4eecb4a8fae65177903b7cf6ed60500cd2b06",
-        "cb67198b161754cb69b343d54048c60f29e017ac367a628c4fcec6b5504e6b99",
+        "59f972cfe7f74c74209a1e407f971c2aa677c7aecc5ccf052b59fa663e780e2b",
     ),
 ];
 

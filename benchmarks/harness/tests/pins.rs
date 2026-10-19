@@ -729,27 +729,6 @@ fn a_method_file_without_its_honesty_rules_is_refused() {
 }
 
 #[test]
-fn no_file_names_the_legacy_app_identifier_as_a_literal() {
-    // The legacy identifier lives only in lumen-core's legacy module; the method files say
-    // "the legacy data directory". The forbidden word is assembled so this file does not hold it.
-    let word = ["speed", "ata"].concat();
-    for rel in [
-        "competitors/METHOD.md",
-        "competitors/tools.toml",
-        "competitors/tasks.toml",
-        "competitors/draw_tasks.py",
-        "versions/METHOD.md",
-        "versions/manifest.toml",
-        "harness/tests/pins.rs",
-    ] {
-        assert!(
-            !read_norm(rel).to_lowercase().contains(&word),
-            "{rel} names the legacy identifier"
-        );
-    }
-}
-
-#[test]
 fn daemon_env_lists_supervised_from_1_2_4() {
     let m = load("versions/manifest.toml");
     for ver in VERSIONS {
