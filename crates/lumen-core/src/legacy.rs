@@ -9,6 +9,7 @@
 pub mod commit;
 pub mod discover;
 pub mod freeze;
+pub mod import;
 pub mod marker;
 pub mod migrate;
 pub mod redirect;

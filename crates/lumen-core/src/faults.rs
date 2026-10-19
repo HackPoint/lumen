@@ -112,7 +112,7 @@ impl FaultRecord {
 ///
 /// Days-from-civil is the inverse of Howard Hinnant's civil-from-days, which is the
 /// algorithm `chrono` uses; it is exact for every date this will ever see.
-fn utc_now() -> String {
+pub fn utc_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -358,10 +358,21 @@ pub fn insert(conn: &rusqlite::Connection, recs: &[FaultRecord]) -> rusqlite::Re
 /// [`insert`] inside a transaction the caller owns and commits: the rows land with whatever
 /// else the caller writes in it, or not at all.
 pub fn insert_in(tx: &rusqlite::Transaction<'_>, recs: &[FaultRecord]) -> rusqlite::Result<usize> {
-    let mut stmt = tx.prepare(
-        "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
-         agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-    )?;
+    insert_into(tx, "main", recs)
+}
+
+/// [`insert_in`] into the `faults` table of the named schema, for a caller whose `main` is
+/// another ledger and whose target is attached (the manual import). `schema` is a name the caller
+/// chose, never user input.
+pub fn insert_into(
+    tx: &rusqlite::Transaction<'_>,
+    schema: &str,
+    recs: &[FaultRecord],
+) -> rusqlite::Result<usize> {
+    let mut stmt = tx.prepare(&format!(
+        "INSERT INTO {schema}.faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
+         agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+    ))?;
     for r in recs {
         stmt.execute(rusqlite::params![
             r.ts,
