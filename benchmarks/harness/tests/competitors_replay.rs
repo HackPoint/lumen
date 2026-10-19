@@ -6,10 +6,13 @@
 
 use lumen_bench::competitors::record::{self, Item};
 use lumen_bench::competitors::replay::arms::{
-    HeadroomArm, Kind, LumenArm, NaArm, NoneArm, Recovery, recovery_for, replay_with_hooks,
-    retrieval_hashes, rtk_recall_ids,
+    HeadroomArm, Kind, LumenArm, NaArm, NoneArm, Recovery, recovery_for, retrieval_hashes,
 };
+// Used only by the tests of the competitor arms, whose PATH shims are POSIX (n/a on Windows).
+#[cfg(unix)]
+use lumen_bench::competitors::replay::arms::{replay_with_hooks, rtk_recall_ids};
 use lumen_bench::competitors::replay::echo::{self, EchoUpstream};
+#[cfg(unix)]
 use lumen_bench::competitors::replay::hooks;
 use lumen_bench::competitors::replay::{
     Arm, CAVEMAN_NA, Case, Cell, NeedleKind, Outcome, Received, ToolCall, apply_head_limit,
@@ -17,7 +20,9 @@ use lumen_bench::competitors::replay::{
     needle_mix, output_text, post_payload, run_case, totals, tsv,
 };
 use lumen_bench::driver::probe_identity;
-use lumen_bench::sandbox::{RealLedgerGuard, Sandbox};
+use lumen_bench::sandbox::RealLedgerGuard;
+#[cfg(unix)]
+use lumen_bench::sandbox::Sandbox;
 use lumen_core::calibration::{ContentType, Model};
 use serde_json::json;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
