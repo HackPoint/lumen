@@ -466,8 +466,8 @@ describe('SessionService', () => {
 
   it('reports the project the gauge is following', () => {
     const s = build();
-    bridge.emit('daemon', turnFrame({ project: 'datapulse-gitlab' }));
-    expect(s.project()).toBe('datapulse-gitlab');
+    bridge.emit('daemon', turnFrame({ project: 'widget-service' }));
+    expect(s.project()).toBe('widget-service');
   });
 
   it('leaves the project empty rather than guessing', () => {
@@ -487,9 +487,9 @@ describe('SessionService', () => {
     expect(s.fill()).toBe(40_000);
 
     bridge.emit('daemon', turnFrame({
-      session_id: 'win-b', project: 'datapulse-gitlab', cache_read_input_tokens: 9_000,
+      session_id: 'win-b', project: 'widget-service', cache_read_input_tokens: 9_000,
     }));
-    expect(s.project()).toBe('datapulse-gitlab');
+    expect(s.project()).toBe('widget-service');
     expect(s.fill()).toBe(9_000);
     expect(s.sessionCount()).toBe(2);
   });
@@ -513,12 +513,12 @@ describe('SessionService', () => {
       type: 'snapshot',
       sessions: [{
         session_id: 's1', fill: 5_000, peak_fill: 5_000,
-        model: 'claude-opus-4-8', project: 'datapulse-gitlab',
+        model: 'claude-opus-4-8', project: 'widget-service',
         input: 0, output: 0, cache_read: 0, cache_write: 0,
         ts: '2026-01-01T10:00:00Z',
       }],
     }));
-    expect(s.project()).toBe('datapulse-gitlab');
+    expect(s.project()).toBe('widget-service');
   });
 
   // ── cost ──────────────────────────────────────────────────────────────────

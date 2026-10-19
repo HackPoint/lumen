@@ -321,11 +321,11 @@ mod tests {
             "/Users",
             "/Users/x",
             "/Users/x/dev",
-            "/Users/x/dev/datapulse-gitlab",
+            "/Users/x/dev/widget-service",
         ]);
         assert_eq!(
-            project_label("-Users-x-dev-datapulse-gitlab", &exists),
-            "datapulse-gitlab",
+            project_label("-Users-x-dev-widget-service", &exists),
+            "widget-service",
             "the label must not be truncated to just 'gitlab'"
         );
     }
