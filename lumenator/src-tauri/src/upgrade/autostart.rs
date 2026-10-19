@@ -668,7 +668,9 @@ fn settle(env: &Env, e: &Entry) -> Result<(), String> {
 
 // ── The real Run key ──────────────────────────────────────────────────────────
 
+// T7 wires the real key into the start; until then nothing names it.
 #[cfg(windows)]
+#[allow(unused_imports)]
 pub use registry::HkcuRun;
 
 #[cfg(windows)]
