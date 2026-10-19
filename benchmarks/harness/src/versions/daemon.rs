@@ -22,7 +22,7 @@
 //! - Cold start: spawn to ready (daemon), spawn to the `initialize` reply (`lumen-mcp`), spawn to exit
 //!   of the first hook. On Linux the page cache is dropped before each run when `sudo -n` allows it;
 //!   otherwise, and on macOS and Windows, the figure is labelled "warm file cache".
-//! - Idle: a 30 s settle, then one sample a second for 120 s. CPU is seconds per minute of wall time
+//! - Idle: a 30 s settle, then one sample a second for 120 s, and on until 60 samples are in. CPU is seconds per minute of wall time
 //!   between the first and last sample; RSS is the median and the peak of the samples.
 //!
 //! Not measured here: script hooks (the script-hook series does), and 1.0.0's daemon on Windows,
@@ -540,28 +540,33 @@ pub struct IdleCfg {
     pub settle: Duration,
     pub window: Duration,
     pub interval: Duration,
+    /// The window runs on until this many samples are in. On a loaded machine a sleep overshoots
+    /// its interval, and a window of time alone gave fewer samples than it was meant to.
+    pub min_samples: usize,
 }
 
 impl IdleCfg {
-    /// 30 s to settle, then once a second for 120 s.
+    /// 30 s to settle, then once a second for 120 s, and at least 60 samples.
     pub fn standard() -> IdleCfg {
         IdleCfg {
             settle: Duration::from_secs(30),
             window: Duration::from_secs(120),
             interval: Duration::from_secs(1),
+            min_samples: 60,
         }
     }
 }
 
-/// Settle, then sample `pid` every `interval` for `window`. A sample that fails (the process died)
-/// is an error: an idle figure of a process that was not there would be a made-up number.
+/// Settle, then sample `pid` every `interval` for `window`, and until `min_samples` are in. A
+/// sample that fails (the process died) is an error: an idle figure of a process that was not
+/// there would be a made-up number.
 pub fn measure_idle(pid: u32, cfg: &IdleCfg) -> Res<Idle> {
     std::thread::sleep(cfg.settle);
     let first = sample(pid)?;
     let t0 = Instant::now();
     let mut last = (first, t0);
     let mut rss = vec![first.rss_bytes as i64];
-    while t0.elapsed() < cfg.window {
+    while t0.elapsed() < cfg.window || rss.len() < cfg.min_samples {
         std::thread::sleep(cfg.interval);
         let s = sample(pid).ctx("sample during the idle window")?;
         rss.push(s.rss_bytes as i64);
@@ -1433,6 +1438,7 @@ mod tests {
             settle: Duration::from_millis(10),
             window: Duration::from_millis(300),
             interval: Duration::from_millis(50),
+            min_samples: 4,
         };
         let r = measure_idle(std::process::id(), &cfg).unwrap();
         assert!(r.samples >= 4);
@@ -1442,6 +1448,19 @@ mod tests {
             measure_idle(u32::MAX - 1, &cfg).is_err(),
             "a missing process is an error"
         );
+    }
+
+    #[test]
+    fn idle_sampling_takes_its_minimum_however_slow_the_clock() {
+        // A window already over when sampling starts: what a loaded runner did to a 300 ms one.
+        let cfg = IdleCfg {
+            settle: Duration::ZERO,
+            window: Duration::ZERO,
+            interval: Duration::from_millis(1),
+            min_samples: 5,
+        };
+        let r = measure_idle(std::process::id(), &cfg).unwrap();
+        assert_eq!(r.samples, 5);
     }
 
     // --- the rules ---
@@ -1507,6 +1526,7 @@ mod tests {
                 settle: Duration::from_millis(50),
                 window: Duration::from_millis(300),
                 interval: Duration::from_millis(50),
+                min_samples: 4,
             },
         }
     }
