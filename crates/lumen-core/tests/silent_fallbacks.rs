@@ -171,22 +171,16 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-core/src/meter.rs",
         NumberForError,
-        "backfill.pending",
+        "backfill_pending(",
         "Whether a row rewrite has anything to do: a read that failed (the table or column is not there) leaves the rewrite not run, as its own failure would have been swallowed.",
     ),
     allow(
         "crates/lumen-core/src/meter.rs",
         DroppedWrite,
         "execute_batch(\"ROLLBACK\")",
-        "The migrations are already being given up on with their own error; a rollback that finds no transaction left has nothing to undo.",
-    ),
-    allow(
-        "crates/lumen-core/src/meter.rs",
-        DroppedWrite,
-        "execute_batch(backfill.rewrite)",
-        "A row rewrite, not a schema change, and idempotent: a ledger that stayed busy for it \
-         keeps its rows as they were and the next open runs it again.",
-    ),
+        "The upgrade (or the backfill) is already being given up on with its own error; a rollback that finds no transaction left has nothing to undo.",
+    )
+    .times(2),
     allow(
         "crates/lumen-core/src/meter.rs",
         DroppedWrite,
@@ -272,15 +266,8 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-core/src/schema.rs",
         NumberForError,
-        "backfill.pending",
+        "backfill_pending(",
         "Whether a row rewrite has anything to do: a read that failed (the table or column is not there) leaves the rewrite not run, as its own failure would have been swallowed.",
-    ),
-    allow(
-        "crates/lumen-core/src/schema.rs",
-        DroppedWrite,
-        "AssertSqlSafe(backfill.rewrite)",
-        "A row rewrite, not a schema change, and idempotent: a ledger that stayed busy for it \
-         keeps its rows as they were and the next open runs it again.",
     ),
     allow(
         "crates/lumen-core/src/update.rs",
