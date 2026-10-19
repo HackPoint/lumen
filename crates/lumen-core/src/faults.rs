@@ -275,7 +275,7 @@ pub fn peek_spool_at(path: &Path) -> std::io::Result<Vec<FaultRecord>> {
 }
 
 /// Where a drain moves the spool while it inserts it.
-fn draining_path(spool: &Path) -> PathBuf {
+pub(crate) fn draining_path(spool: &Path) -> PathBuf {
     spool.with_extension("jsonl.draining")
 }
 
@@ -285,9 +285,23 @@ fn draining_path(spool: &Path) -> PathBuf {
 /// good fault in the spool. Decoded lossily for the same reason: a tail cut inside a
 /// multi-byte character is one bad line, not a spool that cannot be read.
 fn parse_spool(bytes: &[u8]) -> Vec<FaultRecord> {
+    records(bytes, DRAIN_LINE_CAP)
+}
+
+/// Every record in spool bytes, with no [`DRAIN_LINE_CAP`].
+///
+/// For the one reader that takes a spool whole and for good: the freeze of a migrated
+/// install's backup, which would otherwise leave the lines past the cap behind for ever.
+/// A line that does not parse (a partial last line, a corrupt one) is skipped and left
+/// where it is: nothing here writes to the bytes' source.
+pub fn parse_spool_all(bytes: &[u8]) -> Vec<FaultRecord> {
+    records(bytes, usize::MAX)
+}
+
+fn records(bytes: &[u8], cap: usize) -> Vec<FaultRecord> {
     String::from_utf8_lossy(bytes)
         .lines()
-        .take(DRAIN_LINE_CAP)
+        .take(cap)
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .filter_map(|l| serde_json::from_str::<FaultRecord>(l).ok())
@@ -336,27 +350,32 @@ pub fn insert(conn: &rusqlite::Connection, recs: &[FaultRecord]) -> rusqlite::Re
         return Ok(0);
     }
     let tx = conn.unchecked_transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
-             agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        )?;
-        for r in recs {
-            stmt.execute(rusqlite::params![
-                r.ts,
-                r.kind,
-                r.variant,
-                r.path,
-                r.lines,
-                r.detail,
-                r.session_id,
-                r.version,
-                r.channel,
-                r.agent_id,
-            ])?;
-        }
-    }
+    insert_in(&tx, recs)?;
     tx.commit()?;
+    Ok(recs.len())
+}
+
+/// [`insert`] inside a transaction the caller owns and commits: the rows land with whatever
+/// else the caller writes in it, or not at all.
+pub fn insert_in(tx: &rusqlite::Transaction<'_>, recs: &[FaultRecord]) -> rusqlite::Result<usize> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
+         agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+    )?;
+    for r in recs {
+        stmt.execute(rusqlite::params![
+            r.ts,
+            r.kind,
+            r.variant,
+            r.path,
+            r.lines,
+            r.detail,
+            r.session_id,
+            r.version,
+            r.channel,
+            r.agent_id,
+        ])?;
+    }
     Ok(recs.len())
 }
 
@@ -797,5 +816,41 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{build} arm did not create faults");
         }
+    }
+
+    #[test]
+    fn the_whole_spool_is_parsed_past_the_drain_cap_and_a_cut_line_is_skipped() {
+        let line = |k: usize| {
+            serde_json::to_string(&FaultRecord::now(&format!("k{k}"), "v")).unwrap() + "\n"
+        };
+        let mut bytes = String::new();
+        for k in 0..DRAIN_LINE_CAP + 3 {
+            bytes += &line(k);
+        }
+        bytes += "{\"ts\":\"t\",\"kind\":\"cut";
+        assert_eq!(parse_spool(bytes.as_bytes()).len(), DRAIN_LINE_CAP);
+        let all = parse_spool_all(bytes.as_bytes());
+        assert_eq!(all.len(), DRAIN_LINE_CAP + 3);
+        assert_eq!(all.last().unwrap().kind, format!("k{}", DRAIN_LINE_CAP + 2));
+    }
+
+    #[test]
+    fn insert_in_lands_with_its_transaction_or_not_at_all() {
+        let mut c = conn_with_schema();
+        let recs = [FaultRecord::now("a", "v"), FaultRecord::now("b", "v")];
+        {
+            let tx = c.transaction().unwrap();
+            assert_eq!(insert_in(&tx, &recs).unwrap(), 2);
+            // dropped: rolled back
+        }
+        let n = |c: &rusqlite::Connection| -> i64 {
+            c.query_row("SELECT count(*) FROM faults", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(n(&c), 0);
+        let tx = c.transaction().unwrap();
+        insert_in(&tx, &recs).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(n(&c), 2);
     }
 }

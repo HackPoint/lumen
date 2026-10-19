@@ -213,6 +213,22 @@ const ALLOWED: &[Allowed] = &[
          that is not there yet, never a wrong one.",
     ),
     allow(
+        "crates/lumen-core/src/legacy/freeze.rs",
+        OrDefault,
+        "to_string_lossy().into_owned()",
+        "The label of a backup folder in the `legacy_merge` key. The folder comes from the marker \
+         and always has a name; a path without one would give the key `backup:`, which names one \
+         backup as well as any other, and no figure is derived from it.",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/freeze.rs",
+        NumberForError,
+        ".copied()",
+        "Where the merge starts in a table the marker has no mark for: the table was not in the \
+         snapshot, so no row of it was carried and the position is 0. A rowid position, not a \
+         measurement; a table whose mark is there is never read as 0.",
+    ),
+    allow(
         "crates/lumen-core/src/meter.rs",
         OrDefault,
         "CLAUDE_CODE_ENTRYPOINT",
