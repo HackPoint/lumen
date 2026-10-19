@@ -47,6 +47,13 @@ pub const KEYED_TABLES: [&str; 5] = [
 /// Tables with no key: carried by rowid position.
 pub const POSITIONAL_TABLES: [&str; 2] = ["read_events", "faults"];
 
+/// The table the v1 spool copy keeps its intent in. The ledger's schema no longer has it (the
+/// freeze takes the spool once, with no intent), so this code makes it when it needs it. Goes
+/// with [`merge_spool`] when v1 is deleted.
+const SPOOL_INTENT_DDL: &str = "CREATE TABLE IF NOT EXISTS legacy_spool_intent (\
+    source TEXT PRIMARY KEY, src_from INTEGER NOT NULL, src_to INTEGER NOT NULL, \
+    dst_before INTEGER NOT NULL)";
+
 /// How much of a spool's head says it is the same spool.
 const SIG_BYTES: u64 = 256;
 
@@ -178,7 +185,7 @@ fn check_ledger(source: &Path) -> Result<(), String> {
     }
 }
 
-fn quote(ident: &str) -> String {
+pub(super) fn quote(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
@@ -224,7 +231,7 @@ pub(super) fn columns(
 }
 
 /// The progress of `source` for `tbl`: `(hwm, sig)`.
-fn progress(
+pub(super) fn progress(
     conn: &Connection,
     source: &str,
     tbl: &str,
@@ -238,7 +245,7 @@ fn progress(
     .map_err(|e| format!("legacy_merge: {e}"))
 }
 
-fn set_progress(
+pub(super) fn set_progress(
     conn: &Connection,
     source: &str,
     tbl: &str,
@@ -607,6 +614,7 @@ fn merge_spool(
         return Ok(0);
     }
     let tx = |sql: &str| conn.execute_batch(sql).map_err(|e| e.to_string());
+    tx(SPOOL_INTENT_DDL)?;
     let mut appended = 0;
 
     // A copy a crash cut short: finish it exactly.
@@ -1132,7 +1140,7 @@ mod tests {
     fn the_normal_merge_keeps_nothing_per_row() {
         let e = env(V190);
         let bookkeeping = |e: &Env| {
-            ["legacy_merge", "legacy_spool_intent"]
+            ["legacy_merge"]
                 .iter()
                 .map(|t| count(&e.new_db, t))
                 .collect::<Vec<_>>()
@@ -1158,7 +1166,7 @@ mod tests {
             small,
             "bookkeeping does not grow with the source"
         );
-        assert_eq!(small, vec![2, 0]);
+        assert_eq!(small, vec![2]);
     }
 
     #[test]
@@ -1246,6 +1254,7 @@ mod tests {
             dst.extend_from_slice(&chunk[..appended]);
             std::fs::write(e.dst_spool(), &dst).unwrap();
             // Progress and the pending intent, as a run killed mid-copy leaves them.
+            q(&e.new_db, SPOOL_INTENT_DDL);
             q(
                 &e.new_db,
                 &format!(
@@ -1412,9 +1421,7 @@ mod tests {
         let t = TempDir::new().unwrap();
         let p = old_ledger(t.path(), V180);
         drop(crate::meter::connect_db(&p).unwrap());
-        for tbl in ["legacy_merge", "legacy_spool_intent"] {
-            assert_eq!(count(&p, tbl), 0, "{tbl}");
-        }
+        assert_eq!(count(&p, "legacy_merge"), 0);
         // sqlx (daemon and GUI).
         let p2 = old_ledger(&t.path().join("x"), V190);
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1427,8 +1434,6 @@ mod tests {
                 .unwrap();
             pool.close().await;
         });
-        for tbl in ["legacy_merge", "legacy_spool_intent"] {
-            assert_eq!(count(&p2, tbl), 0, "{tbl}");
-        }
+        assert_eq!(count(&p2, "legacy_merge"), 0);
     }
 }
