@@ -39,6 +39,7 @@ fn needles(legacy_id: &str) -> Vec<(&'static str, String)> {
         ("the legacy identifier", legacy_id.to_ascii_lowercase()),
         ("the company name", company),
         ("a related product name", ["speed", "ash"].concat()),
+        ("a private project name", ["data", "pulse"].concat()),
         ("the owner's username", ["gsh", "munik"].concat()),
     ]
 }
