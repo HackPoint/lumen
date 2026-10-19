@@ -1,0 +1,231 @@
+crates/lumen-cli/src/data.rs-10-#[derive(Default)]
+crates/lumen-cli/src/data.rs:11:pub struct AppState {
+crates/lumen-cli/src/data.rs-12-    pub fill: u64,
+--
+crates/lumen-cli/src/data.rs-36-
+crates/lumen-cli/src/data.rs:37:pub struct OneshotData {
+crates/lumen-cli/src/data.rs-38-    pub fill: u64,
+--
+crates/lumen-cli/src/doctor.rs-15-#[derive(Debug, Clone, PartialEq)]
+crates/lumen-cli/src/doctor.rs:16:pub struct StatusItemPref {
+crates/lumen-cli/src/doctor.rs-17-    pub domain: String,
+--
+crates/lumen-cli/src/doctor.rs-24-#[derive(Debug, Clone, Default)]
+crates/lumen-cli/src/doctor.rs:25:pub struct Facts {
+crates/lumen-cli/src/doctor.rs-26-    pub platform: String,
+--
+crates/lumen-core/src/compress.rs-2-
+crates/lumen-core/src/compress.rs:3:pub struct CompressResult {
+crates/lumen-core/src/compress.rs-4-    pub text: String,
+--
+crates/lumen-core/src/econ.rs-101-#[derive(Debug, Clone, Copy, PartialEq)]
+crates/lumen-core/src/econ.rs:102:pub struct Econ {
+crates/lumen-core/src/econ.rs-103-    /// Context tokens re-read on the extra round.
+--
+crates/lumen-core/src/events.rs-41-#[derive(Debug, Clone, PartialEq, Eq)]
+crates/lumen-core/src/events.rs:42:pub struct Event {
+crates/lumen-core/src/events.rs-43-    pub kind: Kind,
+--
+crates/lumen-core/src/events.rs-107-#[derive(Default)]
+crates/lumen-core/src/events.rs:108:pub struct Tracker {
+crates/lumen-core/src/events.rs-109-    depth: HashMap<String, i64>,
+--
+crates/lumen-core/src/faults.rs-31-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+crates/lumen-core/src/faults.rs:32:pub struct FaultRecord {
+crates/lumen-core/src/faults.rs-33-    /// ISO-8601 UTC. Supplied by the caller so this module needs no clock.
+--
+crates/lumen-core/src/meter.rs-220-#[derive(Debug, Clone, Default, PartialEq)]
+crates/lumen-core/src/meter.rs:221:pub struct RankedMeta {
+crates/lumen-core/src/meter.rs-222-    pub budget: Option<i64>,
+--
+crates/lumen-core/src/meter.rs-314-#[derive(Debug, Clone, PartialEq, Eq)]
+crates/lumen-core/src/meter.rs:315:pub struct WriteError {
+crates/lumen-core/src/meter.rs-316-    pub stage: &'static str,
+--
+crates/lumen-core/src/meter.rs-406-#[derive(Debug, Clone, PartialEq, Eq)]
+crates/lumen-core/src/meter.rs:407:pub struct HookReadEvent<'a> {
+crates/lumen-core/src/meter.rs-408-    /// The tool Claude Code ran: `Read` or `Bash`.
+--
+crates/lumen-core/src/ranked.rs-103-#[derive(Debug, Clone)]
+crates/lumen-core/src/ranked.rs:104:pub struct Def {
+crates/lumen-core/src/ranked.rs-105-    pub name: String,
+--
+crates/lumen-core/src/ranked.rs-137-#[derive(Debug, Clone)]
+crates/lumen-core/src/ranked.rs:138:pub struct Ref {
+crates/lumen-core/src/ranked.rs-139-    pub name: String,
+--
+crates/lumen-core/src/ranked.rs-446-/// Edges of the in-file reference graph, plus file-level uses.
+crates/lumen-core/src/ranked.rs:447:pub struct Graph {
+crates/lumen-core/src/ranked.rs-448-    /// `(caller, callee) -> weight`. BTreeMap so iteration order is deterministic.
+--
+crates/lumen-core/src/ranked.rs-712-#[derive(Debug, Clone)]
+crates/lumen-core/src/ranked.rs:713:pub struct Fitted {
+crates/lumen-core/src/ranked.rs-714-    pub text: String,
+--
+crates/lumen-core/src/ranked.rs-817-#[derive(Debug, Clone)]
+crates/lumen-core/src/ranked.rs:818:pub struct Decision {
+crates/lumen-core/src/ranked.rs-819-    pub econ: Econ,
+--
+crates/lumen-core/src/ranked.rs-968-
+crates/lumen-core/src/ranked.rs:969:pub struct Report {
+crates/lumen-core/src/ranked.rs-970-    pub ok: bool,
+--
+crates/lumen-core/src/ranked.rs-1548-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+crates/lumen-core/src/ranked.rs:1549:pub struct FileStamp {
+crates/lumen-core/src/ranked.rs-1550-    pub mtime: i64,
+--
+crates/lumen-core/src/record.rs-3-#[derive(Debug, Deserialize)]
+crates/lumen-core/src/record.rs:4:pub struct Record {
+crates/lumen-core/src/record.rs-5-    #[serde(rename = "sessionId")]
+--
+crates/lumen-core/src/record.rs-12-#[derive(Debug, Deserialize)]
+crates/lumen-core/src/record.rs:13:pub struct Message {
+crates/lumen-core/src/record.rs-14-    pub id: String,
+--
+crates/lumen-core/src/record.rs-35-#[derive(Debug, Deserialize)]
+crates/lumen-core/src/record.rs:36:pub struct Usage {
+crates/lumen-core/src/record.rs-37-    pub input_tokens: i64,
+--
+crates/lumen-core/src/record.rs-46-#[derive(Debug, Deserialize)]
+crates/lumen-core/src/record.rs:47:pub struct CacheCreation {
+crates/lumen-core/src/record.rs-48-    pub ephemeral_1h_input_tokens: Option<i64>,
+--
+crates/lumen-core/src/record.rs-52-#[derive(Debug, Deserialize)]
+crates/lumen-core/src/record.rs:53:pub struct ServerToolUse {
+crates/lumen-core/src/record.rs-54-    pub web_search_requests: Option<i64>,
+--
+crates/lumen-core/src/repeat.rs-196-#[derive(Debug, Clone, PartialEq, Eq)]
+crates/lumen-core/src/repeat.rs:197:pub struct Sym {
+crates/lumen-core/src/repeat.rs-198-    pub kind: String,
+--
+crates/lumen-core/src/repeat.rs-261-#[derive(Debug, Clone, PartialEq, Eq)]
+crates/lumen-core/src/repeat.rs:262:pub struct Changed {
+crates/lumen-core/src/repeat.rs-263-    pub sym: Sym,
+--
+crates/lumen-core/src/repeat.rs-282-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+crates/lumen-core/src/repeat.rs:283:pub struct Delta {
+crates/lumen-core/src/repeat.rs-284-    pub changed: Vec<Changed>,
+--
+crates/lumen-core/src/repeat.rs-686-#[derive(Debug, Clone)]
+crates/lumen-core/src/repeat.rs:687:pub struct OutlineBase {
+crates/lumen-core/src/repeat.rs-688-    pub when_ms: i64,
+--
+crates/lumen-core/src/repeat.rs-697-#[derive(Debug, Clone)]
+crates/lumen-core/src/repeat.rs:698:pub struct RecallBase {
+crates/lumen-core/src/repeat.rs-699-    pub when_ms: i64,
+--
+crates/lumen-core/src/repeat.rs-725-#[derive(Default)]
+crates/lumen-core/src/repeat.rs:726:pub struct Store {
+crates/lumen-core/src/repeat.rs-727-    map: HashMap<(String, String), (u64, Base)>,
+--
+crates/lumen-core/src/report.rs-40-#[derive(Debug, Clone, Deserialize)]
+crates/lumen-core/src/report.rs:41:pub struct Fault {
+crates/lumen-core/src/report.rs-42-    pub kind: String,
+--
+crates/lumen-core/src/report.rs-109-#[derive(Debug, Clone, Default)]
+crates/lumen-core/src/report.rs:110:pub struct Environment {
+crates/lumen-core/src/report.rs-111-    pub lumen_version: String,
+--
+crates/lumen-core/src/report.rs-559-#[derive(Debug, Clone, Default)]
+crates/lumen-core/src/report.rs:560:pub struct RenderOpts {
+crates/lumen-core/src/report.rs-561-    /// Embed the contents of affected files. Off by default, and the CLI prints a
+--
+crates/lumen-core/src/report.rs-1075-#[derive(Debug, Clone)]
+crates/lumen-core/src/report.rs:1076:pub struct Endpoints {
+crates/lumen-core/src/report.rs-1077-    /// REST base, no trailing slash. `https://api.github.com` in production.
+--
+crates/lumen-core/src/report.rs-1157-#[derive(Debug)]
+crates/lumen-core/src/report.rs:1158:pub struct Filing {
+crates/lumen-core/src/report.rs-1159-    pub outcome: Filed,
+--
+crates/lumen-core/src/structure.rs-25-
+crates/lumen-core/src/structure.rs:26:pub struct CodeItem {
+crates/lumen-core/src/structure.rs-27-    pub kind: String,
+--
+crates/lumen-core/src/update.rs-24-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+crates/lumen-core/src/update.rs:25:pub struct Version {
+crates/lumen-core/src/update.rs-26-    pub major: u32,
+--
+crates/lumen-core/src/update.rs-109-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+crates/lumen-core/src/update.rs:110:pub struct CheckState {
+crates/lumen-core/src/update.rs-111-    /// Unix seconds of the last completed check, successful or not.
+--
+crates/lumen-core/src/update.rs-150-#[serde(rename_all = "camelCase")]
+crates/lumen-core/src/update.rs:151:pub struct UpdateAvailable {
+crates/lumen-core/src/update.rs-152-    pub current: String,
+--
+crates/lumen-mcp/src/hook.rs-39-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+crates/lumen-mcp/src/hook.rs:40:pub struct Outcome {
+crates/lumen-mcp/src/hook.rs-41-    /// 0 lets the tool call proceed. 2, from the intercept only, blocks it.
+--
+crates/lumen-mcp/src/hook.rs-48-/// environment, the real temp directory or the real ledger.
+crates/lumen-mcp/src/hook.rs:49:pub struct Env<'a> {
+crates/lumen-mcp/src/hook.rs-50-    pub var: &'a dyn Fn(&str) -> Option<String>,
+--
+crates/lumen-mcp/src/lib.rs-37-#[derive(Deserialize)]
+crates/lumen-mcp/src/lib.rs:38:pub struct Request {
+crates/lumen-mcp/src/lib.rs-39-    #[allow(dead_code)]
+--
+crates/lumen-mcp/src/lib.rs-46-#[derive(Serialize)]
+crates/lumen-mcp/src/lib.rs:47:pub struct Response {
+crates/lumen-mcp/src/lib.rs-48-    pub jsonrpc: &'static str,
+--
+crates/lumen-mcp/src/lib.rs-53-#[derive(Serialize)]
+crates/lumen-mcp/src/lib.rs:54:pub struct ErrorResponse {
+crates/lumen-mcp/src/lib.rs-55-    pub jsonrpc: &'static str,
+--
+crates/lumen-mcp/src/lib.rs-60-#[derive(Serialize)]
+crates/lumen-mcp/src/lib.rs:61:pub struct RpcError {
+crates/lumen-mcp/src/lib.rs-62-    pub code: i32,
+--
+crates/lumen-mcp/src/lib.rs-74-#[derive(Debug, Clone, PartialEq)]
+crates/lumen-mcp/src/lib.rs:75:pub struct MeterRow {
+crates/lumen-mcp/src/lib.rs-76-    pub path: String,
+--
+crates/lumen-mcp/src/lib.rs-128-#[derive(Debug, Clone, PartialEq)]
+crates/lumen-mcp/src/lib.rs:129:pub struct Outcome {
+crates/lumen-mcp/src/lib.rs-130-    pub payload: Payload,
+--
+crates/lumen-mcp/src/lib.rs-1106-#[derive(Debug, PartialEq)]
+crates/lumen-mcp/src/lib.rs:1107:pub struct Block {
+crates/lumen-mcp/src/lib.rs-1108-    pub start: usize,
+--
+crates/lumen-mcp/src/repeat_read.rs-23-
+crates/lumen-mcp/src/repeat_read.rs:24:pub struct Ctx {
+crates/lumen-mcp/src/repeat_read.rs-25-    session: String,
+--
+crates/lumen-stats/src/lib.rs-58-#[derive(Serialize, Debug, PartialEq)]
+crates/lumen-stats/src/lib.rs:59:pub struct Stats {
+crates/lumen-stats/src/lib.rs-60-    pub turns: i64,
+--
+crates/lumen-stats/src/lib.rs-88-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:89:pub struct TokenAgg {
+crates/lumen-stats/src/lib.rs-90-    pub turns: i64,
+--
+crates/lumen-stats/src/lib.rs-99-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:100:pub struct UsageReport {
+crates/lumen-stats/src/lib.rs-101-    pub rolling_5h: TokenAgg,
+--
+crates/lumen-stats/src/lib.rs-241-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:242:pub struct SessionSummary {
+crates/lumen-stats/src/lib.rs-243-    pub session_id: String,
+--
+crates/lumen-stats/src/lib.rs-336-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:337:pub struct ChannelBreakdown {
+crates/lumen-stats/src/lib.rs-338-    pub channel: String,
+--
+crates/lumen-stats/src/lib.rs-345-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:346:pub struct ToolBreakdown {
+crates/lumen-stats/src/lib.rs-347-    pub tool: String,
+--
+crates/lumen-stats/src/lib.rs-354-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:355:pub struct OptimizerReport {
+crates/lumen-stats/src/lib.rs-356-    /// SUM(saved_tokens) over lumen routes — CAUSED by Lumen, not reported.
+--
+crates/lumen-stats/src/lib.rs-651-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:652:pub struct FileHotspot {
+crates/lumen-stats/src/lib.rs-653-    pub path: String,
+--
+crates/lumen-stats/src/lib.rs-675-#[serde(rename_all = "camelCase")]
+crates/lumen-stats/src/lib.rs:676:pub struct ContextReport {
+crates/lumen-stats/src/lib.rs-677-    pub total_tokens_read: i64,

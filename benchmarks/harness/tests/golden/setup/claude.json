@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lumen": {
+      "args": [],
+      "command": "/H/.lumen-bench/bin/lumen-mcp",
+      "env": {
+        "LUMEN_DB": "/H/.lumen-bench/ledger.db"
+      },
+      "type": "stdio"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+=========================== test session starts ============================
+platform linux -- Python 3.x.y, pytest-9.x.y, pluggy-1.x.y
+rootdir: /work/project
+collected 6 items
+
+test_example.py .FEsxX                                               [100%]
+
+================================== ERRORS ==================================
+_______________________ ERROR at setup of test_error _______________________
+
+    @pytest.fixture
+    def error_fixture():
+>       assert 0
+E       assert 0
+
+test_example.py:6: AssertionError
+================================= FAILURES =================================
+________________________________ test_fail _________________________________
+
+    def test_fail():
+>       assert 0
+E       assert 0
+
+test_example.py:14: AssertionError
+================================= XPASSES ==================================
+========================= short test summary info ==========================
+SKIPPED [1] test_example.py:22: skipping this test
+XFAIL test_example.py::test_xfail - xfailing this test
+XPASS test_example.py::test_xpass - always xfail
+ERROR test_example.py::test_error - assert 0
+FAILED test_example.py::test_fail - assert 0
+== 1 failed, 1 passed, 1 skipped, 1 xfailed, 1 xpassed, 1 error in 0.12s ===

@@ -6,7 +6,7 @@
 
 use crate::builds::Build;
 use crate::corpus::Corpus;
-use crate::driver::probe_identity;
+use crate::driver::{Identity, probe_identity};
 use crate::env;
 use crate::latency::{self, BuildLatency, LatencyConfig, MIN_RUNS, Subject};
 use crate::report::{
@@ -98,7 +98,14 @@ pub fn probe_builds(builds: &[Build], work: &Path) -> Res<Vec<Build>> {
     let mut probed: Vec<Build> = Vec::with_capacity(builds.len());
     for b in builds {
         let mut b = b.clone();
-        b.identity = probe_identity(&b.bin, &work.join(format!("probe-{}", b.label)))?;
+        let root = work.join(format!("probe-{}", b.label));
+        b.identity = match &b.caps {
+            // The map decides whether the probe may run at all (it spawns `hook`), and the
+            // probe's answer must agree with the map or the run stops.
+            Some(caps) if caps.no_lumen => Identity::Env,
+            Some(caps) => caps.probe_identity(&b.bin, &root)?,
+            None => probe_identity(&b.bin, &root)?,
+        };
         eprintln!(
             "lumen-bench: {}: per-call identity by {}",
             b.label,
