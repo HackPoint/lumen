@@ -245,17 +245,13 @@ pub fn preflight_old_daemon() -> Res<()> {
 /// can match a user's own row.
 pub const BENCH_PREFIXES: [&str; 2] = ["lumen-bench-", "bench-"];
 
-/// The data-directory name the next release moves to. A literal because nothing in lumen-core
-/// on this branch knows it yet; it is a bundle identifier, not a person or a company.
-const NEXT_APP_ID: &str = "io.hackpoint.lumen";
+/// The data-directory name Lumen uses today, from lumen-core.
+const NEXT_APP_ID: &str = lumen_core::meter::APP_ID;
 
-/// The identifier of the previous data directory.
-///
-/// TODO(1.10.0): when `lumen_core::legacy` merges, return `legacy::LEGACY_APP_ID` here. Until
-/// then `meter::APP_ID` is still the old identifier, so it is read from there and never spelt
-/// out in this crate.
+/// The identifier of the data directory before 1.10.0, from the migration module: the only
+/// place it is spelt out.
 pub fn legacy_app_id() -> &'static str {
-    lumen_core::meter::APP_ID
+    lumen_core::legacy::LEGACY_APP_ID
 }
 
 /// The ledgers a run must never write, for a real home: the data directory under each
