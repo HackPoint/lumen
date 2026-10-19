@@ -34,7 +34,8 @@
 /* ── rolling windows ── */
 .usage__rolling {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* Two equal columns however long a figure is; a figure wraps inside its card instead. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.7rem;
 }
 
@@ -50,9 +51,11 @@
 
 .win__head {
   display: flex;
+  /* A card too narrow for both puts the reset time under the label, whole. */
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.4rem;
+  gap: 0.2rem 0.4rem;
 }
 
 .win__label {
@@ -64,9 +67,11 @@
 }
 
 .win__reset {
+  margin-left: auto;
   font-family: var(--lumen-font-sans);
   font-size: 0.66rem;
   color: var(--lumen-text-dim);
+  white-space: nowrap;
 }
 
 .tag {
@@ -89,25 +94,43 @@
 
 .win__meta {
   display: flex;
-  gap: 0.75rem;
+  /* The second count wraps whole before a count leaves its unit. */
+  flex-wrap: wrap;
+  gap: 0.1rem 0.75rem;
   font-size: 0.74rem;
   color: var(--lumen-text-dim);
 }
 
+/* One row per model: the name on the left, its figures on the right. */
 .win__split {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 0.35rem;
   margin-top: 0.1rem;
 }
 
 .pill {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 0.5rem;
   font-size: 0.64rem;
   color: var(--lumen-text-dim);
   background: var(--lumen-bg-elevated);
   border: 1px solid var(--lumen-border);
-  border-radius: 999px;
-  padding: 0.1rem 0.45rem;
+  border-radius: var(--lumen-radius-sm);
+  padding: 0.15rem 0.5rem;
+}
+
+.pill__k {
+  white-space: nowrap;
+}
+
+/* Breaks only at " · ", and only in a card too narrow for the whole figure. */
+.pill__v {
+  margin-left: auto;
+  text-align: right;
+  color: var(--lumen-text);
 }
 
 /* ── calendar rollups ── */
