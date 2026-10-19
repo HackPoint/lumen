@@ -181,11 +181,11 @@ const ALLOWED: &[Allowed] = &[
         "crates/lumen-core/src/legacy/commit.rs",
         DroppedWrite,
         "remove_dir_all(",
-        "Cleaning up the staging directory after the outcome is decided (a failed run, or the \
-         tidy after the marker is written); a leftover is removed by the next run before it \
-         stages, and nothing reads it.",
-    )
-    .times(2),
+        "The tidy after the marker is written: the migration is committed, the stage is only \
+         leftovers, and a leftover is removed by the next run. (A failed run does not delete \
+         its stage: undo_half_commit takes back what was renamed into N first, because the \
+         next run reads the intent.)",
+    ),
     allow(
         "crates/lumen-core/src/legacy/commit.rs",
         DroppedWrite,

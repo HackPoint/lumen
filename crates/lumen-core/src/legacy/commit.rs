@@ -227,8 +227,11 @@ pub fn migrate_under(
         };
     }
     let out = copy_verify_commit(l, &abs, &x, n, &stage, opts, ops);
-    if !matches!(out, Outcome::Migrated { .. }) {
-        let _ = fs::remove_dir_all(&stage);
+    if !matches!(out, Outcome::Migrated { .. }) && !marker::read(n).is_present() {
+        // A failure that returned (not a kill) may have renamed some staged files into N.
+        // Take them back with the intent still in hand, instead of deleting it: if this
+        // fails too, the stage and its intent stay for the next run's undo.
+        let _ = undo_half_commit(n);
     }
     out
 }
