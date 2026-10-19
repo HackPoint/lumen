@@ -2154,6 +2154,16 @@ mod tests {
         statement: &str,
         indexes: &mut std::collections::BTreeMap<String, String>,
     ) -> Option<String> {
+        // Both openers run an entry as a batch, so a second statement after a `;` would run
+        // unseen by the checks below: one statement per entry.
+        if statement.contains(';') {
+            return Some(format!(
+                "{statement:?} holds more than one statement: both openers run an entry as a \
+                 batch, so what follows the `;` is never checked here. Give each statement its \
+                 own entry. A ledger that already has the shape of a fresh one is not upgraded, \
+                 so a row rewrite after the `;` would be skipped on it forever."
+            ));
+        }
         let words: Vec<&str> = statement.split_whitespace().collect();
         let kind = match words.as_slice() {
             ["ALTER", "TABLE", _, "ADD", "COLUMN", ..] => return None,
@@ -2271,6 +2281,10 @@ mod tests {
             "CREATE TABLE t (a TEXT)",
             "ALTER TABLE t RENAME COLUMN a TO b",
             "ALTER TABLE t DROP COLUMN c, DROP COLUMN d",
+            // A row write hidden behind a `;` in an entry the classifier would otherwise pass.
+            "ALTER TABLE turns ADD COLUMN foo TEXT; UPDATE turns SET foo = 'x'",
+            "CREATE TABLE IF NOT EXISTS foo (a TEXT); INSERT INTO foo VALUES ('x')",
+            "CREATE INDEX IF NOT EXISTS idx_new2 ON t(a); DELETE FROM faults",
         ];
         let mut indexes = indexes_in_ddl();
         for statement in ok {
