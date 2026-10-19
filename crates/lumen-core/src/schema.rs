@@ -496,15 +496,12 @@ pub const MIGRATIONS: &[&str] = &[
         matcher INTEGER NOT NULL, through_ms INTEGER NOT NULL, \
         PRIMARY KEY (source_file, session_id))",
     "CREATE INDEX IF NOT EXISTS idx_transcript_scans_session ON transcript_scans(session_id)",
-    // 1.10.0: how far the late-row merge (legacy::merge) has carried each old ledger, per table, and
-    // a spool copy in flight. Kept in this ledger so a batch and its progress commit together:
+    // 1.10.0: how far the merge from a backup (legacy::freeze) has carried each table, and the
+    // `$frozen` row that ends it. Kept in this ledger so a batch and its progress commit together:
     // rows are merged by position (rowid past `hwm`), never by matching their content.
     "CREATE TABLE IF NOT EXISTS legacy_merge (\
         source TEXT NOT NULL, tbl TEXT NOT NULL, hwm INTEGER NOT NULL, sig TEXT, \
         PRIMARY KEY (source, tbl))",
-    "CREATE TABLE IF NOT EXISTS legacy_spool_intent (\
-        source TEXT PRIMARY KEY, src_from INTEGER NOT NULL, src_to INTEGER NOT NULL, \
-        dst_before INTEGER NOT NULL)",
 ];
 
 /// A row rewrite and the read that says whether it has anything to do.
@@ -683,19 +680,13 @@ CREATE TABLE IF NOT EXISTS transcript_scans (
     PRIMARY KEY (source_file, session_id)
 );
 
--- 1.10.0: progress of the late-row merge from an old ledger (see MIGRATIONS).
+-- 1.10.0: progress of the merge from a backup, and its freeze row (see MIGRATIONS).
 CREATE TABLE IF NOT EXISTS legacy_merge (
     source TEXT NOT NULL,
     tbl    TEXT NOT NULL,
     hwm    INTEGER NOT NULL,
     sig    TEXT,
     PRIMARY KEY (source, tbl)
-);
-CREATE TABLE IF NOT EXISTS legacy_spool_intent (
-    source     TEXT PRIMARY KEY,
-    src_from   INTEGER NOT NULL,
-    src_to     INTEGER NOT NULL,
-    dst_before INTEGER NOT NULL
 );
 -- idx_read_events_dedup is created in MIGRATIONS, not here. DDL runs as one batch
 -- against a database that may predate E7, where session_id does not yet exist —
