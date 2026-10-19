@@ -99,7 +99,7 @@ All through the real binaries of the asset, on the committed corpus of the exist
 | server | `*.inproc` | not measured for any prebuilt version (it needs the library linked) |
 | daemon | ingest throughput | a seeded synthetic Claude Code transcript set (about 40 MB; the generator is committed, no real transcripts). The daemon starts on an empty projects directory, is ready, the set is moved in, and `COUNT(*) FROM turns` is polled every 50 ms until it equals the set's turn count (or, for a version that drops or adds turns, until unchanged for 10 s; that run is marked incomplete). Bytes per second, turns per second, rows per table; 5 fresh runs, median and min-max |
 | startup | cold start, 30 runs each | daemon spawn to port accepting and schema present; `lumen-mcp` spawn to `initialize` replied; first hook spawn. Linux: a true cold start with the page cache dropped (`sudo -n`); macOS and Windows: labelled "warm file cache" |
-| resources | idle CPU and memory | the daemon empty and after ingest, and an idle `lumen-mcp`: 30 s to settle, then once a second for 120 s; CPU seconds per minute, RSS median and peak |
+| resources | idle CPU and memory | the daemon empty and after ingest, and an idle `lumen-mcp`: 30 s to settle, then once a second for 120 s (and on until 60 samples are in); CPU seconds per minute, RSS median and peak |
 | E2E | success, dollars, rounds | the subset below |
 
 Latency series report the median and the min-max of the runs. "Worse" and "equal" use that
