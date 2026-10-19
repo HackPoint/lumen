@@ -31,6 +31,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tray-icon",
+ "winreg",
 ]
 
 [[package]]

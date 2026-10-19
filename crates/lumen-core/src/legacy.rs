@@ -13,6 +13,7 @@ pub mod marker;
 pub mod migrate;
 pub mod redirect;
 pub mod retire;
+pub mod satellites;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};

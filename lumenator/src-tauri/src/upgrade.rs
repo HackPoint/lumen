@@ -323,5 +323,9 @@ impl retire::Ops for AppOps {
     }
 }
 
+// Written beside v1 and not wired yet: the start-up switch-over calls it.
+#[allow(dead_code)]
+pub mod autostart;
+
 #[cfg(test)]
 mod tests;

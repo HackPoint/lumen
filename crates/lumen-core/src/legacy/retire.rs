@@ -57,7 +57,7 @@ pub fn backup_name(holder: &Path, date: &str) -> PathBuf {
     unused_name(holder, &format!("legacy-backup-{date}"))
 }
 
-fn unused_name(parent: &Path, base: &str) -> PathBuf {
+pub(super) fn unused_name(parent: &Path, base: &str) -> PathBuf {
     let mut p = parent.join(base);
     let mut n = 2u32;
     while std::fs::symlink_metadata(&p).is_ok() {
