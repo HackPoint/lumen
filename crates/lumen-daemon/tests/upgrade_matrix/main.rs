@@ -244,6 +244,49 @@ async fn each_fixture_has_the_schema_of_the_release_it_stands_for() {
     }
 }
 
+/// F53: the previous install is found by what is in its ledger. The folder has a name nothing in
+/// Lumen knows, and the ledger is the one each release left, from 1.1.4 to 1.9.0, empty or with
+/// rows, so the columns discovery relies on are asserted against every released schema.
+#[tokio::test]
+async fn a_previous_install_is_found_by_its_ledger_under_any_name() {
+    use lumen_core::legacy::discover::{Hints, discover};
+
+    fn find(root: &Path, what: &str) {
+        let found = discover(&[root], "example.current.app", &Hints::default());
+        let chosen = found
+            .chosen
+            .unwrap_or_else(|| panic!("{what}: the ledger was not recognised"));
+        assert_eq!(chosen.name, "example.previous.app", "{what}");
+        assert_eq!(chosen.dir, root.join("example.previous.app"), "{what}");
+        assert!(
+            found.others.is_empty() && found.unknown.is_empty(),
+            "{what}"
+        );
+    }
+
+    for release in [
+        Release::V1_1_4,
+        Release::V1_5_0,
+        Release::V1_6_0,
+        Release::V1_7_0,
+        Release::V1_8_0,
+        Release::V1_9_0,
+    ] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("example.previous.app");
+        std::fs::create_dir_all(&dir).expect("folder");
+        release.open(&dir.join("lumen.db")).await;
+        find(root.path(), &format!("{release:?}, empty"));
+    }
+    for fixture in releases::ALL {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("example.previous.app");
+        std::fs::create_dir_all(&dir).expect("folder");
+        place(&dir, "lumen.db", &fixture.build().await);
+        find(root.path(), &format!("{fixture:?}, with rows"));
+    }
+}
+
 #[tokio::test]
 async fn a_long_lived_ledger_ends_at_the_schema_of_the_last_release_that_opened_it() {
     let long_lived = old_ledger(Fixture::LongLived).await;
