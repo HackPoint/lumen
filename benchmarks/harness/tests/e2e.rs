@@ -1109,7 +1109,25 @@ fn a_tool_arm_installs_the_pinned_version_and_checks_the_script_it_runs() {
     assert_eq!(hr.claude_prefix, ["headroom", "wrap", "claude", "--"]);
     assert!(hr.setup[0].contains(&s("headroom-ai[all]==0.41.0")));
     assert!(hr.setup[0].contains(&s("2026-10-18T00:00:00Z")));
-    assert!(hr.setup[1].contains(&s("e00cc5e60ff73b01674ef8fa6da6c5acf6d54181")));
+    // The weights revision is the one tools.toml pins for the arm, read from there so the two
+    // cannot drift apart again.
+    let tools_toml: toml::Value = toml::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../competitors/tools.toml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let kompress = tools_toml["arm"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"].as_str() == Some("headroom"))
+        .and_then(|a| a["model"]["commit"].as_str())
+        .unwrap()
+        .to_string();
+    assert_eq!(kompress.len(), 40);
+    assert!(hr.setup[1].contains(&kompress), "{:?}", hr.setup[1]);
     let cv = install("caveman");
     let script = &cv.setup[0][2];
     assert!(script.contains("c129b946a1f7f2e9eeeff5c1a747d7b43b2630c6b9e5fc7aa8297cece9cd3804"));
