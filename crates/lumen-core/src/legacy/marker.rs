@@ -131,11 +131,20 @@ pub fn parse(bytes: &[u8]) -> Seen {
     }
 }
 
-/// Read the marker in `n_dir`.
+/// Read the marker in `n_dir`. Nothing at the name, or a directory there, is no marker. A
+/// file that is there but cannot be read (permissions, a sharing violation, an I/O error) is
+/// [`Seen::Bad`]: it is present, so it pins N and nothing migrates again.
 pub fn read(n_dir: &Path) -> Seen {
-    match fs::read(n_dir.join(MARKER_NAME)) {
+    let path = n_dir.join(MARKER_NAME);
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Seen::Absent,
+        Ok(m) if m.is_dir() => return Seen::Absent,
+        _ => {}
+    }
+    match fs::read(&path) {
         Ok(bytes) => parse(&bytes),
-        Err(_) => Seen::Absent,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Seen::Absent,
+        Err(_) => Seen::Bad,
     }
 }
 
@@ -304,6 +313,25 @@ mod tests {
         fs::create_dir(d.path().join(MARKER_NAME)).unwrap();
         assert_eq!(read(d.path()), Seen::Absent);
         assert_eq!(read(&d.path().join("missing")), Seen::Absent);
+    }
+
+    /// A marker that is there but cannot be read is present, never "no marker".
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_marker_is_bad_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::new().unwrap();
+        write_settled(d.path()).unwrap();
+        let m = d.path().join(MARKER_NAME);
+        fs::set_permissions(&m, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&m).is_ok() {
+            return; // running as root: the file stays readable
+        }
+        let seen = read(d.path());
+        let again = write_settled(d.path()).unwrap_err().kind();
+        fs::set_permissions(&m, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(seen, Seen::Bad);
+        assert_eq!(again, io::ErrorKind::AlreadyExists);
     }
 
     #[test]
