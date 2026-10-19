@@ -1,5 +1,5 @@
 use crate::busy;
-use crate::schema::{BACKFILLS, DDL, MIGRATIONS};
+use crate::schema::{BACKFILLS, Backfill, MIGRATIONS, Shape, ddl_in_transaction};
 use rusqlite::{Connection, params};
 
 /// Detect which Claude Code channel spawned this process.
@@ -144,41 +144,102 @@ fn resolve_db_path_unmapped(
 /// Open (or create) the lumen SQLite DB, apply DDL + additive migrations.
 ///
 /// A ledger another program holds is waited for (see [`crate::busy`]); the migrations'
-/// other errors are "already applied", as in [`crate::schema::init_schema`], and so is a
-/// backfill that stays busy.
+/// other errors are "already applied", as in [`crate::schema::init_schema`], which this mirrors,
+/// and so is a backfill that stays busy.
 fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     restore_sidecar_write_bits(path);
     let conn = Connection::open(path)?;
-    busy::retry_busy_blocking(|| conn.execute_batch(DDL))?;
-    busy::retry_busy_blocking(|| migrate(&conn))?;
-    for backfill in BACKFILLS {
-        let pending = conn
-            .query_row(backfill.pending, [], |row| row.get::<_, i64>(0))
-            .unwrap_or(0);
-        if pending != 0 {
-            busy::retry_busy_blocking(|| conn.execute_batch(backfill.rewrite)).ok();
-        }
-    }
+    busy::retry_busy_blocking(|| upgrade(&conn))?;
+    busy::retry_busy_blocking(|| backfill(&conn)).ok();
     Ok(conn)
 }
 
-/// [`MIGRATIONS`] in one transaction; see the sqlx `migrate` in [`crate::schema`], which this
-/// mirrors. A busy ledger rolls it back for the caller to run again.
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("BEGIN")?;
+fn is_wal(conn: &Connection) -> rusqlite::Result<bool> {
+    let mode = conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))?;
+    Ok(mode.eq_ignore_ascii_case("wal"))
+}
+
+pub(crate) fn live_shape(conn: &Connection) -> rusqlite::Result<Shape> {
+    let read = |sql: &str| -> rusqlite::Result<Vec<(String, String)>> {
+        conn.prepare(sql)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    };
+    Ok(Shape::from_rows(
+        read(Shape::OBJECTS_SQL)?,
+        read(Shape::COLUMNS_SQL)?,
+    ))
+}
+
+fn backfill_pending(conn: &Connection, backfill: &Backfill) -> rusqlite::Result<i64> {
+    conn.query_row(backfill.pending, [], |row| row.get::<_, i64>(0))
+}
+
+/// One attempt at the schema upgrade, mirroring the sqlx `upgrade` in [`crate::schema`]: nothing
+/// is written to a current ledger; otherwise one transaction that takes the write lock first and
+/// reads again inside, so no other connection's commit can outdate what it has read. A busy
+/// ledger rolls it back for the caller to run again.
+fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
+    if is_wal(conn)? && !live_shape(conn)?.lacks_something() {
+        return Ok(());
+    }
+    // The switch to WAL cannot happen inside a transaction. It is a no-op once done.
+    if !is_wal(conn)? {
+        conn.execute_batch("PRAGMA journal_mode=WAL")?;
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
     let run = || -> rusqlite::Result<()> {
-        for migration in MIGRATIONS {
-            if let Err(e) = conn.execute_batch(migration)
-                && busy::is_busy_rusqlite(&e)
-            {
-                return Err(e);
+        if live_shape(conn)?.lacks_something() {
+            conn.execute_batch(ddl_in_transaction())?;
+            for migration in MIGRATIONS {
+                if let Err(e) = conn.execute_batch(migration)
+                    && busy::is_busy_rusqlite(&e)
+                {
+                    return Err(e);
+                }
+                crate::schema::probe::after_migration();
             }
         }
+        rewrite_rows(conn)?;
         conn.execute_batch("COMMIT")
     };
     run().inspect_err(|_| {
         conn.execute_batch("ROLLBACK").ok();
     })
+}
+
+/// [`BACKFILLS`] that have a row to rewrite, inside the caller's write transaction.
+fn rewrite_rows(conn: &Connection) -> rusqlite::Result<()> {
+    for backfill in BACKFILLS {
+        let pending = backfill_pending(conn, backfill).unwrap_or(0);
+        if pending != 0 {
+            crate::schema::probe::before_rewrite();
+            if let Err(e) = conn.execute_batch(backfill.rewrite)
+                && busy::is_busy_rusqlite(&e)
+            {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The row rewrites on a ledger whose schema is whole: read first, so a ledger with no row to
+/// rewrite is not asked for the write lock, then one transaction that takes it first.
+fn backfill(conn: &Connection) -> rusqlite::Result<()> {
+    let mut pending = false;
+    for backfill in BACKFILLS {
+        pending |= backfill_pending(conn, backfill)? != 0;
+    }
+    if !pending {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    rewrite_rows(conn)
+        .and_then(|()| conn.execute_batch("COMMIT"))
+        .inspect_err(|_| {
+            conn.execute_batch("ROLLBACK").ok();
+        })
 }
 
 /// Public entry point for external crates (e.g. lumen-cli) that need a DB connection.
@@ -586,6 +647,7 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::DDL;
     use tempfile::TempDir;
 
     fn read_events_columns(path: &std::path::Path) -> Vec<String> {
