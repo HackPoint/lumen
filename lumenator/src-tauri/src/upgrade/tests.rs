@@ -378,9 +378,13 @@ fn done_marker(home: &Path) {
 
 #[test]
 fn setup_is_needed_when_the_claude_config_still_points_into_the_legacy_directory() {
+    use lumen_core::legacy::marker::Seen;
     let t = TempDir::new().unwrap();
     let home = t.path();
     let root = lumen_core::legacy::data_roots(Some(home))[0].clone();
+    let n = root.join(NEW);
+    // What a pre-release migration left: a marker that names the folder it came from.
+    let seen = Seen::V1 { source: OLD.into() };
     done_marker(home);
     // A command that exists on every system, so only the legacy path is in question.
     let exe = std::env::current_exe()
@@ -394,7 +398,7 @@ fn setup_is_needed_when_the_claude_config_still_points_into_the_legacy_directory
         &exe,
         &root.join(NEW).join("lumen.db").to_string_lossy(),
     );
-    assert!(!crate::setup::setup_needed_with(home, NEW, OLD));
+    assert!(!crate::setup::setup_needed_with(home, &n, &seen));
 
     // The LUMEN_DB value was exempt from validation; now it is what shows the prompt.
     write_config(
@@ -403,10 +407,10 @@ fn setup_is_needed_when_the_claude_config_still_points_into_the_legacy_directory
         &root.join(OLD).join("lumen.db").to_string_lossy(),
     );
     assert!(
-        crate::setup::setup_needed_with(home, NEW, OLD),
+        crate::setup::setup_needed_with(home, &n, &seen),
         "red before: false"
     );
-    let v = crate::setup::validate_mcp_with(home, NEW, OLD);
+    let v = crate::setup::validate_mcp_with(home, &n, &seen);
     assert!(
         !v.healthy && v.detail.contains("legacy data directory"),
         "{v:?}"
@@ -415,41 +419,22 @@ fn setup_is_needed_when_the_claude_config_still_points_into_the_legacy_directory
     // The command inside the legacy directory (the DMG copy under bin/) shows too.
     let bin = root.join(OLD).join("bin").join("lumen-mcp");
     write_config(home, &bin.to_string_lossy(), "/elsewhere/lumen.db");
-    assert!(crate::setup::setup_needed_with(home, NEW, OLD));
+    assert!(crate::setup::setup_needed_with(home, &n, &seen));
 
     // Not Setup's business: another directory that merely has the same name, and
-    // the unflipped state where the two identifiers are one.
+    // an install where nothing moved.
     write_config(home, &exe, &format!("/elsewhere/{OLD}/lumen.db"));
-    assert!(!crate::setup::setup_needed_with(home, NEW, OLD));
+    assert!(!crate::setup::setup_needed_with(home, &n, &seen));
     write_config(
         home,
         &exe,
         &root.join(OLD).join("lumen.db").to_string_lossy(),
     );
-    assert!(!crate::setup::setup_needed_with(home, OLD, OLD));
+    assert!(!crate::setup::setup_needed_with(home, &n, &Seen::Settled));
 
     // And without the completion marker it is needed whatever the config says.
     std::fs::remove_file(home.join(".claude/lumen/.setup_done")).unwrap();
-    assert!(crate::setup::setup_needed_with(home, OLD, OLD));
-}
-
-#[test]
-fn startup_never_writes_the_claude_config() {
-    let t = TempDir::new().unwrap();
-    let home = t.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let root = home.join("data");
-    let c = ctx(&root);
-    seed_old(&root, 1);
-    write_config(
-        &home,
-        "/x",
-        &root.join(OLD).join("lumen.db").to_string_lossy(),
-    );
-    let before = std::fs::read(home.join(".claude.json")).unwrap();
-    let r = at_start(&c, &AppOps);
-    assert!(r.problems.is_empty(), "{r:?}");
-    assert_eq!(std::fs::read(home.join(".claude.json")).unwrap(), before);
+    assert!(crate::setup::setup_needed_with(home, &n, &Seen::Settled));
 }
 
 #[test]

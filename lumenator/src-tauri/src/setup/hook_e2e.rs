@@ -2853,9 +2853,10 @@ fn upgrade_from(version: &str, login_on: bool) {
     // is as the user had it.
     assert!(std::fs::read(&claude_json).unwrap() == config_before.0);
     assert!(std::fs::read(&settings).unwrap() == config_before.1);
-    let legacy_id = lumen_core::legacy::LEGACY_APP_ID;
-    assert!(setup_needed_with(&rig.home, UPGRADE_NEW_ID, legacy_id));
-    let mcp = validate_mcp_with(&rig.home, UPGRADE_NEW_ID, legacy_id);
+    let n = ctx.new_dir();
+    let seen = lumen_core::legacy::marker::read(&n);
+    assert!(setup_needed_with(&rig.home, &n, &seen));
+    let mcp = validate_mcp_with(&rig.home, &n, &seen);
     assert!(
         !mcp.healthy && mcp.detail.contains("legacy data directory"),
         "{mcp:?}"
@@ -2889,8 +2890,8 @@ fn upgrade_from(version: &str, login_on: bool) {
         saved.contains("audit-read") && saved.contains("\"model\""),
         "{saved}"
     );
-    assert!(!setup_needed_with(&rig.home, UPGRADE_NEW_ID, legacy_id));
-    assert!(validate_mcp_with(&rig.home, UPGRADE_NEW_ID, legacy_id).healthy);
+    assert!(!setup_needed_with(&rig.home, &n, &seen));
+    assert!(validate_mcp_with(&rig.home, &n, &seen).healthy);
     assert_eq!(
         item.0.get(),
         login_on,

@@ -1,7 +1,12 @@
 #![allow(clippy::unnecessary_map_or)] // map_or style kept for clarity in async context
+use lumen_core::legacy::marker::Seen;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
+
+// Called from the app's start in T7.
+#[allow(dead_code)]
+mod repoint;
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
@@ -61,63 +66,55 @@ impl SetupStep {
 /// Returns true when setup has not been completed yet.
 #[tauri::command]
 pub fn lumen_setup_needed() -> bool {
-    setup_needed_with(
-        &home(),
-        lumen_core::meter::APP_ID,
-        lumen_core::legacy::LEGACY_APP_ID,
-    )
+    let home = home();
+    let n = app_support_dir_in(&home);
+    setup_needed_with(&home, &n, &lumen_core::legacy::marker::read(&n))
 }
 
-/// Setup has not completed, or it did and `~/.claude.json` still points into the
-/// legacy data directory (the redirect keeps that working until Setup moves it).
-pub(crate) fn setup_needed_with(home: &Path, new_id: &str, legacy_id: &str) -> bool {
-    !marker_path_in(home).exists() || config_references_legacy_with(home, new_id, legacy_id)
+/// Setup is needed when it has never completed, when a migration has committed and Setup has
+/// not yet recorded the new data folder (it records the folder it baked in `.setup_done`, and
+/// a Setup run while the old folder was still in use names that one), or when one of Lumen's
+/// entries in Claude's files still has a value inside the previous folder or its backup (the
+/// redirect keeps that working until Setup moves it).
+///
+/// A fresh install that settled, and a pre-release migration, need Setup only for the first
+/// reason, or the last.
+pub(crate) fn setup_needed_with(home: &Path, n: &Path, seen: &Seen) -> bool {
+    let Ok(done) = std::fs::read_to_string(marker_path_in(home)) else {
+        return true;
+    };
+    if matches!(seen, Seen::Migrated(_)) && !setup_done_names(&done, n) {
+        return true;
+    }
+    !legacy_references_with(home, n, seen).is_empty()
 }
 
-/// Whether `~/.claude.json` still points Lumen's MCP entry into the legacy data
-/// directory. False when the two identifiers are the same.
-pub(crate) fn config_references_legacy_with(home: &Path, new_id: &str, legacy_id: &str) -> bool {
-    !legacy_references_with(home, new_id, legacy_id).is_empty()
+/// Whether `.setup_done` says the data folder it baked was `n`.
+fn setup_done_names(done: &str, n: &Path) -> bool {
+    let want = fold_path(&n.to_string_lossy());
+    done.lines()
+        .filter_map(|l| l.trim().strip_prefix("data_dir="))
+        .any(|d| fold_path(d.trim()) == want)
 }
 
-/// The `command` and `env` values of `mcpServers.lumen` that sit inside the legacy
-/// data directory, as "what value".
-fn legacy_references_with(home: &Path, new_id: &str, legacy_id: &str) -> Vec<String> {
-    if new_id == legacy_id {
-        return Vec::new();
-    }
-    let Ok(root) = read_config_object(&claude_json_path_in(home)) else {
+/// The values of Lumen's entries, in `~/.claude.json` and `~/.claude/settings.json`, that sit
+/// inside the previous folder or its backup, as "where value". Empty when nothing moved.
+fn legacy_references_with(home: &Path, n: &Path, seen: &Seen) -> Vec<String> {
+    let moved = match seen {
+        Seen::Migrated(m) => repoint::Moved::of(m, n),
+        Seen::V1 { source } => Some(repoint::Moved::of_names(
+            &lumen_core::legacy::data_roots(Some(home)),
+            source,
+            n,
+        )),
+        _ => None,
+    };
+    let Some(moved) = moved else {
         return Vec::new();
     };
-    let Some(entry) = root.get("mcpServers").and_then(|m| m.get("lumen")) else {
-        return Vec::new();
-    };
-    let prefixes: Vec<String> = lumen_core::legacy::data_roots(Some(home))
-        .iter()
-        .map(|r| fold_path(&r.join(legacy_id).to_string_lossy()))
-        .collect();
-    let inside = |v: &str| {
-        let v = fold_path(v);
-        prefixes
-            .iter()
-            .any(|p| v == *p || v.starts_with(&format!("{p}/")))
-    };
-    let mut hits = Vec::new();
-    if let Some(c) = entry.get("command").and_then(|c| c.as_str()) {
-        if inside(c) {
-            hits.push(format!("command {c}"));
-        }
-    }
-    if let Some(env) = entry.get("env").and_then(|e| e.as_object()) {
-        for (k, v) in env {
-            if let Some(p) = v.as_str() {
-                if inside(p) {
-                    hits.push(format!("{k} {p}"));
-                }
-            }
-        }
-    }
-    hits
+    let mut claude = read_config_object(&claude_json_path_in(home)).ok();
+    let mut settings = read_config_object(&global_settings_path_in(home)).ok();
+    repoint::stale_values(claude.as_mut(), settings.as_mut(), &moved)
 }
 
 /// A path as one comparable string: forward slashes, no trailing one, and
@@ -384,6 +381,13 @@ fn lumen_dir_in(home: &Path) -> PathBuf {
 
 fn marker_path_in(home: &Path) -> PathBuf {
     lumen_dir_in(home).join(".setup_done")
+}
+
+/// What `.setup_done` holds: the data folder this Setup baked into the shims and the config,
+/// the parent of the ledger it was given. Old installs have it empty.
+fn setup_done_text(db: &str) -> String {
+    let dir = Path::new(db).parent().unwrap_or_else(|| Path::new(""));
+    format!("data_dir={}\n", dir.display())
 }
 
 fn claude_json_path_in(home: &Path) -> PathBuf {
@@ -826,14 +830,11 @@ fn validate_cli() -> ArtifactStatus {
 }
 
 fn validate_mcp_in(home: &Path) -> ArtifactStatus {
-    validate_mcp_with(
-        home,
-        lumen_core::meter::APP_ID,
-        lumen_core::legacy::LEGACY_APP_ID,
-    )
+    let n = app_support_dir_in(home);
+    validate_mcp_with(home, &n, &lumen_core::legacy::marker::read(&n))
 }
 
-pub(crate) fn validate_mcp_with(home: &Path, new_id: &str, legacy_id: &str) -> ArtifactStatus {
+pub(crate) fn validate_mcp_with(home: &Path, n: &Path, seen: &Seen) -> ArtifactStatus {
     // An unreadable file is reported as one. "No lumen entry — run Setup" would send
     // the user to a Setup that refuses the same file.
     let mcp = match read_config_object(&claude_json_path_in(home)) {
@@ -872,7 +873,7 @@ pub(crate) fn validate_mcp_with(home: &Path, new_id: &str, legacy_id: &str) -> A
                 }
             }
             // Still working through the redirect, but Setup is what moves it.
-            let stale = legacy_references_with(home, new_id, legacy_id);
+            let stale = legacy_references_with(home, n, seen);
             if dead.is_empty() && !stale.is_empty() {
                 ArtifactStatus {
                     id: "mcp".into(),
@@ -1979,7 +1980,7 @@ fn run_setup_with(
         .all(|s| s.status == StepStatus::Ok || s.status == StepStatus::Warn);
     if all_good {
         let _ = std::fs::create_dir_all(lumen_dir_in(home));
-        let _ = std::fs::write(marker_path_in(home), "");
+        let _ = std::fs::write(marker_path_in(home), setup_done_text(db_str));
     }
 
     steps
@@ -5307,6 +5308,50 @@ mod tests {
             home.join("data/lumen.db").to_string_lossy().to_string(),
             mcp.to_string_lossy().to_string(),
         )
+    }
+
+    /// The Setup that satisfies the prompt after a migration is the one that re-registers: it
+    /// records the data folder it baked, and a login item the user turned off stays off.
+    #[test]
+    fn setup_still_leaves_an_opted_out_login_item_off() {
+        let h = TempDir::new().unwrap();
+        let (db, mcp) = setup_home(h.path());
+        let a = FakeAutoStart::default();
+        assert!(ensure_autostart_once(
+            &a,
+            &autostart_marker_in(h.path()),
+            EXE
+        ));
+        a.disable().unwrap();
+
+        let steps = run_setup_with(h.path(), &a, &db, &mcp);
+
+        assert!(find(&steps, AUTOSTART_ID).detail.contains("Left off"));
+        assert!(!a.enabled.get(), "Setup switched the login item back on");
+        let n = h.path().join("data");
+        assert_eq!(
+            std::fs::read_to_string(marker_path_in(h.path())).unwrap(),
+            format!("data_dir={}\n", n.display()),
+            "Setup records the folder it baked"
+        );
+        let m = lumen_core::legacy::marker::MarkerV2 {
+            format: 2,
+            state: "migrated".into(),
+            source: "example.previous.app".into(),
+            source_dir: h
+                .path()
+                .join("old/example.previous.app")
+                .to_string_lossy()
+                .into(),
+            backup: "legacy-backup-2026-10-19".into(),
+            ..Default::default()
+        };
+        let seen = Seen::Migrated(std::sync::Arc::new(m));
+        assert!(!setup_needed_with(h.path(), &n, &seen));
+        assert!(
+            setup_needed_with(h.path(), &h.path().join("elsewhere"), &seen),
+            "a Setup that baked another folder does not satisfy it"
+        );
     }
 
     /// 1.6.0 tells Windows users to re-run Setup to repair their hook commands. A
