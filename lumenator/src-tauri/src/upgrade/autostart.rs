@@ -18,7 +18,8 @@
 //!    does not take the missing plugin entry for "never registered" and switch Lumen on (the user
 //!    turned it off).
 //! 3. Move the entry into the backup's `autostart/` folder (Windows: its value and its
-//!    `StartupApproved` bytes into a `run.json` there, then remove both).
+//!    `StartupApproved` bytes into a `run.json` there, then remove both). A file keeps no name of
+//!    its own there (`login.plist`, `login.desktop`, `-2`, ...), as the old name may be the previous app's.
 //!
 //! The plugin's own entry is the user's choice and is never touched. A crash between steps 1 and 3
 //! leaves the entry for the next start, which only moves it. The result is one entry when Lumen was
@@ -647,7 +648,15 @@ pub fn adopt_other_entries(env: &Env) -> Outcome {
 /// Move one entry into the backup.
 fn settle(env: &Env, e: &Entry) -> Result<(), String> {
     if let Some(path) = &e.path {
-        let rel = Path::new("autostart").join(&e.name);
+        // A neutral name: the entry's own may be the previous app's (`<id>.plist`), and that
+        // name must not reappear inside the backup. The `-2`, `-3` rule keeps several apart.
+        let ext = Path::new(&e.name)
+            .extension()
+            .map(|x| x.to_string_lossy().into_owned());
+        let rel = Path::new("autostart").join(match ext {
+            Some(x) if x.chars().all(|c| c.is_ascii_alphanumeric()) => format!("login.{x}"),
+            _ => "login".to_string(),
+        });
         move_into_backup(path, &rel, env.backup, env.new_id, false, env.ops).map(|_| ())
     } else {
         let key = env.run_key.ok_or("no Run key")?;
@@ -1203,6 +1212,83 @@ mod tests {
         assert_eq!(j["approved"], hex(&DISABLED));
     }
 
+    /// Every name under `root`, as lower-case text.
+    fn names_under(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                out.push(e.file_name().to_string_lossy().to_lowercase());
+                todo.push(e.path());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_entry_named_after_the_previous_app_gets_a_neutral_name_in_the_backup() {
+        // Moves the first time as the OS refuses (different volumes), so the fallback is covered.
+        struct Exdev(Cell<bool>);
+        impl Ops for Exdev {
+            fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+                if !self.0.replace(true) {
+                    return Err(std::io::ErrorKind::CrossesDevices.into());
+                }
+                std::fs::rename(from, to)
+            }
+            fn link_dir(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+        }
+        let x = "example.previous.app";
+        for (p, file, body, ext) in [
+            (
+                Platform::MacOs,
+                format!("{x}.plist"),
+                plist(&[MAC_EXE], ""),
+                "plist",
+            ),
+            (
+                Platform::Linux,
+                format!("{x}.desktop"),
+                desktop(LINUX_EXE, ""),
+                "desktop",
+            ),
+        ] {
+            for exdev in [false, true] {
+                let m = Machine::new(p);
+                let t = TempDir::new().unwrap();
+                m.seed_own(true);
+                m.put(&file, &body);
+                let backup = t.path().join("N/legacy-backup-2026-10-19");
+                let marker = t.path().join("m");
+                let ops = Exdev(Cell::new(!exdev));
+                let mut env = m.env(&marker, &backup);
+                env.ops = &ops;
+                let out = adopt_other_entries(&env);
+                assert_eq!(out.moved.len(), 1, "{p:?} {exdev}: {out:?}");
+                assert!(out.problems.is_empty(), "{p:?} {exdev}: {out:?}");
+                let at = if exdev {
+                    m.dir.path().join("io.hackpoint.lumen")
+                } else {
+                    t.path().to_path_buf()
+                };
+                let seen = names_under(&at);
+                assert!(
+                    seen.iter().all(|n| !n.contains(x)),
+                    "{p:?} {exdev}: the previous name survives inside B as {seen:?}"
+                );
+                assert!(
+                    seen.contains(&format!("login.{ext}")),
+                    "{p:?} {exdev}: {seen:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_entry_that_cannot_move_stays_and_is_tried_again() {
         struct Refuse;
@@ -1230,7 +1316,7 @@ mod tests {
         let out = adopt_other_entries(&env);
         assert_eq!(out.moved.len(), 1, "{out:?}");
         assert!(!m.dir.path().join("com.old.login.plist").exists());
-        assert!(backup.join("autostart/com.old.login.plist").exists());
+        assert!(backup.join("autostart/login.plist").exists());
     }
 
     #[test]
