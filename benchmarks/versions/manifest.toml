@@ -1,0 +1,268 @@
+# Per-version pins and capability map for the version-over-version benchmark (V1).
+#
+# Committed before any run (METHOD.md, "Honesty rule"). The assets are the published release
+# files of HackPoint/lumen, never a rebuild; each sha256 is GitHub's digest of the asset from
+# `gh release view v<version> -R HackPoint/lumen --json assets`, resolved on 2026-10-18.
+# Every pin is a full 40-character commit or a 64-hex sha256 (benchmarks/harness/tests/pins.rs).
+#
+# The capability map is a CLAIM, not a fact the harness trusts: probes check it at run time, a
+# probe that disagrees with the map stops the run, and the map is then corrected in a commit of
+# its own. The values come from the approved plan's table (docs of each release, the changelog).
+#
+# Fields
+#   saved_tokens     "clamped" (1.0.0: the self-reported saving is floored at zero; recorded,
+#                    never used) or "signed"
+#   hook_kind        "scripts"            bash and python3 scripts, counting via lumen-tok
+#                    "scripts+cli"        scripts that exec `lumen-mcp hook intercept|meter`
+#                    "scripts+cli+identity" the same plus the identity hook on mcp__lumen__*
+#   hook_cli         true when the binary has a `hook` subcommand (1.6.0+). Where false,
+#                    `lumen-mcp hook ...` silently starts an MCP server and is never spawned.
+#   bash_meter       the Bash meter and `would_inflate` exist
+#   repeat_reads     "none", "opt-in" (LUMEN_REPEAT_READS) or "default"
+#   identity         "none", "env" or "hook"
+#   daemon_env       the LUMEN_* variables the daemon reads (from each tag's sources), to be
+#                    pointed at scratch or cleared; LUMEN_SUPERVISED is read from 1.2.4
+#   daemon_fixed_port the daemon binds a fixed port (1.0.0: 127.0.0.1:9999) and so collides
+#                    with a running Lumen app
+#   daemon_reads_home the daemon reads $HOME/.claude/projects (1.0.0)
+#   e2e              the version is an E2E arm; 1.1.5 stands in for 1.0.0
+#
+# Assets: one table per OS. The app asset is the one that carries lumen-mcp, lumen-daemon and
+# lumen-tok (the CLI archives hold only the `lumen` CLI and are not used). Windows installers
+# are unpacked with 7z and never run. An OS without an asset is `na = "<reason>"`.
+
+[meta]
+repo = "https://github.com/HackPoint/lumen"
+resolved_on = "2026-10-18"
+versions = ["1.0.0", "1.1.5", "1.2.4", "1.3.1", "1.4.0", "1.5.1", "1.6.0", "1.7.0", "1.8.0", "1.9.0"]
+e2e = ["1.1.5", "1.6.0", "1.8.0", "1.9.0"]
+e2e_stand_in = { "1.0.0" = "1.1.5" }
+
+[version."1.0.0"]
+tag = "v1.0.0"
+commit = "f80a0eb47fdb9b486f174f444ad61f45cce42d54"
+saved_tokens = "clamped"
+hook_kind = "scripts"
+hook_cli = false
+bash_meter = false
+repeat_reads = "none"
+identity = "none"
+daemon_env = ["LUMEN_DB"]
+daemon_fixed_port = true
+daemon_reads_home = true
+e2e = false
+[version."1.0.0".asset.macos-arm64]
+name = "Lumen_1.0.0_aarch64.dmg"
+sha256 = "2f8254f74064e97a9cfdab7ee107d683befa92d4d56667524a94715f9393fbac"
+[version."1.0.0".asset.linux-x86_64]
+na = "1.0.0 shipped no Linux app asset: the lumen-mcp, lumen-daemon and lumen-tok sidecars exist only inside the .dmg, .deb, .AppImage and setup.exe, and 1.0.0 has no .deb or .AppImage"
+[version."1.0.0".asset.windows-x64]
+name = "Lumen_1.0.0_x64-setup.exe"
+sha256 = "a8be9c0f0aae3925435a4ea5942505185d823ed4c00d78c37a782e3f6d89e8be"
+
+[version."1.1.5"]
+tag = "v1.1.5"
+commit = "737eb71fcb0dc44b328576631aabf3652faa7541"
+saved_tokens = "signed"
+hook_kind = "scripts"
+hook_cli = false
+bash_meter = false
+repeat_reads = "none"
+identity = "none"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = true
+[version."1.1.5".asset.macos-arm64]
+name = "Lumen_1.1.5_aarch64.dmg"
+sha256 = "feb221b978c9365b9603738ee18290e4e60935078336cbd843acc82ab027984b"
+[version."1.1.5".asset.linux-x86_64]
+name = "lumen_1.1.5_amd64.deb"
+sha256 = "d400a0c7832207d36a8f3984004ddce967be6cc03fe5dca27210d9dd55dc3bfe"
+[version."1.1.5".asset.windows-x64]
+name = "Lumen_1.1.5_x64-setup.exe"
+sha256 = "756bc047b6c9272982082fe7493aafe39c57f434cf29aab0e0b426d421746488"
+
+[version."1.2.4"]
+tag = "v1.2.4"
+commit = "c0c66b3bb6b721bef2318c290ecd22129b21943a"
+saved_tokens = "signed"
+hook_kind = "scripts"
+hook_cli = false
+bash_meter = false
+repeat_reads = "none"
+identity = "none"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = false
+[version."1.2.4".asset.macos-arm64]
+name = "Lumen_1.2.4_aarch64.dmg"
+sha256 = "636c324a7ec4c30be7e41b59fe3960daaed522884ee2ec70d3a470217121302a"
+[version."1.2.4".asset.linux-x86_64]
+name = "lumen_1.2.4_amd64.deb"
+sha256 = "3267f98da09eab6c026d2396f7739fcd181162eb51bb11ebf351de4ef45f0ffd"
+[version."1.2.4".asset.windows-x64]
+name = "Lumen_1.2.4_x64-setup.exe"
+sha256 = "febf1950f587941bba85b2aeaa0055a9cf97bff5f09cf857949044b370e2e3de"
+
+[version."1.3.1"]
+tag = "v1.3.1"
+commit = "8bb21f8b996d109adf8df1e7f5dd96dfaf66fe9a"
+saved_tokens = "signed"
+hook_kind = "scripts"
+hook_cli = false
+bash_meter = false
+repeat_reads = "none"
+identity = "none"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = false
+[version."1.3.1".asset.macos-arm64]
+name = "Lumen_1.3.1_aarch64.dmg"
+sha256 = "efd686e88206ef2583ba6bf7d787340236b220438066965d2b12fcc9d222b3b7"
+[version."1.3.1".asset.linux-x86_64]
+name = "lumen_1.3.1_amd64.deb"
+sha256 = "4837c5b79e0cfd3489d187b3b145e631e895876565305432891e365b1efad1bb"
+[version."1.3.1".asset.windows-x64]
+name = "Lumen_1.3.1_x64-setup.exe"
+sha256 = "54bfb51f96cb9cceb1c2350a04d46169dcf8eea9884eec99cb59f696ec85426f"
+
+[version."1.4.0"]
+tag = "v1.4.0"
+commit = "50b991c8375c6a18dd19c6e49f3fd6c9c45794b4"
+saved_tokens = "signed"
+hook_kind = "scripts"
+hook_cli = false
+bash_meter = false
+repeat_reads = "none"
+identity = "none"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = false
+[version."1.4.0".asset.macos-arm64]
+name = "Lumen_1.4.0_aarch64.dmg"
+sha256 = "51e0ab02ce30ac5d5511f60ee392a6b5bbf0d7ec6af005c9ad4ac142a25c465c"
+[version."1.4.0".asset.linux-x86_64]
+name = "lumen_1.4.0_amd64.deb"
+sha256 = "7f8da8f529598a6e00aecc337316978ff8e1182d0ddcb05f54ce24583bed3a6a"
+[version."1.4.0".asset.windows-x64]
+name = "Lumen_1.4.0_x64-setup.exe"
+sha256 = "504e9436c4ff956d0e97bf26fb81ec499a1991ad84d6b2283dbbb2117569497b"
+
+[version."1.5.1"]
+tag = "v1.5.1"
+commit = "fa671653539c4e774c877d036f5ddd5b3925809c"
+saved_tokens = "signed"
+hook_kind = "scripts"
+hook_cli = false
+bash_meter = false
+repeat_reads = "none"
+identity = "none"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = false
+[version."1.5.1".asset.macos-arm64]
+name = "Lumen_1.5.1_aarch64.dmg"
+sha256 = "a70c1b28a627c0c460e0432ead47c1336f1b465ceb182a5dda1bed04ea7c190c"
+[version."1.5.1".asset.linux-x86_64]
+name = "lumen_1.5.1_amd64.deb"
+sha256 = "c73334626bdf7ed8d5fd7468b46991a345972e60df82ebfa189f7caf0da2f526"
+[version."1.5.1".asset.windows-x64]
+name = "Lumen_1.5.1_x64-setup.exe"
+sha256 = "a921294ce552ac41c858db9e25273cc8162067efbefedba4b60d7f365bbf124d"
+
+[version."1.6.0"]
+tag = "v1.6.0"
+commit = "9d84f7c2124e0ef0ad1d5f8d94e1113e161143cf"
+saved_tokens = "signed"
+hook_kind = "scripts+cli"
+hook_cli = true
+bash_meter = true
+repeat_reads = "none"
+identity = "env"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED", "LUMEN_LOG"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = true
+[version."1.6.0".asset.macos-arm64]
+name = "Lumen_1.6.0_aarch64.dmg"
+sha256 = "9b83472b405ac00db7ec35c1c26f12e6ccca417b2015077f8225757477c0f6f0"
+[version."1.6.0".asset.linux-x86_64]
+name = "lumen_1.6.0_amd64.deb"
+sha256 = "5f3fe3b27bb1fda4bf7f2e65fb2e7dfd49f050813e1a7f6d2e45221e552b8e49"
+[version."1.6.0".asset.windows-x64]
+name = "Lumen_1.6.0_x64-setup.exe"
+sha256 = "c2e7aab40c976906f33f83cb6e01a99bda49bc24c72c19ff4828a8d35215a0a7"
+
+[version."1.7.0"]
+tag = "v1.7.0"
+commit = "5d1ec0408ad25edcbae43cf1a6ecbc0ddba47c94"
+saved_tokens = "signed"
+hook_kind = "scripts+cli"
+hook_cli = true
+bash_meter = true
+repeat_reads = "opt-in"
+identity = "env"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED", "LUMEN_LOG"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = false
+[version."1.7.0".asset.macos-arm64]
+name = "Lumen_1.7.0_aarch64.dmg"
+sha256 = "f7deb0f490eb7ff36dd84c2fee199beb3cdf5fcaefc32888eba676a70f259b81"
+[version."1.7.0".asset.linux-x86_64]
+name = "lumen_1.7.0_amd64.deb"
+sha256 = "4c516fb4eb7a4ada46d12a2ef86d918cea1454fd7ca2790e35befa7ecd2dd66f"
+[version."1.7.0".asset.windows-x64]
+name = "Lumen_1.7.0_x64-setup.exe"
+sha256 = "865dbba31cbd1d04550e7c2db0d3955bc88d55190cd62fa860e3482a1516fa0c"
+
+[version."1.8.0"]
+tag = "v1.8.0"
+commit = "12ad305679cf92b23167b032f56412a2a38e72a1"
+saved_tokens = "signed"
+hook_kind = "scripts+cli+identity"
+hook_cli = true
+bash_meter = true
+repeat_reads = "default"
+identity = "hook"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED", "LUMEN_LOG"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = true
+[version."1.8.0".asset.macos-arm64]
+name = "Lumen_1.8.0_aarch64.dmg"
+sha256 = "55b7c0c42f3a1123bd2c0c7b64606f9f40bf8b2bf5ebe500155b53092eb5ee48"
+[version."1.8.0".asset.linux-x86_64]
+name = "lumen_1.8.0_amd64.deb"
+sha256 = "b071b64b92dba96f1c59894e8ef05d2646f4011f2dac0e051afdc8fa51cc036a"
+[version."1.8.0".asset.windows-x64]
+name = "Lumen_1.8.0_x64-setup.exe"
+sha256 = "f8a094e5ca7166c353edba93f9cc5e81b4448217eede8b81fc02a97d743b61b1"
+
+[version."1.9.0"]
+tag = "v1.9.0"
+commit = "a74421383ea1b4cad801c72ca0fb370014cf4974"
+saved_tokens = "signed"
+hook_kind = "scripts+cli+identity"
+hook_cli = true
+bash_meter = true
+repeat_reads = "default"
+identity = "hook"
+daemon_env = ["LUMEN_DB", "LUMEN_WS_ADDR", "LUMEN_PROJECTS_DIR", "LUMEN_SUPERVISED", "LUMEN_LOG"]
+daemon_fixed_port = false
+daemon_reads_home = false
+e2e = true
+[version."1.9.0".asset.macos-arm64]
+name = "Lumen_1.9.0_aarch64.dmg"
+sha256 = "ff9eeb5860e98d6daeb9a2d75c789fea9d93106bd44afc1f01568c117264fc08"
+[version."1.9.0".asset.linux-x86_64]
+name = "lumen_1.9.0_amd64.deb"
+sha256 = "8b1b334c39002b91bbdeb2e2d6f38087d4234e9273a7d587db64094edb69e9d8"
+[version."1.9.0".asset.windows-x64]
+name = "Lumen_1.9.0_x64-setup.exe"
+sha256 = "4f3b4258307c254fd7101c363018c8371f2b75c513cd6fbbb51799eb3201cdfd"

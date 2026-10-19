@@ -79,6 +79,14 @@ pub struct BuildInfo {
     pub identity: String,
     pub identity_note: String,
     pub reported_version: String,
+    /// A release asset's name and sha256: what identifies a build made from one (never a path,
+    /// and not `reported_version`, which 1.0.0 gets wrong). Absent for a build from source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<String>,
+    /// What the capability map says about the build that a reader needs beside its figures:
+    /// clamped savings, repeat reads as opt-in, no Lumen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     pub tokens: Option<TokensSection>,
 }
 
@@ -190,6 +198,8 @@ pub fn build_info(b: &Build, version: &str, tokens: Option<TokensSection>) -> Bu
         identity: b.identity.label().to_string(),
         identity_note: b.identity.describe().to_string(),
         reported_version: version.to_string(),
+        asset: b.caps.as_ref().and_then(|c| c.asset.clone()),
+        labels: b.caps.as_ref().map(|c| c.labels()).unwrap_or_default(),
         tokens,
     }
 }
@@ -907,6 +917,8 @@ mod tests {
             identity: "env".to_string(),
             identity_note: String::new(),
             reported_version: String::new(),
+            asset: None,
+            labels: Vec::new(),
             tokens: None,
         };
         let lb = |label: &str, block: i64| BuildLatency {

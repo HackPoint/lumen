@@ -1,0 +1,430 @@
+doc/en/how-to/cache.rst:202:implements a :ref:`fixture <fixture>` which reuses previously created state
+doc/en/how-to/cache.rst:215:    @pytest.fixture
+doc/en/how-to/cache.rst:278:See the :fixture:`config.cache fixture <cache>` for more details.
+doc/en/how-to/capture-stdout-stderr.rst:8:command-line argument or by using fixtures. The ``--capture=`` flag configures
+doc/en/how-to/capture-stdout-stderr.rst:9:reporting, whereas the fixtures offer more granular control and allow
+doc/en/how-to/capture-stdout-stderr.rst:117:The :fixture:`capsys`, :fixture:`capteesys`, :fixture:`capsysbinary`, :fixture:`capfd`, and :fixture:`capfdbinary`
+doc/en/how-to/capture-stdout-stderr.rst:118:fixtures allow access to ``stdout``/``stderr`` output created during test execution.
+doc/en/how-to/capture-stdout-stderr.rst:137:be restored.  Using :fixture:`capsys` this way frees your
+doc/en/how-to/capture-stdout-stderr.rst:145:the :fixture:`capsysbinary` fixture which instead returns ``bytes`` from
+doc/en/how-to/capture-stdout-stderr.rst:149:the :fixture:`capfd` fixture which offers the exact
+doc/en/how-to/capture-stdout-stderr.rst:152:system level output streams (FD1 and FD2). Similarly to :fixture:`capsysbinary`, :fixture:`capfdbinary` can be
+doc/en/how-to/capture-stdout-stderr.rst:156:To temporarily disable capture within a test, the capture fixtures
+doc/en/how-to/capture-stdout-stderr.rst:170:   When a capture fixture such as :fixture:`capsys` or :fixture:`capfd` is used,
+doc/en/how-to/capture-stdout-stderr.rst:174:   This means that output produced within a test using a capture fixture will
+doc/en/how-to/capture-warnings.rst:286::func:`pytest.warns`, :func:`pytest.deprecated_call` or using the :fixture:`recwarn` fixture,
+doc/en/how-to/capture-warnings.rst:429::fixture:`recwarn` fixture (see :ref:`below <recwarn>`).
+doc/en/how-to/capture-warnings.rst:432:The :fixture:`recwarn` fixture automatically ensures to reset the warnings
+doc/en/how-to/capture-warnings.rst:443:the :fixture:`recwarn` fixture.
+doc/en/how-to/capture-warnings.rst:458:The :fixture:`recwarn` fixture will record warnings for the whole function:
+doc/en/how-to/capture-warnings.rst:474:Both the :fixture:`recwarn` fixture and the :func:`pytest.warns` context manager return the same interface for recorded
+doc/en/how-to/doctest.rst:208:Using fixtures
+doc/en/how-to/doctest.rst:211:It is possible to use fixtures using the ``getfixture`` helper:
+doc/en/how-to/doctest.rst:216:    >>> tmp = getfixture('tmp_path')
+doc/en/how-to/doctest.rst:220:Note that the fixture needs to be defined in a place visible by pytest, for example, a `conftest.py`
+doc/en/how-to/doctest.rst:221:file or plugin; normal python files containing docstrings are not normally scanned for fixtures
+doc/en/how-to/doctest.rst:224:Also, the :ref:`usefixtures <usefixtures>` mark and fixtures marked as :ref:`autouse <autouse>` are supported
+doc/en/how-to/doctest.rst:228:Fixture scope is not shared between the two.
+doc/en/how-to/doctest.rst:230:Doctests do not support fixtures that depend on parametrization, because doctest
+doc/en/how-to/doctest.rst:232:This includes parametrized autouse fixtures. If you need to run doctests against
+doc/en/how-to/doctest.rst:239:'doctest_namespace' fixture
+doc/en/how-to/doctest.rst:242:The ``doctest_namespace`` fixture can be used to inject items into the
+doc/en/how-to/doctest.rst:244:your own fixtures to provide the tests that use them with context.
+doc/en/how-to/doctest.rst:256:    @pytest.fixture(autouse=True)
+doc/en/how-to/doctest.rst:272:Note that like the normal ``conftest.py``, the fixtures are discovered in the directory tree conftest is in.
+doc/en/how-to/doctest.rst:274:Fixtures will not be discovered in a sibling directory tree!
+doc/en/how-to/fixtures.rst:1:.. _how-to-fixtures:
+doc/en/how-to/fixtures.rst:3:How to use fixtures
+doc/en/how-to/fixtures.rst:6:.. seealso:: :ref:`about-fixtures`
+doc/en/how-to/fixtures.rst:7:.. seealso:: :ref:`Fixtures reference <reference-fixtures>`
+doc/en/how-to/fixtures.rst:10:"Requesting" fixtures
+doc/en/how-to/fixtures.rst:13:At a basic level, test functions request fixtures they require by declaring
+doc/en/how-to/fixtures.rst:17:function's signature, and then searches for fixtures that have the same names as
+doc/en/how-to/fixtures.rst:18:those parameters. Once pytest finds them, it runs those fixtures, captures what
+doc/en/how-to/fixtures.rst:51:    @pytest.fixture
+doc/en/how-to/fixtures.rst:65:execute the ``fruit_bowl`` fixture function and pass the object it returns into
+doc/en/how-to/fixtures.rst:90:Fixtures can **request** other fixtures
+doc/en/how-to/fixtures.rst:93:One of pytest's greatest strengths is its extremely flexible fixture system. It
+doc/en/how-to/fixtures.rst:97:here's a quick example to demonstrate how fixtures can use other fixtures:
+doc/en/how-to/fixtures.rst:106:    @pytest.fixture
+doc/en/how-to/fixtures.rst:112:    @pytest.fixture
+doc/en/how-to/fixtures.rst:126:fixtures in pytest **request** fixtures just like tests. All the same
+doc/en/how-to/fixtures.rst:127:**requesting** rules apply to fixtures that do for tests. Here's how this
+doc/en/how-to/fixtures.rst:152:Fixtures are reusable
+doc/en/how-to/fixtures.rst:155:One of the things that makes pytest's fixture system so powerful, is that it
+doc/en/how-to/fixtures.rst:158:the same fixture and have pytest give each test their own result from that
+doc/en/how-to/fixtures.rst:159:fixture.
+doc/en/how-to/fixtures.rst:174:    @pytest.fixture
+doc/en/how-to/fixtures.rst:180:    @pytest.fixture
+doc/en/how-to/fixtures.rst:202:which means the ``order`` fixture is getting executed twice (the same
+doc/en/how-to/fixtures.rst:203:is true for the ``first_entry`` fixture). If we were to do this by hand as
+doc/en/how-to/fixtures.rst:240:A test/fixture can **request** more than one fixture at a time
+doc/en/how-to/fixtures.rst:243:Tests and fixtures aren't limited to **requesting** a single fixture at a time.
+doc/en/how-to/fixtures.rst:254:    @pytest.fixture
+doc/en/how-to/fixtures.rst:260:    @pytest.fixture
+doc/en/how-to/fixtures.rst:266:    @pytest.fixture
+doc/en/how-to/fixtures.rst:272:    @pytest.fixture
+doc/en/how-to/fixtures.rst:284:Fixtures can be **requested** more than once per test (return values are cached)
+doc/en/how-to/fixtures.rst:287:Fixtures can also be **requested** more than once during the same test, and
+doc/en/how-to/fixtures.rst:289:fixtures in multiple fixtures that are dependent on them (and even again in the
+doc/en/how-to/fixtures.rst:290:test itself) without those fixtures being executed more than once.
+doc/en/how-to/fixtures.rst:299:    @pytest.fixture
+doc/en/how-to/fixtures.rst:305:    @pytest.fixture
+doc/en/how-to/fixtures.rst:311:    @pytest.fixture
+doc/en/how-to/fixtures.rst:320:If a **requested** fixture was executed once for every time it was **requested**
+doc/en/how-to/fixtures.rst:329:.. _`autouse fixtures`:
+doc/en/how-to/fixtures.rst:331:Autouse fixtures (fixtures you don't have to request)
+doc/en/how-to/fixtures.rst:334:Sometimes you may want to have a fixture (or even several) that you know all
+doc/en/how-to/fixtures.rst:335:your tests will depend on. "Autouse" fixtures are a convenient way to make all
+doc/en/how-to/fixtures.rst:337:lot of redundant **requests**, and can even provide more advanced fixture usage
+doc/en/how-to/fixtures.rst:340:We can make a fixture an autouse fixture by passing in ``autouse=True`` to the
+doc/en/how-to/fixtures.rst:341:fixture's decorator. Here's a simple example for how they can be used:
+doc/en/how-to/fixtures.rst:349:    @pytest.fixture
+doc/en/how-to/fixtures.rst:354:    @pytest.fixture
+doc/en/how-to/fixtures.rst:359:    @pytest.fixture(autouse=True)
+doc/en/how-to/fixtures.rst:372:In this example, the ``append_first`` fixture is an autouse fixture. Because it
+doc/en/how-to/fixtures.rst:379:Scope: sharing fixtures across classes, modules, packages or session
+doc/en/how-to/fixtures.rst:384:Fixtures requiring network access depend on connectivity and are
+doc/en/how-to/fixtures.rst:387::py:func:`@pytest.fixture <pytest.fixture>` invocation
+doc/en/how-to/fixtures.rst:388:to cause a ``smtp_connection`` fixture function, responsible to create a connection to a preexisting SMTP server, to only be invoked
+doc/en/how-to/fixtures.rst:391:each receive the same ``smtp_connection`` fixture instance, thus saving time.
+doc/en/how-to/fixtures.rst:394:The next example puts the fixture function into a separate ``conftest.py`` file
+doc/en/how-to/fixtures.rst:396:access the fixture function:
+doc/en/how-to/fixtures.rst:406:    @pytest.fixture(scope="module")
+doc/en/how-to/fixtures.rst:428:Here, the ``test_ehlo`` needs the ``smtp_connection`` fixture value.  pytest
+doc/en/how-to/fixtures.rst:429:will discover and call the :py:func:`@pytest.fixture <pytest.fixture>`
+doc/en/how-to/fixtures.rst:430:marked ``smtp_connection`` fixture function.  Running the test looks like this:
+doc/en/how-to/fixtures.rst:484:    @pytest.fixture(scope="session")
+doc/en/how-to/fixtures.rst:486:        # the returned fixture value will be shared for
+doc/en/how-to/fixtures.rst:491:Fixture scopes
+doc/en/how-to/fixtures.rst:494:Fixtures are created when first requested by a test, and are destroyed based on their ``scope``:
+doc/en/how-to/fixtures.rst:496:* ``function``: the default scope, the fixture is destroyed at the end of the test.
+doc/en/how-to/fixtures.rst:497:* ``class``: the fixture is destroyed during teardown of the last test in the class.
+doc/en/how-to/fixtures.rst:498:* ``module``: the fixture is destroyed during teardown of the last test in the module.
+doc/en/how-to/fixtures.rst:499:* ``package``: the fixture is destroyed during teardown of the last test in the package where the fixture is defined, including sub-packages and sub-directories within it.
+doc/en/how-to/fixtures.rst:500:* ``session``: the fixture is destroyed at the end of the test session.
+doc/en/how-to/fixtures.rst:504:    Pytest only caches one instance of a fixture at a time, which
+doc/en/how-to/fixtures.rst:505:    means that when using a parametrized fixture, pytest may invoke a fixture more than once in
+doc/en/how-to/fixtures.rst:515:In some cases, you might want to change the scope of the fixture without changing the code.
+doc/en/how-to/fixtures.rst:517:and will be executed only once - during the fixture definition. It will be called with two
+doc/en/how-to/fixtures.rst:518:keyword arguments - ``fixture_name`` as a string and ``config`` with a configuration object.
+doc/en/how-to/fixtures.rst:520:This can be especially useful when dealing with fixtures that need time for setup, like spawning
+doc/en/how-to/fixtures.rst:526:    def determine_scope(fixture_name, config):
+doc/en/how-to/fixtures.rst:532:    @pytest.fixture(scope=determine_scope)
+doc/en/how-to/fixtures.rst:540:Teardown/Cleanup (AKA Fixture finalization)
+doc/en/how-to/fixtures.rst:545:mountain of test data to bloat the system). Fixtures in pytest offer a very
+doc/en/how-to/fixtures.rst:547:for each fixture to clean up after itself.
+doc/en/how-to/fixtures.rst:551:.. _`yield fixtures`:
+doc/en/how-to/fixtures.rst:553:1. ``yield`` fixtures (recommended)
+doc/en/how-to/fixtures.rst:558:"Yield" fixtures ``yield`` instead of ``return``. With these
+doc/en/how-to/fixtures.rst:559:fixtures, we can run some code and pass an object back to the requesting
+doc/en/how-to/fixtures.rst:560:fixture/test, just like with the other fixtures. The only differences are:
+doc/en/how-to/fixtures.rst:563:2. Any teardown code for that fixture is placed *after* the ``yield``.
+doc/en/how-to/fixtures.rst:565:Once pytest figures out a linear order for the fixtures, it will run each one up
+doc/en/how-to/fixtures.rst:566:until it returns or yields, and then move on to the next fixture in the list to
+doc/en/how-to/fixtures.rst:569:Once the test is finished, pytest will go back down the list of fixtures, but in
+doc/en/how-to/fixtures.rst:620:    @pytest.fixture
+doc/en/how-to/fixtures.rst:625:    @pytest.fixture
+doc/en/how-to/fixtures.rst:632:    @pytest.fixture
+doc/en/how-to/fixtures.rst:645:Because ``receiving_user`` is the last fixture to run during setup, it's the first to run
+doc/en/how-to/fixtures.rst:658:Handling errors for yield fixture
+doc/en/how-to/fixtures.rst:661:If a yield fixture raises an exception before yielding, pytest won't try to run
+doc/en/how-to/fixtures.rst:662:the teardown code after that yield fixture's ``yield`` statement. But, for every
+doc/en/how-to/fixtures.rst:663:fixture that has already run successfully for that test, pytest will still
+doc/en/how-to/fixtures.rst:669:While yield fixtures are considered to be the cleaner and more straightforward
+doc/en/how-to/fixtures.rst:672:yield fixtures, but requires a bit more verbosity.
+doc/en/how-to/fixtures.rst:675:(just like we would request another fixture) in the fixture we need to add
+doc/en/how-to/fixtures.rst:680:been added, even if that fixture raises an exception after adding the finalizer.
+doc/en/how-to/fixtures.rst:682:would only add the finalizer once the fixture would have done something that
+doc/en/how-to/fixtures.rst:695:    @pytest.fixture
+doc/en/how-to/fixtures.rst:700:    @pytest.fixture
+doc/en/how-to/fixtures.rst:707:    @pytest.fixture
+doc/en/how-to/fixtures.rst:718:    @pytest.fixture
+doc/en/how-to/fixtures.rst:734:It's a bit longer than yield fixtures and a bit more complex, but it
+doc/en/how-to/fixtures.rst:747:For yield fixtures, the first teardown code to run is from the right-most fixture, i.e. the last test parameter.
+doc/en/how-to/fixtures.rst:760:    @pytest.fixture
+doc/en/how-to/fixtures.rst:766:    @pytest.fixture
+doc/en/how-to/fixtures.rst:787:For finalizers, the first fixture to run is last call to `request.addfinalizer`.
+doc/en/how-to/fixtures.rst:796:    @pytest.fixture
+doc/en/how-to/fixtures.rst:821:This is so because yield fixtures use `addfinalizer` behind the scenes: when the fixture executes, `addfinalizer` registers a function that resumes the generator, which in turn calls the teardown code.
+doc/en/how-to/fixtures.rst:829:The fixture system of pytest is *very* powerful, but it's still being run by a
+doc/en/how-to/fixtures.rst:845:    @pytest.fixture
+doc/en/how-to/fixtures.rst:863:very descriptive fixture name, and none of the fixtures can be reused easily.
+doc/en/how-to/fixtures.rst:869:fixtures, but that might get pretty complex and difficult to maintain (and it
+doc/en/how-to/fixtures.rst:878:.. _`safe fixture structure`:
+doc/en/how-to/fixtures.rst:880:Safe fixture structure
+doc/en/how-to/fixtures.rst:883:The safest and simplest fixture structure requires limiting fixtures to only
+doc/en/how-to/fixtures.rst:885:their teardown code, as :ref:`the email examples above <yield fixtures>` showed.
+doc/en/how-to/fixtures.rst:892:fixture function and separating it from other, potentially failing
+doc/en/how-to/fixtures.rst:906:that browser session running, so we'll want to make sure the fixtures that
+doc/en/how-to/fixtures.rst:913:    For this example, certain fixtures (i.e. ``base_url`` and
+doc/en/how-to/fixtures.rst:930:    @pytest.fixture
+doc/en/how-to/fixtures.rst:935:    @pytest.fixture
+doc/en/how-to/fixtures.rst:943:    @pytest.fixture
+doc/en/how-to/fixtures.rst:950:    @pytest.fixture
+doc/en/how-to/fixtures.rst:957:    @pytest.fixture
+doc/en/how-to/fixtures.rst:966:fixture would execute before the ``driver`` fixture. But that's ok, because
+doc/en/how-to/fixtures.rst:979:    While the ``user`` fixture doesn't *actually* need to happen before the
+doc/en/how-to/fixtures.rst:980:    ``driver`` fixture, if we made ``driver`` request ``user``, it might save
+doc/en/how-to/fixtures.rst:995:step defined as an autouse fixture, and finally, making sure all the fixtures
+doc/en/how-to/fixtures.rst:998:Let's pull :ref:`an example from above <safe fixture structure>`, and tweak it a
+doc/en/how-to/fixtures.rst:1007:    For this example, certain fixtures (i.e. ``base_url`` and
+doc/en/how-to/fixtures.rst:1025:    @pytest.fixture(scope="class")
+doc/en/how-to/fixtures.rst:1030:    @pytest.fixture(scope="class")
+doc/en/how-to/fixtures.rst:1038:    @pytest.fixture(scope="class")
+doc/en/how-to/fixtures.rst:1045:    @pytest.fixture(scope="class")
+doc/en/how-to/fixtures.rst:1051:        @pytest.fixture(scope="class", autouse=True)
+doc/en/how-to/fixtures.rst:1070:``unittest.TestCase`` framework. Everything is managed by the pytest fixture
+doc/en/how-to/fixtures.rst:1073:Each method only has to request the fixtures that it actually needs without
+doc/en/how-to/fixtures.rst:1074:worrying about order. This is because the **act** fixture is an autouse fixture,
+doc/en/how-to/fixtures.rst:1075:and it made sure all the other fixtures executed before it. There's no more
+doc/en/how-to/fixtures.rst:1080:The ``login`` fixture is defined inside the class as well, because not every one
+doc/en/how-to/fixtures.rst:1095:        @pytest.fixture(scope="class")
+doc/en/how-to/fixtures.rst:1109:Fixtures can introspect the requesting test context
+doc/en/how-to/fixtures.rst:1112:Fixture functions can accept the :py:class:`request <_pytest.fixtures.FixtureRequest>` object
+doc/en/how-to/fixtures.rst:1114:Further extending the previous ``smtp_connection`` fixture example, let's
+doc/en/how-to/fixtures.rst:1115:read an optional server URL from the test module which uses our fixture:
+doc/en/how-to/fixtures.rst:1125:    @pytest.fixture(scope="module")
+doc/en/how-to/fixtures.rst:1154:    smtpserver = "mail.python.org"  # will be read by smtp fixture
+doc/en/how-to/fixtures.rst:1177:voila! The ``smtp_connection`` fixture function picked up our mail server name
+doc/en/how-to/fixtures.rst:1182:Using markers to pass data to fixtures
+doc/en/how-to/fixtures.rst:1185:Using the :py:class:`request <_pytest.fixtures.FixtureRequest>` object, a fixture can also access
+doc/en/how-to/fixtures.rst:1187:into a fixture from a test:
+doc/en/how-to/fixtures.rst:1194:    @pytest.fixture
+doc/en/how-to/fixtures.rst:1211:.. _`fixture-factory`:
+doc/en/how-to/fixtures.rst:1213:Factories as fixtures
+doc/en/how-to/fixtures.rst:1216:The "factory as fixture" pattern can help in situations where the result
+doc/en/how-to/fixtures.rst:1217:of a fixture is needed multiple times in a single test. Instead of returning
+doc/en/how-to/fixtures.rst:1218:data directly, the fixture instead returns a function which generates the data.
+doc/en/how-to/fixtures.rst:1225:    @pytest.fixture
+doc/en/how-to/fixtures.rst:1238:If the data created by the factory requires managing, the fixture can take care of that:
+doc/en/how-to/fixtures.rst:1242:    @pytest.fixture
+doc/en/how-to/fixtures.rst:1263:.. _`fixture-parametrize`:
+doc/en/how-to/fixtures.rst:1265:Parametrizing fixtures
+doc/en/how-to/fixtures.rst:1268:Fixture functions can be parametrized in which case they will be called
+doc/en/how-to/fixtures.rst:1270:tests that depend on this fixture.  Test functions usually do not need
+doc/en/how-to/fixtures.rst:1271:to be aware of their re-running.  Fixture parametrization helps to
+doc/en/how-to/fixtures.rst:1275:Extending the previous example, we can flag the fixture to create two
+doc/en/how-to/fixtures.rst:1276:``smtp_connection`` fixture instances which will cause all tests using the fixture
+doc/en/how-to/fixtures.rst:1277:to run twice.  The fixture function gets access to each parameter
+doc/en/how-to/fixtures.rst:1278:through the special :py:class:`request <pytest.FixtureRequest>` object:
+doc/en/how-to/fixtures.rst:1288:    @pytest.fixture(scope="module", params=["smtp.gmail.com", "mail.python.org"])
+doc/en/how-to/fixtures.rst:1296::py:func:`@pytest.fixture <pytest.fixture>`, a list of values
+doc/en/how-to/fixtures.rst:1297:for each of which the fixture function will execute and can access
+doc/en/how-to/fixtures.rst:1370:pytest will build a string that is the test ID for each fixture value
+doc/en/how-to/fixtures.rst:1371:in a parametrized fixture, e.g. ``test_ehlo[smtp.gmail.com]`` and
+doc/en/how-to/fixtures.rst:1380:the string used in a test ID for a certain fixture value by using the
+doc/en/how-to/fixtures.rst:1389:   @pytest.fixture(params=[0, 1], ids=["spam", "ham"])
+doc/en/how-to/fixtures.rst:1398:   def idfn(fixture_value):
+doc/en/how-to/fixtures.rst:1399:       if fixture_value == 0:
+doc/en/how-to/fixtures.rst:1405:   @pytest.fixture(params=[0, 1], ids=idfn)
+doc/en/how-to/fixtures.rst:1414:a function which will be called with the fixture value and then
+doc/en/how-to/fixtures.rst:1428:   <Dir fixtures.rst-236>
+doc/en/how-to/fixtures.rst:1449:.. _`fixture-parametrize-marks`:
+doc/en/how-to/fixtures.rst:1451:Using marks with parametrized fixtures
+doc/en/how-to/fixtures.rst:1454::func:`pytest.param` can be used to apply marks in values sets of parametrized fixtures in the same way
+doc/en/how-to/fixtures.rst:1461:    # content of test_fixture_marks.py
+doc/en/how-to/fixtures.rst:1465:    @pytest.fixture(params=[0, 1, pytest.param(2, marks=pytest.mark.skip)])
+doc/en/how-to/fixtures.rst:1477:    $ pytest test_fixture_marks.py -v
+doc/en/how-to/fixtures.rst:1484:    test_fixture_marks.py::test_data[0] PASSED                           [ 33%]
+doc/en/how-to/fixtures.rst:1485:    test_fixture_marks.py::test_data[1] PASSED                           [ 66%]
+doc/en/how-to/fixtures.rst:1486:    test_fixture_marks.py::test_data[2] SKIPPED (unconditional skip)     [100%]
+doc/en/how-to/fixtures.rst:1490:.. _`interdependent fixtures`:
+doc/en/how-to/fixtures.rst:1492:Modularity: using fixtures from a fixture function
+doc/en/how-to/fixtures.rst:1495:In addition to using fixtures in test functions, fixture functions
+doc/en/how-to/fixtures.rst:1496:can use other fixtures themselves.  This contributes to a modular design
+doc/en/how-to/fixtures.rst:1497:of your fixtures and allows reuse of framework-specific fixtures across
+doc/en/how-to/fixtures.rst:1514:    @pytest.fixture(scope="module")
+doc/en/how-to/fixtures.rst:1522:Here we declare an ``app`` fixture which receives the previously defined
+doc/en/how-to/fixtures.rst:1523:``smtp_connection`` fixture and instantiates an ``App`` object with it.  Let's run it:
+doc/en/how-to/fixtures.rst:1541:need for the ``app`` fixture to be aware of the ``smtp_connection``
+doc/en/how-to/fixtures.rst:1542:parametrization because pytest will fully analyse the fixture dependency graph.
+doc/en/how-to/fixtures.rst:1544:Note that the ``app`` fixture has a scope of ``module`` and uses a
+doc/en/how-to/fixtures.rst:1545:module-scoped ``smtp_connection`` fixture.  The example would still work if
+doc/en/how-to/fixtures.rst:1546:``smtp_connection`` was cached on a ``session`` scope: it is fine for fixtures to use
+doc/en/how-to/fixtures.rst:1547:"broader" scoped fixtures but not the other way round:
+doc/en/how-to/fixtures.rst:1548:A session-scoped fixture could not use a module-scoped one in a
+doc/en/how-to/fixtures.rst:1554:Automatic grouping of tests by fixture instances
+doc/en/how-to/fixtures.rst:1559:pytest minimizes the number of active fixtures during test runs.
+doc/en/how-to/fixtures.rst:1560:If you have a parametrized fixture, then all the tests using it will
+doc/en/how-to/fixtures.rst:1562:before the next fixture instance is created.  Among other things,
+doc/en/how-to/fixtures.rst:1565:The following example uses two parametrized fixtures, one of which is
+doc/en/how-to/fixtures.rst:1575:    @pytest.fixture(scope="module", params=["mod1", "mod2"])
+doc/en/how-to/fixtures.rst:1583:    @pytest.fixture(scope="function", params=[1, 2])
+doc/en/how-to/fixtures.rst:1662:.. _`usefixtures`:
+doc/en/how-to/fixtures.rst:1664:Use fixtures in classes and modules with ``usefixtures``
+doc/en/how-to/fixtures.rst:1669:Sometimes test functions do not directly need access to a fixture object.
+doc/en/how-to/fixtures.rst:1673:and pytest fixtures to
+doc/en/how-to/fixtures.rst:1674:achieve it.  We separate the creation of the fixture into a :file:`conftest.py`
+doc/en/how-to/fixtures.rst:1687:    @pytest.fixture
+doc/en/how-to/fixtures.rst:1695:and declare its use in a test module via a ``usefixtures`` marker:
+doc/en/how-to/fixtures.rst:1705:    @pytest.mark.usefixtures("cleandir")
+doc/en/how-to/fixtures.rst:1715:Due to the ``usefixtures`` marker, the ``cleandir`` fixture
+doc/en/how-to/fixtures.rst:1718:to verify our fixture is activated and the tests pass:
+doc/en/how-to/fixtures.rst:1726:You can specify multiple fixtures like this:
+doc/en/how-to/fixtures.rst:1730:    @pytest.mark.usefixtures("cleandir", "anotherfixture")
+doc/en/how-to/fixtures.rst:1733:and you may specify fixture usage at the test module level using :globalvar:`pytestmark`:
+doc/en/how-to/fixtures.rst:1737:    pytestmark = pytest.mark.usefixtures("cleandir")
+doc/en/how-to/fixtures.rst:1740:It is also possible to put fixtures required by all tests in your project
+doc/en/how-to/fixtures.rst:1747:    usefixtures = ["cleandir"]
+doc/en/how-to/fixtures.rst:1751:    ``@pytest.mark.usefixtures`` cannot be used on **fixture functions**. For example,
+doc/en/how-to/fixtures.rst:1756:        @pytest.mark.usefixtures("my_other_fixture")
+doc/en/how-to/fixtures.rst:1757:        @pytest.fixture
+doc/en/how-to/fixtures.rst:1758:        def my_fixture_that_sadly_wont_use_my_other_fixture(): ...
+doc/en/how-to/fixtures.rst:1760:.. _`override fixtures`:
+doc/en/how-to/fixtures.rst:1762:Overriding fixtures on various levels
+doc/en/how-to/fixtures.rst:1765:In a relatively large test suite, you may want to *override* a fixture, to augment
+doc/en/how-to/fixtures.rst:1768:Override a fixture on a directory (conftest) level
+doc/en/how-to/fixtures.rst:1780:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1794:                @pytest.fixture
+doc/en/how-to/fixtures.rst:1803:As you can see, a fixture with the same name can be overridden for a certain test directory level.
+doc/en/how-to/fixtures.rst:1804:Note that the ``base`` or ``super`` fixture can be accessed from the ``overriding``
+doc/en/how-to/fixtures.rst:1805:fixture easily - used in the example above.
+doc/en/how-to/fixtures.rst:1807:Override a fixture on a test module level
+doc/en/how-to/fixtures.rst:1819:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1827:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1838:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1845:In the example above, a fixture with the same name can be overridden for a certain test module.
+doc/en/how-to/fixtures.rst:1848:Override a fixture with direct test parametrization
+doc/en/how-to/fixtures.rst:1860:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1864:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1880:In the example above, a fixture value is overridden by the test parameter value. Note that the value of the fixture
+doc/en/how-to/fixtures.rst:1884:Override a parametrized fixture with non-parametrized one and vice versa
+doc/en/how-to/fixtures.rst:1896:            @pytest.fixture(params=['one', 'two', 'three'])
+doc/en/how-to/fixtures.rst:1900:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1908:            @pytest.fixture
+doc/en/how-to/fixtures.rst:1912:            @pytest.fixture(params=['one', 'two', 'three'])
+doc/en/how-to/fixtures.rst:1930:In the example above, a parametrized fixture is overridden with a non-parametrized version, and
+doc/en/how-to/fixtures.rst:1931:a non-parametrized fixture is overridden with a parametrized version for certain test module.
+doc/en/how-to/fixtures.rst:1935:Using fixtures from other projects
+doc/en/how-to/fixtures.rst:1939:so just installing those projects into an environment will make those fixtures available for use.
+doc/en/how-to/fixtures.rst:1941:In case you want to use fixtures from a project that does not use entry points, you can
+doc/en/how-to/fixtures.rst:1945:Suppose you have some fixtures in ``mylibrary.fixtures`` and you want to reuse them into your
+doc/en/how-to/fixtures.rst:1953:    pytest_plugins = "mylibrary.fixtures"
+doc/en/how-to/fixtures.rst:1955:This effectively registers ``mylibrary.fixtures`` as a plugin, making all its fixtures and
+doc/en/how-to/fixtures.rst:1960:    Sometimes users will *import* fixtures from other projects for use, however this is not
+doc/en/how-to/fixtures.rst:1961:    recommended: importing fixtures into a module will register them in pytest
+doc/en/how-to/index.rst:16:   fixtures
+doc/en/how-to/logging.rst:83:caplog fixture
+doc/en/how-to/logging.rst:87:messages.  This is supported by the ``caplog`` fixture:
+doc/en/how-to/logging.rst:124:the fixture in the form of both the ``logging.LogRecord`` instances and the final log text.
+doc/en/how-to/logging.rst:165:if you want to make sure that tests which use a certain fixture never log any warnings, you can inspect
+doc/en/how-to/logging.rst:170:    @pytest.fixture
+doc/en/how-to/logging.rst:183:The full API is available at :class:`pytest.LogCaptureFixture`.
+doc/en/how-to/logging.rst:187:    The ``caplog`` fixture adds a handler to the root logger to capture logs. If the root logger is
+doc/en/how-to/mark.rst:13:* :ref:`usefixtures <usefixtures>` - use fixtures on a test function or class
+doc/en/how-to/mark.rst:31:    :ref:`fixtures <fixtures>`.
+doc/en/how-to/monkeypatch.rst:10:tested such as network access.  The ``monkeypatch`` fixture
+doc/en/how-to/monkeypatch.rst:14:The ``monkeypatch`` fixture provides these helper methods for safely patching and mocking
+doc/en/how-to/monkeypatch.rst:29:test function or fixture has finished. The ``raising``
+doc/en/how-to/monkeypatch.rst:58:control teardown of complex fixtures or patches to the stdlib.
+doc/en/how-to/monkeypatch.rst:172:This mock can be shared across tests using a ``fixture``:
+doc/en/how-to/monkeypatch.rst:191:    # monkeypatched requests.get moved to a fixture
+doc/en/how-to/monkeypatch.rst:192:    @pytest.fixture
+doc/en/how-to/monkeypatch.rst:202:    # notice our test uses the custom fixture instead of monkeypatch directly
+doc/en/how-to/monkeypatch.rst:208:Furthermore, if the mock was designed to be applied to all tests, the ``fixture`` could
+doc/en/how-to/monkeypatch.rst:224:    @pytest.fixture(autouse=True)
+doc/en/how-to/monkeypatch.rst:229:This autouse fixture will be executed for each test function and it
+doc/en/how-to/monkeypatch.rst:313:This behavior can be moved into ``fixture`` structures and shared across tests:
+doc/en/how-to/monkeypatch.rst:321:    @pytest.fixture
+doc/en/how-to/monkeypatch.rst:326:    @pytest.fixture
+doc/en/how-to/monkeypatch.rst:331:    # notice the tests reference the fixtures for mocks
+doc/en/how-to/monkeypatch.rst:401:The modularity of fixtures gives you the flexibility to define
+doc/en/how-to/monkeypatch.rst:402:separate fixtures for each potential mock and reference them in the needed tests.
+doc/en/how-to/monkeypatch.rst:413:    # all of the mocks are moved into separated fixtures
+doc/en/how-to/monkeypatch.rst:414:    @pytest.fixture
+doc/en/how-to/monkeypatch.rst:420:    @pytest.fixture
+doc/en/how-to/monkeypatch.rst:426:    @pytest.fixture
+doc/en/how-to/monkeypatch.rst:432:    # tests reference only the fixture mocks that are needed
+doc/en/how-to/output.rst:56:details when tests fail, fixtures details with :option:`--fixtures`, etc.
+doc/en/how-to/output.rst:349:situations, for example you are shown even fixtures that start with ``_`` if you use ``pytest --fixtures -v``.
+doc/en/how-to/output.rst:397:    @pytest.fixture
+doc/en/how-to/output.rst:398:    def error_fixture():
+doc/en/how-to/output.rst:410:    def test_error(error_fixture):
+doc/en/how-to/output.rst:440:        @pytest.fixture
+doc/en/how-to/output.rst:441:        def error_fixture():
+doc/en/how-to/output.rst:497:        @pytest.fixture
+doc/en/how-to/output.rst:498:        def error_fixture():
+doc/en/how-to/output.rst:532:        @pytest.fixture
+doc/en/how-to/output.rst:533:        def error_fixture():
+doc/en/how-to/output.rst:651:``record_property`` fixture:
+doc/en/how-to/output.rst:715:``record_xml_attribute`` fixture. This can also be used to override existing values:
+doc/en/how-to/output.rst:782:that are relevant to all tests, you can use the ``record_testsuite_property`` session-scoped fixture:
+doc/en/how-to/output.rst:784:The ``record_testsuite_property`` session-scoped fixture can be used to add properties relevant
+doc/en/how-to/output.rst:792:    @pytest.fixture(scope="session", autouse=True)
+doc/en/how-to/output.rst:802:The fixture is a callable which receives ``name`` and ``value`` of a ``<property>`` tag
+doc/en/how-to/parametrize.rst:9:How to parametrize fixtures and test functions
+doc/en/how-to/parametrize.rst:14:- :py:func:`pytest.fixture` allows one to :ref:`parametrize fixture
+doc/en/how-to/parametrize.rst:15:  functions <fixture-parametrize>`.
+doc/en/how-to/parametrize.rst:18:  arguments and fixtures at the test function or class.
+doc/en/how-to/parametrize.rst:219:of a fixture.   For this, you can use the ``pytest_generate_tests`` hook
+doc/en/how-to/parametrize.rst:227:a simple test accepting a ``stringinput`` fixture function argument:
+doc/en/how-to/parametrize.rst:255:        if "stringinput" in metafunc.fixturenames:
+doc/en/how-to/tmp_path.rst:8:The ``tmp_path`` fixture
+doc/en/how-to/tmp_path.rst:11:You can use the ``tmp_path`` fixture which will provide a temporary directory
+doc/en/how-to/tmp_path.rst:71:The ``tmp_path_factory`` fixture
+doc/en/how-to/tmp_path.rst:74:The ``tmp_path_factory`` is a session-scoped fixture which can be used
+doc/en/how-to/tmp_path.rst:75:to create arbitrary temporary directories from any other fixture or test.
+doc/en/how-to/tmp_path.rst:88:    @pytest.fixture(scope="session")
+doc/en/how-to/tmp_path.rst:106:The ``tmpdir`` and ``tmpdir_factory`` fixtures
+doc/en/how-to/tmp_path.rst:109:The ``tmpdir`` and ``tmpdir_factory`` fixtures are similar to ``tmp_path``
+doc/en/how-to/tmp_path.rst:127:See :fixture:`tmpdir <tmpdir>` :fixture:`tmpdir_factory <tmpdir_factory>`
+doc/en/how-to/tmp_path.rst:137:as returned by the :fixture:`tmp_path` and (now deprecated) :fixture:`tmpdir` fixtures,
+doc/en/how-to/unittest.rst:60:* :ref:`Auto-use fixtures <mixing-fixtures>`;
+doc/en/how-to/unittest.rst:65:* :ref:`Fixtures <fixture>` (except for ``autouse`` fixtures, see :ref:`below <mixing-fixtures>`);
+doc/en/how-to/unittest.rst:72:.. _mixing-fixtures:
+doc/en/how-to/unittest.rst:74:Mixing pytest fixtures into ``unittest.TestCase`` subclasses using marks
+doc/en/how-to/unittest.rst:78::ref:`fixture mechanism <fixture>` with ``unittest.TestCase`` style
+doc/en/how-to/unittest.rst:79:tests.  Assuming you have at least skimmed the pytest fixture features,
+doc/en/how-to/unittest.rst:81:fixture, setting up a class-cached database object, and then reference
+doc/en/how-to/unittest.rst:88:    # we define a fixture function below and it will be "used" by
+doc/en/how-to/unittest.rst:94:    @pytest.fixture(scope="class")
+doc/en/how-to/unittest.rst:102:This defines a fixture function ``db_class`` which - if used - is
+doc/en/how-to/unittest.rst:104:``db`` attribute to a ``DummyDB`` instance.  The fixture function
+doc/en/how-to/unittest.rst:107:as the ``cls`` attribute, denoting the class from which the fixture
+doc/en/how-to/unittest.rst:108:is used.  This architecture de-couples fixture writing from actual test
+doc/en/how-to/unittest.rst:109:code and allows reuse of the fixture by a minimal reference, the fixture
+doc/en/how-to/unittest.rst:111:fixture definition:
+doc/en/how-to/unittest.rst:122:    @pytest.mark.usefixtures("db_class")
+doc/en/how-to/unittest.rst:131:The ``@pytest.mark.usefixtures("db_class")`` class-decorator makes sure that
+doc/en/how-to/unittest.rst:132:the pytest fixture function ``db_class`` is called once per class.
+doc/en/how-to/unittest.rst:177:when writing the class-scoped fixture function above.
+doc/en/how-to/unittest.rst:180:Using autouse fixtures and accessing other fixtures
+doc/en/how-to/unittest.rst:183:Although it's usually better to explicitly declare use of fixtures you need
+doc/en/how-to/unittest.rst:184:for a given test, you may sometimes want to have fixtures that are
+doc/en/how-to/unittest.rst:186:style of unittest-setup mandates the use of this implicit fixture writing
+doc/en/how-to/unittest.rst:189:You can flag fixture functions with ``@pytest.fixture(autouse=True)``
+doc/en/how-to/unittest.rst:190:and define the fixture function in the context where you want it used.
+doc/en/how-to/unittest.rst:191:Let's look at an ``initdir`` fixture which makes all test methods of a
+doc/en/how-to/unittest.rst:193:pre-initialized ``samplefile.ini``.  Our ``initdir`` fixture itself uses
+doc/en/how-to/unittest.rst:194:the pytest builtin :fixture:`tmp_path` fixture to delegate the
+doc/en/how-to/unittest.rst:206:        @pytest.fixture(autouse=True)
+doc/en/how-to/unittest.rst:216:Due to the ``autouse`` flag the ``initdir`` fixture function will be
+doc/en/how-to/unittest.rst:218:shortcut for using a ``@pytest.mark.usefixtures("initdir")`` marker
+doc/en/how-to/unittest.rst:229:... gives us one passed test because the ``initdir`` fixture function
+doc/en/how-to/unittest.rst:234:   ``unittest.TestCase`` methods cannot directly receive fixture
+doc/en/how-to/unittest.rst:238:   The above ``usefixtures`` and ``autouse`` examples should help to mix in
+doc/en/how-to/unittest.rst:239:   pytest fixtures into unittest suites.
+doc/en/how-to/usage.rst:132:    pytest --fixtures  # show available builtin function arguments
+doc/en/how-to/writing_hook_functions.rst:220:Hooks may be called both from fixtures or from other hooks. In both cases, hooks are called
+doc/en/how-to/writing_hook_functions.rst:222:``config`` object directly, while fixtures may use the ``pytestconfig`` fixture which provides the same object.
+doc/en/how-to/writing_hook_functions.rst:226:    @pytest.fixture()
+doc/en/how-to/writing_hook_functions.rst:227:    def my_fixture(pytestconfig):
+doc/en/how-to/writing_plugins.rst:121:All of these plugins implement :ref:`hooks <hook-reference>` and/or :ref:`fixtures <fixture>`
+doc/en/how-to/writing_plugins.rst:270:This mechanism makes it easy to share fixtures within applications or even
+doc/en/how-to/writing_plugins.rst:340:fixture for testing your plugin code.
+doc/en/how-to/writing_plugins.rst:343:developed a plugin that provides a fixture ``hello`` which yields a function
+doc/en/how-to/writing_plugins.rst:364:    @pytest.fixture
+doc/en/how-to/writing_plugins.rst:376:Now the ``pytester`` fixture provides a convenient API for creating temporary
+doc/en/how-to/writing_plugins.rst:390:            @pytest.fixture(params=[
+doc/en/how-to/xunit_setup.rst:9:fixtures (setup and teardown test state) on a per-module/class/function basis.
+doc/en/how-to/xunit_setup.rst:16:    using pytest's more powerful :ref:`fixture mechanism
+doc/en/how-to/xunit_setup.rst:17:    <fixture>` which leverages the concept of dependency injection, allowing
+doc/en/how-to/xunit_setup.rst:20:    mix both fixture mechanisms in the same file but
+doc/en/how-to/xunit_setup.rst:22:    cannot receive fixture arguments.
+doc/en/how-to/xunit_setup.rst:29:module you can optionally implement the following fixture methods
+doc/en/how-to/xunit_setup.rst:89:you can also use the following functions to implement fixtures:
+doc/en/how-to/xunit_setup.rst:114:* Prior to pytest-4.2, xunit-style functions did not obey the scope rules of fixtures, so
+doc/en/how-to/xunit_setup.rst:116:  session-scoped autouse fixture.
+doc/en/how-to/xunit_setup.rst:118:  Now the xunit-style functions are integrated with the fixture mechanism and obey the proper
+doc/en/how-to/xunit_setup.rst:119:  scope rules of fixtures involved in the call.
