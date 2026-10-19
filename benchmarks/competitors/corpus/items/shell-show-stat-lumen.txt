@@ -1,0 +1,269 @@
+3b951e93dbe55e46dc0e15951666b303110861e7
+fix(intercept): send the retry to recall_file when smart_read already worked, instead of releasing the whole file (#42)
+
+ .claude-plugin/plugin.json                                                  |   18 +
+ .claude/hooks/lumen_meter.sh                                                |   73 +
+ .claude/hooks/lumen_read_intercept.sh                                       |   76 +
+ .claude/lumen_report.sh                                                     |  183 +
+ .devcontainer/Dockerfile                                                    |   22 +
+ .devcontainer/devcontainer.json                                             |   15 +
+ .gitattributes                                                              |   12 +
+ .github/ISSUE_TEMPLATE/fault-report.md                                      |   48 +
+ .github/workflows/ci.yml                                                    |  529 +++
+ .github/workflows/release.yml                                               |  694 ++++
+ .github/workflows/verify-install.yml                                        |  217 ++
+ .gitignore                                                                  |   76 +
+ .mcp.json                                                                   |   12 +
+ CHANGELOG.md                                                                | 1554 ++++++++
+ CLAUDE.md                                                                   |   55 +
+ Cargo.lock                                                                  | 7128 +++++++++++++++++++++++++++++++++++
+ Cargo.toml                                                                  |   16 +
+ Casks/lumen-app.rb                                                          |   62 +
+ DESIGN_CONTRACT.md                                                          |  130 +
+ Formula/lumen-cli.rb                                                        |   34 +
+ LICENSE                                                                     |   21 +
+ MANUAL_TEST.md                                                              |  280 ++
+ MESSAGING_CONTRACT.md                                                       |   42 +
+ PRE_RELEASE_TEST_RESULTS.md                                                 |  287 ++
+ README.md                                                                   |  908 +++++
+ RELEASE_NOTES.md                                                            |   98 +
+ commands/lumen-report.md                                                    |   28 +
+ crates/lumen-cli/Cargo.toml                                                 |   23 +
+ crates/lumen-cli/src/data.rs                                                |  895 +++++
+ crates/lumen-cli/src/doctor.rs                                              |  755 ++++
+ crates/lumen-cli/src/main.rs                                                |  267 ++
+ crates/lumen-cli/src/ui.rs                                                  |  661 ++++
+ crates/lumen-core/.gitignore                                                |    1 +
+ crates/lumen-core/Cargo.toml                                                |   29 +
+ crates/lumen-core/queries/rust-tags-supplement.scm                          |   24 +
+ crates/lumen-core/queries/typescript-tags.scm                               |   92 +
+ crates/lumen-core/src/compress.rs                                           |  182 +
+ crates/lumen-core/src/coverage.rs                                           |  241 ++
+ crates/lumen-core/src/econ.rs                                               |  414 ++
+ crates/lumen-core/src/events.rs                                             |  451 +++
+ crates/lumen-core/src/faults.rs                                             |  786 ++++
+ crates/lumen-core/src/lib.rs                                                |   38 +
+ crates/lumen-core/src/meter.rs                                              | 1242 ++++++
+ crates/lumen-core/src/project.rs                                            |  306 ++
+ crates/lumen-core/src/ranked.rs                                             | 1922 ++++++++++
+ crates/lumen-core/src/rates.rs                                              |  304 ++
+ crates/lumen-core/src/record.rs                                             |  180 +
+ crates/lumen-core/src/repeat.rs                                             | 1044 +++++
+ crates/lumen-core/src/report.rs                                             | 2573 +++++++++++++
+ crates/lumen-core/src/schema.rs                                             |  939 +++++
+ crates/lumen-core/src/structure.rs                                          |  437 +++
+ crates/lumen-core/src/tokenizer.rs                                          |    9 +
+ crates/lumen-core/src/update.rs                                             |  409 ++
+ crates/lumen-core/tests/filing_routes.rs                                    |  447 +++
+ crates/lumen-core/tests/fixtures/faults_empty.json                          |    1 +
+ crates/lumen-core/tests/fixtures/faults_mixed.json                          |   73 +
+ crates/lumen-core/tests/fixtures/report_mixed.md                            |   58 +
+ crates/lumen-core/tests/fixtures/sample.jsonl                               |    5 +
+ crates/lumen-core/tests/frontend_styling.rs                                 |  206 +
+ crates/lumen-core/tests/integration.rs                                      |  243 ++
+ crates/lumen-core/tests/phase_a_effect.rs                                   |  113 +
+ crates/lumen-core/tests/ranked_coverage.rs                                  |  122 +
+ crates/lumen-core/tests/ranked_timing.rs                                    |   88 +
+ crates/lumen-core/tests/silent_fallbacks.rs                                 | 1472 ++++++++
+ crates/lumen-core/tests/version_sync.rs                                     |  194 +
+ crates/lumen-daemon/.gitignore                                              |    1 +
+ crates/lumen-daemon/Cargo.toml                                              |   21 +
+ crates/lumen-daemon/src/main.rs                                             | 1761 +++++++++
+ crates/lumen-daemon/tests/db_path.rs                                        |  130 +
+ crates/lumen-daemon/tests/e2e_pipeline.rs                                   |  524 +++
+ crates/lumen-daemon/tests/supervisor_exit.rs                                |  238 ++
+ crates/lumen-mcp/.gitignore                                                 |    1 +
+ crates/lumen-mcp/Cargo.toml                                                 |   37 +
+ crates/lumen-mcp/src/hook.rs                                                | 1136 ++++++
+ crates/lumen-mcp/src/lib.rs                                                 | 2273 +++++++++++
+ crates/lumen-mcp/src/main.rs                                                |   91 +
+ crates/lumen-mcp/src/repeat_read.rs                                         |  331 ++
+ crates/lumen-mcp/src/tok.rs                                                 |   39 +
+ crates/lumen-mcp/tests/e2e_read_to_screen.rs                                |  494 +++
+ crates/lumen-mcp/tests/efficiency.rs                                        |  997 +++++
+ crates/lumen-mcp/tests/escape_valve.rs                                      |  328 ++
+ crates/lumen-mcp/tests/fixtures/hooks/README.md                             |   29 +
+ crates/lumen-mcp/tests/fixtures/hooks/bash_post.json                        |    1 +
+ crates/lumen-mcp/tests/fixtures/hooks/bash_pre.json                         |    1 +
+ crates/lumen-mcp/tests/fixtures/hooks/read_post.json                        |    1 +
+ crates/lumen-mcp/tests/fixtures/hooks/read_post_partial.json                |    1 +
+ crates/lumen-mcp/tests/fixtures/hooks/read_pre.json                         |    1 +
+ crates/lumen-mcp/tests/hook_cli.rs                                          |  735 ++++
+ crates/lumen-mcp/tests/model_copy.rs                                        |  121 +
+ crates/lumen-mcp/tests/optimizer_baseline.json                              |  185 +
+ crates/lumen-mcp/tests/optimizer_bench.rs                                   |  772 ++++
+ crates/lumen-mcp/tests/protocol.rs                                          |  532 +++
+ crates/lumen-mcp/tests/ranked_metering.rs                                   |  276 ++
+ crates/lumen-mcp/tests/repeat_reads.rs                                      |  781 ++++
+ crates/lumen-mcp/tests/tok_cli.rs                                           |  106 +
+ crates/lumen-stats/Cargo.toml                                               |   25 +
+ crates/lumen-stats/src/lib.rs                                               |  809 ++++
+ crates/lumen-stats/tests/aggregates.rs                                      | 1470 ++++++++
+ crates/lumen-stats/tests/upgrade_1_7_0.rs                                   |   64 +
+ docs/assets/fault-report/fault-1-badge.png                                  |  Bin 0 -> 81252 bytes
+ docs/assets/fault-report/fault-2-preview.png                                |  Bin 0 -> 115943 bytes
+ docs/assets/fault-report/fault-3-filed.png                                  |  Bin 0 -> 122276 bytes
+ docs/assets/fault-report/fault-4-handoff.png                                |  Bin 0 -> 132175 bytes
+ docs/assets/firefly-dim.svg                                                 |   35 +
+ docs/assets/firefly.svg                                                     |   45 +
+ docs/assets/lumen-icon-1024.png                                             |  Bin 0 -> 1636856 bytes
+ docs/assets/screenshot-cli.png                                              |  Bin 0 -> 3160 bytes
+ docs/assets/screenshot-gauge.png                                            |  Bin 0 -> 67854 bytes
+ docs/assets/screenshot-optimizer.png                                        |  Bin 0 -> 3104 bytes
+ docs/assets/screenshot-setup.png                                            |  Bin 0 -> 2617 bytes
+ docs/e7-ledger-backups/README.md                                            |   34 +
+ docs/e7-ledger-backups/SHA256SUMS.txt                                       |    5 +
+ docs/efficiency.md                                                          |  215 ++
+ docs/filing-a-fault-report.md                                               |  185 +
+ docs/troubleshooting-the-tray.md                                            |  139 +
+ hooks/hooks.json                                                            |   35 +
+ lumenator/.gitignore                                                        |   42 +
+ lumenator/.postcssrc.json                                                   |    5 +
+ lumenator/angular.json                                                      |  117 +
+ lumenator/build-sidecar.sh                                                  |   70 +
+ lumenator/e2e/app.e2e.mjs                                                   |  352 ++
+ lumenator/e2e/webdriver.mjs                                                 |  165 +
+ lumenator/package.json                                                      |   41 +
+ lumenator/pnpm-lock.yaml                                                    | 4858 ++++++++++++++++++++++++
+ lumenator/pnpm-workspace.yaml                                               |    5 +
+ lumenator/src-tauri/.gitignore                                              |    4 +
+ lumenator/src-tauri/Cargo.toml                                              |   64 +
+ lumenator/src-tauri/build.rs                                                |    3 +
+ lumenator/src-tauri/capabilities/default.json                               |   22 +
+ lumenator/src-tauri/icons/128x128.png                                       |  Bin 0 -> 14979 bytes
+ lumenator/src-tauri/icons/128x128@2x.png                                    |  Bin 0 -> 38000 bytes
+ lumenator/src-tauri/icons/32x32.png                                         |  Bin 0 -> 1921 bytes
+ lumenator/src-tauri/icons/64x64.png                                         |  Bin 0 -> 5618 bytes
+ lumenator/src-tauri/icons/Square107x107Logo.png                             |  Bin 0 -> 11572 bytes
+ lumenator/src-tauri/icons/Square142x142Logo.png                             |  Bin 0 -> 17177 bytes
+ lumenator/src-tauri/icons/Square150x150Logo.png                             |  Bin 0 -> 18543 bytes
+ lumenator/src-tauri/icons/Square284x284Logo.png                             |  Bin 0 -> 43238 bytes
+ lumenator/src-tauri/icons/Square30x30Logo.png                               |  Bin 0 -> 1737 bytes
+ lumenator/src-tauri/icons/Square310x310Logo.png                             |  Bin 0 -> 47952 bytes
+ lumenator/src-tauri/icons/Square44x44Logo.png                               |  Bin 0 -> 3176 bytes
+ lumenator/src-tauri/icons/Square71x71Logo.png                               |  Bin 0 -> 6522 bytes
+ lumenator/src-tauri/icons/Square89x89Logo.png                               |  Bin 0 -> 8864 bytes
+ lumenator/src-tauri/icons/StoreLogo.png                                     |  Bin 0 -> 3904 bytes
+ lumenator/src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml         |    5 +
+ lumenator/src-tauri/icons/android/mipmap-hdpi/ic_launcher.png               |  Bin 0 -> 3072 bytes
+ lumenator/src-tauri/icons/android/mipmap-hdpi/ic_launcher_foreground.png    |  Bin 0 -> 20683 bytes
+ lumenator/src-tauri/icons/android/mipmap-hdpi/ic_launcher_round.png         |  Bin 0 -> 3302 bytes
+ lumenator/src-tauri/icons/android/mipmap-mdpi/ic_launcher.png               |  Bin 0 -> 2857 bytes
+ lumenator/src-tauri/icons/android/mipmap-mdpi/ic_launcher_foreground.png    |  Bin 0 -> 11829 bytes
+ lumenator/src-tauri/icons/android/mipmap-mdpi/ic_launcher_round.png         |  Bin 0 -> 3127 bytes
+ lumenator/src-tauri/icons/android/mipmap-xhdpi/ic_launcher.png              |  Bin 0 -> 8399 bytes
+ lumenator/src-tauri/icons/android/mipmap-xhdpi/ic_launcher_foreground.png   |  Bin 0 -> 30244 bytes
+ lumenator/src-tauri/icons/android/mipmap-xhdpi/ic_launcher_round.png        |  Bin 0 -> 8950 bytes
+ lumenator/src-tauri/icons/android/mipmap-xxhdpi/ic_launcher.png             |  Bin 0 -> 15554 bytes
+ lumenator/src-tauri/icons/android/mipmap-xxhdpi/ic_launcher_foreground.png  |  Bin 0 -> 51209 bytes
+ lumenator/src-tauri/icons/android/mipmap-xxhdpi/ic_launcher_round.png       |  Bin 0 -> 16000 bytes
+ lumenator/src-tauri/icons/android/mipmap-xxxhdpi/ic_launcher.png            |  Bin 0 -> 23402 bytes
+ lumenator/src-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png |  Bin 0 -> 75990 bytes
+ lumenator/src-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_round.png      |  Bin 0 -> 24145 bytes
+ lumenator/src-tauri/icons/android/values/ic_launcher_background.xml         |    4 +
+ lumenator/src-tauri/icons/icon.icns                                         |  Bin 0 -> 495836 bytes
+ lumenator/src-tauri/icons/icon.ico                                          |  Bin 0 -> 52805 bytes
+ lumenator/src-tauri/icons/icon.png                                          |  Bin 0 -> 101014 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-20x20@1x.png                          |  Bin 0 -> 901 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-20x20@2x-1.png                        |  Bin 0 -> 2674 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-20x20@2x.png                          |  Bin 0 -> 2674 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-20x20@3x.png                          |  Bin 0 -> 5098 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-29x29@1x.png                          |  Bin 0 -> 1698 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-29x29@2x-1.png                        |  Bin 0 -> 4807 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-29x29@2x.png                          |  Bin 0 -> 4807 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-29x29@3x.png                          |  Bin 0 -> 8700 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-40x40@1x.png                          |  Bin 0 -> 2674 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-40x40@2x-1.png                        |  Bin 0 -> 7567 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-40x40@2x.png                          |  Bin 0 -> 7567 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-40x40@3x.png                          |  Bin 0 -> 13511 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-512@2x.png                            |  Bin 0 -> 190289 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-60x60@2x.png                          |  Bin 0 -> 13511 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-60x60@3x.png                          |  Bin 0 -> 23800 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-76x76@1x.png                          |  Bin 0 -> 7192 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-76x76@2x.png                          |  Bin 0 -> 19029 bytes
+ lumenator/src-tauri/icons/ios/AppIcon-83.5x83.5@2x.png                      |  Bin 0 -> 21538 bytes
+ lumenator/src-tauri/src/health.rs                                           |  680 ++++
+ lumenator/src-tauri/src/lib.rs                                              | 1313 +++++++
+ lumenator/src-tauri/src/main.rs                                             |    6 +
+ lumenator/src-tauri/src/setup.rs                                            | 4517 ++++++++++++++++++++++
+ lumenator/src-tauri/src/setup/hook_e2e.rs                                   | 2567 +++++++++++++
+ lumenator/src-tauri/src/setup/plugin_hooks.rs                               |  175 +
+ lumenator/src-tauri/tauri.conf.json                                         |   76 +
+ lumenator/src-tauri/tests/fixtures/v1.5.1/README.md                         |   18 +
+ lumenator/src-tauri/tests/fixtures/v1.5.1/lumen_meter.sh                    |  204 +
+ lumenator/src-tauri/tests/fixtures/v1.5.1/lumen_read_intercept.sh           |  135 +
+ lumenator/src/app/app.component.css                                         |    7 +
+ lumenator/src/app/app.component.html                                        |    1 +
+ lumenator/src/app/app.component.ts                                          |   17 +
+ lumenator/src/app/app.config.ts                                             |   16 +
+ lumenator/src/app/app.routes.ts                                             |   17 +
+ lumenator/src/app/app.spec.ts                                               |   52 +
+ lumenator/src/app/components/cost/cost.html                                 |   63 +
+ lumenator/src/app/components/cost/cost.scss                                 |  154 +
+ lumenator/src/app/components/cost/cost.spec.ts                              |  208 +
+ lumenator/src/app/components/cost/cost.ts                                   |   57 +
+ lumenator/src/app/components/firefly/firefly.spec.ts                        |  126 +
+ lumenator/src/app/components/firefly/firefly.ts                             |  270 ++
+ lumenator/src/app/components/gauge/gauge.html                               |   70 +
+ lumenator/src/app/components/gauge/gauge.scss                               |  168 +
+ lumenator/src/app/components/gauge/gauge.spec.ts                            |  154 +
+ lumenator/src/app/components/gauge/gauge.ts                                 |   70 +
+ lumenator/src/app/components/index.ts                                       |  283 ++
+ lumenator/src/app/components/logo/logo.spec.ts                              |   57 +
+ lumenator/src/app/components/logo/logo.ts                                   |  105 +
+ lumenator/src/app/components/usage/usage.html                               |   85 +
+ lumenator/src/app/components/usage/usage.scss                               |  179 +
+ lumenator/src/app/components/usage/usage.spec.ts                            |  148 +
+ lumenator/src/app/components/usage/usage.ts                                 |   74 +
+ lumenator/src/app/context-window.spec.ts                                    |   36 +
+ lumenator/src/app/directives/tooltip.directive.spec.ts                      |  165 +
+ lumenator/src/app/directives/tooltip.directive.ts                           |  104 +
+ lumenator/src/app/pages/home/home.css                                       |  357 ++
+ lumenator/src/app/pages/home/home.html                                      |  164 +
+ lumenator/src/app/pages/home/home.spec.ts                                   |  406 ++
+ lumenator/src/app/pages/home/home.ts                                        |  103 +
+ lumenator/src/app/pages/hotspots/hotspots.css                               |  293 ++
+ lumenator/src/app/pages/hotspots/hotspots.html                              |  160 +
+ lumenator/src/app/pages/hotspots/hotspots.spec.ts                           |  425 +++
+ lumenator/src/app/pages/hotspots/hotspots.ts                                |  102 +
+ lumenator/src/app/pages/optimizer/optimizer.css                             |  453 +++
+ lumenator/src/app/pages/optimizer/optimizer.html                            |  229 ++
+ lumenator/src/app/pages/optimizer/optimizer.spec.ts                         |  488 +++
+ lumenator/src/app/pages/optimizer/optimizer.ts                              |  201 +
+ lumenator/src/app/pages/panel/panel.css                                     |  275 ++
+ lumenator/src/app/pages/panel/panel.html                                    |   88 +
+ lumenator/src/app/pages/panel/panel.spec.ts                                 |  378 ++
+ lumenator/src/app/pages/panel/panel.ts                                      |  102 +
+ lumenator/src/app/pages/setup/setup.css                                     |  262 ++
+ lumenator/src/app/pages/setup/setup.html                                    |   91 +
+ lumenator/src/app/pages/setup/setup.spec.ts                                 |  396 ++
+ lumenator/src/app/pages/setup/setup.ts                                      |  166 +
+ lumenator/src/app/session.service.spec.ts                                   |  869 +++++
+ lumenator/src/app/session.service.ts                                        |  825 ++++
+ lumenator/src/app/tauri-bridge.fake.ts                                      |   86 +
+ lumenator/src/app/tauri-bridge.ts                                           |   56 +
+ lumenator/src/assets/angular.svg                                            |   16 +
+ lumenator/src/assets/tauri.svg                                              |    6 +
+ lumenator/src/index.html                                                    |   12 +
+ lumenator/src/main.ts                                                       |    7 +
+ lumenator/src/styles.css                                                    |  258 ++
+ lumenator/src/test-setup.ts                                                 |   28 +
+ lumenator/tsconfig.app.json                                                 |   21 +
+ lumenator/tsconfig.json                                                     |   26 +
+ lumenator/tsconfig.spec.json                                                |   17 +
+ panel-after-fix.png                                                         |  Bin 0 -> 23915 bytes
+ scripts/build-cli-release.sh                                                |   41 +
+ scripts/check-msrv.sh                                                       |   35 +
+ scripts/ci-download.ps1                                                     |   25 +
+ scripts/fix-quarantine.sh                                                   |   24 +
+ scripts/issue5-launch-check.sh                                              |  298 ++
+ scripts/lumen_image_reads.py                                                |  167 +
+ scripts/lumen_percall.py                                                    |  303 ++
+ scripts/lumen_rounds.py                                                     |  174 +
+ scripts/patch-formula.py                                                    |   90 +
+ scripts/probe-hook-env.sh                                                   |  112 +
+ scripts/release.sh                                                          |  236 ++
+ scripts/verify-hooks.sh                                                     |  244 ++
+ scripts/verify-install.ps1                                                  |  191 +
+ scripts/verify-install.sh                                                   |  302 ++
+ 265 files changed, 72611 insertions(+)

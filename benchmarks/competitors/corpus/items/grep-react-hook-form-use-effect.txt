@@ -1,0 +1,151 @@
+src/__tests__/controller.test.tsx:131:      React.useEffect(() => {
+src/__tests__/controller.test.tsx:952:      React.useEffect(() => {
+src/__tests__/controller.test.tsx:1801:      React.useEffect(() => {
+src/__tests__/performance.test.tsx:62:      React.useEffect(() => {
+src/__tests__/performance.test.tsx:123:      React.useEffect(() => {
+src/__tests__/performance.test.tsx:198:      React.useEffect(() => {
+src/__tests__/performance.test.tsx:291:      React.useEffect(() => {
+src/__tests__/performance.test.tsx:561:      React.useEffect(() => {
+src/__tests__/type.test.tsx:405:    React.useEffect(() => {
+src/__tests__/useController.test.tsx:1:import React, { useEffect, useMemo, useState } from 'react';
+src/__tests__/useController.test.tsx:112:      useEffect(() => {
+src/__tests__/useController.test.tsx:469:      useEffect(() => {
+src/__tests__/useController.test.tsx:537:      React.useEffect(() => {
+src/__tests__/useController.test.tsx:710:      React.useEffect(() => {
+src/__tests__/useController.test.tsx:855:      React.useEffect(() => {
+src/__tests__/useController.test.tsx:903:  it('restore defaultValue from Controller with react strict mode double useEffect', async () => {
+src/__tests__/useController.test.tsx:940:  it('restore defaultValues with react strict mode double useEffect', () => {
+src/__tests__/useFieldArray.test.tsx:1272:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:1458:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:1675:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:1817:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:2503:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:2602:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:2706:        React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:2953:      React.useEffect(() => {
+src/__tests__/useFieldArray.test.tsx:5678:    React.useEffect(() => {
+src/__tests__/useFieldArray/insert.test.tsx:486:      { test: [] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/insert.test.tsx:488:      { test: [{ value: '' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/move.test.tsx:187:      { test: [{ value: '1' }, { value: '2' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/move.test.tsx:189:      { test: [{ value: '2' }, { value: '1' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/prepend.test.tsx:243:      { test: [] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/prepend.test.tsx:245:      { test: [{ value: '' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/remove.test.tsx:772:      { test: [] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/remove.test.tsx:774:      { test: [{ value: '' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/remove.test.tsx:776:      { test: [] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/remove.test.tsx:1273:      React.useEffect(() => {
+src/__tests__/useFieldArray/remove.test.tsx:1475:      React.useEffect(() => {
+src/__tests__/useFieldArray/replace.test.tsx:222:      React.useEffect(() => {
+src/__tests__/useFieldArray/replace.test.tsx:283:      React.useEffect(() => {
+src/__tests__/useFieldArray/replace.test.tsx:378:      React.useEffect(() => {
+src/__tests__/useFieldArray/swap.test.tsx:238:      { test: [{ value: '1' }, { value: '2' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/swap.test.tsx:240:      { test: [{ value: '2' }, { value: '1' }] }, // render inside useEffect in useFieldArray
+src/__tests__/useFieldArray/update.test.tsx:723:      React.useEffect(() => {
+src/__tests__/useFieldArray/update.test.tsx:787:      React.useEffect(() => {
+src/__tests__/useForm.test.tsx:547:        React.useEffect(() => {
+src/__tests__/useForm.test.tsx:2361:      React.useEffect(() => {
+src/__tests__/useForm.test.tsx:2484:      React.useEffect(() => {
+src/__tests__/useForm/clearErrors.test.tsx:282:      React.useEffect(() => {
+src/__tests__/useForm/formState.test.tsx:257:        React.useEffect(() => {
+src/__tests__/useForm/formState.test.tsx:435:    it('render isValid as true with reset at useEffect with valid data', async () => {
+src/__tests__/useForm/formState.test.tsx:447:        React.useEffect(() => {
+src/__tests__/useForm/formState.test.tsx:471:    it('render isValid as false with reset at useEffect with valid data', async () => {
+src/__tests__/useForm/formState.test.tsx:483:        React.useEffect(() => {
+src/__tests__/useForm/register.test.tsx:225:      React.useEffect(() => {
+src/__tests__/useForm/register.test.tsx:258:      React.useEffect(() => {
+src/__tests__/useForm/register.test.tsx:309:      React.useEffect(() => {
+src/__tests__/useForm/register.test.tsx:1031:        React.useEffect(() => {
+src/__tests__/useForm/register.test.tsx:1659:        React.useEffect(() => {
+src/__tests__/useForm/reset.test.tsx:90:      React.useEffect(() => {
+src/__tests__/useForm/reset.test.tsx:566:      React.useEffect(() => {
+src/__tests__/useForm/reset.test.tsx:683:        React.useEffect(() => {
+src/__tests__/useForm/reset.test.tsx:851:        React.useEffect(() => {
+src/__tests__/useForm/reset.test.tsx:1342:      React.useEffect(() => {
+src/__tests__/useForm/reset.test.tsx:1368:      React.useEffect(() => {
+src/__tests__/useForm/resetField.test.tsx:543:      React.useEffect(() => {
+src/__tests__/useForm/resolver.test.tsx:39:      React.useEffect(() => {
+src/__tests__/useForm/resolver.test.tsx:409:      React.useEffect(() => {
+src/__tests__/useForm/resolver.test.tsx:464:        React.useEffect(() => {
+src/__tests__/useForm/resolver.test.tsx:659:        React.useEffect(() => {
+src/__tests__/useForm/setError.test.tsx:375:it('update error state in FormProvider when setError is called in useEffect', async () => {
+src/__tests__/useForm/setError.test.tsx:388:    React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:638:        React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:663:        React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:1117:        React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:1232:      React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:1272:      React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:1552:      React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:1583:      React.useEffect(() => {
+src/__tests__/useForm/setValue.test.tsx:1668:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:27:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:46:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:98:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:136:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:177:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:216:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:261:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:301:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:343:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:387:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:462:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:524:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:578:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:630:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:683:      React.useEffect(() => {
+src/__tests__/useForm/subscribe.test.tsx:727:      React.useEffect(
+src/__tests__/useForm/trigger.test.tsx:549:      React.useEffect(() => {
+src/__tests__/useForm/unregister.test.tsx:185:  it('not flip isDirty to true when a field with no defaultValue is registered from useEffect', async () => {
+src/__tests__/useForm/unregister.test.tsx:196:      React.useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:1:import React, { useEffect, useState } from 'react';
+src/__tests__/useForm/watch.test.tsx:226:      React.useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:501:      React.useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:622:      useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:733:      useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:744:      useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:816:      useEffect(() => {
+src/__tests__/useForm/watch.test.tsx:820:      useEffect(() => {
+src/__tests__/useFormContext.test.tsx:27:      React.useEffect(() => {
+src/__tests__/useFormContext.test.tsx:346:      React.useEffect(() => {
+src/__tests__/useFormContext.test.tsx:397:      React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:186:      React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:433:      React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:984:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1660:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1683:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1719:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1754:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1791:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1917:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1921:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1949:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1953:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1981:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:1985:          React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:2119:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:2146:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:2242:        React.useEffect(() => {
+src/__tests__/useWatch.test.tsx:2274:        React.useEffect(() => {
+src/form.tsx:135:  React.useEffect(() => {
+src/types/form.ts:221: * Registers a field into hook form with or without the actual DOM ref. You can invoke register anywhere in the component including in `useEffect`.
+src/types/form.ts:242: * // Register custom field at useEffect
+src/types/form.ts:243: * useEffect(() => {
+src/types/form.ts:275: * useEffect(() => {
+src/types/form.ts:485:useEffect(() => {
+src/types/form.ts:576:   * useEffect(() => {
+src/types/form.ts:603: * useEffect(() => {
+src/types/form.ts:812: * useEffect(() => {
+src/useController.ts:207:  React.useEffect(() => {
+src/useController.ts:275:  React.useEffect(() => {
+src/useFieldArray.ts:374:  React.useEffect(() => {
+src/useFieldArray.ts:502:  React.useEffect(() => {
+src/useForm.ts:147:  React.useEffect(
+src/useForm.ts:152:  React.useEffect(() => {
+src/useForm.ts:161:  React.useEffect(() => {
+src/useForm.ts:168:  React.useEffect(() => {
+src/useForm.ts:175:  React.useEffect(() => {
+src/useForm.ts:182:  React.useEffect(() => {
+src/useForm.ts:193:  React.useEffect(() => {
+src/useForm.ts:214:  React.useEffect(() => {
+src/useFormState.ts:84:  React.useEffect(() => {
+src/useIsomorphicLayoutEffect.ts:7:  : React.useEffect;
+src/useWatch.ts:239:  React.useEffect(() => control._removeUnmounted());
