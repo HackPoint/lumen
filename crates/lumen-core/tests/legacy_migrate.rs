@@ -1114,9 +1114,13 @@ mod v2 {
 
     // --- the move and the lock ---------------------------------------------
 
+    // Used only by the unix test below: Windows cannot move a folder whose ledger is held open.
+    #[cfg(unix)]
     static BUSY_THROUGH_MOVE: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
     static MOVED_AT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+    #[cfg(unix)]
     fn probe_the_moved_ledger(p: &Phase<'_>) {
         if let Phase::Moved { dir } = p {
             MOVED_AT.set(dir.to_path_buf()).ok();
