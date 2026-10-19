@@ -105,6 +105,64 @@ All through the real binaries of the asset, on the committed corpus of the exist
 Latency series report the median and the min-max of the runs. "Worse" and "equal" use that
 range: overlapping ranges are equal.
 
+## What is worse
+
+A newer version is compared with the version immediately before it in the manifest (never with
+no Lumen, which is a reference and not an earlier release). Both cells must hold a figure: an
+`n/a` cell, a failed cell, or a pair that is not comparable (a script hook against a binary hook)
+is never compared. "Worse" is defined per metric, so noise is not called a regression:
+
+| metric | worse when |
+|---|---|
+| tokens returned per call, per tool and size bucket | the median over the files is higher |
+| net dollars per call, per tool and size bucket | the median over the files is lower (for a repeat read and a blocked Read the unit is the flow, see below) |
+| latency p50 (hooks and server) | the runs separate: every pass median of the newer build is above every pass median of the older build (the release bench's rule). p90 and p99 are shown with their changes and not judged: only the median has pass-level evidence |
+| ingest throughput (bytes and turns per second) | the whole min-max of the newer runs is below the whole min-max of the older runs |
+| cold start | the whole min-max of the newer runs is above that of the older runs |
+| idle RSS | the newer median is above the older peak (the run's own median-to-peak range does not overlap) |
+| idle CPU | one window per process has no range, so a fixed margin: higher by more than 25% and by more than 0.05 CPU seconds a minute |
+
+Anything else is `equal` (overlapping ranges, a change inside the margin) or `better`. An ingest
+in which any run did not finish is a failed cell, `incomplete: N of M turns` for the run with the
+fewest turns, and is never compared. A hook figure of a script-hook version (up to 1.5.1) is
+labelled `(script)` and is compared only with another script-hook version.
+
+The engine prices a repeat-read stub and an edit delta against what Lumen returned the first
+time, so its line for them moves with the outline. They are therefore scored as the flow (the
+outline and the repeat read, two calls), as is a blocked Read followed by an outline, so that a
+better outline is never shown as a worse stub. The outline and `recall_file` rows are one call.
+The delta of the edit flow is scored with the file's own full count, not the edited file's (a
+few tokens apart).
+
+Every regression is listed in the report with the metric, both versions, both values, the
+evidence and where to look for the cause (a pointer: the run times and counts, it does not trace),
+and the `gh issue create -R HackPoint/lumen ...` command that files it is printed in the report
+and by the command. The harness never runs `gh`: the issues are filed after review.
+
+## The one command and the table
+
+`benchmarks/versions/run.sh` (`run.ps1` on Windows), which is `lumen-bench versions all`:
+
+1. fetches the pinned asset of every version for this OS (sha256 checked, never rebuilt), and
+   refuses on a mismatch;
+2. measures every version and no Lumen one after the other, in the sandbox, under the real-ledger
+   guard: the token figures, the latency series (binary hooks, script hooks, server), and the
+   daemon (ingest, cold start, idle CPU and memory);
+3. writes `results/<os>.json` (the measurements, the only input of the report) and
+   `results/<os>.md` (the version x metric table rendered from that JSON, then the regressions
+   and the issue commands). `versions report FILE` renders a JSON again, byte for byte.
+
+`--dry-run` prints what would be fetched and measured and writes nothing. A setting other than
+the default (`--runs`, `--ingest-runs`, `--idle-window`, ...) or a subset of the versions is
+written into the results as a note, so a smoke run is never mistaken for the benchmark.
+
+The table has one row per metric and one column per version, no Lumen first. Each figure carries
+its change against the previous version and against no Lumen (dollars as a difference, the rest as
+a percentage); `n/a - <reason>` cells carry no change. Dollars are the primary MODELLED reference
+session at R = 0 and, once the no-Lumen E2E arm has run, at the R it measured (`--measured-r`);
+until then the report says "not available yet". `compress_logs` is not measured by the token
+runner and has no row.
+
 ## n/a rules
 
 A cell that cannot exist shows `n/a - <reason>`, never 0, and never enters a delta or a ranking:

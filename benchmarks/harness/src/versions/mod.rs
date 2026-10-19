@@ -7,9 +7,15 @@
 //! same token and latency runners as the two-build mode. The daemon metrics (V4), the script
 //! hooks (V3) and the version x metric report (V5) plug in beside [`run_builds`]: they take the
 //! builds it returns and the [`caps::Caps`] each carries.
+//!
+//! V5 ([`report`], [`collect`]): `versions all` is the one command that reproduces the whole
+//! benchmark on this OS (`benchmarks/versions/run.sh`), and `versions report FILE` renders its
+//! results JSON again.
 
 pub mod caps;
+pub mod collect;
 pub mod daemon;
+pub mod report;
 pub mod script_hooks;
 
 use crate::builds::{self, Build};
@@ -39,6 +45,11 @@ usage: benchmarks/run.sh versions [options]
   --latency-only     skip the token part
   --runs N           recorded runs per latency series (default 200, at least 100)
   --warmup N         discarded warm-up runs per series per pass (default 20)
+
+  all                the one command that reproduces the whole benchmark: every version and no
+                     Lumen, tokens, latency and daemon metrics, scored, written as <os>.json and
+                     <os>.md (`versions all --help`; run it as benchmarks/versions/run.sh)
+  report FILE        render a results JSON again
 ";
 
 /// The builds of a run, and the versions that have no asset on the platform with the
@@ -149,6 +160,11 @@ fn parse(args: &[String]) -> Res<Option<Opts>> {
 
 /// Entry point for `lumen-bench versions <args>`. `args` are what follows the subcommand.
 pub fn entry(args: &[String]) -> Res<()> {
+    match args.first().map(String::as_str) {
+        Some("all") => return collect::entry_all(&args[1..]),
+        Some("report") => return collect::entry_report(&args[1..]),
+        _ => {}
+    }
     let Some(o) = parse(args)? else {
         print!("{HELP}");
         return Ok(());
