@@ -940,6 +940,84 @@ mod v2 {
         assert!(!n.join(STAGE_DIR).exists());
     }
 
+    static N_MARKER: OnceLock<PathBuf> = OnceLock::new();
+
+    /// After the ledger is in N, the marker's temp name is made unusable, so the marker write
+    /// fails, as ENOSPC or a sharing violation on its temp file would.
+    fn block_marker_write(p: &Phase<'_>) {
+        if let Phase::Commit { rel } = p
+            && rel.ends_with("update_check.json")
+        {
+            std::fs::create_dir_all(N_MARKER.get().unwrap().join(".legacy-migration.tmp")).unwrap();
+        }
+    }
+
+    /// A commit that fails by returning (not by a kill) takes back what it renamed into N, so
+    /// the rerun does not set the staged ledger aside as a ledger someone else left there.
+    #[test]
+    fn a_commit_that_fails_at_the_marker_leaves_no_second_copy() {
+        let root = TempDir::new().unwrap();
+        let (l, n) = dirs(root.path());
+        seed_prev(&l, false, 20);
+        N_MARKER.set(n.clone()).unwrap();
+        let mut o = copts();
+        o.hook = Some(block_marker_write);
+        let out = commit::migrate(&l, &n, &o, &Real);
+        assert!(matches!(out, commit::Outcome::Failed { .. }), "{out:?}");
+        assert!(!n.join("lumen.db").exists(), "the ledger was taken back");
+        assert!(l.join("lumen.db").is_file(), "L is whole");
+
+        std::fs::remove_dir(n.join(".legacy-migration.tmp")).unwrap();
+        let (_, moved) = migrated(commit::migrate(&l, &n, &copts(), &Real));
+        assert_eq!(moved, Moved::Done);
+        assert_eq!(has_pre_legacy(&n), Vec::<String>::new());
+        assert_eq!(events(&n.join("lumen.db")), 20);
+    }
+
+    #[test]
+    fn a_commit_that_keeps_failing_adds_no_copy_per_start() {
+        let root = TempDir::new().unwrap();
+        let (l, n) = dirs(root.path());
+        seed_prev(&l, false, 20);
+        std::fs::create_dir_all(n.join(".legacy-migration.tmp")).unwrap();
+        for _ in 0..3 {
+            let out = commit::migrate(&l, &n, &copts(), &Real);
+            assert!(matches!(out, commit::Outcome::Failed { .. }), "{out:?}");
+        }
+        assert_eq!(has_pre_legacy(&n), Vec::<String>::new());
+        std::fs::remove_dir(n.join(".legacy-migration.tmp")).unwrap();
+        migrated(commit::migrate(&l, &n, &copts(), &Real));
+        assert_eq!(has_pre_legacy(&n), Vec::<String>::new());
+    }
+
+    static N_RENAME: OnceLock<PathBuf> = OnceLock::new();
+
+    /// The next staged file vanishes, so its rename into N fails after the ledger's succeeded.
+    fn drop_next_staged(p: &Phase<'_>) {
+        if let Phase::Commit { rel } = p
+            && rel.ends_with("lumen.db")
+        {
+            let stage = N_RENAME.get().unwrap().join(STAGE_DIR);
+            std::fs::remove_file(stage.join("lumen_call_toolu_1.json")).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_commit_that_fails_at_a_rename_leaves_no_second_copy() {
+        let root = TempDir::new().unwrap();
+        let (l, n) = dirs(root.path());
+        seed_prev(&l, false, 20);
+        N_RENAME.set(n.clone()).unwrap();
+        let mut o = copts();
+        o.hook = Some(drop_next_staged);
+        let out = commit::migrate(&l, &n, &o, &Real);
+        assert!(matches!(out, commit::Outcome::Failed { .. }), "{out:?}");
+        let (_, moved) = migrated(commit::migrate(&l, &n, &copts(), &Real));
+        assert_eq!(moved, Moved::Done);
+        assert_eq!(has_pre_legacy(&n), Vec::<String>::new());
+        assert_eq!(events(&n.join("lumen.db")), 20);
+    }
+
     #[test]
     fn a_run_killed_after_the_commit_moves_the_folder_at_the_next_start() {
         let root = TempDir::new().unwrap();
