@@ -2786,12 +2786,15 @@ dependencies = [
 name = "lumen-bench"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "lumen-core",
  "lumen-mcp",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "toml 1.1.6+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

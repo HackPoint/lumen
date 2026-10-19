@@ -1,0 +1,62 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'/H/.claude/lumen/lumen_meter.sh'",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "'/H/.claude/lumen/lumen_meter.sh'",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'/H/.claude/lumen/lumen_read_intercept.sh'",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "'/H/.claude/lumen/lumen_read_intercept.sh'",
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__lumen__smart_read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "'/H/.claude/lumen/lumen_read_intercept.sh'",
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__lumen__recall_file"
+      },
+      {
+        "hooks": [
+          {
+            "command": "'/H/.claude/lumen/lumen_read_intercept.sh'",
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__lumen__compress_logs"
+      }
+    ]
+  }
+}

@@ -1,0 +1,138 @@
+# The exact task list of the competitor comparison and the version comparison's E2E subset.
+#
+# Committed before any run (METHOD.md, "Honesty rule"). The list is fixed: it cannot be
+# changed, extended or pruned after results exist. Pins are full 40-character commits or
+# 64-hex sha256 values (benchmarks/harness/tests/pins.rs checks).
+
+[swe_bench]
+dataset = "princeton-nlp/SWE-bench_Verified"
+revision = "c104f840cc67f8b6eec6f759ebc8b2693d585d4a" # Hugging Face commit, last modified 2025-02-18
+parquet = "data/test-00000-of-00001.parquet"
+parquet_sha256 = "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd"
+rows = 500
+seed = "lumen-p2-2026-10-18"
+count = 10
+ids_sha256 = "63df4ddca915d75820bdd26f8b9cf6f98dff0361eb9d5f73bc5ae439a427762f" # sha256 of the 10 ids in rank order joined by "\n" (no trailing newline)
+# The draw: rank every instance id by sha256("<seed>\n<instance_id>") and keep the first 10, in
+# rank order. Nothing is filtered, so the draw is whatever it is (6 django, 3 sphinx, 1
+# matplotlib here); a different mix would have been equally valid and equally unfiltered.
+# `python3 benchmarks/competitors/draw_tasks.py --check` reproduces it (see that file).
+# The prompt for each is the instance's problem statement plus one fixed instruction line
+# (METHOD.md); success is the official swebench harness on the resulting patch.
+
+[[swe]]
+id = "django__django-14915"
+repo = "django/django"
+base_commit = "903aaa35e5ceaa33bfc9b19b7f6da65ce5a91dd4"
+
+[[swe]]
+id = "django__django-16801"
+repo = "django/django"
+base_commit = "3b62d8c83e3e48d2ed61cfa32a61c56d9e030293"
+
+[[swe]]
+id = "sphinx-doc__sphinx-7985"
+repo = "sphinx-doc/sphinx"
+base_commit = "f30284ef926ebaf04b176f21b421e2dffc679792"
+
+[[swe]]
+id = "sphinx-doc__sphinx-8548"
+repo = "sphinx-doc/sphinx"
+base_commit = "dd1615c59dc6fff633e27dbb3861f2d27e1fb976"
+
+[[swe]]
+id = "matplotlib__matplotlib-25287"
+repo = "matplotlib/matplotlib"
+base_commit = "f8ffce6d44127d4ea7d6491262ab30046b03294b"
+
+[[swe]]
+id = "django__django-11087"
+repo = "django/django"
+base_commit = "8180ffba21bf10f4be905cb0d4890dc2bcff2788"
+
+[[swe]]
+id = "django__django-13363"
+repo = "django/django"
+base_commit = "76e0151ea0e0f56dca66cee846a78b89346d2c4c"
+
+[[swe]]
+id = "django__django-14349"
+repo = "django/django"
+base_commit = "a708f39ce67af174df90c5b5e50ad1976cec7cb8"
+
+[[swe]]
+id = "django__django-15104"
+repo = "django/django"
+base_commit = "a7e7043c8746933dafce652507d3b821801cdc7d"
+
+[[swe]]
+id = "sphinx-doc__sphinx-7440"
+repo = "sphinx-doc/sphinx"
+base_commit = "9bb204dcabe6ba0fc422bf4a45ad0c79c680d90b"
+
+
+# --- Lumen scenarios ---------------------------------------------------------------------------
+# Three tasks that stress what Lumen is for. Each is a real upstream fix or change: the base is
+# the parent of an upstream commit, the gold patch is that commit's source change, and the hidden
+# tests either come from that commit or are written in E2 and shown to fail at the base and pass
+# with the gold patch (E2's acceptance). All three are BSD-3-Clause Python projects; the agent
+# is given the repository at `base_commit` with no .git history after it, a fresh container
+# per run, and none of the hidden tests.
+# If E2 finds a prompt below cannot be judged as written, the prompt is amended in a commit
+# before the pilot, never after it (METHOD.md, "Honesty rule").
+
+[[scenario]]
+id = "large-file-exploration"
+title = "A fix inside a 4,000-line source file"
+repo = "https://github.com/pallets/click"
+license = "BSD-3-Clause"
+base_commit = "4b24a6c8f6658ef89fd6db4dcaf8ee88eef75dfa"
+gold_commit = "7d05a59b9d46a415d85937630d1d812cf477f60a" # "Fix get_parameter_source() during type conversion and eager callbacks"
+language = "python"
+large_file = "src/click/core.py" # 4,038 lines at the base commit
+prompt = """\
+In this repository, `Context.get_parameter_source(name)` returns None when it is called from \
+inside `ParamType.convert()` or from an eager option's callback, although by then the \
+parameter's source (command line, environment, default, ...) is already known. A parameter \
+that has not been processed yet may still be None; one that is being converted or whose \
+eager callback is running must report its source. Fix it. When several options share one \
+parameter name and one of them loses the arbitration, the winner's source must be the one \
+that stays recorded. Do not change any other behaviour. Run the existing tests that cover \
+what you touched."""
+success = "hidden FAIL_TO_PASS: the tests added by the gold commit in tests/test_defaults.py and tests/test_options.py (hidden from the agent); PASS_TO_PASS: the rest of tests/ at the base commit, run in E2"
+
+[[scenario]]
+id = "log-heavy-debugging"
+title = "A bug found through a long CI log"
+repo = "https://github.com/pallets/werkzeug"
+license = "BSD-3-Clause"
+base_commit = "f7e37f0bf510fa355fdac3e922cc2078916b021f"
+gold_commit = "594452f6a4fe4de38a544962fbf04bfc9d37fbc2" # "put sign in correct place for small negative float"
+language = "python"
+log = "ci.log" # E2 produces it: `python -m pytest -v -rA tests` at the base commit with the hidden test included, so the failure is in it, buried in the passing lines; its size and sha256 are recorded in E2
+prompt = """\
+A CI run of this repository's test suite failed. The complete output of `python -m pytest -v \
+-rA tests` is in `ci.log` in the repository root. Find out why the run failed, fix the cause in \
+the source (not in the tests), and check the fix by running the failing test. Do not change \
+any other behaviour."""
+success = "hidden FAIL_TO_PASS: the routing test case added by the gold commit (tests/test_routing.py, 'no exp small negative'); PASS_TO_PASS: the rest of tests/"
+
+[[scenario]]
+id = "multi-file-refactor"
+title = "A rename and tightening across three files"
+repo = "https://github.com/pallets/werkzeug"
+license = "BSD-3-Clause"
+base_commit = "40d4b497104db492273057c19425a6d47442bd29"
+gold_commit = "50f5cfb31b39f8c10c12dda5ef8176fd2c1aeaf7" # "private `parse_age` and `dump_age`"
+language = "python"
+files_touched_by_gold = ["src/werkzeug/_header_property.py", "src/werkzeug/http.py", "src/werkzeug/sansio/response.py"]
+prompt = """\
+Make the Age header helpers private and tighten their edge cases. In `werkzeug.http`, replace \
+the public `parse_age` and `dump_age` with private `_load_age(value: str)` and \
+`_dump_age(value)`, update every caller, and do not keep the old names. `_load_age` returns \
+None for a value that is not a base-10 integer, is negative, or overflows a timedelta; \
+`_dump_age` takes a timedelta or an int and raises ValueError for a negative one. Make \
+`_load_retry_after` and `_dump_retry_after` follow the same rules for a number of seconds \
+(negative loads as None and dumps as ValueError). `header_property` must not run its \
+`load_func` on its default value when the header is absent. Keep the existing tests passing."""
+success = "hidden FAIL_TO_PASS: tests written in E2 for the behaviour above (they fail at the base commit and pass with the gold patch); PASS_TO_PASS: the rest of tests/"

@@ -1,0 +1,833 @@
+[corpus]
+schema = 1
+note = "Layer 1 compression-replay corpus (C1): real tool outputs recorded from pinned public sources. Regenerate with `benchmarks/run.sh competitors record`; verify with `competitors record --verify`. A needle is a line or fragment a later question needs; a tool that drops one does not win the row."
+items = 46
+total_bytes = 963901
+
+[[item]]
+id = "buildlog-rustc-item-privacy"
+category = "build_log"
+file = "items/buildlog-rustc-item-privacy.txt"
+bytes = 7439
+lines = 240
+sha256 = "0ae2fae07a25d0c98170a6c286700bb5a13f9c886d0c8e789266813b10e4b021"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/rust-lang/rust/1159e78c4747b02ef996e55082b704c09b970588/tests/ui/traits/item-privacy.stderr"
+source_sha256 = "0ae2fae07a25d0c98170a6c286700bb5a13f9c886d0c8e789266813b10e4b021"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "error[E0599]: no method named `a` found for struct `S` in the current scope",
+    "error[E0599]: no associated item named `B` found for struct `S` in the current scope",
+    "error[E0624]: associated type `A` is private",
+    "error: aborting due to 15 previous errors",
+]
+
+[[item]]
+id = "buildlog-rustc-mismatched-lifetime-syntaxes"
+category = "build_log"
+file = "items/buildlog-rustc-mismatched-lifetime-syntaxes.txt"
+bytes = 31866
+lines = 613
+sha256 = "ee1b8daa0f8e60a756e1a5dfb0f70afa394e8d1406d6a56776d8a8d168f988bd"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/rust-lang/rust/1159e78c4747b02ef996e55082b704c09b970588/tests/ui/lifetimes/mismatched-lifetime-syntaxes.stderr"
+source_sha256 = "ee1b8daa0f8e60a756e1a5dfb0f70afa394e8d1406d6a56776d8a8d168f988bd"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "error: eliding a lifetime that's named elsewhere is confusing",
+    "error: hiding a lifetime that's named elsewhere is confusing",
+    "error: aborting due to 42 previous errors",
+]
+
+[[item]]
+id = "buildlog-rustc-recursion-hang"
+category = "build_log"
+file = "items/buildlog-rustc-recursion-hang.txt"
+bytes = 13119
+lines = 31
+sha256 = "c833dc4bfb4a9d4437b8d11f3d26a7f607bde9fdad3a4bad50271499da5b584b"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/rust-lang/rust/1159e78c4747b02ef996e55082b704c09b970588/tests/ui/traits/issue-91949-hangs-on-recursion.stderr"
+source_sha256 = "c833dc4bfb4a9d4437b8d11f3d26a7f607bde9fdad3a4bad50271499da5b584b"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = ["error: aborting due to 1 previous error; 1 warning emitted"]
+
+[[item]]
+id = "buildlog-tsc-conditional-types"
+category = "build_log"
+file = "items/buildlog-tsc-conditional-types.txt"
+bytes = 28695
+lines = 544
+sha256 = "d6016827385d720a2b08eb1862c1da14088aef86f094c6a9ddf8709d158c963f"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/microsoft/TypeScript/c63de15a992d37f0d6cec03ac7631872838602cb/tests/baselines/reference/conditionalTypes1.errors.txt"
+source_sha256 = "d6016827385d720a2b08eb1862c1da14088aef86f094c6a9ddf8709d158c963f"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "conditionalTypes1.ts(12,5): error TS2322: Type 'T' is not assignable to type 'NonNullable<T>'.",
+    "!!! error TS2322:         Type 'string' is not assignable to type 'T[keyof T] extends Function ? never : keyof T'.",
+    "!!! error TS2322:       Type 'boolean' is not assignable to type 'true'.",
+]
+
+[[item]]
+id = "buildlog-tsc-keyof-indexed-access"
+category = "build_log"
+file = "items/buildlog-tsc-keyof-indexed-access.txt"
+bytes = 22842
+lines = 396
+sha256 = "a926e2f774ac5b3ae9e80f4822e770d2e951050071d060d28bc9f1a8513653ce"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/microsoft/TypeScript/c63de15a992d37f0d6cec03ac7631872838602cb/tests/baselines/reference/keyofAndIndexedAccessErrors.errors.txt"
+source_sha256 = "a926e2f774ac5b3ae9e80f4822e770d2e951050071d060d28bc9f1a8513653ce"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "keyofAndIndexedAccessErrors.ts(10,18): error TS2304: Cannot find name 'K0'.",
+    """!!! error TS2345:   Type '"size"' is not assignable to type 'keyof Shape'.""",
+    "!!! error TS2322:   'number' is assignable to the constraint of type 'T[keyof T]', but 'T[keyof T]' could be instantiated with a different subtype of constraint 'number'.",
+]
+
+[[item]]
+id = "buildlog-tsc-mapped-type-errors"
+category = "build_log"
+file = "items/buildlog-tsc-mapped-type-errors.txt"
+bytes = 13695
+lines = 259
+sha256 = "635021b5edb68b171d03c1efe26d1bdf20216fdf10fe9683e0ae65c393693e13"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/microsoft/TypeScript/c63de15a992d37f0d6cec03ac7631872838602cb/tests/baselines/reference/mappedTypeErrors.errors.txt"
+source_sha256 = "635021b5edb68b171d03c1efe26d1bdf20216fdf10fe9683e0ae65c393693e13"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "mappedTypeErrors.ts(19,20): error TS2313: Type parameter 'P' has a circular constraint.",
+    "!!! error TS2344: Type 'Date' does not satisfy the constraint 'string | number | symbol'.",
+    "!!! error TS2339: Property 'foo' does not exist on type 'Record<K, number>'.",
+]
+
+[[item]]
+id = "grep-lumen-pub-fn"
+category = "grep"
+file = "items/grep-lumen-pub-fn.txt"
+bytes = 18399
+lines = 201
+sha256 = "2818685406e5dabfa733477ae98bd83c6726405a3eaa766922557c051e2330ab"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git grep -n -e pub fn <commit> -- crates"
+needles = [
+    "crates/lumen-cli/src/data.rs:87:pub fn run(state: Arc<Mutex<AppState>>) {",
+    "crates/lumen-core/src/rates.rs:79:pub fn session_cost(input: i64, output: i64, cache_read: i64, cache_write: i64) -> f64 {",
+    "crates/lumen-stats/src/lib.rs:31:pub fn db_url() -> String {",
+]
+
+[[item]]
+id = "grep-lumen-pub-struct-context"
+category = "grep"
+file = "items/grep-lumen-pub-struct-context.txt"
+bytes = 11262
+lines = 231
+sha256 = "ce3dc70d392320b534bb9b043726127888495adebfeb6e13d4466ee262da7799"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git grep -n -C 1 -e pub struct <commit> -- crates"
+needles = [
+    "crates/lumen-cli/src/data.rs-10-#[derive(Default)]",
+    "crates/lumen-core/src/repeat.rs-725-#[derive(Default)]",
+    "crates/lumen-stats/src/lib.rs-677-    pub total_tokens_read: i64,",
+]
+
+[[item]]
+id = "grep-pytest-count-def-test"
+category = "grep"
+file = "items/grep-pytest-count-def-test.txt"
+bytes = 5782
+lines = 124
+sha256 = "7a999d9e136dee227c882d2e82f9f186edcb968bae3472b570525d8cc4231b48"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git grep -c -e def test_ <commit> -- testing"
+needles = [
+    "testing/_py/test_local.py:183",
+    "testing/plugins_integration/pytest_twisted_integration.py:2",
+    "testing/typing_checks.py:1",
+]
+
+[[item]]
+id = "grep-pytest-fixture-docs"
+category = "grep"
+file = "items/grep-pytest-fixture-docs.txt"
+bytes = 39428
+lines = 430
+sha256 = "29d21d5b555cc14936683b1b1555bc41f15b74e6b386954dd8f90ec2f9a891de"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git grep -n -i -e fixture <commit> -- doc/en/how-to"
+needles = [
+    "doc/en/how-to/cache.rst:202:implements a :ref:`fixture <fixture>` which reuses previously created state",
+    'doc/en/how-to/fixtures.rst:1389:   @pytest.fixture(params=[0, 1], ids=["spam", "ham"])',
+    "doc/en/how-to/xunit_setup.rst:119:  scope rules of fixtures involved in the call.",
+]
+
+[[item]]
+id = "grep-pytest-raise"
+category = "grep"
+file = "items/grep-pytest-raise.txt"
+bytes = 28057
+lines = 340
+sha256 = "e95937eb6c12aae9f7cb776b9cb13bf36dc323ec7aceb2e6424f4e2ec4aacbe6"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git grep -n -e raise  <commit> -- src"
+needles = [
+    'src/_pytest/_code/code.py:95:                raise OSError("path check failed.")',
+    "src/_pytest/mark/expression.py:304:        raise NotImplementedError()",
+    "src/pytest/__main__.py:9:    raise SystemExit(_console_main())",
+]
+
+[[item]]
+id = "grep-react-hook-form-export-const"
+category = "grep"
+file = "items/grep-react-hook-form-export-const.txt"
+bytes = 1418
+lines = 21
+sha256 = "fb9bd202b4d7486b17cd4f70c51beb7e749a2f9288f4db3a2e36831ce8499165"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git grep -n -e export const <commit> -- src"
+needles = [
+    "src/constants.ts:1:export const EVENTS = {",
+    "src/formState.tsx:34:export const FormStateSubscribe = FormState;",
+    "src/watch.tsx:23:export const Watch = <",
+]
+
+[[item]]
+id = "grep-react-hook-form-use-effect"
+category = "grep"
+file = "items/grep-react-hook-form-use-effect.txt"
+bytes = 11458
+lines = 151
+sha256 = "cc3851e8fa67958cdf629904c5bac19be620a92dca4063b56638c885d6dd78d8"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git grep -n -e useEffect <commit> -- src"
+needles = [
+    "src/__tests__/controller.test.tsx:131:      React.useEffect(() => {",
+    "src/__tests__/useForm/setValue.test.tsx:1272:      React.useEffect(() => {",
+    "src/useWatch.ts:239:  React.useEffect(() => control._removeUnmounted());",
+]
+
+[[item]]
+id = "json-file-lumen-largest"
+category = "json"
+file = "items/json-file-lumen-largest.json"
+bytes = 4913
+lines = 185
+sha256 = "eeecb802d187848a012ca5c0ed94137733c325be25b125b94937301083a7b05b"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git cat-file blob (the largest .json file under 250000 bytes) 3b951e93dbe55e46dc0e15951666b303110861e7:crates/lumen-mcp/tests/optimizer_baseline.json"
+needles = [
+    '"fixtures": {',
+    '"saved_tokens": 7246,',
+    '"is_error": false',
+]
+
+[[item]]
+id = "json-file-react-hook-form-largest"
+category = "json"
+file = "items/json-file-react-hook-form-largest.json"
+bytes = 14317
+lines = 369
+sha256 = "eb6b4eb470c4c66ea58ed7b9e1631bf5e820ce807a548962734247b930f9d105"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git cat-file blob (the largest .json file under 250000 bytes) 8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4:api-extractor.json"
+needles = [
+    "* Config file for API Extractor.  For more info, please visit: https://api-extractor.com",
+    '"dtsRollup": {',
+    '//   "addToApiReportFile": true',
+]
+
+[[item]]
+id = "json-file-react-hook-form-package"
+category = "json"
+file = "items/json-file-react-hook-form-package.json"
+bytes = 4503
+lines = 143
+sha256 = "2e820a6e2d2ca01f5e34e4063f87f97ca814645fdf3f928d1c83ffb3631a56db"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git cat-file blob 8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4:package.json"
+needles = [
+    '"name": "react-hook-form"',
+    '"version": "7.90.0"',
+    '"main": "dist/index.cjs.js"',
+    '"name": "react-hook-form",',
+    '"@eslint/compat": "^1.4.1",',
+    '"node": ">=18.0.0"',
+]
+
+[[item]]
+id = "json-github-commit-pytest"
+category = "json"
+file = "items/json-github-commit-pytest.json"
+bytes = 16296
+lines = 0
+sha256 = "b314db3cb274cc391f52dafb86f8192d881baeeb799180b1647465c2948cf525"
+source_kind = "url"
+source = "https://api.github.com/repos/pytest-dev/pytest/commits/cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+source_sha256 = "be24114a9438212bb38189f2d5c13916390d60eecc3ee290af82fc7d2f14ae6a"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+normalised = "/home/sweet/ -> /work/"
+needles = [
+    '"sha":"cf470ec0bf7eb89cd97dd56df4859eae5db46447"',
+    '"message":"Prepare release version 9.1.1"',
+    '"html_url":"https://github.com/pytest-dev/pytest/commit/cf470ec0bf7eb89cd97dd56df4859eae5db46447"',
+    '"total":60',
+]
+
+[[item]]
+id = "json-npm-express-4.21.2"
+category = "json"
+file = "items/json-npm-express-4.21.2.json"
+bytes = 3708
+lines = 0
+sha256 = "522a2879772019f3f69d6334e0a788d1cee07e1866862d0d36c79a2f29382f68"
+source_kind = "url"
+source = "https://registry.npmjs.org/express/4.21.2"
+source_sha256 = "522a2879772019f3f69d6334e0a788d1cee07e1866862d0d36c79a2f29382f68"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    '"name":"express"',
+    '"version":"4.21.2"',
+    '"shasum":"cf250e48362174ead6cea4a566abef0162c1ec32"',
+    '"tarball":"https://registry.npmjs.org/express/-/express-4.21.2.tgz"',
+]
+
+[[item]]
+id = "json-npm-react-hook-form-7.90.0"
+category = "json"
+file = "items/json-npm-react-hook-form-7.90.0.json"
+bytes = 4927
+lines = 0
+sha256 = "bb3b76a54f2369771f29ed9e6168381bb78a2ee781d836b5b963ff51bf003a6d"
+source_kind = "url"
+source = "https://registry.npmjs.org/react-hook-form/7.90.0"
+source_sha256 = "bb3b76a54f2369771f29ed9e6168381bb78a2ee781d836b5b963ff51bf003a6d"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    '"name":"react-hook-form"',
+    '"version":"7.90.0"',
+    '"shasum":"166fc35a3f6df7cd62bc880789aba6ea16e5d443"',
+    '"tarball":"https://registry.npmjs.org/react-hook-form/-/react-hook-form-7.90.0.tgz"',
+]
+
+[[item]]
+id = "json-npm-typescript-5.9.3"
+category = "json"
+file = "items/json-npm-typescript-5.9.3.json"
+bytes = 3904
+lines = 0
+sha256 = "80f0d5d237c08c433b4cee823d75c4f54469beee86cc2fad5e1800f86b6243d8"
+source_kind = "url"
+source = "https://registry.npmjs.org/typescript/5.9.3"
+source_sha256 = "80f0d5d237c08c433b4cee823d75c4f54469beee86cc2fad5e1800f86b6243d8"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    '"name":"typescript"',
+    '"version":"5.9.3"',
+    '"shasum":"5b4f59e15310ab17a216f5d6cf53ee476ede670f"',
+    '"tarball":"https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"',
+]
+
+[[item]]
+id = "json-pypi-pytest-9.1.1"
+category = "json"
+file = "items/json-pypi-pytest-9.1.1.json"
+bytes = 9742
+lines = 1
+sha256 = "8ed48304ba7fd0ae974a041f117487b499d553b40e5ce55a9ece677e946f68dd"
+source_kind = "url"
+source = "https://pypi.org/pypi/pytest/9.1.1/json"
+source_sha256 = "8ed48304ba7fd0ae974a041f117487b499d553b40e5ce55a9ece677e946f68dd"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    '"version":"9.1.1"',
+    '"requires_python":">=3.10"',
+    '"license":null',
+    '"name":"pytest"',
+]
+
+[[item]]
+id = "read-lumen-1000-2999"
+category = "file_read"
+bucket = "1000-2999"
+file = "items/read-lumen-1000-2999.txt"
+bytes = 36526
+lines = 1044
+sha256 = "5d0d6e95efb166c9e55fb198b965cf090180ec9f983c6d6eecdf944af8ca057c"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git cat-file blob 3b951e93dbe55e46dc0e15951666b303110861e7:crates/lumen-core/src/repeat.rs"
+needles = [
+    "fn keys(items: &[Sym]) -> Vec<Key> {",
+    "pub fn recall_delta(",
+    "pub fn event_since(",
+    "//! Repeat reads (1.7.0): answering a second `smart_read` / `recall_file` of the same thing",
+    "let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();",
+    'assert_eq!(parse_mode("nonsense"), Mode::Off);',
+]
+
+[[item]]
+id = "read-lumen-300-999"
+category = "file_read"
+bucket = "300-999"
+file = "items/read-lumen-300-999.txt"
+bytes = 15838
+lines = 425
+sha256 = "42155bd41c9f19925d1b62e5e4c122f77f1aeac77c2363183002befe15be9ff6"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git cat-file blob 3b951e93dbe55e46dc0e15951666b303110861e7:lumenator/src/app/pages/hotspots/hotspots.spec.ts"
+needles = [
+    "function report(over: Partial<ContextReport> = {}): ContextReport {",
+    "function faultReport(over: Partial<FaultReport> = {}): FaultReport {",
+    "function filingResult(over: Partial<FilingResult> = {}): FilingResult {",
+    "import { ComponentFixture, TestBed } from '@angular/core/testing';",
+    "* holds a live daemon subscription, so the fixture is never stable.",
+    "expect(t).toContain('cannot run gh');",
+]
+
+[[item]]
+id = "read-lumen-lt300"
+category = "file_read"
+bucket = "<300"
+file = "items/read-lumen-lt300.txt"
+bytes = 1807
+lines = 57
+sha256 = "f88db21ec8a87feb333f99997fb275ca7a94533299609a288882fb4f33b79d34"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git cat-file blob 3b951e93dbe55e46dc0e15951666b303110861e7:lumenator/src/app/components/logo/logo.spec.ts"
+needles = [
+    "function build(variant?: 'lockup' | 'mark'): Logo {",
+    "function html(): string {",
+    "import { ComponentFixture, TestBed } from '@angular/core/testing';",
+    "build('mark');",
+    """expect(html()).toContain('aria-hidden="true"');""",
+]
+
+[[item]]
+id = "read-pytest-1000-2999"
+category = "file_read"
+bucket = "1000-2999"
+file = "items/read-pytest-1000-2999.txt"
+bytes = 62905
+lines = 1803
+sha256 = "9e791d0a3446b04324e70bb939712f8d490005ad13eb46ab3249592baa08ff17"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:src/_pytest/pytester.py"
+needles = [
+    "def getfailures(",
+    "def _makefile(",
+    "def getitem(",
+    "# mypy: allow-untyped-defs",
+    ":param name:",
+    "return str(self)",
+]
+
+[[item]]
+id = "read-pytest-300-999"
+category = "file_read"
+bucket = "300-999"
+file = "items/read-pytest-300-999.txt"
+bytes = 15487
+lines = 484
+sha256 = "819984a5c4afbdd0ed3ba5d2d72a79c86291ae02448dde7fbabce2bfa6a92087"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:testing/test_session.py"
+needles = [
+    "def test_broken_repr(self, pytester: Pytester) -> None:",
+    "class Testmygroup(object):",
+    "class TestClass:",
+    "# mypy: allow-untyped-defs",
+    'itemstarted = reprec.getcalls("pytest_itemcollected")',
+    'result.stdout.fnmatch_lines("*session.shouldstop cannot be unset*")',
+]
+
+[[item]]
+id = "read-pytest-3000plus"
+category = "file_read"
+bucket = "3000+"
+file = "items/read-pytest-3000plus.txt"
+bytes = 107586
+lines = 3144
+sha256 = "454503f21a1813e1766aeacbef4a0d002e0d30a0289d81523dfcc608313bf35d"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:testing/test_config.py"
+needles = [
+    "def test_addini_args_ini_files(self, pytester: Pytester) -> None:",
+    "class Distribution:",
+    "def test_addopts_before_initini(",
+    "# mypy: allow-untyped-defs",
+    'metadata = {"name": "foo"}',
+    "console_main()",
+]
+
+[[item]]
+id = "read-pytest-lt300"
+category = "file_read"
+bucket = "<300"
+file = "items/read-pytest-lt300.txt"
+bytes = 175
+lines = 9
+sha256 = "37f8b6a3df1aef71336bce85e366db968ede153dd72ad4e60bebff79e279dc40"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:src/pytest/__main__.py"
+needles = [
+    '"""The pytest entry point."""',
+    "from _pytest.config import _console_main",
+    "raise SystemExit(_console_main())",
+]
+
+[[item]]
+id = "read-react-hook-form-1000-2999"
+category = "file_read"
+bucket = "1000-2999"
+file = "items/read-react-hook-form-1000-2999.txt"
+bytes = 27667
+lines = 1119
+sha256 = "ff2c87632defc6315ec1e93ffeb5ffdbfef3f5a967fd6f2b2ebbdb7de8039e68"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git cat-file blob 8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4:src/__tests__/useFormState.test.tsx"
+needles = [
+    "function DirtyState() {",
+    "function Form({ values }: { values: FormValues }) {",
+    "function Consumer({ control }: { control: Control<{ test: string }> }) {",
+    "import React from 'react';",
+    "const App = () => {",
+    "expect(screen.getByTestId('error')).toHaveTextContent('no-error');",
+]
+
+[[item]]
+id = "read-react-hook-form-300-999"
+category = "file_read"
+bucket = "300-999"
+file = "items/read-react-hook-form-300-999.txt"
+bytes = 18324
+lines = 754
+sha256 = "abf04011e6e57d89e1ea00ae41c49cb886abdcb3464d78d7b04a117db9b98fbc"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git cat-file blob 8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4:src/__tests__/useForm/subscribe.test.tsx"
+needles = [
+    "function App() {",
+    "import React from 'react';",
+    "defaultValues: {",
+    "expect.objectContaining({ name: 'weight', values: { weight: 100 } }),",
+]
+
+[[item]]
+id = "read-react-hook-form-3000plus"
+category = "file_read"
+bucket = "3000+"
+file = "items/read-react-hook-form-3000plus.txt"
+bytes = 93087
+lines = 3521
+sha256 = "dd3d4dabe1ec6cfad0a102f795043daae4a8f06a779a567c65d303542b245141"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git cat-file blob 8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4:src/__tests__/useForm/reset.test.tsx"
+needles = [
+    "function App() {",
+    "import React from 'react';",
+    "name_es: 'Espanol',",
+    "'error:stale error',",
+]
+
+[[item]]
+id = "read-react-hook-form-lt300"
+category = "file_read"
+bucket = "<300"
+file = "items/read-react-hook-form-lt300.txt"
+bytes = 2000
+lines = 86
+sha256 = "456822f0b2363d23bb4be9c9f4a064e06cc2e29b3ad6bd7b7ab7cad0347ff5b0"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git cat-file blob 8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4:examples/V6/fieldArrayMinLength.tsx"
+needles = [
+    "function App() {",
+    "import React from 'react';",
+    "React.useEffect(() => {",
+    '<input type="submit" />',
+]
+
+[[item]]
+id = "shell-ls-tree-lumen"
+category = "shell"
+file = "items/shell-ls-tree-lumen.txt"
+bytes = 26370
+lines = 265
+sha256 = "ac0eb189560ce40c5979e34b29f953f544ecf092ab8ba67a24b0d97a4bea9a00"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git ls-tree -r -l <commit>"
+needles = [
+    "100644 blob 87e431b3be45118695643d9d6aa39d693594c1a7     499\t.claude-plugin/plugin.json",
+    "100644 blob 8e57483362ca4d04cfac882f600bea4831c00a99    5618\tlumenator/src-tauri/icons/64x64.png",
+    "100755 blob 23d32811d2cea1de9b6c6d42ce7919bb032d4ea8   13547\tscripts/verify-install.sh",
+]
+
+[[item]]
+id = "shell-ls-tree-pytest"
+category = "shell"
+file = "items/shell-ls-tree-pytest.txt"
+bytes = 61303
+lines = 629
+sha256 = "f458204477fd9cdba98b99600e4e1c3f2daf67ee9e96834076ba4562fe41f86c"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git ls-tree -r -l <commit>"
+needles = [
+    "100644 blob 4f4cdb6c56467916be074d7dfba01e8126df6427    1299\t.git-blame-ignore-revs",
+    "100644 blob 1c37023c72a2537b413256e2cc5aaf3a8628d085    1249\tdoc/en/how-to/existingtestsuite.rst",
+    "100644 blob 89faf4488757ea9099f44aae6a4539c7562622f7    7518\ttox.ini",
+]
+
+[[item]]
+id = "shell-ls-tree-react-hook-form"
+category = "shell"
+file = "items/shell-ls-tree-react-hook-form.txt"
+bytes = 46737
+lines = 507
+sha256 = "de5703992d5b6b7a1a0fba839f69ca71f02483a690c6b0504c1ebd0d6752132c"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git ls-tree -r -l <commit>"
+needles = [
+    "100644 blob 0954d284022061633819a0a5a6444c0b89027144     181\t.codesandbox/ci.json",
+    "100644 blob 79d323d2c8671d90422b7ea9dbd631cfd6df5433   19587\tsrc/__tests__/formStateSubscribe.test.tsx",
+    "100644 blob 99e1c40b8596c536813c5f9398795c4dc2bd36c2     757\ttsconfig.json",
+]
+
+[[item]]
+id = "shell-show-stat-lumen"
+category = "shell"
+file = "items/shell-show-stat-lumen.txt"
+bytes = 24143
+lines = 269
+sha256 = "7d81902b250db246e9510d21b73f8121c3cb997abbace03aade2e45136d234d3"
+source_kind = "git"
+source = "https://github.com/HackPoint/lumen"
+commit = "3b951e93dbe55e46dc0e15951666b303110861e7"
+recipe = "git show --stat=120,100 --format=%H%n%s <commit>"
+needles = [
+    "3b951e93dbe55e46dc0e15951666b303110861e7",
+    "lumenator/src-tauri/icons/64x64.png                                         |  Bin 0 -> 5618 bytes",
+    "265 files changed, 72611 insertions(+)",
+]
+
+[[item]]
+id = "shell-show-stat-pytest"
+category = "shell"
+file = "items/shell-show-stat-pytest.txt"
+bytes = 55162
+lines = 633
+sha256 = "45b0a9777e654aca2b3a33063dba0ae0935c25f0cd4bbdf6090cd2d0315edc8c"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git show --stat=120,100 --format=%H%n%s <commit>"
+needles = [
+    "cf470ec0bf7eb89cd97dd56df4859eae5db46447",
+    "doc/en/how-to/existingtestsuite.rst                                         |    34 +",
+    "629 files changed, 172095 insertions(+)",
+]
+
+[[item]]
+id = "shell-show-stat-react-hook-form"
+category = "shell"
+file = "items/shell-show-stat-react-hook-form.txt"
+bytes = 34710
+lines = 511
+sha256 = "16170c94ce2e82e77b894cc64f28046613c0783ba44119b5aff4031ba74f099f"
+source_kind = "git"
+source = "https://github.com/react-hook-form/react-hook-form"
+commit = "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4"
+recipe = "git show --stat=120,100 --format=%H%n%s <commit>"
+needles = [
+    "8ac7cc0bcc1f50f887230d50b1929d977b4d3fb4",
+    "src/__tests__/formStateSubscribe.test.tsx                |  716 ++++++",
+    "507 files changed, 104024 insertions(+)",
+]
+
+[[item]]
+id = "testlog-cargo-assert-failure"
+category = "test_log"
+file = "items/testlog-cargo-assert-failure.txt"
+bytes = 787
+lines = 24
+sha256 = "8076c3a8cdaf9e886df5ed8555750a81ab6336831478a9259e2d9ee6c26ade0b"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/rust-lang/book/1500248d8f230566e4ec9f27fcbb8fe9e2898ab1/listings/ch11-writing-automated-tests/no-listing-03-introducing-a-bug/output.txt"
+source_sha256 = "8076c3a8cdaf9e886df5ed8555750a81ab6336831478a9259e2d9ee6c26ade0b"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "thread 'tests::larger_can_hold_smaller' (6020788) panicked at src/lib.rs:28:9:",
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+]
+
+[[item]]
+id = "testlog-cargo-should-panic-mismatch"
+category = "test_log"
+file = "items/testlog-cargo-should-panic-mismatch.txt"
+bytes = 925
+lines = 25
+sha256 = "48ae84503684e8cf74a9fcf1bd405db84c085860c2fe66288682050dcf4dc069"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/rust-lang/book/1500248d8f230566e4ec9f27fcbb8fe9e2898ab1/listings/ch11-writing-automated-tests/no-listing-09-guess-with-panic-msg-bug/output.txt"
+source_sha256 = "48ae84503684e8cf74a9fcf1bd405db84c085860c2fe66288682050dcf4dc069"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    'panic message: "Guess value must be greater than or equal to 1, got 200."',
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+]
+
+[[item]]
+id = "testlog-cargo-show-output"
+category = "test_log"
+file = "items/testlog-cargo-show-output.txt"
+bytes = 943
+lines = 36
+sha256 = "1738bcbe569e3b863cb22560e3f42ae552f9d8bb5f6eef3155e84cdb9b6512cf"
+source_kind = "url"
+source = "https://raw.githubusercontent.com/rust-lang/book/1500248d8f230566e4ec9f27fcbb8fe9e2898ab1/listings/ch11-writing-automated-tests/output-only-01-show-output/output.txt"
+source_sha256 = "1738bcbe569e3b863cb22560e3f42ae552f9d8bb5f6eef3155e84cdb9b6512cf"
+recipe = "downloaded, checked against the pinned sha256, stored unchanged"
+needles = [
+    "thread 'tests::this_test_will_fail' (6022313) panicked at src/lib.rs:19:9:",
+    "test tests::this_test_will_fail ... FAILED",
+    "test tests::this_test_will_pass ... ok",
+]
+
+[[item]]
+id = "testlog-pytest-failure-demo"
+category = "test_log"
+file = "items/testlog-pytest-failure-demo.txt"
+bytes = 24912
+lines = 714
+sha256 = "952ba79b07995b43f29e6999d0eec44e42c3e42ab2cc18852fa6d8b3ef88b10d"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:doc/en/example/reportingdemo.rst, lines 11-724, 4 leading spaces removed"
+normalised = "/home/sweet/ -> /work/"
+needles = [
+    "FAILED failure_demo.py::test_generative[3-6] - assert (3 * 2) < 6",
+    "FAILED failure_demo.py::test_attribute_instance - AssertionError: assert ...",
+    "FAILED failure_demo.py::TestCustomAssertMsg::test_custom_repr - Assertion...",
+    "============================ 44 failed in 0.12s ============================",
+]
+
+[[item]]
+id = "testlog-pytest-report-chars-ra"
+category = "test_log"
+file = "items/testlog-pytest-report-chars-ra.txt"
+bytes = 1246
+lines = 32
+sha256 = "3a7bd2429f613df675d9d20351b2e75b98a446ab69025f792c8f9f477ea4caab"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:doc/en/how-to/output.rst, lines 430-461, 4 leading spaces removed"
+normalised = "/home/sweet/ -> /work/"
+needles = [
+    "FAILED test_example.py::test_fail - assert 0",
+    "_______________________ ERROR at setup of test_error _______________________",
+    "ERROR test_example.py::test_error - assert 0",
+]
+
+[[item]]
+id = "testlog-pytest-verbosity-default"
+category = "test_log"
+file = "items/testlog-pytest-verbosity-default.txt"
+bytes = 2352
+lines = 47
+sha256 = "179834b4c8298e01c02b692d246cf6413e28ae53c65572f7b3957b7dc6a27b3e"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:doc/en/how-to/output.rst, lines 90-136, 4 leading spaces removed"
+needles = [
+    "FAILED test_verbosity_example.py::test_words_fail - AssertionError: asser...",
+    "FAILED test_verbosity_example.py::test_numbers_fail - AssertionError: ass...",
+    "FAILED test_verbosity_example.py::test_long_text_fail - AssertionError: a...",
+    "E       AssertionError: assert ['banana', 'a...elon', 'kiwi'] == ['banana', 'a...elon', 'kiwi']",
+    "E       AssertionError: assert 'hello world' in 'Lorem ipsum dolor sit amet Lorem ipsum dolor sit amet Lorem ipsum dolor sit amet Lorem ipsum dolor sit amet Lorem ips... sit amet Lorem ipsum dolor sit amet Lorem ipsum dolor sit amet Lorem ipsum dolor sit amet Lorem ipsum dolor sit amet '",
+]
+
+[[item]]
+id = "testlog-pytest-verbosity-v"
+category = "test_log"
+file = "items/testlog-pytest-verbosity-v.txt"
+bytes = 2811
+lines = 58
+sha256 = "7964a335905536ed0bfba798007e1844206070d1e0431e2bfffe82e8aa1bca0f"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:doc/en/how-to/output.rst, lines 151-208, 4 leading spaces removed"
+needles = [
+    "test_verbosity_example.py::test_words_fail FAILED                    [ 50%]",
+    "FAILED test_verbosity_example.py::test_words_fail - AssertionError: asser...",
+    "FAILED test_verbosity_example.py::test_long_text_fail - AssertionError: a...",
+    "test_verbosity_example.py::test_ok PASSED                            [ 25%]",
+]
+
+[[item]]
+id = "testlog-pytest-verbosity-vv"
+category = "test_log"
+file = "items/testlog-pytest-verbosity-vv.txt"
+bytes = 4328
+lines = 116
+sha256 = "42da65d1a09edbeab8c296594c13e19051a4c5b23ec170f4293bc6b0c76893f9"
+source_kind = "git"
+source = "https://github.com/pytest-dev/pytest"
+commit = "cf470ec0bf7eb89cd97dd56df4859eae5db46447"
+recipe = "git cat-file blob cf470ec0bf7eb89cd97dd56df4859eae5db46447:doc/en/how-to/output.rst, lines 223-338, 4 leading spaces removed"
+needles = [
+    "test_verbosity_example.py::test_words_fail FAILED                    [ 50%]",
+    "test_verbosity_example.py::test_long_text_fail FAILED                [100%]",
+    "FAILED test_verbosity_example.py::test_numbers_fail - AssertionError: assert {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4} == {'0': 0, '10': 10, '20': 20, '30': 30, '40': 40}",
+    "E       AssertionError: assert ['banana', 'apple', 'grapes', 'melon', 'kiwi'] == ['banana', 'apple', 'orange', 'melon', 'kiwi']",
+    "test_verbosity_example.py:14: AssertionError",
+]

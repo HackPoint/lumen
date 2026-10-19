@@ -110,11 +110,16 @@ fn the_fixed_rounds_of_the_old_net_value_are_gone_from_every_source() {
 }
 
 /// The files that may use `econ`'s fixed sizing inputs: econ itself, the ranked arm that sizes an
-/// outline with them, and the MCP server that records the inputs on each ranked row.
+/// outline with them, the MCP server that records the inputs on each ranked row, and the version
+/// benchmark's scoring, which uses the constants only to size its MODELLED reference session
+/// (the prompt and output a round costs), never for a savings figure: every figure still comes
+/// from `savings::summarize`.
 const SIZING: &[&str] = &[
     "crates/lumen-core/src/econ.rs",
     "crates/lumen-core/src/ranked.rs",
     "crates/lumen-mcp/src/lib.rs",
+    "benchmarks/harness/src/score.rs",
+    "benchmarks/harness/tests/score.rs",
 ];
 
 #[test]

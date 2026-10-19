@@ -882,8 +882,24 @@ pub fn ranked_outline_cached<F>(
 where
     F: Fn(&str) -> usize,
 {
+    ranked_outline_within(path, src, full_tokens, econ, count, stamp, time_budget())
+}
+
+/// The body of [`ranked_outline_cached`] with the wall-clock ceiling passed in, so a test
+/// of what the budget does can run with no ceiling instead of racing the machine.
+fn ranked_outline_within<F>(
+    path: &str,
+    src: &str,
+    full_tokens: usize,
+    econ: &Econ,
+    count: &F,
+    stamp: Option<FileStamp>,
+    deadline: std::time::Duration,
+) -> Decision
+where
+    F: Fn(&str) -> usize,
+{
     let started = std::time::Instant::now();
-    let deadline = time_budget();
     let s_min = econ.s_min().map(|s| s.ceil() as i64).unwrap_or(i64::MAX);
     let budget = econ.budget(full_tokens).unwrap_or(i64::MIN);
     let mk = |outcome| Decision {
@@ -1214,7 +1230,17 @@ fn caller(a: A) -> u8 { shared(a) }
             })
             .collect();
         let full = tok(&src);
-        let d = ranked_outline("wide.rs", &src, full, &econ, &tok);
+        // No wall-clock ceiling: this test is about the budget, not the speed of the host.
+        // The ceiling has its own test.
+        let d = ranked_outline_within(
+            "wide.rs",
+            &src,
+            full,
+            &econ,
+            &tok,
+            None,
+            std::time::Duration::MAX,
+        );
         let f = d
             .outcome
             .as_ref()
@@ -1232,6 +1258,25 @@ fn caller(a: A) -> u8 { shared(a) }
             "the outline must respect the target: {} tokens",
             f.returned_tokens
         );
+    }
+
+    /// The wall-clock ceiling is real: a run that has used up its time declines `TooSlow`.
+    /// A zero ceiling is always already spent, so this needs no sleeping and no luck.
+    #[test]
+    fn a_spent_time_ceiling_declines_too_slow() {
+        let src: String = (0..300)
+            .map(|i| format!("pub fn function_number_{i}(a: u32) -> u32 {{\n    a + {i}\n}}\n\n"))
+            .collect();
+        let d = ranked_outline_within(
+            "wide.rs",
+            &src,
+            tok(&src),
+            &Econ::default(),
+            &tok,
+            None,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(d.outcome.as_ref().err(), Some(&Decline::TooSlow));
     }
 
     /// A small file is still refused — Phase A must not weaken the gate, which is the part

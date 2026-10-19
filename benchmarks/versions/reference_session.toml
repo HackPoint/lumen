@@ -1,0 +1,34 @@
+# The reference sessions every version's replies are priced against (benchmarks/versions/METHOD.md,
+# "Scoring with today's engine"). They are MODELLED: no real session, stand-ins with the numbers
+# below, so every figure scored against them is labelled MODELLED wherever it is shown.
+#
+# PRIMARY: the context and output sizes lumen-core measured on 19,161 main-agent turns
+# (crates/lumen-core/src/econ.rs, DEFAULT_CONTEXT_TOKENS and DEFAULT_OUTPUT_TOKENS). They are read
+# from lumen-core at run time, not copied here, so they cannot drift. A real extra round costs
+# what a whole such prompt costs, so this is the conservative choice for Lumen.
+#
+# SMALL PROMPT: a 60k-token prompt with 400 output tokens, a sensitivity shown beside the primary.
+# It flatters Lumen (a round is cheap), and is labelled so.
+#
+# The prompt follows econ.rs's measured round (Econ::round_cost: the whole context read from the
+# cache, plus the output), with one addition modelled here: a cache write equal to the previous
+# round's output (the new tokens each request appends). econ.rs has no write term; the write adds
+# about $0.0027 a round on Sonnet 5.5, which counts against Lumen. In both sessions: a fixed
+# handful of tokens uncached, that write, and the rest read from the cache.
+
+label = "MODELLED"
+
+# Prices come from crates/lumen-core/src/rates.rs (PRICES) as of this date; a test holds it equal
+# to rates::PRICES_AS_OF, so a price change cannot pass silently.
+prices_as_of = "2026-10-13"
+
+# The consuming model, and the model sensitivities (at the primary sizes). Haiku 5.5 has no price
+# in the engine today: its dollar cells are "n/a — no price", never 0.
+model = "claude-sonnet-5-5"
+sensitivity = ["claude-opus-5-5", "claude-haiku-5-5"]
+
+uncached_input_tokens = 10
+
+[small_prompt]
+prompt_tokens = 60000
+output_tokens = 400

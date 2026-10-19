@@ -1,0 +1,201 @@
+crates/lumen-cli/src/data.rs:87:pub fn run(state: Arc<Mutex<AppState>>) {
+crates/lumen-cli/src/data.rs:306:pub fn read_db_oneshot() -> Option<OneshotData> {
+crates/lumen-cli/src/doctor.rs:68:    pub fn remedy(&self) -> String {
+crates/lumen-cli/src/doctor.rs:94:pub fn findings(f: &Facts) -> Vec<Finding> {
+crates/lumen-cli/src/doctor.rs:140:pub fn render(f: &Facts) -> String {
+crates/lumen-cli/src/doctor.rs:341:pub fn collect() -> Facts {
+crates/lumen-cli/src/doctor.rs:440:pub fn show() -> i32 {
+crates/lumen-cli/src/ui.rs:15:pub fn render(f: &mut Frame, state: &AppState, no_anim: bool) {
+crates/lumen-core/src/compress.rs:16:pub fn compress_logs(text: &str) -> CompressResult {
+crates/lumen-core/src/coverage.rs:90:pub fn ext_of(path: &str) -> String {
+crates/lumen-core/src/coverage.rs:103:pub fn classify(path: &str, lines: Option<i64>) -> Scope {
+crates/lumen-core/src/coverage.rs:129:pub fn not_unmeasurable_sql() -> String {
+crates/lumen-core/src/econ.rs:51:    pub fn as_str(self) -> &'static str {
+crates/lumen-core/src/econ.rs:72:pub fn target_outline() -> i64 {
+crates/lumen-core/src/econ.rs:125:    pub fn round_cost(&self) -> f64 {
+crates/lumen-core/src/econ.rs:130:    pub fn value_per_token(&self) -> f64 {
+crates/lumen-core/src/econ.rs:139:    pub fn s_min(&self) -> Option<f64> {
+crates/lumen-core/src/econ.rs:163:    pub fn budget(&self, full_tokens: usize) -> Option<i64> {
+crates/lumen-core/src/econ.rs:181:    pub fn observed(db: &std::path::Path) -> Self {
+crates/lumen-core/src/events.rs:32:    pub fn as_str(self) -> &'static str {
+crates/lumen-core/src/events.rs:56:    pub fn resync(session_id: impl Into<String>, at_ms: i64, offset: u64) -> Self {
+crates/lumen-core/src/events.rs:114:    pub fn new() -> Self {
+crates/lumen-core/src/events.rs:120:    pub fn feed(&mut self, line: &str) -> Option<Event> {
+crates/lumen-core/src/events.rs:176:pub fn parse_ts_ms(s: &str) -> Option<i64> {
+crates/lumen-core/src/faults.rs:63:    pub fn now(kind: &str, variant: &str) -> Self {
+crates/lumen-core/src/faults.rs:74:    pub fn now_with_env(kind: &str, variant: &str, var: impl Fn(&str) -> Option<String>) -> Self {
+crates/lumen-core/src/faults.rs:94:    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+crates/lumen-core/src/faults.rs:99:    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+crates/lumen-core/src/faults.rs:138:pub fn spool_path() -> Option<PathBuf> {
+crates/lumen-core/src/faults.rs:149:pub fn record(rec: &FaultRecord) {
+crates/lumen-core/src/faults.rs:157:pub fn record_at(path: &Path, rec: &FaultRecord) {
+crates/lumen-core/src/faults.rs:164:pub fn try_record_at(path: &Path, rec: &FaultRecord) -> std::io::Result<()> {
+crates/lumen-core/src/faults.rs:181:pub fn record_throttled(rec: &FaultRecord, min_interval: std::time::Duration) -> bool {
+crates/lumen-core/src/faults.rs:221:pub fn take_spool() -> Option<(Vec<FaultRecord>, PathBuf)> {
+crates/lumen-core/src/faults.rs:230:pub fn spool_len() -> usize {
+crates/lumen-core/src/faults.rs:239:pub fn spool_len_at(path: &Path) -> usize {
+crates/lumen-core/src/faults.rs:259:pub fn peek_spool_at(path: &Path) -> std::io::Result<Vec<FaultRecord>> {
+crates/lumen-core/src/faults.rs:292:pub fn take_spool_at(path: &Path) -> Option<(Vec<FaultRecord>, PathBuf)> {
+crates/lumen-core/src/faults.rs:328:pub fn insert(conn: &rusqlite::Connection, recs: &[FaultRecord]) -> rusqlite::Result<usize> {
+crates/lumen-core/src/faults.rs:360:pub fn drain_spool(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
+crates/lumen-core/src/faults.rs:373:pub fn drain_spool_at(conn: &rusqlite::Connection, path: &Path) -> rusqlite::Result<usize> {
+crates/lumen-core/src/meter.rs:11:pub fn detect_channel() -> &'static str {
+crates/lumen-core/src/meter.rs:18:pub fn channel_from(var: impl Fn(&str) -> Option<String>) -> &'static str {
+crates/lumen-core/src/meter.rs:44:pub fn db_path() -> Option<std::path::PathBuf> {
+crates/lumen-core/src/meter.rs:63:pub fn app_data_dir_in(home: &std::path::Path) -> std::path::PathBuf {
+crates/lumen-core/src/meter.rs:79:pub fn canonical_db_path_in(home: &std::path::Path) -> std::path::PathBuf {
+crates/lumen-core/src/meter.rs:87:pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
+crates/lumen-core/src/meter.rs:134:pub fn connect_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
+crates/lumen-core/src/meter.rs:144:pub fn open_read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {
+crates/lumen-core/src/meter.rs:161:pub fn lumen_answered(db: &std::path::Path, session: &str, path: &str) -> bool {
+crates/lumen-core/src/meter.rs:187:pub fn restore_sidecar_write_bits(db: &std::path::Path) {
+crates/lumen-core/src/meter.rs:209:pub fn restore_sidecar_write_bits(_db: &std::path::Path) {}
+crates/lumen-core/src/meter.rs:248:pub fn insert_read_event(
+crates/lumen-core/src/meter.rs:343:pub fn insert_read_event_at(
+crates/lumen-core/src/meter.rs:434:pub fn insert_hook_event_at(db: &std::path::Path, ev: &HookReadEvent) -> Result<(), WriteError> {
+crates/lumen-core/src/project.rs:27:pub fn is_subagent_path(path: &str) -> bool {
+crates/lumen-core/src/project.rs:37:pub fn encoded_project_dir(path: &str) -> Option<&str> {
+crates/lumen-core/src/project.rs:54:pub fn decode_project_dir(encoded: &str, exists: &dyn Fn(&Path) -> bool) -> PathBuf {
+crates/lumen-core/src/project.rs:85:pub fn project_label(encoded: &str, exists: &dyn Fn(&Path) -> bool) -> String {
+crates/lumen-core/src/project.rs:95:pub fn project_label_on_disk(encoded: &str) -> String {
+crates/lumen-core/src/project.rs:100:pub fn label_for_transcript(path: &str) -> Option<String> {
+crates/lumen-core/src/ranked.rs:89:    pub fn as_str(self) -> &'static str {
+crates/lumen-core/src/ranked.rs:153:    pub fn detect(path: &str) -> Option<Self> {
+crates/lumen-core/src/ranked.rs:339:pub fn extract_tags(src: &str, lang: TagLang) -> Option<(Vec<Def>, Vec<Ref>)> {
+crates/lumen-core/src/ranked.rs:460:pub fn build_graph(defs: &[Def], refs: &[Ref]) -> Graph {
+crates/lumen-core/src/ranked.rs:517:/// This is the half of the score that graph centrality cannot supply. A `pub fn` nothing
+crates/lumen-core/src/ranked.rs:522:pub fn prior(defs: &[Def], graph: &Graph) -> Vec<f64> {
+crates/lumen-core/src/ranked.rs:557:pub fn pagerank(prior: &[f64], graph: &Graph) -> Vec<f64> {
+crates/lumen-core/src/ranked.rs:605:pub fn rank(defs: &[Def], scores: &[f64]) -> Vec<usize> {
+crates/lumen-core/src/ranked.rs:642:pub fn render(path: &str, total_lines: usize, src: &str, defs: &[Def], chosen: &[usize]) -> String {
+crates/lumen-core/src/ranked.rs:731:pub fn fit_budget<F>(
+crates/lumen-core/src/ranked.rs:802:    pub fn route(self) -> &'static str {
+crates/lumen-core/src/ranked.rs:859:pub fn ranked_outline<F>(
+crates/lumen-core/src/ranked.rs:874:pub fn ranked_outline_cached<F>(
+crates/lumen-core/src/ranked.rs:948:pub fn run(config: Config) -> Result<Report> {
+crates/lumen-core/src/ranked.rs:974:    pub fn new() -> Self {
+crates/lumen-core/src/ranked.rs:1032:            "`pub fn run` is never called in this file, so in-degree ranks it last. It \
+crates/lumen-core/src/ranked.rs:1054:        assert!(run.exported, "`pub fn run` is exported");
+crates/lumen-core/src/ranked.rs:1213:                format!("/// Item {i}.\npub fn function_number_{i}(a: u32, b: &str) -> Result<Vec<String>, Error> {{\n    let mut v = Vec::new();\n    v.push(format!(\"{{}}\", a));\n    Ok(v)\n}}\n\n")
+crates/lumen-core/src/ranked.rs:1249:        let d = ranked_outline("small.rs", "pub fn a() {}\n", 3_216, &econ, &tok);
+crates/lumen-core/src/ranked.rs:1557:    pub fn of(path: &str) -> Option<Self> {
+crates/lumen-core/src/ranked.rs:1577:pub fn extract_tags_cached(
+crates/lumen-core/src/ranked.rs:1611:pub fn clear_cache() {
+crates/lumen-core/src/ranked.rs:1631:        let src = "pub fn a() {}\n";
+crates/lumen-core/src/ranked.rs:1649:        let p = write(d.path(), "b.rs", "pub fn a() {}\n");
+crates/lumen-core/src/ranked.rs:1651:        let first = extract_tags_cached(&p, "pub fn a() {}\n", TagLang::Rust, Some(st1)).unwrap();
+crates/lumen-core/src/ranked.rs:1659:        let src2 = "pub fn a() {}\npub fn b() {}\n";
+crates/lumen-core/src/ranked.rs:1677:        let p = write(d.path(), "c.rs", "pub fn a() {}\n");
+crates/lumen-core/src/ranked.rs:1679:        let first = extract_tags_cached(&p, "pub fn a() {}\n", TagLang::Rust, Some(st1)).unwrap();
+crates/lumen-core/src/ranked.rs:1685:        let second = extract_tags_cached(&p, "pub fn z() {}\n", TagLang::Rust, Some(st2)).unwrap();
+crates/lumen-core/src/ranked.rs:1694:        let src = "pub fn a() {}\n";
+crates/lumen-core/src/ranked.rs:1713:        let src = "pub fn a() {}\n";
+crates/lumen-core/src/ranked.rs:1729:            let p = write(d.path(), &format!("f{i}.rs"), "pub fn a() {}\n");
+crates/lumen-core/src/ranked.rs:1730:            let _ = extract_tags_cached(&p, "pub fn a() {}\n", TagLang::Rust, FileStamp::of(&p));
+crates/lumen-core/src/ranked.rs:1751:    pub fn as_str(self) -> &'static str {
+crates/lumen-core/src/ranked.rs:1771:pub fn mode_from_env() -> Mode {
+crates/lumen-core/src/ranked.rs:1812:pub fn arm_for(mode: Mode, path: &str) -> Arm {
+crates/lumen-core/src/rates.rs:42:pub fn model_window(model: &str) -> Option<u64> {
+crates/lumen-core/src/rates.rs:57:pub fn infer_window(fill: u64) -> u64 {
+crates/lumen-core/src/rates.rs:70:pub fn resolve_window(model: &str, peak_fill: u64) -> u64 {
+crates/lumen-core/src/rates.rs:79:pub fn session_cost(input: i64, output: i64, cache_read: i64, cache_write: i64) -> f64 {
+crates/lumen-core/src/rates.rs:87:pub fn caching_savings(cache_read: i64) -> f64 {
+crates/lumen-core/src/record.rs:60:    pub fn is_billable(&self) -> bool {
+crates/lumen-core/src/record.rs:66:    pub fn text_output(&self) -> String {
+crates/lumen-core/src/repeat.rs:41:pub fn mode_from_env() -> Mode {
+crates/lumen-core/src/repeat.rs:45:pub fn parse_mode(v: &str) -> Mode {
+crates/lumen-core/src/repeat.rs:56:pub fn treated(mode: Mode, path: &str) -> bool {
+crates/lumen-core/src/repeat.rs:69:pub fn normalize(s: &str) -> Cow<'_, str> {
+crates/lumen-core/src/repeat.rs:181:pub fn blob_hash(content: &str) -> Hash {
+crates/lumen-core/src/repeat.rs:189:pub fn hex(h: &Hash) -> String {
+crates/lumen-core/src/repeat.rs:211:pub fn syms<'a>(src: &str, items: impl IntoIterator<Item = &'a CodeItem>) -> Vec<Sym> {
+crates/lumen-core/src/repeat.rs:294:    pub fn is_empty(&self) -> bool {
+crates/lumen-core/src/repeat.rs:305:pub fn diff(old: &[Sym], new: &[Sym]) -> Delta {
+crates/lumen-core/src/repeat.rs:413:pub fn unchanged_text(tool: &str) -> String {
+crates/lumen-core/src/repeat.rs:444:pub fn format_delta(new_lines: usize, d: &Delta) -> String {
+crates/lumen-core/src/repeat.rs:527:pub fn line_diff(old: &[&str], new: &[&str], first_line: usize) -> Option<String> {
+crates/lumen-core/src/repeat.rs:577:pub fn recall_changed_header(tool: &str) -> String {
+crates/lumen-core/src/repeat.rs:583:pub fn range_sym(start: usize, end: usize, text: &str) -> Sym {
+crates/lumen-core/src/repeat.rs:600:pub fn recall_delta(
+crates/lumen-core/src/repeat.rs:711:    pub fn when_ms(&self) -> i64 {
+crates/lumen-core/src/repeat.rs:732:    pub fn get(&self, session: &str, key: &str) -> Option<&Base> {
+crates/lumen-core/src/repeat.rs:738:    pub fn put(&mut self, session: &str, key: &str, base: Base) {
+crates/lumen-core/src/repeat.rs:753:    pub fn len(&self) -> usize {
+crates/lumen-core/src/repeat.rs:757:    pub fn is_empty(&self) -> bool {
+crates/lumen-core/src/repeat.rs:765:pub fn store() -> &'static Mutex<Store> {
+crates/lumen-core/src/repeat.rs:771:pub fn bound_pieces(pieces: Vec<(Sym, String)>) -> Vec<(Sym, Option<String>)> {
+crates/lumen-core/src/repeat.rs:782:pub fn now_ms() -> i64 {
+crates/lumen-core/src/repeat.rs:797:pub fn event_since(
+crates/lumen-core/src/report.rs:135:    pub fn collect() -> Self {
+crates/lumen-core/src/report.rs:145:    pub fn collect_for(channel: &str) -> Self {
+crates/lumen-core/src/report.rs:514:pub fn fingerprint(faults: &[Fault], env: &Environment) -> String {
+crates/lumen-core/src/report.rs:572:pub fn render(faults: &[Fault], env: &Environment, opts: &RenderOpts) -> Option<String> {
+crates/lumen-core/src/report.rs:766:pub fn embedded_sources(faults: &[Fault], env: &Environment) -> Vec<(String, String)> {
+crates/lumen-core/src/report.rs:811:pub fn source_manifest(faults: &[Fault], env: &Environment) -> Vec<(String, usize)> {
+crates/lumen-core/src/report.rs:834:pub fn load_faults_from_db(conn: &rusqlite::Connection) -> Result<Vec<Fault>, String> {
+crates/lumen-core/src/report.rs:841:pub fn load_faults_with_spool(
+crates/lumen-core/src/report.rs:1020:pub fn actionable_fault_count(db: Option<&Path>, spool: Option<&Path>) -> u64 {
+crates/lumen-core/src/report.rs:1113:    pub fn from_env() -> Self {
+crates/lumen-core/src/report.rs:1141:pub fn marker(fp: &str) -> String {
+crates/lumen-core/src/report.rs:1349:pub fn find_existing(repo: &str, fp: &str) -> Result<Option<(u64, String)>, String> {
+crates/lumen-core/src/report.rs:1354:pub fn find_existing_with(
+crates/lumen-core/src/report.rs:1427:pub fn file_issue(repo: &str, title: &str, body: &str, fp: &str) -> Result<Filing, String> {
+crates/lumen-core/src/report.rs:1432:pub fn file_issue_with(
+crates/lumen-core/src/report.rs:1683:pub fn title_from(body: &str) -> String {
+crates/lumen-core/src/report.rs:1694:pub fn load_faults(path: &Path) -> Result<Vec<Fault>, String> {
+crates/lumen-core/src/structure.rs:11:pub fn detect_lang(path: &str) -> Lang {
+crates/lumen-core/src/structure.rs:38:pub fn outline(src: &str, lang: Lang) -> Vec<CodeItem> {
+crates/lumen-core/src/tokenizer.rs:7:pub fn count_tokens(text: &str) -> usize {
+crates/lumen-core/src/update.rs:36:    pub fn parse(raw: &str) -> Option<Self> {
+crates/lumen-core/src/update.rs:61:    pub fn current() -> Self {
+crates/lumen-core/src/update.rs:87:pub fn bump(from: Version, to: Version) -> Bump {
+crates/lumen-core/src/update.rs:104:pub fn is_notifiable(b: Bump) -> bool {
+crates/lumen-core/src/update.rs:120:pub fn state_path() -> Option<PathBuf> {
+crates/lumen-core/src/update.rs:125:pub fn load_state(path: &Path) -> CheckState {
+crates/lumen-core/src/update.rs:132:pub fn save_state(path: &Path, state: &CheckState) {
+crates/lumen-core/src/update.rs:139:pub fn enabled() -> bool {
+crates/lumen-core/src/update.rs:144:pub fn due(state: &CheckState, now: u64, interval: u64) -> bool {
+crates/lumen-core/src/update.rs:163:pub fn decide(
+crates/lumen-core/src/update.rs:192:pub fn latest_from_json(json: &str) -> Option<Version> {
+crates/lumen-mcp/src/hook.rs:79:pub fn run(args: &[String]) -> i32 {
+crates/lumen-mcp/src/hook.rs:104:pub fn run_with(args: &[String], input: &[u8], env: &Env) -> Outcome {
+crates/lumen-mcp/src/hook.rs:397:pub fn cmd_label(command: &str) -> String {
+crates/lumen-mcp/src/lib.rs:104:    pub fn record(&self) {
+crates/lumen-mcp/src/lib.rs:135:    pub fn ok(result: Value) -> Self {
+crates/lumen-mcp/src/lib.rs:142:    pub fn err(code: i32, message: impl Into<String>) -> Self {
+crates/lumen-mcp/src/lib.rs:153:    pub fn result(&self) -> Option<&Value> {
+crates/lumen-mcp/src/lib.rs:160:    pub fn error_code(&self) -> Option<i32> {
+crates/lumen-mcp/src/lib.rs:167:    pub fn error_message(&self) -> Option<&str> {
+crates/lumen-mcp/src/lib.rs:177:pub fn ok_result(text: String, full_tokens: usize, returned_tokens: usize) -> Value {
+crates/lumen-mcp/src/lib.rs:223:pub fn request_key(
+crates/lumen-mcp/src/lib.rs:436:pub fn safe_read(path: &str) -> Result<String, String> {
+crates/lumen-mcp/src/lib.rs:449:pub fn handle_initialize() -> Value {
+crates/lumen-mcp/src/lib.rs:457:pub fn handle_tools_list() -> Value {
+crates/lumen-mcp/src/lib.rs:589:pub fn tool_ping(args: &Value) -> Outcome {
+crates/lumen-mcp/src/lib.rs:599:pub fn tool_smart_read(args: &Value) -> Outcome {
+crates/lumen-mcp/src/lib.rs:790:pub fn format_outline(
+crates/lumen-mcp/src/lib.rs:825:pub fn tool_recall_file(args: &Value) -> Outcome {
+crates/lumen-mcp/src/lib.rs:1118:pub fn merge_blocks(items: &[&CodeItem], total_lines: usize) -> Vec<Block> {
+crates/lumen-mcp/src/lib.rs:1157:pub fn format_items_excerpt(path: &str, src_lines: &[&str], items: &[&CodeItem]) -> String {
+crates/lumen-mcp/src/lib.rs:1186:pub fn format_outline_compact(path: &str, line_count: usize, items: &[&CodeItem]) -> String {
+crates/lumen-mcp/src/lib.rs:1206:pub fn tool_compress_logs(args: &Value) -> Outcome {
+crates/lumen-mcp/src/lib.rs:1254:pub fn handle_tools_call(params: Option<Value>) -> Outcome {
+crates/lumen-mcp/src/lib.rs:1273:pub fn dispatch(method: &str, params: Option<Value>) -> Outcome {
+crates/lumen-mcp/src/repeat_read.rs:53:pub fn begin(tool: &'static str, path: &str, req_key: &str, args: &Value) -> Option<Ctx> {
+crates/lumen-mcp/src/repeat_read.rs:97:    pub fn serve_outline(
+crates/lumen-mcp/src/repeat_read.rs:159:    pub fn stamp_outline(
+crates/lumen-mcp/src/repeat_read.rs:189:    pub fn serve_recall(
+crates/lumen-mcp/src/repeat_read.rs:242:    pub fn stamp_recall(
+crates/lumen-mcp/tests/e2e_read_to_screen.rs:60:                "/// Item {i}.\npub fn function_number_{i}(a: u32, b: &str) \
+crates/lumen-mcp/tests/efficiency.rs:672:    pub fn row(
+crates/lumen-mcp/tests/efficiency.rs:694:    pub fn ledger(
+crates/lumen-mcp/tests/escape_valve.rs:55:        s.push_str(&format!("pub fn operation_{i}(input: &str) -> String {{\n"));
+crates/lumen-mcp/tests/optimizer_bench.rs:58:            "/// Operation {i}.\npub fn operation_{i}(input: &str) -> String {{\n"
+crates/lumen-mcp/tests/optimizer_bench.rs:73:    (0..n).map(|i| format!("pub fn f{i}() {{}}\n")).collect()
+crates/lumen-mcp/tests/ranked_metering.rs:108:            "/// Item {i}.\npub fn function_number_{i}(a: u32, b: &str) -> Result<Vec<String>, Error> {{\n    let mut v = Vec::new();\n    v.push(format!(\"{{}}{{}}\", a, b));\n    Ok(v)\n}}\n\n"
+crates/lumen-mcp/tests/ranked_metering.rs:193:    std::fs::write(&p, "pub fn a() -> u8 { 1 }\npub fn b() -> u8 { 2 }\n").unwrap();
+crates/lumen-mcp/tests/repeat_reads.rs:45:    let mut s = format!("pub fn {name}({params}) -> String {{\n");
+crates/lumen-mcp/tests/repeat_reads.rs:341:        "pub fn operation_3",
+crates/lumen-mcp/tests/repeat_reads.rs:342:        "pub fn inserted() {}\n\npub fn operation_3",
+crates/lumen-mcp/tests/repeat_reads.rs:580:    let at = before.find("pub fn operation_3").unwrap();
+crates/lumen-stats/src/lib.rs:31:pub fn db_url() -> String {
