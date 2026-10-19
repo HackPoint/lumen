@@ -543,6 +543,21 @@ fn advance_offset(offsets: &Offsets, path: PathBuf, end: u64) {
 // ingest_from — core ingestion (logic unchanged from original)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// How long a refused transcript may take to finish being deleted.
+const GONE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Whether `path` is gone now or within [`GONE_WAIT`].
+async fn gone_soon(path: &Path) -> bool {
+    let deadline = tokio::time::Instant::now() + GONE_WAIT;
+    loop {
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            _ if tokio::time::Instant::now() >= deadline => return false,
+            _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    }
+}
+
 /// Read the file from byte `start`, ingest all complete lines, return the
 /// new end offset.
 ///
@@ -554,7 +569,8 @@ fn advance_offset(offsets: &Offsets, path: PathBuf, end: u64) {
 ///     must not stop the rest of the file).
 ///   - INSERT OR IGNORE on message_id: same bytes ingested twice is safe.
 ///   - A transcript that is gone when it is opened has nothing to ingest:
-///     `start` is returned and no state is touched.  Every other file-open /
+///     `start` is returned and no state is touched. So is one whose open is refused while it
+///     is being deleted, once it is gone ([`gone_soon`]).  Every other file-open /
 ///     seek / read error is returned to the caller, who logs and skips.  This
 ///     keeps error handling at the outermost loop boundary.
 async fn ingest_from(
@@ -568,6 +584,12 @@ async fn ingest_from(
         Ok(f) => f,
         // Deleted between being noticed and being opened: nothing left to ingest.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(start),
+        // On Windows a file deleted while a handle to it is still open refuses every open with
+        // "Access is denied" until the last handle closes, and then it is gone. A refused file
+        // that is gone a moment later was being deleted; one still there is a real refusal.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && gone_soon(path).await => {
+            return Ok(start);
+        }
         Err(e) => return Err(e.into()),
     };
     let fname = path.to_string_lossy().to_string();
@@ -2310,6 +2332,51 @@ mod tests {
                 .unwrap(),
             42
         );
+        assert_eq!(event_kinds(&pool).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_refused_file_is_gone_soon_only_if_it_really_goes() {
+        let dir = TempDir::new().unwrap();
+        // Already gone, and gone partway through the wait: a deletion.
+        assert!(gone_soon(&dir.path().join("never.jsonl")).await);
+        let going = dir.path().join("going.jsonl");
+        std::fs::write(&going, b"x\n").unwrap();
+        let g = going.clone();
+        let deleter = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            std::fs::remove_file(g).unwrap();
+        });
+        assert!(gone_soon(&going).await);
+        deleter.await.unwrap();
+        // Still there after the wait: a real refusal, which stays a fault.
+        let stays = dir.path().join("stays.jsonl");
+        std::fs::write(&stays, b"x\n").unwrap();
+        let t = std::time::Instant::now();
+        assert!(!gone_soon(&stays).await);
+        assert!(t.elapsed() >= GONE_WAIT);
+    }
+
+    /// The Windows case itself: a transcript deleted while another handle holds it open refuses
+    /// the daemon's open until that handle closes. The daemon must hand the offset back, not fail.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_transcript_refused_while_it_is_being_deleted_is_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        let pool = make_pool(&dir).await;
+        let (tx, _rx) = broadcast::channel(4);
+        let jsonl = dir.path().join("pending.jsonl");
+        std::fs::write(&jsonl, b"{}\n").unwrap();
+        // std opens with FILE_SHARE_DELETE, so the delete succeeds and leaves it delete-pending
+        // (or, under POSIX delete semantics, removes the name at once: then the open is NotFound).
+        let holder = std::fs::File::open(&jsonl).unwrap();
+        std::fs::remove_file(&jsonl).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(holder);
+        });
+        assert_eq!(ingest_from(&pool, &jsonl, 7, &tx, true).await.unwrap(), 7);
+        release.join().unwrap();
         assert_eq!(event_kinds(&pool).await, Vec::<String>::new());
     }
 
