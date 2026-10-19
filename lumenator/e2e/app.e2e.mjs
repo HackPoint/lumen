@@ -550,5 +550,18 @@ test('Home shows in bold what the ledger saved, as `lumen` says it, and keeps a 
     const rows = await s.until('the per-call ledger',
       `return document.querySelectorAll('table[aria-labelledby="ledger-recent"] tbody tr').length || null;`);
     assert.equal(rows, summary.ledger.recent.length);
+
+    // The rest of the pictures for the release: every other tab, on the same fixture.
+    for (const tab of ['optimizer', 'details', 'settings']) {
+      await s.click(`a.tab-nav__tab[href="/${tab}"]`);
+      await s.until(`the ${tab} tab`,
+        `return document.querySelector('a.tab-nav__tab[href="/' + arguments[0] + '"]')?.classList.contains('is-active') || null;`,
+        15_000, tab);
+      await sleep(1_000);
+      const shot = path.join(ARTIFACTS, `${tab}-${WINDOWS ? 'windows' : 'linux'}.png`);
+      fs.writeFileSync(shot, await s.screenshot());
+      t.diagnostic(`screenshot: ${shot} (${fs.statSync(shot).size} bytes)`);
+      assert.ok(fs.statSync(shot).size > 1_000, `the ${tab} screenshot holds a picture`);
+    }
   });
 });

@@ -21,8 +21,10 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 pub mod merge;
 
-/// The identifier Lumen used before the data directory moved.
-pub const LEGACY_APP_ID: &str = "io.hackpoint.lumen";
+/// A placeholder for the v1 migration code until F53 v2 T7 removes it. The previous install is
+/// found by what it holds (`discover`), never by its folder's name, and no file in the
+/// repository names it.
+pub const LEGACY_APP_ID: &str = "io.previous.lumen";
 
 /// Written into the new directory as the migration's commit point.
 pub const MARKER_NAME: &str = ".legacy-migration.json";

@@ -444,7 +444,7 @@ jobs:
           exit $LASTEXITCODE
 
       # Home on a fixture ledger, as this platform renders it: for the release PR.
-      - name: Keep the screenshot of Home
+      - name: Keep the screenshots of every tab
         if: always()
         uses: actions/upload-artifact@v7
         with:

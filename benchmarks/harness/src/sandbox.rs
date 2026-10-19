@@ -248,15 +248,11 @@ pub const BENCH_PREFIXES: [&str; 2] = ["lumen-bench-", "bench-"];
 /// The data-directory name Lumen uses today, from lumen-core.
 const NEXT_APP_ID: &str = lumen_core::meter::APP_ID;
 
-/// The identifier of the data directory before 1.10.0, from the migration module: the only
-/// place it is spelt out.
-pub fn legacy_app_id() -> &'static str {
-    lumen_core::legacy::LEGACY_APP_ID
-}
-
-/// The ledgers a run must never write, for a real home: the data directory under each
-/// identifier, and the database `~/.lumen_db_path` points at. Files that do not exist are
-/// listed too; [`check_ledger`] skips them and never creates one.
+/// The ledgers a run must never write, for a real home: the current data directory's, every
+/// Lumen ledger directly under the platform's data root whatever its folder is called (a
+/// previous install is found by what it holds, not by its name), and the database
+/// `~/.lumen_db_path` points at. Files that do not exist are listed too; [`check_ledger`]
+/// skips them and never creates one.
 pub fn real_ledger_paths(home: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = Vec::new();
     let mut add = |p: PathBuf| {
@@ -265,12 +261,21 @@ pub fn real_ledger_paths(home: &Path) -> Vec<PathBuf> {
         }
     };
     add(lumen_core::meter::canonical_db_path_in(home));
-    // The current identifier on the day this lands, and the legacy one: the directories are
-    // listed under both so the guard is the same before and after the identifier changes.
-    for id in [legacy_app_id(), NEXT_APP_ID] {
-        let dir = lumen_core::meter::app_data_dir_in(home);
-        if let Some(parent) = dir.parent() {
-            add(parent.join(id).join("lumen.db"));
+    let dir = lumen_core::meter::app_data_dir_in(home);
+    if let Some(root) = dir.parent() {
+        add(root.join(NEXT_APP_ID).join("lumen.db"));
+        // Any folder one level down that holds a ledger: the install before the identifier
+        // changed, under a name this crate never needs to know.
+        if let Ok(entries) = std::fs::read_dir(root) {
+            let mut found: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path().join("lumen.db"))
+                .filter(|db| db.is_file())
+                .collect();
+            found.sort();
+            for db in found {
+                add(db);
+            }
         }
     }
     if let Ok(s) = std::fs::read_to_string(home.join(".lumen_db_path")) {
@@ -694,15 +699,20 @@ mod tests {
     }
 
     #[test]
-    fn real_ledger_paths_cover_both_directories_and_the_pointer() {
+    fn real_ledger_paths_cover_every_ledger_under_the_data_root_and_the_pointer() {
         let t = tempfile::tempdir().unwrap();
         std::fs::write(t.path().join(".lumen_db_path"), "/somewhere/else.db\n").unwrap();
+        let parent = lumen_core::meter::app_data_dir_in(t.path());
+        let parent = parent.parent().unwrap().to_path_buf();
+        // A previous install under a name of its own, and a folder with no ledger.
+        std::fs::create_dir_all(parent.join("io.previous.lumen")).unwrap();
+        std::fs::write(parent.join("io.previous.lumen").join("lumen.db"), b"").unwrap();
+        std::fs::create_dir_all(parent.join("some.other.app")).unwrap();
         let v = real_ledger_paths(t.path());
         assert!(v.contains(&PathBuf::from("/somewhere/else.db")));
         assert!(v.contains(&lumen_core::meter::canonical_db_path_in(t.path())));
-        let parent = lumen_core::meter::app_data_dir_in(t.path());
-        let parent = parent.parent().unwrap();
-        assert!(v.contains(&parent.join(legacy_app_id()).join("lumen.db")));
+        assert!(v.contains(&parent.join("io.previous.lumen").join("lumen.db")));
+        assert!(!v.contains(&parent.join("some.other.app").join("lumen.db")));
         assert!(v.contains(&parent.join(NEXT_APP_ID).join("lumen.db")));
         let mut d = v.clone();
         d.dedup();
