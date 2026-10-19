@@ -160,3 +160,37 @@ fn an_import_brings_the_rows_in_once() {
     assert!(text(&again.stderr).contains("already imported"));
     assert_eq!(rows(&s), 3);
 }
+
+fn lumen_in(s: &Sandbox, cwd: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_lumen"))
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &s.home)
+        .env("USERPROFILE", &s.home)
+        .env("LUMEN_DB", s.n.join("lumen.db"))
+        .output()
+        .expect("the lumen binary runs")
+}
+
+#[test]
+fn a_relative_folder_is_imported_like_an_absolute_one() {
+    let s = sandbox(true);
+    old_folder(&s, "restored-copy", 3);
+    let before = rows(&s);
+    let out = lumen_in(&s, &s.root, &["import-ledger", "restored-copy"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(rows(&s), before + 3);
+}
+
+#[test]
+fn a_bare_ledger_file_name_is_imported_from_the_current_folder() {
+    let s = sandbox(true);
+    let folder = old_folder(&s, "restored-copy", 2);
+    fs::rename(folder.join("lumen.db"), folder.join("lumen.db.pre-legacy")).unwrap();
+    let before = rows(&s);
+    let out = lumen_in(&s, &folder, &["import-ledger", "lumen.db.pre-legacy"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(rows(&s), before + 2);
+}

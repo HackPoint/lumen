@@ -459,6 +459,9 @@ pub fn import(
     opts: &ImportOptions,
     ops: &dyn Ops,
 ) -> Result<ImportReport, ImportError> {
+    // A relative argument would be read from the filesystem root by the read-only URI.
+    let abs = std::path::absolute(arg).map_err(|e| failed("cannot resolve the path", e))?;
+    let arg = abs.as_path();
     // 1. Refuse.
     let mut pending_move = false;
     let backup = match marker::read(n) {
@@ -787,7 +790,13 @@ fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path, spool: bool) ->
 /// The originals already merged: `B/data/lumen.db` and every `legacy-imports/<k>` (or in-place
 /// folder) with a `$done` row. Read-only connections, one per ledger, opened on demand.
 fn originals(n: &Path, conn: &Connection, current: &Path) -> Result<Vec<PathBuf>, ImportError> {
+    // N's own ledger is an original too: a copy of it (a Finder duplicate, a restored backup)
+    // holds only rows N already has, so they are prefix, not new.
     let mut found = Vec::new();
+    let own = n.join(LEDGER);
+    if own.is_file() && !same_dir(&real(&own), &real(current)) {
+        found.push(own);
+    }
     if let Seen::Migrated(m) = marker::read(n)
         && let Some(b) = backup_dir(n, &m)
     {
@@ -1897,5 +1906,69 @@ mod tests {
         );
         assert_eq!(count(&i.n_db(), "read_events"), 3);
         drop(app);
+    }
+
+    // ---- copies of N itself ----
+    mod copies_of_n {
+        use super::*;
+
+        /// A Finder duplicate (or a restored copy) of N itself, on a settled install.
+        #[test]
+        fn a_copy_of_the_live_folder_adds_no_row() {
+            let t = TempDir::new().unwrap();
+            let root = t.path().join("data");
+            let n = root.join("example.current.app");
+            ledger(&n.join("lumen.db"), &["one", "two"]);
+            marker::write_settled(&n).unwrap();
+            drop(crate::meter::connect_db(&n.join("lumen.db")).unwrap());
+            let dup = root.join("example.current.app copy");
+            copy_dir(&n, &dup);
+            let before = counts(&n.join("lumen.db"));
+            import(&n, &dup, &opts(), &Native).unwrap();
+            assert_eq!(
+                counts(&n.join("lumen.db")),
+                before,
+                "a copy of the live ledger doubled its rows"
+            );
+        }
+
+        /// A user's own copy of the live ledger, after the migration, once the app wrote its own rows.
+        #[test]
+        fn a_copy_of_the_live_ledger_after_migration_adds_no_row() {
+            let i = install();
+            {
+                let c = crate::meter::connect_db(&i.n_db()).unwrap();
+                c.execute_batch(
+                    "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                       routed_via) VALUES ('t-own', 'Read', '/own', 1, 2, 1, 'builtin_read'); \
+                     INSERT INTO faults (ts, kind, session_id) VALUES ('t-own', 'row-own', 's');",
+                )
+                .unwrap();
+            }
+            let copy = i.root.join("home").join("lumen-backup");
+            fs::create_dir_all(&copy).unwrap();
+            fs::copy(i.n_db(), copy.join("lumen.db")).unwrap();
+            let before = counts(&i.n_db());
+            i.import(&copy).unwrap();
+            assert_eq!(
+                counts(&i.n_db()),
+                before,
+                "the live ledger's own rows came in twice"
+            );
+        }
+
+        /// A copy of a folder already imported (not the backup) adds nothing.
+        #[test]
+        fn a_copy_of_an_imported_folder_adds_no_row() {
+            let i = install();
+            let d = recreated(&i);
+            let spare = i.root.join("home").join("spare-copy");
+            copy_dir(&d, &spare);
+            i.import(&d).unwrap();
+            let after_first = counts(&i.n_db());
+            let r = i.import(&spare).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first);
+            assert_eq!(r.spool, Spool::Kept);
+        }
     }
 }
