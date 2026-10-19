@@ -39,7 +39,7 @@ use super::commit::{LockError, backup_dir, take_lock};
 use super::discover::{Verdict, is_lumen_ledger};
 use super::freeze::make_read_only;
 use super::marker::{self, Seen};
-use super::merge::{KEYED_TABLES, POSITIONAL_TABLES, columns, key_expr, quote};
+use super::merge::{KEYED_TABLES, POSITIONAL_TABLES, columns, key_expr, quote, row_sig_in};
 use super::migrate::{LEDGER, Probe, probe, sidecar, sync_dir};
 use super::retire::Ops;
 use super::same_dir;
@@ -294,8 +294,12 @@ pub fn set_aside_text(ledger: &Path) -> String {
 // ---- the source ----
 
 enum Kind {
-    /// A folder with `lumen.db` in it (and maybe a spool): moves whole.
+    /// A folder with `lumen.db` in it (and maybe a spool) that holds only Lumen's own files, or
+    /// sits directly in a data root: moves whole.
     Folder,
+    /// A folder with `lumen.db` in it that holds other files too (a user's `Documents`): only the
+    /// ledger set and the spool move; the rest is never touched.
+    Shared,
     /// A single ledger file with its sidecars, such as `lumen.db.pre-legacy`.
     Ledger,
 }
@@ -368,10 +372,41 @@ fn within(p: &Path, root: &Path) -> bool {
     p.ancestors().any(|a| same_dir(a, root))
 }
 
+/// Whether `name` is a file or folder Lumen itself keeps in its data folder.
+fn is_lumen_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with(LEDGER)
+        || n.starts_with("faults.jsonl")
+        || n == "lumen_settings.json"
+        || n == "update_check.json"
+        || (n.starts_with("lumen_call_") && n.ends_with(".json"))
+        || matches!(n.as_str(), "bin" | "logs" | "ebwebview" | "webkit")
+}
+
+/// Whether the whole of `folder` may move into `legacy-imports` and be made read-only: it sits
+/// directly in a data root (next to N) or under N, or everything in it is a Lumen name. Any other
+/// folder holds somebody's files, and those stay where they are.
+fn owns_folder(n_real: &Path, folder: &Path) -> bool {
+    if let Some(parent) = folder.parent() {
+        if within(parent, n_real) {
+            return true;
+        }
+        if n_real.parent().is_some_and(|root| same_dir(parent, root)) {
+            return true;
+        }
+    }
+    match fs::read_dir(folder) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .all(|e| is_lumen_name(&e.file_name().to_string_lossy())),
+        Err(_) => false,
+    }
+}
+
 /// The folder name under `legacy-imports` that `p` is directly in or is, when it is.
 fn import_name(imports: &Path, p: &Path, kind: &Kind) -> Option<String> {
     let folder = match kind {
-        Kind::Folder => p,
+        Kind::Folder | Kind::Shared => p,
         Kind::Ledger => p.parent()?,
     };
     let parent = folder.parent()?;
@@ -425,9 +460,23 @@ pub fn import(
     ops: &dyn Ops,
 ) -> Result<ImportReport, ImportError> {
     // 1. Refuse.
+    let mut pending_move = false;
     let backup = match marker::read(n) {
         Seen::Settled => None,
-        Seen::Migrated(m) => backup_dir(n, &m),
+        Seen::Migrated(m) => {
+            let b = backup_dir(n, &m);
+            // The previous folder was not moved into the backup yet (the OS refused the rename, or
+            // the start was killed before it): there is no original to compare against, and the
+            // next start moves and merges it. Importing now would add its rows a second time.
+            let data_db = b
+                .as_ref()
+                .map(|b| b.join(super::commit::DATA_DIR).join(LEDGER));
+            pending_move = !m.source_dir.is_empty()
+                && data_db.is_some_and(|d| !d.is_file())
+                && fs::symlink_metadata(Path::new(&m.source_dir).join(LEDGER))
+                    .is_ok_and(|md| md.file_type().is_file());
+            b
+        }
         Seen::Absent => {
             return Err(ImportError::NotStarted(
                 "this install has not finished its first start, so there is nothing to import into"
@@ -441,8 +490,18 @@ pub fn import(
             ));
         }
     };
-    let src = resolve(arg)?;
+    if pending_move {
+        return Err(ImportError::NotStarted(
+            "the previous folder has not moved into the backup yet and its rows are not all \
+             merged; quit the older Lumen, start Lumen again, then retry"
+                .into(),
+        ));
+    }
+    let mut src = resolve(arg)?;
     let n_real = real(n);
+    if matches!(src.kind, Kind::Folder) && !owns_folder(&n_real, &real(&src.path)) {
+        src.kind = Kind::Shared;
+    }
     let n_db = n.join(LEDGER);
     let src_real = real(&src.path);
     let ledger_real = real(&src.ledger);
@@ -525,7 +584,7 @@ fn import_under(
     let imports = n_real.join(IMPORTS_DIR);
     let mut ledger = src.ledger.clone();
     let mut dir = match src.kind {
-        Kind::Folder => src.path.clone(),
+        Kind::Folder | Kind::Shared => src.path.clone(),
         Kind::Ledger => src
             .path
             .parent()
@@ -550,7 +609,8 @@ fn import_under(
             }
             let moved = match src.kind {
                 Kind::Folder => ops.rename(&src.path, &target),
-                Kind::Ledger => move_ledger_set(ops, &src.path, &target),
+                Kind::Shared => move_ledger_set(ops, &src.ledger, &target, true),
+                Kind::Ledger => move_ledger_set(ops, &src.path, &target, false),
             };
             let placed = match moved {
                 Ok(()) => {
@@ -610,7 +670,17 @@ fn import_under(
         placed,
         done_key,
     };
-    run_import(&place, src, held, opts)
+    let landed = place.dir.clone();
+    let moved = matches!(place.placed, Placed::Moved) && !opts.dry_run;
+    run_import(&place, src, held, opts).map_err(|e| match e {
+        // The source already left its place: say where it is, and that a rerun on it imports.
+        ImportError::Failed(why) if moved => ImportError::Failed(format!(
+            "{why}; the source is now at {}, and this finishes it: {}",
+            landed.display(),
+            command_for(&landed)
+        )),
+        other => other,
+    })
 }
 
 fn empty_report(name: String, dir: PathBuf, placed: Placed, opts: &ImportOptions) -> ImportReport {
@@ -653,14 +723,29 @@ fn free_name(imports: &Path, date: &str) -> String {
     }
 }
 
-/// A set-aside ledger goes, sidecars first, to `<target>/lumen.db*`. A failed rename puts back
+/// A set-aside ledger goes, sidecars first, to `<target>/lumen.db*`; with `spool`, the folder's
+/// fault spool and its `.draining` file go too, ahead of the ledger. A failed rename puts back
 /// what was moved, newest first, so the ledger is whole under its own name again, and removes the
 /// folder it made.
-fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path) -> io::Result<()> {
+fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path, spool: bool) -> io::Result<()> {
     fs::create_dir_all(target)?;
     let to_db = target.join(LEDGER);
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut run = || -> io::Result<()> {
+        if spool && let Some(dir) = from_db.parent() {
+            let live = dir.join("faults.jsonl");
+            for from in [faults::draining_path(&live), live] {
+                if from
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_file())
+                    && let Some(name) = from.file_name()
+                {
+                    let to = target.join(name);
+                    ops.rename(&from, &to)?;
+                    moved.push((from, to));
+                }
+            }
+        }
         for sfx in SIDECARS {
             let from = sidecar(from_db, sfx);
             if from.symlink_metadata().is_ok() {
@@ -806,6 +891,32 @@ fn run_import(
             *slot = (*slot).max(k);
         }
     }
+    // With no copy of the previous folder left to compare against (the backup was deleted), the
+    // marker still knows the row at each mark: a source that has it holds everything up to there.
+    if let Seen::Migrated(m) = marker::read(p.n) {
+        let have_copy = backup_dir(p.n, &m)
+            .is_some_and(|b| b.join(super::commit::DATA_DIR).join(LEDGER).is_file());
+        if !have_copy {
+            for table in POSITIONAL_TABLES {
+                let (Some(&mark), Some(sig)) = (m.hwm.get(table), m.hwm_sig.get(table)) else {
+                    continue;
+                };
+                let Ok(cols) = columns(&conn, "main", table) else {
+                    continue;
+                };
+                if mark > 0
+                    && row_sig_in(&conn, "main", table, &cols, mark)
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some(sig.as_str())
+                {
+                    let slot = prefix.entry(table.to_string()).or_insert(0);
+                    *slot = (*slot).max(mark);
+                }
+            }
+        }
+    }
     let shares_history = prefix.values().any(|&v| v > 0);
 
     // 5. One transaction.
@@ -854,8 +965,8 @@ fn run_import(
     }
     let (spool, spool_sig) = match src.kind {
         Kind::Ledger => (Spool::NoneHere, None),
-        Kind::Folder if shares_history => (Spool::Kept, None),
-        Kind::Folder => {
+        Kind::Folder | Kind::Shared if shares_history => (Spool::Kept, None),
+        Kind::Folder | Kind::Shared => {
             let spool = p.actual.join("faults.jsonl");
             let mut bytes = Vec::new();
             let mut recs = Vec::new();
@@ -1605,5 +1716,186 @@ mod tests {
             assert!(text.contains(&command_for(p)), "{text}");
         }
         assert!(recreated_folder_text(p).contains("Nothing from it was merged"));
+    }
+
+    // ---- review fixes ----
+
+    fn make_writable(dir: &Path) {
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                make_writable(&p);
+            } else {
+                let mut perms = fs::metadata(&p).unwrap().permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    perms.set_mode(0o644);
+                }
+                #[cfg(not(unix))]
+                {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                }
+                fs::set_permissions(&p, perms).unwrap();
+            }
+        }
+    }
+
+    /// A migration whose move the OS refused: the marker is written, the previous folder is still
+    /// at its place and the backup has no data yet.
+    fn install_move_deferred() -> Install {
+        let t = TempDir::new().unwrap();
+        let root = t.path().join("data");
+        let l = root.join("example.previous.app");
+        let n = root.join("example.current.app");
+        ledger(&l.join("lumen.db"), &["snap", "snap2"]);
+        fs::write(
+            l.join("faults.jsonl"),
+            format!("{}\n", line("backup-spool")),
+        )
+        .unwrap();
+        let mut o = CommitOptions::new("2026-10-19T08:00:00Z");
+        o.probe_tries = 1;
+        o.probe_delay = Duration::from_millis(10);
+        let ops = Refuse(io::ErrorKind::PermissionDenied);
+        let m: MarkerV2 = match commit::migrate(&l, &n, &o, &ops) {
+            Outcome::Migrated { marker, moved } => {
+                assert!(matches!(moved, Moved::Deferred(_)), "{moved:?}");
+                marker
+            }
+            other => panic!("expected Migrated, got {other:?}"),
+        };
+        let b = backup_dir(&n, &m).unwrap();
+        assert!(!b.join(DATA_DIR).exists());
+        assert!(l.join("lumen.db").is_file());
+        Install { _t: t, root, n, b }
+    }
+
+    #[test]
+    fn while_the_move_is_pending_the_previous_folder_and_its_copies_are_refused() {
+        let i = install_move_deferred();
+        let before = counts(&i.n_db());
+        let l = i.old_place();
+        let dup = i.root.join("example.previous.app copy");
+        copy_dir(&l, &dup);
+        for arg in [l.clone(), l.join("lumen.db"), dup.clone()] {
+            for dry in [false, true] {
+                let mut o = opts();
+                o.dry_run = dry;
+                let err = import(&i.n, &arg, &o, &Native).unwrap_err();
+                assert!(
+                    matches!(err, ImportError::NotStarted(_)),
+                    "{arg:?}: {err:?}"
+                );
+                assert!(err.to_string().contains("start Lumen again"), "{err}");
+            }
+        }
+        assert_eq!(counts(&i.n_db()), before, "no row came in");
+        assert!(l.join("lumen.db").is_file() && dup.join("lumen.db").is_file());
+        assert!(!i.imports().exists(), "nothing moved");
+    }
+
+    #[test]
+    fn a_copy_of_the_previous_folder_adds_no_row_after_its_backup_is_deleted() {
+        let i = install();
+        let copy = i.root.join("example.previous.app copy");
+        copy_dir(&i.b_data(), &copy);
+        make_writable(&i.b);
+        fs::remove_dir_all(i.b_data()).unwrap();
+        let before = counts(&i.n_db());
+        let r = i.import(&copy).unwrap();
+        assert!(
+            r.prefix["read_events"] > 0 && r.prefix["faults"] > 0,
+            "{:?}",
+            r.prefix
+        );
+        assert_eq!(counts(&i.n_db()), before, "its rows came in twice");
+    }
+
+    /// Everything in a folder that is not a Lumen name.
+    fn user_folder(i: &Install) -> PathBuf {
+        let docs = i.root.join("home").join("my-documents");
+        ledger(&docs.join("lumen.db"), &["mine"]);
+        fs::write(docs.join("taxes-2025.pdf"), b"precious").unwrap();
+        fs::create_dir_all(docs.join("photos")).unwrap();
+        fs::write(docs.join("photos").join("a.jpg"), b"jpg").unwrap();
+        docs
+    }
+
+    #[test]
+    fn a_ledger_in_a_user_folder_moves_alone_and_the_rest_is_not_touched() {
+        for as_file in [true, false] {
+            let i = install();
+            let docs = user_folder(&i);
+            fs::write(
+                docs.join("faults.jsonl"),
+                format!("{}\n", line("docs-spool")),
+            )
+            .unwrap();
+            let arg = if as_file {
+                docs.join("lumen.db")
+            } else {
+                docs.clone()
+            };
+            let r = i.import(&arg).unwrap();
+            assert_eq!(r.spool, Spool::Taken(1));
+            assert_eq!(fs::read(docs.join("taxes-2025.pdf")).unwrap(), b"precious");
+            assert!(docs.join("photos").join("a.jpg").is_file());
+            assert!(!docs.join("lumen.db").exists() && !docs.join("faults.jsonl").exists());
+            let landed = i.first_import();
+            assert!(landed.join("lumen.db").is_file());
+            assert!(!landed.join("taxes-2025.pdf").exists() && !landed.join("photos").exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = |p: PathBuf| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+                assert_ne!(
+                    mode(docs.join("taxes-2025.pdf")),
+                    0o444,
+                    "the user's file stayed writable"
+                );
+                assert_eq!(mode(landed.join("lumen.db")), 0o444);
+            }
+            assert!(kinds(&i.n_db()).contains("docs-spool"));
+        }
+    }
+
+    #[test]
+    fn a_folder_of_only_lumen_files_still_moves_whole() {
+        let i = install();
+        let d = i.root.join("some-lumen-copy");
+        ledger(&d.join("lumen.db"), &["x"]);
+        fs::write(d.join("lumen_settings.json"), b"{}").unwrap();
+        fs::create_dir_all(d.join("logs")).unwrap();
+        i.import(&d).unwrap();
+        assert!(!d.exists());
+        assert!(i.first_import().join("lumen_settings.json").is_file());
+    }
+
+    #[test]
+    fn an_import_and_a_dry_run_work_while_the_live_ledger_is_open() {
+        let i = install();
+        let app = crate::meter::connect_db(&i.n_db()).unwrap();
+        app.query_row("SELECT count(*) FROM read_events", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+        let d = recreated(&i);
+        let mut dry = opts();
+        dry.dry_run = true;
+        let t = std::time::Instant::now();
+        let r = import(&i.n, &d, &dry, &Native).unwrap();
+        assert!(r.dry_run && r.total_rows() > 0, "{r:?}");
+        assert!(d.join("lumen.db").is_file(), "a dry run moves nothing");
+        let r = i.import(&d).unwrap();
+        assert!(r.total_rows() > 0 && !d.exists());
+        assert!(
+            t.elapsed() < Duration::from_secs(4),
+            "it waited on the lock: {:?}",
+            t.elapsed()
+        );
+        assert_eq!(count(&i.n_db(), "read_events"), 3);
+        drop(app);
     }
 }
