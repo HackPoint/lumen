@@ -712,6 +712,7 @@ mod tests {
     }
 
     /// A ledger with the table the stub meter inserts into, made the way a build would make it.
+    #[cfg(unix)] // used only by the unix-only series tests
     fn stub_ledger(iso: &Sandbox) -> Res<()> {
         // `connect_db` creates the ledger with lumen-core's schema, as a build would.
         lumen_core::meter::connect_db(&iso.db)
@@ -719,11 +720,13 @@ mod tests {
             .ctx("open the ledger")
     }
 
+    #[cfg(unix)] // used only by the unix-only series tests
     const STUB_INTERCEPT: &str = "#!/usr/bin/env bash\n\
         in=$(cat)\n\
         case \"$in\" in *-block-*) exit 2;; esac\n\
         exit 0\n";
 
+    #[cfg(unix)] // used only by the unix-only series tests
     const STUB_METER: &str = "#!/usr/bin/env bash\n\
         cat >/dev/null\n\
         python3 - \"$LUMEN_DB\" \"$LUMEN_TOK\" <<'PY'\n\
@@ -741,6 +744,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // used only by the unix-only series tests
     fn run_stubs(
         work: &Path,
         s: Scripts,
