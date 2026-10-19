@@ -21,8 +21,9 @@
 
 use crate::builds::Build;
 use crate::corpus::{BUCKETS, Corpus, LANGS, SourceFile, bucket_of};
-use crate::driver::{Identity, Isolation, LedgerRow, Reply, Server, ledger_rows};
+use crate::driver::{LedgerRow, Reply, Server, ledger_rows};
 use crate::edit::{self, Edit, Rep};
+use crate::sandbox::Sandbox;
 use crate::stats::{Dist, dist};
 use crate::util::{Ctx, Res, sha256_hex};
 use lumen_core::tokenizer::count_tokens;
@@ -86,6 +87,13 @@ pub struct FileResult {
     pub delta_route: Option<String>,
     /// Whether the first read with repeat reads on was word for word the repeat-off outline.
     pub first_matches_off: bool,
+    /// Why the stub and delta figures cannot exist for this build (before 1.7.0, or no Lumen):
+    /// `n/a — <reason>`. `stub` and `delta` then hold nothing and are never read as a figure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_na: Option<String>,
+    /// A clamped version's own `saved_tokens` for the outline, as reported: recorded, never used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_self_saved: Option<i64>,
 }
 
 fn check(p: &Prepared, r: &Reply, tool: &str) -> Res<()> {
@@ -130,17 +138,12 @@ struct Off {
 }
 
 /// Repeat reads off: the outline and the recall as shipped.
-fn off_pass(
-    bin: &Path,
-    identity: Identity,
-    c: &Corpus,
-    prep: &[Prepared],
-    work: &Path,
-    tag: &str,
-) -> Res<(Vec<Off>, String)> {
-    let iso = Isolation::create(&work.join(format!("off-{}", c.name)))?;
+fn off_pass(build: &Build, c: &Corpus, prep: &[Prepared], work: &Path) -> Res<(Vec<Off>, String)> {
+    let (bin, identity, tag) = (build.bin.as_path(), build.identity, build.label.as_str());
+    let iso = Sandbox::create(&work.join(format!("off-{}", c.name)))?;
     let session = format!("bench-off-{}", c.name);
     let mut s = Server::start(bin, &c.root, &iso, &session, false, identity)?;
+    s.set_clamped(build.clamped());
     let version = s.version.clone();
     let mut replies: Vec<(Reply, Option<Reply>)> = Vec::with_capacity(prep.len());
     for (i, p) in prep.iter().enumerate() {
@@ -208,15 +211,8 @@ struct On {
 
 /// Repeat reads on: first read, an identical second read, and (when an edit exists) a third read
 /// of the edited file. Runs on a private copy of the files so the corpus cache is never edited.
-fn on_pass(
-    bin: &Path,
-    identity: Identity,
-    c: &Corpus,
-    prep: &[Prepared],
-    off: &[Off],
-    work: &Path,
-    tag: &str,
-) -> Res<Vec<On>> {
+fn on_pass(build: &Build, c: &Corpus, prep: &[Prepared], off: &[Off], work: &Path) -> Res<Vec<On>> {
+    let (bin, identity, tag) = (build.bin.as_path(), build.identity, build.label.as_str());
     let base = work.join(format!("on-{}", c.name));
     let scratch = base.join("files");
     for p in prep {
@@ -225,7 +221,7 @@ fn on_pass(
         std::fs::create_dir_all(parent).ctx(&format!("create {}", parent.display()))?;
         std::fs::write(&dest, p.src.as_bytes()).ctx(&format!("write {}", dest.display()))?;
     }
-    let iso = Isolation::create(&base)?;
+    let iso = Sandbox::create(&base)?;
     let mut s = Server::start(
         bin,
         &scratch,
@@ -234,6 +230,7 @@ fn on_pass(
         true,
         identity,
     )?;
+    s.set_clamped(build.clamped());
     let mut replies: Vec<(Reply, Reply, Option<Reply>)> = Vec::with_capacity(prep.len());
     for (i, p) in prep.iter().enumerate() {
         let first = s.smart_read(&p.file.rel)?;
@@ -322,26 +319,97 @@ fn on_pass(
     Ok(out)
 }
 
+/// The read cap of Claude Code's Read tool, in tokens: what a plain Read of a big file returns.
+/// The engine's own constant, compared with cl100k counts as everywhere else in the harness.
+pub const READ_CAP: i64 = lumen_core::savings::READ_TOKEN_LIMIT;
+
+/// The "no Lumen" arm: every way of reading a file is a Read of it, capped. There is no server,
+/// so there is no version, no route and no stub or delta to speak of.
+pub fn no_lumen(c: &Corpus, prep: &[Prepared]) -> Vec<FileResult> {
+    let why = "n/a — no Lumen: a file is read whole each time, there is no repeat-read gate";
+    prep.iter()
+        .map(|p| {
+            let read = p.full.min(READ_CAP);
+            let route = if p.full > READ_CAP {
+                "no_lumen/read_capped"
+            } else {
+                "no_lumen/read"
+            };
+            FileResult {
+                corpus: c.name.clone(),
+                path: p.file.rel.clone(),
+                language: p.file.lang.name().to_string(),
+                lines: p.file.lines,
+                bucket: BUCKETS[bucket_of(p.file.lines)].name.to_string(),
+                full: p.full,
+                outline: read,
+                outline_route: route.to_string(),
+                // To get one item without Lumen is to Read the file.
+                recall_item: p.rep.as_ref().map(|r| r.name.clone()),
+                recall: p.rep.as_ref().map(|_| read),
+                recall_route: p.rep.as_ref().map(|_| route.to_string()),
+                stub: 0,
+                stub_route: String::new(),
+                delta_line: None,
+                delta: None,
+                delta_route: None,
+                first_matches_off: true,
+                repeat_na: Some(why.to_string()),
+                outline_self_saved: None,
+            }
+        })
+        .collect()
+}
+
 /// Measure one build on one corpus. Returns the per-file results and the version the build says
 /// it is. `work` is the build's own scratch directory.
+///
+/// What the capability map says the build cannot do is not asked of it: a version without repeat
+/// reads has no stub or delta to measure, so those cells are `n/a — <reason>` and never a figure.
 pub fn measure(
     build: &Build,
     c: &Corpus,
     prep: &[Prepared],
     work: &Path,
 ) -> Res<(Vec<FileResult>, String)> {
-    let (bin, identity, tag) = (build.bin.as_path(), build.identity, build.label.as_str());
-    let (off, version) = off_pass(bin, identity, c, prep, work, tag)?;
-    let on = on_pass(bin, identity, c, prep, &off, work, tag)?;
+    if build.is_no_lumen() {
+        return Ok((no_lumen(c, prep), "n/a — no Lumen".to_string()));
+    }
+    let clamped = build.clamped();
+    let repeat_na = build.caps.as_ref().and_then(|k| k.na_repeat());
+    let (off, version) = off_pass(build, c, prep, work)?;
+    let on: Vec<On> = if repeat_na.is_some() {
+        Vec::new()
+    } else {
+        on_pass(build, c, prep, &off, work)?
+    };
+    let mut on = on.into_iter();
     let mut out = Vec::with_capacity(prep.len());
-    for ((p, o), n) in prep.iter().zip(off).zip(on) {
+    for (p, o) in prep.iter().zip(off) {
+        let n = match &repeat_na {
+            None => Some(on.next().ok_or("the repeat-read pass ran out of files")?),
+            Some(_) => None,
+        };
         let (recall, recall_route) = match o.recall {
             Some((r, route)) => (Some(r.returned), Some(route)),
             None => (None, None),
         };
-        let (delta, delta_route) = match n.delta {
-            Some((t, route)) => (Some(t), Some(route)),
-            None => (None, None),
+        let (stub, stub_route, delta, delta_route, delta_line, first_matches_off) = match n {
+            Some(n) => {
+                let (delta, delta_route) = match n.delta {
+                    Some((t, route)) => (Some(t), Some(route)),
+                    None => (None, None),
+                };
+                (
+                    n.stub,
+                    n.stub_route,
+                    delta,
+                    delta_route,
+                    p.edit.as_ref().map(|e| e.line),
+                    n.first_matches_off,
+                )
+            }
+            None => (0, String::new(), None, None, None, true),
         };
         out.push(FileResult {
             corpus: c.name.clone(),
@@ -355,12 +423,14 @@ pub fn measure(
             recall_item: p.rep.as_ref().map(|r| r.name.clone()),
             recall,
             recall_route,
-            stub: n.stub,
-            stub_route: n.stub_route,
-            delta_line: p.edit.as_ref().map(|e| e.line),
+            stub,
+            stub_route,
+            delta_line,
             delta,
             delta_route,
-            first_matches_off: n.first_matches_off,
+            first_matches_off,
+            repeat_na: repeat_na.as_ref().map(|r| format!("n/a — {r}")),
+            outline_self_saved: clamped.then_some(o.outline.saved_reported),
         });
     }
     Ok((out, version))
@@ -430,8 +500,16 @@ fn group(files: &[&FileResult]) -> GroupStat {
         full: dist(&full),
         outline: mode_stat(files, |f| Some((f.outline, f.outline_route.as_str()))),
         recall: mode_stat(files, |f| f.recall.zip(f.recall_route.as_deref())),
-        stub: mode_stat(files, |f| Some((f.stub, f.stub_route.as_str()))),
-        delta: mode_stat(files, |f| f.delta.zip(f.delta_route.as_deref())),
+        stub: mode_stat(files, |f| {
+            f.repeat_na
+                .is_none()
+                .then_some((f.stub, f.stub_route.as_str()))
+        }),
+        delta: mode_stat(files, |f| {
+            f.delta
+                .zip(f.delta_route.as_deref())
+                .filter(|_| f.repeat_na.is_none())
+        }),
     }
 }
 
@@ -490,6 +568,25 @@ pub fn tsv(build: &str, files: &[FileResult]) -> String {
     let opt = |v: Option<i64>| v.map_or("-".to_string(), |v| v.to_string());
     let mut s = String::new();
     for f in files {
+        // A cell that cannot exist says so, in words: never a 0.
+        if let Some(why) = &f.repeat_na {
+            s.push_str(&format!(
+                "{build}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tn/a\t{why}\t-\tn/a\t{why}\t{}\n",
+                f.corpus,
+                f.path,
+                f.language,
+                f.lines,
+                f.bucket,
+                f.full,
+                f.outline,
+                f.outline_route,
+                f.recall_item.as_deref().unwrap_or("-"),
+                opt(f.recall),
+                f.recall_route.as_deref().unwrap_or("-"),
+                f.first_matches_off,
+            ));
+            continue;
+        }
         s.push_str(&format!(
             "{build}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             f.corpus,
@@ -546,6 +643,8 @@ mod tests {
             delta: None,
             delta_route: None,
             first_matches_off: true,
+            repeat_na: None,
+            outline_self_saved: None,
         }
     }
 
@@ -565,5 +664,82 @@ mod tests {
         let row = tsv("b", &[file(10)]);
         let columns = TSV_HEADER.trim_end().split('\t').count();
         assert_eq!(row.trim_end().split('\t').count(), columns);
+    }
+
+    #[test]
+    fn a_cell_that_cannot_exist_is_written_as_n_a_and_never_as_a_figure() {
+        let mut f = file(10);
+        f.repeat_na = Some("n/a — this version has no repeat reads".to_string());
+        f.stub = 0;
+        f.stub_route = String::new();
+        let row = tsv("1.0.0", &[f.clone()]);
+        let cols: Vec<&str> = row.trim_end().split('\t').collect();
+        assert_eq!(cols.len(), TSV_HEADER.trim_end().split('\t').count());
+        let h: Vec<&str> = TSV_HEADER.trim_end().split('\t').collect();
+        let at = |name: &str| cols[h.iter().position(|c| *c == name).unwrap()];
+        assert_eq!(at("stub"), "n/a");
+        assert_eq!(at("delta"), "n/a");
+        assert!(at("stub_route").starts_with("n/a — "));
+        assert!(at("delta_route").starts_with("n/a — "));
+        // Neither enters an aggregate: no median over zeros.
+        let agg = aggregate(&[f]);
+        assert!(agg.all.stub.returned.is_none() && agg.all.stub.saved_median.is_none());
+        assert!(agg.all.delta.returned.is_none());
+        assert!(agg.all.outline.returned.is_some());
+    }
+
+    fn fixture_corpus(dir: &Path, big_fns: usize) -> Corpus {
+        let mut big = String::new();
+        for i in 0..big_fns {
+            big.push_str(&format!(
+                "pub fn step_{i:05}(x: i64) -> i64 {{\n    let a = x + {i};\n    let b = a * 2;\n    \
+                 let c = b - {i};\n    let d = c / 3;\n    d + a\n}}\n\n"
+            ));
+        }
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/big.rs"), big).unwrap();
+        std::fs::write(
+            dir.join("src/small.rs"),
+            "pub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n",
+        )
+        .unwrap();
+        crate::corpus::from_dir("fx", dir).unwrap()
+    }
+
+    #[test]
+    fn no_lumen_reads_the_whole_file_with_the_read_cap_and_has_no_stub_or_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = fixture_corpus(dir.path(), 4000);
+        let prep = prepare(&c).unwrap();
+        let rows = no_lumen(&c, &prep);
+        let big = rows.iter().find(|r| r.path == "src/big.rs").unwrap();
+        let small = rows.iter().find(|r| r.path == "src/small.rs").unwrap();
+        assert!(
+            big.full > READ_CAP,
+            "the fixture must exceed the cap: {}",
+            big.full
+        );
+        assert_eq!(big.outline, READ_CAP);
+        assert_eq!(big.outline_route, "no_lumen/read_capped");
+        assert_eq!(small.outline, small.full);
+        assert_eq!(small.outline_route, "no_lumen/read");
+        for r in &rows {
+            assert!(
+                r.repeat_na
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("n/a — no Lumen")
+            );
+            assert_eq!(
+                r.recall,
+                Some(r.outline),
+                "to get an item is to Read the file"
+            );
+        }
+        // No server was started: measure() answers without a binary.
+        let b = Build::no_lumen();
+        let (m, v) = measure(&b, &c, &prep, dir.path()).unwrap();
+        assert_eq!(m.len(), rows.len());
+        assert!(v.starts_with("n/a"));
     }
 }

@@ -126,6 +126,7 @@ fn output() -> &'static Output {
             // Replaced by what `run::execute` finds by running the binary.
             identity: Identity::Env,
             inproc: true,
+            caps: None,
         };
         let plan = Plan {
             label: "smoke".to_string(),

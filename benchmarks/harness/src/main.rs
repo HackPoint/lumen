@@ -3,6 +3,7 @@ use lumen_bench::compare;
 use lumen_bench::corpus::{self, Corpus};
 use lumen_bench::latency::{LatencyConfig, MIN_RUNS};
 use lumen_bench::run::{self, Plan};
+use lumen_bench::sandbox::RealLedgerGuard;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -19,6 +20,7 @@ lumen-bench: token and latency benchmarks for Lumen, baseline against candidate.
 usage: benchmarks/run.sh [options]                  record a run
        benchmarks/run.sh compare FILE [options]     measure latency again and set it against the
                                                     committed results FILE (a <label>-<os>.json)
+       benchmarks/run.sh versions|competitors|e2e ...  the P2 benchmarks (not yet implemented)
 
   --label NAME           name of the result files (default pre-release-<12 characters of the
                          candidate's commit>). A MAJOR.MINOR.PATCH label is a release result; any
@@ -214,6 +216,13 @@ fn load_corpora(o: &Opts, repo: &Path, cache: &Path) -> Result<Vec<Corpus>, Stri
 
 fn main_inner() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Each subcommand lives in its own module, which owns its arguments.
+    match args.first().map(String::as_str) {
+        Some("versions") => return lumen_bench::versions::entry(&args[1..]),
+        Some("competitors") => return lumen_bench::competitors::entry(&args[1..]),
+        Some("e2e") => return lumen_bench::e2e::entry(&args[1..]),
+        _ => {}
+    }
     let Some(o) = parse(&args)? else {
         print!("{HELP}");
         return Ok(());
@@ -227,12 +236,7 @@ fn main_inner() -> Result<(), String> {
         .out
         .clone()
         .unwrap_or_else(|| repo.join("benchmarks").join("results"));
-    if cache.starts_with(&repo) {
-        return Err(format!(
-            "the cache {} is inside the repository; the corpus must stay out of it",
-            cache.display()
-        ));
-    }
+    lumen_bench::assets::ensure_outside_repo(&cache, &repo)?;
 
     // The committed file is read first: an unreadable one stops the run before any building.
     let committed = match &o.compare {
@@ -276,8 +280,19 @@ fn main_inner() -> Result<(), String> {
         work: cache.join("work-run"),
     };
 
+    // Nothing a run spawns may touch a real ledger: checked read-only before it starts and again
+    // when it ends, whatever the run did.
+    let guard = RealLedgerGuard::new()?;
+    guard.check("before")?;
+    let result = measure(&plan, committed, &out);
+    let after = guard.check("after");
+    result?;
+    after
+}
+
+fn measure(plan: &Plan, committed: Option<compare::Committed>, out: &Path) -> Result<(), String> {
     if let Some(committed) = committed {
-        let (subjects, now) = run::latency_only(&plan)?;
+        let (subjects, now) = run::latency_only(plan)?;
         let sides = compare::sides(&committed, &plan.builds, &now)?;
         let now_subjects: Vec<String> = subjects.iter().map(|s| s.rel.clone()).collect();
         let corpus_sha = plan
@@ -292,8 +307,8 @@ fn main_inner() -> Result<(), String> {
         return Ok(());
     }
 
-    let output = run::execute(&plan)?;
-    for p in run::write_outputs(&out, &output)? {
+    let output = run::execute(plan)?;
+    for p in run::write_outputs(out, &output)? {
         println!("wrote {}", p.display());
     }
     Ok(())

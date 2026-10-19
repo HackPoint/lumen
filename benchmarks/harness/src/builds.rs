@@ -2,8 +2,11 @@
 //! checkout). Both are built here, from source, with the same toolchain and the same cargo
 //! profile, so a difference between them is a difference in the code.
 
+use crate::assets;
 use crate::driver::Identity;
+use crate::manifest::VersionsManifest;
 use crate::util::{Ctx, Res, run_text};
+use crate::versions::caps::Caps;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -30,6 +33,37 @@ pub struct Build {
     /// Whether the in-process hook series (which call this checkout's `lumen_mcp::hook` library)
     /// describe this binary: only when it was built from the checkout.
     pub inproc: bool,
+    /// What the capability map claims about this build (a release asset, or no Lumen at all).
+    /// `None` for the two-build mode, whose builds are made from source and probed as before.
+    pub caps: Option<Caps>,
+}
+
+impl Build {
+    /// The arm with no Lumen: there is no binary, and nothing may spawn one.
+    pub fn no_lumen() -> Build {
+        Build {
+            label: "no-lumen".to_string(),
+            role: "version",
+            sha: "0".repeat(40),
+            dirty: false,
+            bin: PathBuf::new(),
+            profile: "release",
+            profile_note: "no Lumen: nothing is built or run".to_string(),
+            source: "no Lumen: a file is read whole, with the Read cap".to_string(),
+            identity: Identity::Env,
+            inproc: false,
+            caps: Some(Caps::no_lumen()),
+        }
+    }
+
+    pub fn is_no_lumen(&self) -> bool {
+        self.caps.as_ref().is_some_and(|c| c.no_lumen)
+    }
+
+    /// The map says this version floors `saved_tokens` at zero.
+    pub fn clamped(&self) -> bool {
+        self.caps.as_ref().is_some_and(|c| c.saved_clamped)
+    }
 }
 
 fn exe(name: &str) -> String {
@@ -136,6 +170,7 @@ pub fn candidate(repo: &Path, release: bool, allow_dirty: bool) -> Res<Build> {
             .to_string(),
         identity: Identity::Env,
         inproc: true,
+        caps: None,
     })
 }
 
@@ -204,6 +239,7 @@ pub fn baseline(repo: &Path, cache: &Path, label: &str, sha: &str) -> Res<Build>
         source: format!("git archive of {sha}"),
         identity: Identity::Env,
         inproc: false,
+        caps: None,
     })
 }
 
@@ -243,7 +279,62 @@ pub fn prebuilt(label: &str, role: &'static str, sha: &str, bin: &Path) -> Res<B
         source: format!("prebuilt binary `{name}`, supplied by the caller"),
         identity: Identity::Env,
         inproc: false,
+        caps: None,
     })
+}
+
+/// A published release, from its asset and never rebuilt: `version`'s asset for `platform` is
+/// fetched (and refused on a sha256 mismatch), its sidecars are unpacked into `dest` (cleared
+/// first: it is this run's scratch), and the build carries the capability map's claims.
+///
+/// Provenance is the asset's name and sha256, never a path: that is what identifies the build,
+/// since `serverInfo.version` of 1.0.0 says 0.2.0. `Ok(Err(reason))` is the manifest's own `na`
+/// for the platform (1.0.0 has no Linux app asset).
+pub fn from_asset(
+    m: &VersionsManifest,
+    version: &str,
+    platform: &str,
+    cache: &Path,
+    repo_root: &Path,
+    dest: &Path,
+) -> Res<Result<Build, String>> {
+    let entry = m.get(version)?;
+    let caps = Caps::from_entry(version, entry)?;
+    if !is_full_sha(&entry.commit) {
+        return Err(format!(
+            "{version}: the manifest's commit {:?} is not a full SHA",
+            entry.commit
+        ));
+    }
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).ctx(&format!("clear {}", dest.display()))?;
+    }
+    let (fetched, files) = match assets::sidecars_for(m, version, platform, cache, repo_root, dest)?
+    {
+        Ok(x) => x,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let want = exe("lumen-mcp");
+    let bin = files
+        .iter()
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == want))
+        .ok_or_else(|| format!("{} holds no {want}", fetched.name))?
+        .canonicalize()
+        .ctx("resolve the unpacked lumen-mcp")?;
+    let provenance = assets::provenance(&fetched.name, &fetched.sha256);
+    Ok(Ok(Build {
+        label: version.to_string(),
+        role: "version",
+        sha: entry.commit.clone(),
+        dirty: false,
+        bin,
+        profile: "release",
+        profile_note: "release, as published: the asset is never rebuilt".to_string(),
+        source: format!("release asset {provenance}"),
+        identity: Identity::Env,
+        inproc: false,
+        caps: Some(caps.with_asset(provenance)),
+    }))
 }
 
 #[cfg(test)]
@@ -304,5 +395,28 @@ mod tests {
             "pre-5bf97e3"
         );
         assert_eq!(pre_release_label("abc"), "pre-abc");
+    }
+
+    #[test]
+    fn a_version_with_no_asset_for_the_platform_is_the_manifests_reason_and_fetches_nothing() {
+        let m = VersionsManifest::load_committed().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dest = cache.path().join("dest");
+        let r = from_asset(&m, "1.0.0", "linux-x86_64", cache.path(), &repo, &dest).unwrap();
+        let why = r.expect_err("1.0.0 has no Linux asset");
+        assert!(why.contains("no Linux app asset"), "{why}");
+        // Nothing was downloaded or unpacked.
+        assert!(!cache.path().join("assets").exists() && !dest.exists());
+        // An unknown version is an error, not an n/a.
+        assert!(from_asset(&m, "9.9.9", "linux-x86_64", cache.path(), &repo, &dest).is_err());
+    }
+
+    #[test]
+    fn no_lumen_is_a_build_with_nothing_to_run() {
+        let b = Build::no_lumen();
+        assert!(b.is_no_lumen() && !b.clamped());
+        assert!(!b.caps.as_ref().unwrap().may_spawn_hook());
+        assert!(b.source.contains("no Lumen"));
     }
 }
