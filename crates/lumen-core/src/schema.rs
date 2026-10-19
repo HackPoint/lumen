@@ -10,6 +10,16 @@ use crate::busy;
 /// row and the gauge simply froze. Only the rusqlite path in `meter.rs` had ever
 /// applied the migrations.
 ///
+/// The ledger is read first, and a current one is left alone: no write, no write lock, so an
+/// open of it never queues behind a writer. What a current ledger holds is what a fresh one
+/// holds ([`Shape`]), and [`MIGRATIONS`] only ever add to it or drop the few things they name.
+/// When something is missing the upgrade is one transaction that asks for the write lock at its
+/// start (`BEGIN IMMEDIATE`, which waits for it) and reads again inside, because another opener
+/// may have done the work in the meantime. A deferred transaction that reads first and writes
+/// later fails at once, whatever the busy timeout, when another connection committed after its
+/// read: SQLITE_BUSY_SNAPSHOT, which with many openers at one instant could refuse the same one
+/// every time.
+///
 /// Migration errors are swallowed, as they are on the rusqlite side: each
 /// statement is additive and idempotent, so "duplicate column" is the expected
 /// outcome on an already-current database. Any other failure leaves a column
@@ -18,51 +28,276 @@ use crate::busy;
 /// busy (see [`crate::busy`]) means the statement did not run, and calling that
 /// "already applied" would leave a column or an index missing for good. It is
 /// waited for, and returned if the wait runs out; the next open runs the
-/// migration again. [`BACKFILLS`] are not read that way: they rewrite rows, not the
-/// schema, so a ledger that stays busy for one does not fail the open. They are also read before
-/// they are run, so a ledger with no row to rewrite is not asked for the write lock.
+/// migration again. [`BACKFILLS`] run in that transaction when it happens, and only when a row
+/// needs it; on a ledger whose schema is whole they are a transaction of their own, which a
+/// ledger that stays busy for does not fail the open.
 pub async fn init_schema(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
-    busy::retry_busy(|| sqlx::raw_sql(DDL).execute(pool)).await?;
-    busy::retry_busy(|| migrate(pool)).await?;
-    for backfill in BACKFILLS {
-        // Literals in BACKFILLS, as below.
-        let pending = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(backfill.pending))
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0);
-        if pending != 0 {
-            busy::retry_busy(|| sqlx::raw_sql(sqlx::AssertSqlSafe(backfill.rewrite)).execute(pool))
+    busy::retry_busy(|| upgrade(pool)).await?;
+    busy::retry_busy(|| backfill(pool)).await.ok();
+    Ok(())
+}
+
+async fn is_wal(db: &mut sqlx::SqliteConnection) -> Result<bool, sqlx::Error> {
+    let mode = sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+        .fetch_one(db)
+        .await?;
+    Ok(mode.eq_ignore_ascii_case("wal"))
+}
+
+async fn live_shape(db: &mut sqlx::SqliteConnection) -> Result<Shape, sqlx::Error> {
+    let objects = sqlx::query_as::<_, (String, String)>(Shape::OBJECTS_SQL)
+        .fetch_all(&mut *db)
+        .await?;
+    let columns = sqlx::query_as::<_, (String, String)>(Shape::COLUMNS_SQL)
+        .fetch_all(&mut *db)
+        .await?;
+    Ok(Shape::from_rows(objects, columns))
+}
+
+async fn backfill_pending(
+    db: &mut sqlx::SqliteConnection,
+    backfill: &Backfill,
+) -> Result<i64, sqlx::Error> {
+    // Literals in BACKFILLS, as below.
+    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(backfill.pending))
+        .fetch_one(db)
+        .await
+}
+
+/// One attempt at the schema upgrade; [`busy::retry_busy`] runs it again when the ledger was
+/// busy. A current ledger is only read.
+async fn upgrade(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    {
+        let mut conn = pool.acquire().await?;
+        if is_wal(&mut conn).await? && !live_shape(&mut conn).await?.lacks_something() {
+            return Ok(());
+        }
+        // The switch to WAL cannot happen inside a transaction. It is a no-op once done.
+        if !is_wal(&mut conn).await? {
+            sqlx::raw_sql("PRAGMA journal_mode=WAL")
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    // An error leaves the transaction to roll back as it drops.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if live_shape(&mut tx).await?.lacks_something() {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(ddl_in_transaction()))
+            .execute(&mut *tx)
+            .await?;
+        for migration in MIGRATIONS {
+            // AssertSqlSafe is sound here: every statement is a literal in
+            // MIGRATIONS above, so no runtime value can reach the SQL.
+            if let Err(e) = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
+                .execute(&mut *tx)
                 .await
-                .ok();
+                && busy::is_busy(&e)
+            {
+                return Err(e);
+            }
+            probe::after_migration();
+        }
+    }
+    rewrite_rows(&mut tx).await?;
+    tx.commit().await
+}
+
+/// [`BACKFILLS`] that have a row to rewrite, inside the caller's write transaction.
+async fn rewrite_rows(db: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
+    for backfill in BACKFILLS {
+        let pending = backfill_pending(db, backfill).await.unwrap_or(0);
+        if pending != 0 {
+            probe::before_rewrite();
+            if let Err(e) = sqlx::raw_sql(sqlx::AssertSqlSafe(backfill.rewrite))
+                .execute(&mut *db)
+                .await
+                && busy::is_busy(&e)
+            {
+                return Err(e);
+            }
         }
     }
     Ok(())
 }
 
-/// [`MIGRATIONS`] in one transaction, which takes the write lock when the first statement that
-/// changes something does, and not at all when none does.
-///
-/// Run statement by statement, each ALTER was a write transaction of its own: a lock to win
-/// against every other opener and a commit to sync, 26 of them for a 1.1.4 ledger and 12 for a
-/// 1.5.0 one. An ALTER that finds its column already there fails before it touches the file, so
-/// on a current ledger the statements take no lock. A busy ledger rolls the whole transaction
-/// back, and [`busy::retry_busy`] runs it again against whatever the winner left.
-async fn migrate(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    for migration in MIGRATIONS {
-        // AssertSqlSafe is sound here: every statement is a literal in
-        // MIGRATIONS above, so no runtime value can reach the SQL.
-        let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(*migration))
-            .execute(&mut *tx)
-            .await;
-        if let Err(e) = outcome
-            && busy::is_busy(&e)
-        {
-            tx.rollback().await.ok();
-            return Err(e);
+/// The row rewrites on a ledger whose schema is whole: read first, so a ledger with no row to
+/// rewrite is not asked for the write lock, then one transaction that takes it first.
+async fn backfill(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    let mut pending = false;
+    {
+        let mut conn = pool.acquire().await?;
+        for backfill in BACKFILLS {
+            pending |= backfill_pending(&mut conn, backfill).await? != 0;
         }
     }
+    if !pending {
+        return Ok(());
+    }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    rewrite_rows(&mut tx).await?;
     tx.commit().await
+}
+
+/// What the ledger holds: its tables, views and indexes by name, and the columns of each table.
+///
+/// A fresh ledger's shape ([`Shape::current`]) is what a current ledger has at least, and
+/// whatever [`MIGRATIONS`] drop is what it has none of. That is the whole question of whether an
+/// open has anything to write, answered by reading `sqlite_master`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Shape {
+    objects: std::collections::BTreeSet<(String, String)>,
+    columns: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl Shape {
+    /// Type and name of every table, view and index SQLite did not make itself.
+    pub const OBJECTS_SQL: &'static str = "SELECT type, name FROM sqlite_master \
+        WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'";
+    /// Table and column name of every column of every table.
+    pub const COLUMNS_SQL: &'static str = "SELECT m.name, p.name FROM sqlite_master m \
+        JOIN pragma_table_info(m.name) p WHERE m.type = 'table' \
+        AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'";
+
+    pub fn from_rows(
+        objects: impl IntoIterator<Item = (String, String)>,
+        columns: impl IntoIterator<Item = (String, String)>,
+    ) -> Shape {
+        let mut shape = Shape {
+            objects: objects.into_iter().collect(),
+            ..Shape::default()
+        };
+        for (table, column) in columns {
+            shape.columns.entry(table).or_default().insert(column);
+        }
+        shape
+    }
+
+    /// The shape of a ledger made from nothing by [`DDL`] and [`MIGRATIONS`], built once in memory.
+    fn current() -> &'static Shape {
+        static CURRENT: std::sync::OnceLock<Shape> = std::sync::OnceLock::new();
+        CURRENT.get_or_init(|| {
+            let read = |conn: &rusqlite::Connection, sql: &str| -> Vec<(String, String)> {
+                let mut stmt = conn.prepare(sql).expect("read sqlite_master");
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .expect("read sqlite_master")
+                    .map(|row| row.expect("a row of sqlite_master"))
+                    .collect()
+            };
+            let conn = rusqlite::Connection::open_in_memory().expect("an in-memory database");
+            conn.execute_batch(ddl_in_transaction())
+                .expect("DDL on an empty database");
+            for migration in MIGRATIONS {
+                // Statements that find their work done fail, as on every ledger.
+                if conn.execute_batch(migration).is_err() {
+                    continue;
+                }
+            }
+            Shape::from_rows(
+                read(&conn, Shape::OBJECTS_SQL),
+                read(&conn, Shape::COLUMNS_SQL),
+            )
+        })
+    }
+
+    /// What [`MIGRATIONS`] remove: `DROP TABLE IF EXISTS t` and `ALTER TABLE t DROP COLUMN c`.
+    fn dropped() -> (Vec<&'static str>, Vec<(&'static str, &'static str)>) {
+        let (mut tables, mut columns) = (Vec::new(), Vec::new());
+        for migration in MIGRATIONS {
+            let words: Vec<&str> = migration.split_whitespace().collect();
+            match words.as_slice() {
+                ["DROP", "TABLE", "IF", "EXISTS", table] => tables.push(*table),
+                ["ALTER", "TABLE", table, "DROP", "COLUMN", column] => {
+                    columns.push((*table, *column));
+                }
+                _ => {}
+            }
+        }
+        (tables, columns)
+    }
+
+    /// Whether this ledger is missing something a fresh one has, or still has something the
+    /// migrations drop. Anything else it holds, a newer build's table or column, is left alone.
+    pub fn lacks_something(&self) -> bool {
+        let current = Shape::current();
+        if !current.objects.is_subset(&self.objects) {
+            return true;
+        }
+        for (table, wanted) in &current.columns {
+            if self
+                .columns
+                .get(table)
+                .is_none_or(|have| !wanted.is_subset(have))
+            {
+                return true;
+            }
+        }
+        let (tables, columns) = Shape::dropped();
+        tables
+            .iter()
+            .any(|t| self.objects.iter().any(|(_, name)| name == t))
+            || columns
+                .iter()
+                .any(|(t, c)| self.columns.get(*t).is_some_and(|have| have.contains(*c)))
+    }
+}
+
+/// [`DDL`] without its `PRAGMA journal_mode=WAL`, which cannot run inside a transaction.
+pub fn ddl_in_transaction() -> &'static str {
+    static TABLES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| DDL.replacen("PRAGMA journal_mode=WAL;", "", 1))
+}
+
+/// Outside tests, the seams do nothing.
+#[cfg(not(test))]
+pub(crate) mod probe {
+    #[inline(always)]
+    pub fn after_migration() {}
+
+    #[inline(always)]
+    pub fn before_rewrite() {}
+}
+
+/// Test seams, on the thread that runs the upgrade: one runs after each migration statement, the
+/// other after a backfill has found a row to rewrite and before it rewrites it.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut()>;
+
+    thread_local! {
+        static AFTER_MIGRATION: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static BEFORE_REWRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub fn set(hook: impl FnMut() + 'static) {
+        AFTER_MIGRATION.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub fn set_before_rewrite(hook: impl FnMut() + 'static) {
+        BEFORE_REWRITE.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub fn clear() {
+        AFTER_MIGRATION.with(|h| *h.borrow_mut() = None);
+        BEFORE_REWRITE.with(|h| *h.borrow_mut() = None);
+    }
+
+    pub fn after_migration() {
+        AFTER_MIGRATION.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
+
+    pub fn before_rewrite() {
+        BEFORE_REWRITE.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
 }
 
 /// Open the ledger at `url` as a pool and bring it up to date: what the daemon runs before it
@@ -1469,5 +1704,623 @@ mod tests {
             marked,
             [("main".into(), 0), ("unix".into(), 1), ("win".into(), 1)]
         );
+    }
+
+    // ── the upgrade takes the write lock first ───────────────────────────────
+
+    /// The mechanism, with no Lumen code in it: a deferred transaction that has read, and whose
+    /// snapshot another connection then outdates by committing, is refused its first write at
+    /// once with SQLITE_BUSY_SNAPSHOT, not after the busy timeout. Waiting could not help it: the
+    /// snapshot it holds is the one that is stale.
+    #[test]
+    fn a_deferred_transaction_that_read_first_is_refused_at_once_after_another_commit() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        let a = rusqlite::Connection::open(&path).unwrap();
+        a.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        a.execute_batch("BEGIN").unwrap();
+        a.query_row("SELECT count(*) FROM calibration", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+        let b = rusqlite::Connection::open(&path).unwrap();
+        b.execute_batch("INSERT INTO calibration VALUES ('b', 1, 1)")
+            .unwrap();
+        let started = std::time::Instant::now();
+        let refused = a
+            .execute_batch("INSERT INTO calibration VALUES ('a', 1, 1)")
+            .unwrap_err();
+        let took = started.elapsed();
+        let rusqlite::Error::SqliteFailure(failure, _) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert_eq!(
+            failure.extended_code,
+            rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            "{refused}"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "the 5 s busy timeout was consulted: {took:?}"
+        );
+    }
+
+    /// Another connection that commits a row whenever the lock is free, and counts what it was
+    /// refused: `busy_timeout` 0, so it never waits.
+    struct Interferer {
+        committed: std::rc::Rc<std::cell::Cell<u32>>,
+        refused: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    /// Make `Interferer` act after every migration statement of the upgrade on this thread.
+    fn interfere_after_every_migration(db: &std::path::Path) -> Interferer {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let committed = std::rc::Rc::new(std::cell::Cell::new(0));
+        let refused = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (c, r) = (committed.clone(), refused.clone());
+        super::probe::set(move || {
+            let n = c.get() + r.get();
+            match conn.execute(
+                "INSERT INTO calibration VALUES (?1, 1, 1)",
+                [format!("interference-{n}")],
+            ) {
+                Ok(_) => c.set(c.get() + 1),
+                Err(_) => r.set(r.get() + 1),
+            }
+        });
+        Interferer { committed, refused }
+    }
+
+    /// A 1.8.0 ledger: every migration up to `turns.speed` finds its work done. A `CREATE ... IF
+    /// NOT EXISTS` that finds its table reads the ledger, so by the time `ADD COLUMN speed`
+    /// writes, the transaction has a read snapshot that a neighbour can outdate.
+    fn ledger_of_1_8_0(dir: &TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("v1_8_0.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE turns").unwrap();
+        conn.execute_batch(TURNS_THROUGH_1_8_0).unwrap();
+        conn.execute_batch(
+            "CREATE INDEX idx_turns_session ON turns(session_id); \
+             CREATE INDEX idx_turns_ts ON turns(ts)",
+        )
+        .unwrap();
+        path
+    }
+
+    fn assert_upgrade_is_not_outdated_by_a_neighbour(interferer: &Interferer, what: &str) {
+        super::probe::clear();
+        assert!(
+            interferer.refused.get() > 0,
+            "{what}: the neighbour never got a turn"
+        );
+        assert_eq!(
+            interferer.committed.get(),
+            0,
+            "{what}: another connection committed in the middle of the upgrade"
+        );
+    }
+
+    /// On a deferred transaction, every attempt reads before it writes, and the neighbour commits
+    /// in between each time: the opener is refused SQLITE_BUSY_SNAPSHOT on every try until its
+    /// budget runs out and gives the error back. Nothing is left to chance.
+    #[test]
+    fn the_rusqlite_open_is_not_outdated_by_a_neighbour_that_commits_between_statements() {
+        let dir = TempDir::new().unwrap();
+        let path = ledger_of_1_8_0(&dir);
+        let neighbour = interfere_after_every_migration(&path);
+        let opened = crate::meter::connect_db(&path);
+        super::probe::clear();
+        opened.expect("the upgrade went through");
+        assert_upgrade_is_not_outdated_by_a_neighbour(&neighbour, "rusqlite");
+        assert_eq!(columns_of(&path, "turns").last().unwrap(), "inference_geo");
+    }
+
+    #[tokio::test]
+    async fn the_sqlx_open_is_not_outdated_by_a_neighbour_that_commits_between_statements() {
+        let dir = TempDir::new().unwrap();
+        let path = ledger_of_1_8_0(&dir);
+        let neighbour = interfere_after_every_migration(&path);
+        let opened = open_pool(&format!("sqlite:{}?mode=rwc", path.display())).await;
+        super::probe::clear();
+        opened.expect("the upgrade went through");
+        assert_upgrade_is_not_outdated_by_a_neighbour(&neighbour, "sqlx");
+        assert_eq!(columns_of(&path, "turns").last().unwrap(), "inference_geo");
+    }
+
+    fn columns_of(db: &std::path::Path, table: &str) -> Vec<String> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn shape_of(db: &std::path::Path) -> Shape {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        crate::meter::live_shape(&conn).unwrap()
+    }
+
+    /// What breaks a current ledger in each way an open has to notice, and what it must show after.
+    const BREAKAGES: &[(&str, &str)] = &[
+        ("an index gone", "DROP INDEX idx_turns_ts"),
+        ("an index of a migration gone", "DROP INDEX idx_faults_kind"),
+        ("a column gone", "ALTER TABLE faults DROP COLUMN agent_id"),
+        ("a table gone", "DROP TABLE transcript_scans"),
+        ("a view gone", "DROP VIEW correction_factor"),
+        (
+            "a dropped column put back",
+            "ALTER TABLE read_events ADD COLUMN is_subagent INTEGER",
+        ),
+        (
+            "a dropped table put back",
+            "CREATE TABLE sessions (id TEXT)",
+        ),
+        (
+            "a turn a backfill is for",
+            "INSERT INTO turns (message_id, session_id, ts, input_tokens, output_tokens, \
+             cache_read_input_tokens, cache_creation_input_tokens, source_file, is_subagent) \
+             VALUES ('m', 's', 't', 1, 1, 1, 1, '/p/subagents/a.jsonl', 0)",
+        ),
+        ("the rollback journal", "PRAGMA journal_mode=DELETE"),
+    ];
+
+    /// The read that decides whether an open writes must see every one of these, or the ledger
+    /// stays as it is for good.
+    #[test]
+    fn every_open_repairs_a_current_ledger_in_each_way_the_read_must_notice() {
+        let dir = TempDir::new().unwrap();
+        let fresh = dir.path().join("fresh.db");
+        drop(crate::meter::connect_db(&fresh).unwrap());
+        let fresh_shape = shape_of(&fresh);
+        for (what, breakage) in BREAKAGES {
+            for opener in ["rusqlite", "sqlx"] {
+                let path = dir.path().join(format!("{opener}.db"));
+                let _ = std::fs::remove_file(&path);
+                drop(crate::meter::connect_db(&path).unwrap());
+                let conn = rusqlite::Connection::open(&path).unwrap();
+                conn.execute_batch(breakage).unwrap();
+                drop(conn);
+                if opener == "rusqlite" {
+                    drop(crate::meter::connect_db(&path).unwrap());
+                } else {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(open_pool(&format!("sqlite:{}?mode=rwc", path.display())))
+                        .unwrap();
+                }
+                let at = format!("{opener}, {what}");
+                assert_eq!(shape_of(&path), fresh_shape, "{at}");
+                let conn = rusqlite::Connection::open(&path).unwrap();
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(mode, "wal", "{at}");
+                let left: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM turns WHERE is_subagent = 0 \
+                         AND source_file LIKE '%/subagents/%'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(left, 0, "{at}");
+            }
+        }
+    }
+
+    /// Every statement of MIGRATIONS that removes something is one the read knows to look for.
+    #[test]
+    fn every_drop_in_the_migrations_is_one_the_read_looks_for() {
+        let drops = MIGRATIONS
+            .iter()
+            .filter(|m| m.starts_with("DROP ") || m.contains(" DROP COLUMN "))
+            .count();
+        let (tables, columns) = Shape::dropped();
+        assert_eq!(tables.len() + columns.len(), drops);
+        assert_eq!(tables, ["sessions"]);
+        assert_eq!(columns, [("read_events", "is_subagent")]);
+    }
+
+    /// A column or table a newer build added is not a ledger to rewrite on every open.
+    #[test]
+    fn a_ledger_with_more_than_a_fresh_one_is_current() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("newer.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE turns ADD COLUMN from_the_future TEXT; CREATE TABLE future (a TEXT)",
+        )
+        .unwrap();
+        assert!(!crate::meter::live_shape(&conn).unwrap().lacks_something());
+    }
+
+    // ── a neighbour that holds the write lock ────────────────────────────────
+
+    /// The mechanism, with no Lumen code in it: a deferred transaction that has read, and then
+    /// asks for the write lock while another connection holds it, is refused at once with plain
+    /// SQLITE_BUSY (5), not after the busy timeout, and not after waiting for the holder: the
+    /// snapshot it holds could not be written from once the holder commits, and waiting could
+    /// deadlock the two. 517 is the same thing once the other has already committed.
+    #[test]
+    fn a_deferred_transaction_that_read_first_is_refused_at_once_while_another_holds_the_lock() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        let a = rusqlite::Connection::open(&path).unwrap();
+        a.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        a.execute_batch("BEGIN").unwrap();
+        a.query_row("SELECT count(*) FROM calibration", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+        let b = rusqlite::Connection::open(&path).unwrap();
+        b.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let refused = a
+            .execute_batch("INSERT INTO calibration VALUES ('a', 1, 1)")
+            .unwrap_err();
+        let took = started.elapsed();
+        let rusqlite::Error::SqliteFailure(failure, _) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert_eq!(
+            failure.extended_code,
+            rusqlite::ffi::SQLITE_BUSY,
+            "{refused}"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "the 5 s busy timeout was consulted: {took:?}"
+        );
+    }
+
+    /// Another connection that asks for the write lock whenever the upgrade gives it a turn, and
+    /// keeps it until its next turn if it is granted: `busy_timeout` 0, so it never waits.
+    struct Holder {
+        granted: std::rc::Rc<std::cell::Cell<u32>>,
+        refused: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Holder {
+        fn hooked(db: &std::path::Path) -> (Holder, impl FnMut() + 'static) {
+            let conn = rusqlite::Connection::open(db).unwrap();
+            conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+            let granted = std::rc::Rc::new(std::cell::Cell::new(0));
+            let refused = std::rc::Rc::new(std::cell::Cell::new(0));
+            let (g, r) = (granted.clone(), refused.clone());
+            let mut holding = false;
+            let turn = move || {
+                if holding {
+                    conn.execute_batch("ROLLBACK").unwrap();
+                    holding = false;
+                } else if conn.execute_batch("BEGIN IMMEDIATE").is_ok() {
+                    g.set(g.get() + 1);
+                    holding = true;
+                } else {
+                    r.set(r.get() + 1);
+                }
+            };
+            (Holder { granted, refused }, turn)
+        }
+
+        fn assert_never_granted(&self, what: &str) {
+            super::probe::clear();
+            assert!(
+                self.refused.get() > 0,
+                "{what}: the neighbour never got a turn"
+            );
+            assert_eq!(
+                self.granted.get(),
+                0,
+                "{what}: another connection held the write lock in the middle of the upgrade"
+            );
+        }
+    }
+
+    /// On a deferred transaction the opener has read by the time the neighbour takes the write
+    /// lock, and its next write is refused with SQLITE_BUSY (5), whatever the busy timeout: the
+    /// error the Windows run reported when a neighbour was still inside its commit. With the lock
+    /// taken first, the neighbour is the one refused.
+    #[test]
+    fn the_rusqlite_open_is_not_refused_by_a_neighbour_that_holds_the_write_lock() {
+        let dir = TempDir::new().unwrap();
+        let path = ledger_of_1_8_0(&dir);
+        let (neighbour, turn) = Holder::hooked(&path);
+        super::probe::set(turn);
+        let opened = crate::meter::connect_db(&path);
+        super::probe::clear();
+        opened.expect("the upgrade went through");
+        neighbour.assert_never_granted("rusqlite");
+        assert_eq!(columns_of(&path, "turns").last().unwrap(), "inference_geo");
+    }
+
+    #[tokio::test]
+    async fn the_sqlx_open_is_not_refused_by_a_neighbour_that_holds_the_write_lock() {
+        let dir = TempDir::new().unwrap();
+        let path = ledger_of_1_8_0(&dir);
+        let (neighbour, turn) = Holder::hooked(&path);
+        super::probe::set(turn);
+        let opened = open_pool(&format!("sqlite:{}?mode=rwc", path.display())).await;
+        super::probe::clear();
+        opened.expect("the upgrade went through");
+        neighbour.assert_never_granted("sqlx");
+        assert_eq!(columns_of(&path, "turns").last().unwrap(), "inference_geo");
+    }
+
+    // ── the row rewrites ─────────────────────────────────────────────────────
+
+    /// A turn the backfill is for, put in through plain SQL.
+    const SUBAGENT_TURN: &str = "INSERT INTO turns (message_id, session_id, ts, input_tokens, \
+        output_tokens, cache_read_input_tokens, cache_creation_input_tokens, source_file) \
+        VALUES ('sub', 's', 't', 1, 1, 0, 0, '/h/projects/p/abc/subagents/agent-1.jsonl')";
+
+    fn marked_as_subagent(db: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row(
+                "SELECT is_subagent FROM turns WHERE message_id = 'sub'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A current ledger with one turn to rewrite, and a neighbour that asks for the write lock
+    /// the moment the backfill has found the row and before it has rewritten it. Taken first, the
+    /// lock is the backfill's and the neighbour is refused. Taken at the rewrite (a deferred
+    /// BEGIN), the backfill holds a snapshot the neighbour then outdates, is refused with
+    /// SQLITE_BUSY_SNAPSHOT on every try, and the open swallows that: the row is left as it was.
+    fn a_current_ledger_with_a_turn_to_rewrite(dir: &TempDir) -> std::path::PathBuf {
+        let path = dir.path().join("current.db");
+        drop(crate::meter::connect_db(&path).unwrap());
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(SUBAGENT_TURN)
+            .unwrap();
+        path
+    }
+
+    fn commit_a_row_whenever_the_backfill_pauses(db: &std::path::Path) -> Interferer {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let committed = std::rc::Rc::new(std::cell::Cell::new(0));
+        let refused = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (c, r) = (committed.clone(), refused.clone());
+        super::probe::set_before_rewrite(move || {
+            let n = c.get() + r.get();
+            match conn.execute(
+                "INSERT INTO calibration VALUES (?1, 1, 1)",
+                [format!("interference-{n}")],
+            ) {
+                Ok(_) => c.set(c.get() + 1),
+                Err(_) => r.set(r.get() + 1),
+            }
+        });
+        Interferer { committed, refused }
+    }
+
+    #[test]
+    fn the_rusqlite_backfill_alone_takes_the_write_lock_before_it_rewrites() {
+        let dir = TempDir::new().unwrap();
+        let path = a_current_ledger_with_a_turn_to_rewrite(&dir);
+        let neighbour = commit_a_row_whenever_the_backfill_pauses(&path);
+        let opened = crate::meter::connect_db(&path);
+        super::probe::clear();
+        drop(opened.unwrap());
+        assert!(neighbour.refused.get() > 0, "the backfill never ran");
+        assert_eq!(neighbour.committed.get(), 0, "a neighbour committed first");
+        assert_eq!(marked_as_subagent(&path), 1);
+    }
+
+    #[tokio::test]
+    async fn the_sqlx_backfill_alone_takes_the_write_lock_before_it_rewrites() {
+        let dir = TempDir::new().unwrap();
+        let path = a_current_ledger_with_a_turn_to_rewrite(&dir);
+        let neighbour = commit_a_row_whenever_the_backfill_pauses(&path);
+        let opened = open_pool(&format!("sqlite:{}?mode=rwc", path.display())).await;
+        super::probe::clear();
+        drop(opened.unwrap());
+        assert!(neighbour.refused.get() > 0, "the backfill never ran");
+        assert_eq!(neighbour.committed.get(), 0, "a neighbour committed first");
+        assert_eq!(marked_as_subagent(&path), 1);
+    }
+
+    /// An upgrade with a row to rewrite is still one commit: the rewrite is inside the
+    /// transaction that holds the lock, not a second one after it.
+    #[test]
+    fn the_rusqlite_upgrade_commits_its_backfill_with_its_migrations() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(SUBAGENT_TURN)
+            .unwrap();
+        let held_open = holding_the_log(&path);
+        let before = commits_in_wal(&path);
+        drop(crate::meter::connect_db(&path).unwrap());
+        assert_eq!(commits_in_wal(&path) - before, 1);
+        assert_eq!(marked_as_subagent(&path), 1);
+        drop(held_open);
+    }
+
+    #[tokio::test]
+    async fn the_sqlx_upgrade_commits_its_backfill_with_its_migrations() {
+        let dir = TempDir::new().unwrap();
+        let path = old_ledger_after_ddl(&dir);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(SUBAGENT_TURN)
+            .unwrap();
+        let held_open = holding_the_log(&path);
+        let before = commits_in_wal(&path);
+        drop(
+            open_pool(&format!("sqlite:{}?mode=rwc", path.display()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(commits_in_wal(&path) - before, 1);
+        assert_eq!(marked_as_subagent(&path), 1);
+        drop(held_open);
+    }
+
+    // ── what MIGRATIONS may hold ─────────────────────────────────────────────
+
+    /// Why a statement may not be in [`MIGRATIONS`], or `None` when it may. A current ledger is
+    /// recognised by reading its shape ([`Shape::lacks_something`]) and is not upgraded at all,
+    /// so a migration whose effect that read cannot see would never run on it.
+    fn what_is_wrong_with_a_migration(
+        statement: &str,
+        indexes: &mut std::collections::BTreeMap<String, String>,
+    ) -> Option<String> {
+        // Both openers run an entry as a batch, so a second statement after a `;` would run
+        // unseen by the checks below: one statement per entry.
+        if statement.contains(';') {
+            return Some(format!(
+                "{statement:?} holds more than one statement: both openers run an entry as a \
+                 batch, so what follows the `;` is never checked here. Give each statement its \
+                 own entry. A ledger that already has the shape of a fresh one is not upgraded, \
+                 so a row rewrite after the `;` would be skipped on it forever."
+            ));
+        }
+        let words: Vec<&str> = statement.split_whitespace().collect();
+        let kind = match words.as_slice() {
+            ["ALTER", "TABLE", _, "ADD", "COLUMN", ..] => return None,
+            ["ALTER", "TABLE", _, "DROP", "COLUMN", _] => return None,
+            ["CREATE", "TABLE", "IF", "NOT", "EXISTS", ..] => return None,
+            ["DROP", "TABLE", "IF", "EXISTS", _] => return None,
+            ["CREATE", "INDEX", "IF", "NOT", "EXISTS", name, "ON", ..]
+            | [
+                "CREATE",
+                "UNIQUE",
+                "INDEX",
+                "IF",
+                "NOT",
+                "EXISTS",
+                name,
+                "ON",
+                ..,
+            ] => {
+                let definition = words[words.iter().position(|w| w == name).unwrap()..].join(" ");
+                // Repeating DDL's own statement, as `faults` is repeated, changes nothing.
+                match indexes.insert((*name).to_string(), definition.clone()) {
+                    Some(earlier) if earlier != definition => {}
+                    _ => return None,
+                }
+                "an index redefined under a name that is already taken: the shape read sees \
+                 the name and takes the index to be there, so the new definition is never applied"
+            }
+            [verb, ..] if ["UPDATE", "INSERT", "DELETE", "REPLACE"].contains(verb) => {
+                "a row rewrite: the shape read cannot see a row, so it would never run on a \
+                 ledger of the current shape. Row rewrites go in BACKFILLS, each with its own \
+                 `pending` read"
+            }
+            _ => {
+                "a statement of a kind the shape read cannot see. Only ADD COLUMN, DROP COLUMN \
+                 (ALTER TABLE t DROP COLUMN c), CREATE TABLE IF NOT EXISTS, CREATE [UNIQUE] \
+                 INDEX IF NOT EXISTS name ON ... (a new name) and DROP TABLE IF EXISTS t (the \
+                 spellings `Shape::dropped` parses) show in the ledger's shape"
+            }
+        };
+        Some(format!(
+            "{statement:?} is {kind}. A ledger that already has the shape of a fresh one is not \
+             upgraded, so this statement would be skipped on it forever."
+        ))
+    }
+
+    /// Each index DDL creates, by name, with its definition from the name on.
+    fn indexes_in_ddl() -> std::collections::BTreeMap<String, String> {
+        DDL.split(';')
+            .filter_map(|statement| {
+                let words: Vec<&str> = statement.split_whitespace().collect();
+                match words.as_slice() {
+                    ["CREATE", "INDEX", "IF", "NOT", "EXISTS", name, rest @ ..]
+                    | [
+                        "CREATE",
+                        "UNIQUE",
+                        "INDEX",
+                        "IF",
+                        "NOT",
+                        "EXISTS",
+                        name,
+                        rest @ ..,
+                    ] => Some(((*name).to_string(), format!("{name} {}", rest.join(" ")))),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_migration_is_a_statement_the_shape_read_can_see() {
+        let mut indexes = indexes_in_ddl();
+        let problems: Vec<String> = MIGRATIONS
+            .iter()
+            .filter_map(|m| what_is_wrong_with_a_migration(m, &mut indexes))
+            .collect();
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// Row rewrites live in BACKFILLS, which read before they write: the one read of `pending`
+    /// and the one rewrite, and nothing the shape read has to see.
+    #[test]
+    fn row_rewrites_live_only_in_the_backfills_and_are_gated_by_their_own_read() {
+        assert!(!BACKFILLS.is_empty());
+        for backfill in BACKFILLS {
+            assert!(
+                backfill.pending.trim_start().starts_with("SELECT "),
+                "a backfill's pending is a read: {}",
+                backfill.pending
+            );
+            assert!(
+                backfill.rewrite.trim_start().starts_with("UPDATE "),
+                "a backfill's rewrite is an UPDATE: {}",
+                backfill.rewrite
+            );
+        }
+    }
+
+    #[test]
+    fn the_migration_guard_refuses_what_the_shape_read_cannot_see() {
+        let ok = [
+            "ALTER TABLE t ADD COLUMN c TEXT",
+            "ALTER TABLE t DROP COLUMN c",
+            "CREATE TABLE IF NOT EXISTS t (a TEXT)",
+            "CREATE INDEX IF NOT EXISTS idx_new ON t(a)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_new_unique ON t(a)",
+            "DROP TABLE IF EXISTS t",
+        ];
+        let bad = [
+            "UPDATE turns SET speed = 'standard' WHERE speed IS NULL",
+            "INSERT INTO calibration VALUES ('a', 1, 1)",
+            "DELETE FROM faults",
+            "CREATE INDEX IF NOT EXISTS idx_turns_ts ON turns(ts, session_id)",
+            "DROP INDEX IF EXISTS idx_turns_ts",
+            "DROP TABLE t",
+            "CREATE TABLE t (a TEXT)",
+            "ALTER TABLE t RENAME COLUMN a TO b",
+            "ALTER TABLE t DROP COLUMN c, DROP COLUMN d",
+            // A row write hidden behind a `;` in an entry the classifier would otherwise pass.
+            "ALTER TABLE turns ADD COLUMN foo TEXT; UPDATE turns SET foo = 'x'",
+            "CREATE TABLE IF NOT EXISTS foo (a TEXT); INSERT INTO foo VALUES ('x')",
+            "CREATE INDEX IF NOT EXISTS idx_new2 ON t(a); DELETE FROM faults",
+        ];
+        let mut indexes = indexes_in_ddl();
+        for statement in ok {
+            assert_eq!(
+                what_is_wrong_with_a_migration(statement, &mut indexes),
+                None
+            );
+        }
+        for statement in bad {
+            let why = what_is_wrong_with_a_migration(statement, &mut indexes)
+                .unwrap_or_else(|| panic!("allowed: {statement}"));
+            assert!(why.contains("skipped on it forever"), "{why}");
+        }
     }
 }

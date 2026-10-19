@@ -1,7 +1,9 @@
 //! Release assets: verification, the cache rule and extraction, on fixtures. No network: a
 //! stand-in downloader writes the bytes, and no real release is touched.
 
-use lumen_bench::assets::{self, Source, ar_members, ensure_outside_repo, extract, fetch_with};
+use lumen_bench::assets::{
+    self, Source, ar_members, ensure_outside_repo, extract, fetch_with, from_archive,
+};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -219,6 +221,30 @@ fn an_unpinned_or_pathlike_request_never_reaches_the_downloader() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn an_archived_asset_is_copied_and_still_checked_against_its_pin() {
+    let (cache, archive) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let bytes = b"the archived asset";
+    std::fs::create_dir_all(archive.path().join(SRC.tag)).unwrap();
+    std::fs::write(archive.path().join(SRC.tag).join("a.zip"), bytes).unwrap();
+    let dl = |s: Source<'_>, n: &str, d: &Path| from_archive(archive.path(), s, n, d);
+    let got = fetch_with(cache.path(), &repo(), SRC, "a.zip", &sha(bytes), &dl).unwrap();
+    assert_eq!(std::fs::read(&got.path).unwrap(), bytes);
+    // A swapped file in the archive refuses like a bad download.
+    std::fs::write(archive.path().join(SRC.tag).join("b.zip"), b"swapped").unwrap();
+    let err = fetch_with(cache.path(), &repo(), SRC, "b.zip", &sha(bytes), &dl).unwrap_err();
+    assert!(err.contains("REFUSED"), "{err}");
+    // A missing file names the archive, and nothing is fetched from anywhere else.
+    let err = fetch_with(cache.path(), &repo(), SRC, "c.zip", &sha(bytes), &dl).unwrap_err();
+    assert!(err.contains("from the archive"), "{err}");
+    // A tag that is a path cannot reach outside the archive.
+    let evil = Source {
+        repo: SRC.repo,
+        tag: "../x",
+    };
+    assert!(from_archive(archive.path(), evil, "a.zip", &cache.path().join("o")).is_err());
 }
 
 #[test]
