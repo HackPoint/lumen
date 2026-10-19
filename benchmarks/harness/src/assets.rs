@@ -7,6 +7,8 @@
 //! - An installer is unpacked, never run. A `.dmg` is mounted read-only, a `.deb` is read as an
 //!   `ar` archive, a Windows `setup.exe` is opened with 7-Zip.
 //! - A result records an asset as its name and sha256 ([`provenance`]), never a local path.
+//! - With [`ARCHIVE_ENV`] set, an asset comes from that private archive and never from the
+//!   network: the published assets of the old releases were withdrawn. The pin is checked the same.
 //!
 //! Extraction uses the machine's own tools (`tar`, `unzip`, `hdiutil`, `7z`), which add no crate
 //! to the harness: `tar` also reads `.xz`/`.zst` members of a `.deb`, and `ar` is parsed here.
@@ -98,12 +100,17 @@ fn resolve(p: &Path) -> Res<PathBuf> {
     }
 }
 
+/// The directory of a private archive of published assets, laid out `<dir>/<tag>/<name>`. When it
+/// is set, [`fetch`] reads only from there.
+pub const ARCHIVE_ENV: &str = "LUMEN_BENCH_ARCHIVE";
+
 /// A way to put the bytes of `<repo> <tag> <name>` at `dest`. The default is [`download`]; a test
 /// passes one that never touches the network.
 pub type Downloader<'a> = &'a dyn Fn(Source<'_>, &str, &Path) -> Res<()>;
 
 /// Fetch `name` of `src` into `cache/assets/<sha256>/<name>`, checking it against `sha256`.
-/// A file already there is checked again, not trusted.
+/// A file already there is checked again, not trusted. With [`ARCHIVE_ENV`] set, the bytes come
+/// from the archive ([`from_archive`]); otherwise they are downloaded ([`download`]).
 pub fn fetch(
     cache: &Path,
     repo_root: &Path,
@@ -111,7 +118,31 @@ pub fn fetch(
     name: &str,
     sha256: &str,
 ) -> Res<Fetched> {
-    fetch_with(cache, repo_root, src, name, sha256, &download)
+    match std::env::var_os(ARCHIVE_ENV) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            let dl = |s: Source<'_>, n: &str, d: &Path| from_archive(&dir, s, n, d);
+            fetch_with(cache, repo_root, src, name, sha256, &dl)
+        }
+        None => fetch_with(cache, repo_root, src, name, sha256, &download),
+    }
+}
+
+/// A [`Downloader`] that copies `<dir>/<tag>/<name>` from a private archive. It never touches the
+/// network, and the pin is still checked by [`fetch_with`], so a damaged or swapped file refuses.
+pub fn from_archive(dir: &Path, src: Source<'_>, name: &str, dest: &Path) -> Res<()> {
+    if !is_plain_name(src.tag) || !is_plain_name(name) {
+        return Err(format!(
+            "{} / {name:?} is not a plain tag and asset name",
+            src.tag
+        ));
+    }
+    let from = dir.join(src.tag).join(name);
+    std::fs::copy(&from, dest).map(|_| ()).ctx(&format!(
+        "copy {name} of {} from the archive {}",
+        src.tag,
+        from.display()
+    ))
 }
 
 pub fn fetch_with(
@@ -226,7 +257,8 @@ pub fn download(src: Source<'_>, name: &str, dest: &Path) -> Res<()> {
         .ctx("run curl")?;
     if !out.status.success() || !got.is_file() {
         return Err(format!(
-            "could not download {name} of {} {} ({why}; curl {}: {})",
+            "could not download {name} of {} {} ({why}; curl {}: {}). The assets of releases before \
+             1.10.0 were withdrawn: set {ARCHIVE_ENV} to a private archive laid out <dir>/<tag>/<name>",
             src.repo,
             src.tag,
             out.status,
