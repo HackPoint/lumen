@@ -157,6 +157,12 @@ fn base_name(program: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// An MCP entry's `command` is one program path that Claude Code spawns without a shell: no
+/// word split and no escapes, only a pair of quotes round the whole value is dropped.
+fn is_mcp_command(command: &str) -> bool {
+    is_mcp_program(command.trim().trim_matches(['"', '\'']))
+}
+
 fn is_mcp_program(program: &str) -> bool {
     let b = base_name(program);
     b.strip_suffix(".exe").unwrap_or(&b) == "lumen-mcp"
@@ -183,7 +189,7 @@ fn visit_mcp_entry(key: &str, entry: &mut Value, f: &mut Rewrite<'_>) {
     let by_command = entry
         .get("command")
         .and_then(|c| c.as_str())
-        .is_some_and(|c| is_mcp_program(&first_word(c).0));
+        .is_some_and(is_mcp_command);
     if key != "lumen" && !by_command {
         return;
     }

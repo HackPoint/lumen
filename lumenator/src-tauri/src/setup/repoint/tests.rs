@@ -692,3 +692,39 @@ fn the_cli_link_into_the_old_folder_follows_this_build() {
     assert!(repoint_cli_link(&stale, &r.marker, &r.n, None).is_err());
     assert_eq!(std::fs::read_link(&stale).unwrap(), old);
 }
+
+#[test]
+fn an_mcp_command_is_one_path_with_spaces_and_native_separators() {
+    assert!(is_mcp_command(
+        "/Users/me/Library/Application Support/X/bin/lumen-mcp"
+    ));
+    assert!(is_mcp_command(
+        r"C:\Users\me\AppData\Local\Lumen\lumen-mcp.exe"
+    ));
+    assert!(is_mcp_command(r#""C:\Program Files\Lumen\lumen-mcp.exe""#));
+    assert!(!is_mcp_command("/Application Support/X/bin/other-tool"));
+    assert!(!is_mcp_command("lumen-mcp --flag"));
+}
+
+#[test]
+fn an_entry_with_a_space_in_its_path_under_another_key_is_found() {
+    let r = Rig::with_root("Application Support");
+    let e = r.lumen_entry();
+    r.write(
+        &r.claude_json(),
+        &json!({"mcpServers": {"my-meter": e.clone()},
+                "projects": {"/w": {"mcpServers": {"meter": e}}}}),
+    );
+    let rep = r.run();
+    assert_eq!(rep.problems, Vec::<String>::new());
+    let cfg = r.read(&r.claude_json());
+    let db = r.new_db().to_string_lossy().to_string();
+    let mcp = r.mcp.to_string_lossy().to_string();
+    for entry in [
+        &cfg["mcpServers"]["my-meter"],
+        &cfg["projects"]["/w"]["mcpServers"]["meter"],
+    ] {
+        assert_eq!(entry["command"], mcp.as_str());
+        assert_eq!(entry["env"]["LUMEN_DB"], db.as_str());
+    }
+}
