@@ -505,3 +505,33 @@ fn the_process_wide_redirect_leaves_unrelated_paths_alone() {
     let p = Path::new("/no-such-root/anywhere/lumen.db");
     assert_eq!(redirect(p), p);
 }
+
+/// A marker that is there but cannot be read still pins N: a leftover pending file must not
+/// send N's ledger path back into the old folder.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_marker_still_pins_new() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    let old = root.path().join(OLD);
+    let new = root.path().join(NEW);
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    marker::write_pending(
+        &new,
+        &Pending {
+            source: OLD.into(),
+            dir: old.clone(),
+        },
+    )
+    .unwrap();
+    mark(&new, &old);
+    let m = new.join(MARKER_NAME);
+    fs::set_permissions(&m, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&m).is_ok() {
+        return; // running as root: the file stays readable
+    }
+    let got = go(&new.join("lumen.db"), &[root.path()]);
+    fs::set_permissions(&m, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(got, new.join("lumen.db"));
+}
