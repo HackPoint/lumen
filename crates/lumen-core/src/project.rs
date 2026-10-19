@@ -258,17 +258,17 @@ mod tests {
 
     #[test]
     fn several_dashed_components_all_resolve() {
-        // Real case from the shipped DB: -Users-x-dev-speedata-ws-datapulse-gitlab
+        // A dashed workspace holding a dashed repo, as Claude Code encodes it: -Users-x-dev-acme-ws-widget-service
         let exists = fs(&[
             "/Users",
             "/Users/x",
             "/Users/x/dev",
-            "/Users/x/dev/speedata-ws",
-            "/Users/x/dev/speedata-ws/datapulse-gitlab",
+            "/Users/x/dev/acme-ws",
+            "/Users/x/dev/acme-ws/widget-service",
         ]);
         assert_eq!(
-            decode_project_dir("-Users-x-dev-speedata-ws-datapulse-gitlab", &exists),
-            PathBuf::from("/Users/x/dev/speedata-ws/datapulse-gitlab")
+            decode_project_dir("-Users-x-dev-acme-ws-widget-service", &exists),
+            PathBuf::from("/Users/x/dev/acme-ws/widget-service")
         );
     }
 

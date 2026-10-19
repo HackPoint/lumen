@@ -144,10 +144,10 @@ describe('Details', () => {
     it('says how many other sessions exist when it follows one of several', async () => {
       const d = await build();
       bridge.emit('daemon', turn({ project: 'lumen' }));
-      bridge.emit('daemon', turn({ session_id: 's2', project: 'speedash' }));
+      bridge.emit('daemon', turn({ session_id: 's2', project: 'atlas' }));
       fixture.detectChanges();
       expect(rendered('.gauge-stage__count')).toBe('+1 more');
-      expect(d.projectHint()).toContain('most recently active of 2 sessions: speedash');
+      expect(d.projectHint()).toContain('most recently active of 2 sessions: atlas');
       expect(d.projectHint()).toContain('spend figures on Settings follow the same session');
     });
   });

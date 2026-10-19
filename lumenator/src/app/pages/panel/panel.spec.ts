@@ -299,9 +299,9 @@ describe('Panel', () => {
   it('says it follows the newest of several sessions', () => {
     const p = build();
     bridge.emit('daemon', frame({ project: 'lumen' }));
-    bridge.emit('daemon', frame({ session_id: 's2', project: 'speedash' }));
+    bridge.emit('daemon', frame({ session_id: 's2', project: 'atlas' }));
     fixture.detectChanges();
-    expect(p.projectHint()).toContain('most recently active of 2 sessions: speedash');
+    expect(p.projectHint()).toContain('most recently active of 2 sessions: atlas');
   });
 
   it('flags compaction as imminent from 95% of the window', () => {
