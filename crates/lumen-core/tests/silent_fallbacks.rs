@@ -25,7 +25,8 @@
 //! there is to write one. Not read at all: PowerShell, the workflow YAML, the frontend,
 //! and Rust outside `src/` (`build.rs`, benches, examples). Read but not recognised: a
 //! shell default (`${VAR:-0}`), `2>/dev/null` with nothing after it, `if let Ok(..)` or an
-//! `Err(_) => {}` arm that drops the error, a fallback to `false` or to a string, a number
+//! `Err(_) => {}` arm that drops the error (but `if let Err(e) = <write> && busy::is_busy(&e)`,
+//! which returns only the busy ones, is), a fallback to `false` or to a string, a number
 //! behind a named constant, and a write through a call not in [`WRITES`] (`writeln!`,
 //! a helper that wraps `fs::write`).
 
@@ -177,6 +178,24 @@ const ALLOWED: &[Allowed] = &[
     allow(
         "crates/lumen-core/src/meter.rs",
         DroppedWrite,
+        "backfill(&conn)",
+        "The row rewrites on a ledger whose schema is whole: one that stays busy for them does not fail the open, and keeps its rows as they were until the next open reads them as pending again.",
+    ),
+    allow(
+        "crates/lumen-core/src/meter.rs",
+        DroppedWrite,
+        "execute_batch(migration)",
+        "An additive, idempotent migration: an error that is not a busy ledger is read as already applied (a column that is there, a column that never was), and a busy one is returned and run again. The read of the ledger's shape in the next open notices a migration that did not take.",
+    ),
+    allow(
+        "crates/lumen-core/src/meter.rs",
+        DroppedWrite,
+        "execute_batch(backfill.rewrite)",
+        "A row rewrite, not a schema change, and idempotent: an error that is not a busy ledger leaves the rows as they were, and the next open reads the pending rows again and runs it again. A busy ledger is returned.",
+    ),
+    allow(
+        "crates/lumen-core/src/meter.rs",
+        DroppedWrite,
         "execute_batch(\"ROLLBACK\")",
         "The upgrade (or the backfill) is already being given up on with its own error; a rollback that finds no transaction left has nothing to undo.",
     )
@@ -262,6 +281,24 @@ const ALLOWED: &[Allowed] = &[
         OrDefault,
         "let html =",
         "The link shown after filing, once the POST has already succeeded.",
+    ),
+    allow(
+        "crates/lumen-core/src/schema.rs",
+        DroppedWrite,
+        "backfill(pool)",
+        "The row rewrites on a ledger whose schema is whole: one that stays busy for them does not fail the open, and keeps its rows as they were until the next open reads them as pending again.",
+    ),
+    allow(
+        "crates/lumen-core/src/schema.rs",
+        DroppedWrite,
+        "AssertSqlSafe(*migration)",
+        "An additive, idempotent migration: an error that is not a busy ledger is read as already applied (a column that is there, a column that never was), and a busy one is returned and run again. The read of the ledger's shape in the next open notices a migration that did not take.",
+    ),
+    allow(
+        "crates/lumen-core/src/schema.rs",
+        DroppedWrite,
+        "AssertSqlSafe(backfill.rewrite)",
+        "A row rewrite, not a schema change, and idempotent: an error that is not a busy ledger leaves the rows as they were, and the next open reads the pending rows again and runs it again. A busy ledger is returned.",
     ),
     allow(
         "crates/lumen-core/src/schema.rs",
@@ -491,6 +528,10 @@ const WRITES: &[&str] = &[
     "execute_batch(",
     "sqlx::query(",
     "sqlx::raw_sql(",
+    // The ledger openers' retry helpers: whatever they wrap is a write, and a result thrown
+    // away behind them is a failed write thrown away.
+    "retry_busy(",
+    "retry_busy_blocking(",
     "fs::write(",
     "fs::copy(",
     "fs::rename(",
@@ -897,7 +938,25 @@ fn rust_shapes(lines: &[(usize, &str)], i: usize) -> Vec<Shape> {
     if dropped.is_some_and(|s| WRITES.iter().any(|w| s.contains(w))) {
         found.push(DroppedWrite);
     }
+    if busy_only_error(lines, i) {
+        found.push(DroppedWrite);
+    }
     found
+}
+
+/// `if let Err(e) = <write> && busy::is_busy(&e) { return Err(e) }`: the busy error is
+/// returned, and every other error of the write is dropped, since nothing else is said of it.
+/// The condition is read up to the `{` that opens its block.
+fn busy_only_error(lines: &[(usize, &str)], i: usize) -> bool {
+    if !lines[i].1.contains("let Err(") || lines[i].1.trim().starts_with("//") {
+        return false;
+    }
+    let mut to = i;
+    while to + 1 < lines.len() && to - i < 6 && !lines[to].1.trim_end().ends_with('{') {
+        to += 1;
+    }
+    let condition = join(&lines[i..=to]);
+    condition.contains("is_busy") && WRITES.iter().any(|w| condition.contains(w))
 }
 
 /// The shell shapes on one line.
@@ -1375,6 +1434,22 @@ fn the_shapes_catch_what_they_name_and_nothing_that_merely_looks_alike() {
         ("let _ = conn\n    .execute_batch(sql);", DroppedWrite),
         ("std::fs::create_dir_all(&d).ok();", DroppedWrite),
         ("std::fs::remove_file(&p)\n    .ok();", DroppedWrite),
+        (
+            "busy::retry_busy_blocking(|| backfill(&conn)).ok();",
+            DroppedWrite,
+        ),
+        (
+            "busy::retry_busy(|| backfill(pool))\n    .await\n    .ok();",
+            DroppedWrite,
+        ),
+        (
+            "if let Err(e) = conn.execute_batch(sql)\n    && busy::is_busy_rusqlite(&e)\n{\n    return Err(e);\n}",
+            DroppedWrite,
+        ),
+        (
+            "if pending != 0\n    && let Err(e) = sqlx::raw_sql(sql).execute(&mut *db).await\n    && busy::is_busy(&e)\n{\n    return Err(e);\n}",
+            DroppedWrite,
+        ),
         ("let s = r#\"\nx=$(cmd || echo 0)\n\"#;", EchoNumber),
     ] {
         assert_eq!(rust(src), [shape], "{src}");
@@ -1391,6 +1466,10 @@ fn the_shapes_catch_what_they_name_and_nothing_that_merely_looks_alike() {
         "let x = std::fs::read(&p).ok();",
         "let ok = std::fs::write(&p, s).is_ok();",
         "return std::fs::remove_file(&p).ok();",
+        "let done = busy::retry_busy_blocking(|| upgrade(&conn)).ok();",
+        "busy::retry_busy_blocking(|| upgrade(&conn))?;",
+        "if let Err(e) = conn.execute_batch(sql) {\n    return Err(e);\n}",
+        "if let Err(e) = read(&conn)\n    && busy::is_busy_rusqlite(&e)\n{\n    return Err(e);\n}",
         "std::io::stdout().flush().ok();",
         "# x=$(cmd || echo 0)",
     ] {
