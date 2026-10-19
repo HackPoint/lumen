@@ -504,6 +504,14 @@ const ALLOWED: &[Allowed] = &[
         "Cleanup on a path that returns the error it is cleaning up after.",
     ),
     allow(
+        "lumenator/src-tauri/src/setup/repoint.rs",
+        DroppedWrite,
+        "remove_file(&tmp)",
+        "The CLI link's scratch name: cleared before the new link is made, and after a failed \
+         symlink or rename whose own error is returned. A leftover is cleared the next time.",
+    )
+    .times(2),
+    allow(
         "lumenator/src-tauri/src/setup.rs",
         OrDefault,
         r#"find_binary("lumen-cli")"#,

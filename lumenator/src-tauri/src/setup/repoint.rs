@@ -66,7 +66,7 @@ impl Moved {
 
     /// What follows the moved folder in `value`: `Some("")` for the folder itself. A tail that
     /// could walk out of it (`..`) is not inside.
-    fn tail(&self, value: &str) -> Option<String> {
+    fn tail_inside(&self, value: &str) -> Option<String> {
         let s = slashed(value);
         let f = fold_path(&s);
         for p in &self.prefixes {
@@ -88,12 +88,12 @@ impl Moved {
     }
 
     pub(super) fn inside(&self, value: &str) -> bool {
-        self.tail(value).is_some()
+        self.tail_inside(value).is_some()
     }
 
     /// The same file in N.
-    fn map(&self, value: &str) -> Option<PathBuf> {
-        let tail = self.tail(value)?;
+    fn moved_path(&self, value: &str) -> Option<PathBuf> {
+        let tail = self.tail_inside(value)?;
         let mut out = self.n.clone();
         for c in tail.split('/').filter(|c| !c.is_empty()) {
             out.push(c);
@@ -343,16 +343,20 @@ pub(super) fn repoint_with(
         };
         match slot {
             Slot::McpCommand => need_mcp(),
-            Slot::Arg => moved.map(v).map(|p| p.to_string_lossy().into_owned()),
+            Slot::Arg => moved
+                .moved_path(v)
+                .map(|p| p.to_string_lossy().into_owned()),
             Slot::Env("LUMEN_DB") => Some(new_db.to_string_lossy().into_owned()),
             Slot::Env("LUMEN_FAULT_SPOOL") => Some(spool.to_string_lossy().into_owned()),
-            Slot::Env(_) => moved.map(v).map(|p| p.to_string_lossy().into_owned()),
+            Slot::Env(_) => moved
+                .moved_path(v)
+                .map(|p| p.to_string_lossy().into_owned()),
             Slot::Hook => {
                 let (word, rest) = first_word(v);
                 let program = if is_mcp_program(&word) {
                     need_mcp()?
                 } else {
-                    moved.map(&word)?.to_string_lossy().into_owned()
+                    moved.moved_path(&word)?.to_string_lossy().into_owned()
                 };
                 Some(format!("{}{rest}", hook_command(Path::new(&program))))
             }

@@ -548,7 +548,7 @@ fn a_tail_that_walks_out_of_the_old_folder_is_not_inside() {
     // A sibling that only starts with the same name is not inside.
     assert!(!m.inside(&format!("{}-copy/x", r.l.display())));
     assert_eq!(
-        m.map(&r.l.join("a/b").to_string_lossy()),
+        m.moved_path(&r.l.join("a/b").to_string_lossy()),
         Some(r.n.join("a").join("b"))
     );
 }

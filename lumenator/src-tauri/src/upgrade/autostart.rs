@@ -178,7 +178,7 @@ impl Parser {
         t
     }
 
-    fn value(&mut self, open: Tok, depth: u32) -> Option<Pl> {
+    fn parse_value(&mut self, open: Tok, depth: u32) -> Option<Pl> {
         if depth > 32 {
             return None;
         }
@@ -214,7 +214,7 @@ impl Parser {
                                     o @ (Tok::Open(_) | Tok::Empty(_)) => o,
                                     _ => return None,
                                 };
-                                v.push((key, self.value(o, depth + 1)?));
+                                v.push((key, self.parse_value(o, depth + 1)?));
                             }
                             _ => return None,
                         }
@@ -228,7 +228,7 @@ impl Parser {
                             o @ (Tok::Open(_) | Tok::Empty(_)) => o,
                             _ => return None,
                         };
-                        v.push(self.value(o, depth + 1)?);
+                        v.push(self.parse_value(o, depth + 1)?);
                     }
                 }
                 _ => {
@@ -271,7 +271,7 @@ fn parse_plist(text: &str) -> Option<Pl> {
         o @ (Tok::Open(_) | Tok::Empty(_)) => o,
         _ => return None,
     };
-    p.value(open, 0)
+    p.parse_value(open, 0)
 }
 
 /// What a LaunchAgent plist runs, and whether it is switched off.
