@@ -37,7 +37,7 @@ Lumen.app and Applications symlink.
 
 ```text
 $ ls -lh target/release/bundle/dmg/Lumen_0.1.0_aarch64.dmg
--rw-r--r--  1 gshmunik  staff  16M Jun  8 11:07 Lumen_0.1.0_aarch64.dmg
+-rw-r--r--  1 user  staff  16M Jun  8 11:07 Lumen_0.1.0_aarch64.dmg
 
 $ hdiutil attach Lumen_0.1.0_aarch64.dmg -nobrowse
 /dev/disk5s1   Apple_HFS   /Volumes/Lumen
@@ -110,7 +110,7 @@ After launching `/Applications/Lumen.app` and waiting for setup to complete:
   "args": [],
   "command": "/Applications/Lumen.app/Contents/MacOS/lumen-mcp",
   "env": {
-    "LUMEN_DB": "/Users/gshmunik/Library/Application Support/io.speedata.lumen/lumen.db",
+    "LUMEN_DB": "/Users/user/Library/Application Support/io.speedata.lumen/lumen.db",
     "LUMEN_TOK": "/Applications/Lumen.app/Contents/MacOS/lumen-tok"
   },
   "type": "stdio"
@@ -126,7 +126,7 @@ PostToolUse/mcp__lumen__compress_logs: ~/.claude/lumen/lumen_meter.sh
 PreToolUse/Read:                       ~/.claude/lumen/lumen_read_intercept.sh
 
 // lumen_meter.sh paths
-LUMEN_DB="/Users/gshmunik/Library/Application Support/io.speedata.lumen/lumen.db"
+LUMEN_DB="/Users/user/Library/Application Support/io.speedata.lumen/lumen.db"
 LUMEN_TOK="/Applications/Lumen.app/Contents/MacOS/lumen-tok"
 ```
 
@@ -230,7 +230,7 @@ Lumen      ESTABLISHED  127.0.0.1:NNN->127.0.0.1:9999
 Seeded state before uninstall:
 
 ```text
-mcpServers: context-optimizer, lumen, playwright, speedash-couchbase, test-unrelated-server
+mcpServers: context-optimizer, lumen, playwright, example-db-server, test-unrelated-server
 hooks:
   PostToolUse/Read                     <- lumen
   PostToolUse/mcp__lumen__smart_read   <- lumen
@@ -243,7 +243,7 @@ hooks:
 After run_uninstall():
 
 ```text
-mcpServers: context-optimizer, playwright, speedash-couchbase, test-unrelated-server
+mcpServers: context-optimizer, playwright, example-db-server, test-unrelated-server
 hooks:
   PostToolUse/Bash: echo test-unrelated-hook  <- preserved
 
