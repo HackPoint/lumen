@@ -438,6 +438,16 @@ else
       else
         limited "neither the accessibility API nor a screenshot read the window"
       fi
+      # The rest of the release's pictures: every other tab, pressed by name, on the same fixture.
+      for TAB in Optimizer Details Settings; do
+        SHOT="$OUT/$(printf '%s' "$TAB" | tr '[:upper:]' '[:lower:]')-macos.png"
+        if osascript -l JavaScript "$PRESS_JS" "$HPID" "$TAB" >/dev/null 2>&1; then
+          sleep 3
+          screencapture -x -o -l "$HOME_ID" "$SHOT" 2>&1 && echo "screenshot: $SHOT"
+        else
+          limited "could not press the $TAB tab; no $(basename "$SHOT")"
+        fi
+      done
     fi
     stop_app "$HPID"
   else
