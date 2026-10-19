@@ -16,8 +16,9 @@
 //!
 //! - Ingest: the daemon starts on an empty projects directory and is ready (port accepting and the
 //!   `turns` table present); the set is moved in with renames; `COUNT(*) FROM turns` is polled every
-//!   50 ms, read-only, until it has not changed for 2 s. The time is from the move to the last change
-//!   of the count, so the 2 s of waiting is not in it. `bytes_per_s` is the set's size over that time.
+//!   50 ms, read-only, until it equals the set's turn count, or, for a version that drops or adds
+//!   turns, until it has not changed for 10 s. The time is from the move to the last change of the
+//!   count, so no waiting is in it. `bytes_per_s` is the set's size over that time.
 //! - Cold start: spawn to ready (daemon), spawn to the `initialize` reply (`lumen-mcp`), spawn to exit
 //!   of the first hook. On Linux the page cache is dropped before each run when `sudo -n` allows it;
 //!   otherwise, and on macOS and Windows, the figure is labelled "warm file cache".
@@ -604,7 +605,8 @@ pub struct Plan {
     pub ingest_runs: usize,
     pub cold_runs: usize,
     pub poll: Duration,
-    /// How long the count must stay put before ingest counts as done.
+    /// How long a count that is not the set's turn count must stay put before ingest counts as
+    /// done (and incomplete). A count that reaches the set's turn count is done at once.
     pub stable: Duration,
     /// Give up on ingest after this long without finishing.
     pub ingest_timeout: Duration,
@@ -619,7 +621,7 @@ impl Plan {
             ingest_runs: 5,
             cold_runs: 30,
             poll: Duration::from_millis(50),
-            stable: Duration::from_secs(2),
+            stable: Duration::from_secs(10),
             ingest_timeout: Duration::from_secs(600),
             ready_timeout: Duration::from_secs(60),
             idle: IdleCfg::standard(),
@@ -839,18 +841,24 @@ fn start_daemon(t: &Target, deps: &Deps, root: &Path, plan: &Plan) -> Res<Runnin
     }
 }
 
-/// Decides when a count has stopped changing. Fed `(count, time)`; done once the count has been
-/// above zero and has not changed for `stable`. The time of the last change is the end of ingest.
+/// Decides when ingest is over. Fed `(count, time)`; done as soon as the count is `expected` (the
+/// set's turn count), or once it has been above zero and has not changed for `stable` (a version
+/// that drops or adds turns). The time of the last change is the end of ingest.
+///
+/// Waiting for a pause alone ended a run that was only slow: on a loaded runner a commit can stall
+/// for longer than the pause, and the run was cut short and reported incomplete.
 pub struct Settle {
     stable: Duration,
+    expected: i64,
     count: i64,
     changed_at: Option<Instant>,
 }
 
 impl Settle {
-    pub fn new(stable: Duration) -> Settle {
+    pub fn new(stable: Duration, expected: i64) -> Settle {
         Settle {
             stable,
+            expected,
             count: 0,
             changed_at: None,
         }
@@ -862,6 +870,7 @@ impl Settle {
             self.changed_at = Some(now);
         }
         match self.changed_at {
+            Some(at) if self.count > 0 && self.count == self.expected => Some(at),
             Some(at) if self.count > 0 && now.duration_since(at) >= self.stable => Some(at),
             _ => None,
         }
@@ -885,7 +894,8 @@ fn ingest_once(
     let summary = write_set(&plan.spec, &stage)?;
     let run = start_daemon(t, deps, root, plan)?;
     std::thread::sleep(Duration::from_millis(300));
-    let mut settle = Settle::new(plan.stable);
+    let expected = i64::try_from(summary.turns).ctx("the set's turn count")?;
+    let mut settle = Settle::new(plan.stable, expected);
     let mut conn = None;
     let t_move = Instant::now();
     for e in std::fs::read_dir(&stage).ctx("list the staged set")? {
@@ -1353,7 +1363,8 @@ mod tests {
     fn ingest_ends_at_the_last_change_not_at_the_end_of_the_wait() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut s = Settle::new(Duration::from_secs(2));
+        // 20 of 25 turns: a version that drops some, so only the pause ends it.
+        let mut s = Settle::new(Duration::from_secs(2), 25);
         assert!(s.feed(0, at(0)).is_none(), "an empty ledger is not settled");
         assert!(s.feed(0, at(5_000)).is_none(), "zero rows is never done");
         assert!(s.feed(10, at(5_050)).is_none());
@@ -1361,6 +1372,40 @@ mod tests {
         assert!(s.feed(20, at(6_000)).is_none());
         assert!(s.feed(20, at(7_099)).is_none(), "one ms short of 2 s");
         assert_eq!(s.feed(20, at(7_100)), Some(at(5_100)));
+    }
+
+    #[test]
+    fn ingest_ends_when_every_turn_is_in_without_waiting_for_a_pause() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut s = Settle::new(Duration::from_secs(10), 111);
+        assert!(s.feed(23, at(380)).is_none());
+        // The CI failure: a commit stalled past the pause, at 23 of 111 turns. Still not done.
+        assert!(
+            s.feed(23, at(800)).is_none(),
+            "a slow run is not a finished one"
+        );
+        assert!(s.feed(23, at(9_000)).is_none());
+        assert!(s.feed(110, at(9_100)).is_none());
+        assert_eq!(
+            s.feed(111, at(9_150)),
+            Some(at(9_150)),
+            "done at the last turn"
+        );
+    }
+
+    #[test]
+    fn a_count_past_the_set_waits_for_the_pause() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut s = Settle::new(Duration::from_secs(2), 10);
+        assert!(s.feed(10, at(100)).is_some(), "exactly the set: done");
+        let mut s = Settle::new(Duration::from_secs(2), 10);
+        assert!(
+            s.feed(12, at(100)).is_none(),
+            "a version that adds turns may still be adding"
+        );
+        assert_eq!(s.feed(12, at(2_100)), Some(at(100)));
     }
 
     // --- sampling ---
@@ -1454,7 +1499,8 @@ mod tests {
             ingest_runs: 2,
             cold_runs: 2,
             poll: Duration::from_millis(10),
-            stable: Duration::from_millis(400),
+            // Only a run short of the set waits this long; the stub's runs end at its last turn.
+            stable: Duration::from_secs(5),
             ingest_timeout: Duration::from_secs(60),
             ready_timeout: Duration::from_secs(30),
             idle: IdleCfg {
@@ -1490,6 +1536,8 @@ mod tests {
         )
         .unwrap();
         let conn = lumen_core::meter::connect_db(&db).unwrap();
+        // A busy ledger waits rather than panic: a dead stub reads as an incomplete ingest.
+        conn.busy_timeout(Duration::from_secs(30)).unwrap();
         let listener = std::net::TcpListener::bind(&addr).unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut offsets: BTreeMap<PathBuf, usize> = BTreeMap::new();
