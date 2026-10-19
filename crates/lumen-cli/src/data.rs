@@ -880,11 +880,11 @@ mod tests {
         apply_msg(
             r#"{"type":"snapshot","sessions":[{"session_id":"s1","input":0,"output":0,
                "cache_read":0,"cache_write":0,"fill":5000,"peak_fill":5000,
-               "model":"claude-opus-4-8","project":"datapulse-gitlab",
+               "model":"claude-opus-4-8","project":"widget-service",
                "ts":"2026-01-01T10:00:00Z"}]}"#,
             &st,
         );
-        assert_eq!(st.lock().unwrap().project, "datapulse-gitlab");
+        assert_eq!(st.lock().unwrap().project, "widget-service");
     }
 
     #[test]
