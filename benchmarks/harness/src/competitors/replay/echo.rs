@@ -203,10 +203,28 @@ fn serve(conn: TcpStream, requests: &Mutex<Vec<Request>>) {
         if let Ok(mut g) = requests.lock() {
             g.push(req);
         }
-        if w.write_all(&reply).is_err() || w.flush().is_err() || close {
+        if w.write_all(&reply).is_err() || w.flush().is_err() {
+            return;
+        }
+        if close {
+            linger_close(&w, &mut r);
             return;
         }
     }
+}
+
+/// Close after the reply without a reset: send FIN first, then read what the client may still
+/// send until it closes too. Windows answers a close with unread bytes in the receive buffer
+/// with a reset, which the client sees as "connection reset" in place of the reply's end.
+fn linger_close(w: &TcpStream, r: &mut BufReader<TcpStream>) {
+    if w.shutdown(std::net::Shutdown::Write).is_err() {
+        return;
+    }
+    if w.set_read_timeout(Some(Duration::from_secs(2))).is_err() {
+        return;
+    }
+    let mut sink = [0u8; 4096];
+    while matches!(r.read(&mut sink), Ok(n) if n > 0) {}
 }
 
 pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
