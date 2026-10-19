@@ -29,6 +29,11 @@ downloads it, refuses on a sha256 mismatch, and extracts the sidecars into a scr
 it never compiles an old tag. Provenance in every result is the asset name and sha256, never a
 path.
 
+The published assets of the releases before 1.10.0 were withdrawn. The owner keeps them in a private
+archive, and a run reads them from there: `LUMEN_BENCH_ARCHIVE=<dir>`, laid out `<dir>/<tag>/<asset>`.
+With it set, nothing is downloaded, and every file is still checked against the pin in `manifest.toml`,
+so the archive cannot change what is measured.
+
 | OS | asset | how it is opened |
 |---|---|---|
 | macOS arm64, every tag | `Lumen_<v>_aarch64.dmg` | `hdiutil attach -readonly -nobrowse -mountpoint <scratch>`; copy `Lumen.app/Contents/MacOS/{lumen-mcp,lumen-daemon,lumen-tok}` |
