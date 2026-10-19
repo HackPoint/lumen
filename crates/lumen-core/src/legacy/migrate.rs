@@ -30,7 +30,7 @@ use std::time::Duration;
 pub const STAGE_DIR: &str = ".legacy-import";
 /// The mutex file, in the directory that holds both L and N.
 pub const LOCK_NAME: &str = ".lumen-migrate.lock";
-const LEDGER: &str = "lumen.db";
+pub(super) const LEDGER: &str = "lumen.db";
 const SPOOL: &str = "faults.jsonl";
 
 /// A point in the run, passed to the debug-build hook in [`Options`].
@@ -40,6 +40,13 @@ pub enum Phase<'a> {
     Copied { rel: &'a Path },
     /// Every file is staged; verification is next.
     Staged { dir: &'a Path },
+    /// One staged file was renamed into N (commit, step M8). Used by [`super::commit`].
+    Commit { rel: &'a Path },
+    /// The marker is written (M9). Used by [`super::commit`].
+    Committed,
+    /// L was renamed to `dir`, `B/data` (M11). On Unix the old ledger's exclusive lock is
+    /// still held at this point. Used by [`super::commit`].
+    Moved { dir: &'a Path },
 }
 
 #[derive(Clone)]
@@ -98,7 +105,7 @@ fn failed(step: &'static str, e: impl std::fmt::Display) -> Outcome {
     }
 }
 
-fn is_full(e: &io::Error) -> bool {
+pub(super) fn is_full(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::StorageFull || matches!(e.raw_os_error(), Some(28 | 39 | 112))
 }
 
@@ -201,7 +208,7 @@ fn walk(base: &Path, rel: &Path, out: &mut Vec<Entry>) -> io::Result<()> {
     Ok(())
 }
 
-fn sha256_file(p: &Path) -> io::Result<String> {
+pub(super) fn sha256_file(p: &Path) -> io::Result<String> {
     let mut f = File::open(p)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -218,7 +225,7 @@ fn sha256_file(p: &Path) -> io::Result<String> {
 /// Copy `src` to `dst`, sync it, keep its permission bits, and return the
 /// SHA-256 of the bytes that were written. With `whole_lines` only the bytes up
 /// to the last newline are taken: an appender may be mid-line at the end.
-fn copy_hashed(src: &Path, dst: &Path, whole_lines: bool) -> io::Result<String> {
+pub(super) fn copy_hashed(src: &Path, dst: &Path, whole_lines: bool) -> io::Result<String> {
     let mut r = File::open(src)?;
     let mut w = File::create(dst)?;
     let mut h = Sha256::new();
@@ -248,25 +255,25 @@ fn copy_hashed(src: &Path, dst: &Path, whole_lines: bool) -> io::Result<String> 
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn sync_dir(_p: &Path) {
+pub(super) fn sync_dir(_p: &Path) {
     #[cfg(unix)]
     if let Ok(d) = File::open(_p) {
         let _ = d.sync_all();
     }
 }
 
-enum Probe {
+pub(super) enum Probe {
     Held(String),
     Err(String),
 }
 
 /// Take the old ledger exclusively. Leaving WAL needs a lock no other open
 /// connection allows, so "still wal" or BUSY means someone has it.
-fn probe(db: &Path, opts: &Options) -> Result<Connection, Probe> {
+pub(super) fn probe(db: &Path, tries: u32, delay: Duration) -> Result<Connection, Probe> {
     let mut last = String::new();
-    for i in 0..opts.probe_tries.max(1) {
+    for i in 0..tries.max(1) {
         if i > 0 {
-            std::thread::sleep(opts.probe_delay);
+            std::thread::sleep(delay);
         }
         let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(|e| Probe::Err(e.to_string()))?;
@@ -291,19 +298,19 @@ fn probe(db: &Path, opts: &Options) -> Result<Connection, Probe> {
     Err(Probe::Held(last))
 }
 
-fn tables(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+pub(super) fn tables(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut st = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
     st.query_map([], |r| r.get(0))?.collect()
 }
 
-fn q(name: &str) -> String {
+pub(super) fn q(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Highest rowid per table; a WITHOUT ROWID table has none and is left out.
-fn high_water(conn: &Connection) -> rusqlite::Result<BTreeMap<String, i64>> {
+pub(super) fn high_water(conn: &Connection) -> rusqlite::Result<BTreeMap<String, i64>> {
     let mut m = BTreeMap::new();
     for t in tables(conn)? {
         let r = conn.query_row(
@@ -322,7 +329,7 @@ fn copy_verify_commit(old: &Path, new: &Path, stage: &Path, opts: &Options) -> O
     // 2. Probe.
     let ledger = old.join(LEDGER);
     let held = if ledger.is_file() {
-        match probe(&ledger, opts) {
+        match probe(&ledger, opts.probe_tries, opts.probe_delay) {
             Ok(c) => Some(c),
             Err(Probe::Held(why)) => {
                 return Outcome::Deferred {
@@ -455,7 +462,7 @@ fn copy_verify_commit(old: &Path, new: &Path, stage: &Path, opts: &Options) -> O
             return failed("commit", err);
         }
         if dst.symlink_metadata().is_ok()
-            && let Err(err) = fs::rename(&dst, aside(&dst))
+            && let Err(err) = fs::rename(&dst, aside(&dst, false))
         {
             return failed("commit", err);
         }
@@ -479,8 +486,70 @@ fn copy_verify_commit(old: &Path, new: &Path, stage: &Path, opts: &Options) -> O
     Outcome::Migrated(marker)
 }
 
-/// A free name beside `p` for a file already in the way; never overwrites.
-fn aside(p: &Path) -> PathBuf {
+/// Move the file in the way aside. For a ledger its `-wal`, `-shm` and `-journal` go with it,
+/// under the same name, because SQLite pairs a WAL with a database by name alone: left behind,
+/// they would be replayed onto the ledger that takes its place and the rows in them lost.
+///
+/// No failed rename leaves the database and its WAL under different names: the moves already
+/// made are undone, newest first. (A process killed between two renames is not covered: the
+/// sidecars go first, so the database stays whole under its own name.)
+pub(super) fn move_aside(dst: &Path, ledger: bool) -> io::Result<()> {
+    move_aside_with(dst, ledger, &|from, to| fs::rename(from, to))
+}
+
+/// [`move_aside`] with the rename as a parameter, so a test can fail any one of them.
+pub(super) fn move_aside_with(
+    dst: &Path,
+    ledger: bool,
+    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let to = aside(dst, ledger);
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut run = || -> io::Result<()> {
+        if ledger {
+            // The sidecars first, the database last: it is the one that, once moved, ends it.
+            for sfx in ["-wal", "-shm", "-journal"] {
+                let from = sidecar(dst, sfx);
+                if from.symlink_metadata().is_ok() {
+                    let target = sidecar(&to, sfx);
+                    rename(&from, &target)?;
+                    moved.push((from, target));
+                }
+            }
+        }
+        rename(dst, &to)
+    };
+    match run() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Put back what was moved, newest first, so the database is whole again under its name.
+            let mut stuck = Vec::new();
+            for (from, target) in moved.iter().rev() {
+                if let Err(u) = fs::rename(target, from) {
+                    stuck.push(format!("{}: {u}", target.display()));
+                }
+            }
+            if stuck.is_empty() {
+                Err(e)
+            } else {
+                Err(io::Error::new(
+                    e.kind(),
+                    format!("{e}; and could not put back {}", stuck.join(", ")),
+                ))
+            }
+        }
+    }
+}
+
+pub(super) fn sidecar(p: &Path, sfx: &str) -> PathBuf {
+    let mut s = p.as_os_str().to_os_string();
+    s.push(sfx);
+    PathBuf::from(s)
+}
+
+/// A free name beside `p` for a file already in the way; never overwrites. With `ledger`, the
+/// names of its sidecars must be free too.
+pub(super) fn aside(p: &Path, ledger: bool) -> PathBuf {
     let Some(name) = p.file_name() else {
         return p.with_extension("pre-legacy");
     };
@@ -492,7 +561,13 @@ fn aside(p: &Path) -> PathBuf {
             format!("-{n}")
         };
         let cand = p.with_file_name(format!("{base}.pre-legacy{tag}"));
-        if cand.symlink_metadata().is_err() {
+        let free = |c: &Path| c.symlink_metadata().is_err();
+        if free(&cand)
+            && (!ledger
+                || ["-wal", "-shm", "-journal"]
+                    .iter()
+                    .all(|s| free(&sidecar(&cand, s))))
+        {
             return cand;
         }
     }
@@ -508,4 +583,132 @@ fn write_marker(new: &Path, m: &Marker) -> io::Result<()> {
     fs::rename(&tmp, new.join(MARKER_NAME))?;
     sync_dir(new);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// A ledger in WAL mode whose last row is only in the WAL; the connection stays open so the
+    /// WAL is not folded in. On Windows SQLite's handles forbid renaming the WAL under it.
+    fn ledger_with_wal(dir: &Path) -> (Connection, PathBuf) {
+        let p = dir.join("lumen.db");
+        let c = Connection::open(&p).unwrap();
+        c.pragma_update(None, "journal_mode", "wal").unwrap();
+        c.execute_batch(
+            "PRAGMA wal_autocheckpoint = 0; CREATE TABLE t (x); INSERT INTO t VALUES (1)",
+        )
+        .unwrap();
+        (c, p)
+    }
+
+    fn rows(p: &Path) -> i64 {
+        Connection::open(p)
+            .unwrap()
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A database and sidecars as plain files, no handle open: what is on disk after a crash. The
+    /// bytes say which file is which.
+    fn plain_ledger(dir: &Path, with_journal: bool) -> PathBuf {
+        let db = dir.join("lumen.db");
+        fs::write(&db, b"db").unwrap();
+        fs::write(sidecar(&db, "-wal"), b"wal").unwrap();
+        fs::write(sidecar(&db, "-shm"), b"shm").unwrap();
+        if with_journal {
+            fs::write(sidecar(&db, "-journal"), b"journal").unwrap();
+        }
+        db
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_failed_database_rename_keeps_the_database_and_its_wal_together() {
+        let t = TempDir::new().unwrap();
+        let db = plain_ledger(t.path(), false);
+        // The database cannot be renamed (on Windows: another process holds it open); the
+        // sidecars before it have been moved by then.
+        let fail_db = |from: &Path, to: &Path| {
+            if from == db {
+                Err(io::Error::other("in use"))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        let err = move_aside_with(&db, true, &fail_db).unwrap_err();
+        assert!(err.to_string().contains("in use"), "{err}");
+        assert_eq!(fs::read(sidecar(&db, "-wal")).unwrap(), b"wal");
+        assert_eq!(fs::read(sidecar(&db, "-shm")).unwrap(), b"shm");
+        assert_eq!(fs::read(&db).unwrap(), b"db");
+        assert_eq!(
+            names(t.path()),
+            ["lumen.db", "lumen.db-shm", "lumen.db-wal"],
+            "nothing is stranded under another name"
+        );
+    }
+
+    #[test]
+    fn a_failed_sidecar_rename_puts_the_ones_already_moved_back() {
+        let t = TempDir::new().unwrap();
+        let db = plain_ledger(t.path(), true);
+        let fail_journal = |from: &Path, to: &Path| {
+            if from == sidecar(&db, "-journal") {
+                Err(io::Error::other("in use"))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        move_aside_with(&db, true, &fail_journal).unwrap_err();
+        assert_eq!(
+            names(t.path()),
+            [
+                "lumen.db",
+                "lumen.db-journal",
+                "lumen.db-shm",
+                "lumen.db-wal"
+            ]
+        );
+        assert_eq!(fs::read(sidecar(&db, "-wal")).unwrap(), b"wal");
+    }
+
+    /// A real WAL whose ledger is open: Windows refuses to rename the WAL under SQLite's handles,
+    /// Unix lets it. Either way the database and its WAL end up together under one name.
+    #[test]
+    fn a_ledger_held_open_is_never_split_from_its_wal() {
+        let t = TempDir::new().unwrap();
+        let (conn, db) = ledger_with_wal(t.path());
+        let moved = move_aside(&db, true);
+        let wal = sidecar(&db, "-wal");
+        if moved.is_err() {
+            assert!(db.is_file() && wal.is_file(), "nothing moved");
+            assert_eq!(rows(&db), 1);
+        } else {
+            let aside_db = t.path().join("lumen.db.pre-legacy");
+            assert!(!db.exists() && !wal.exists());
+            assert!(sidecar(&aside_db, "-wal").is_file());
+        }
+        drop(conn);
+    }
+
+    #[test]
+    fn a_ledger_moves_aside_with_its_wal_and_nothing_is_left_behind() {
+        let t = TempDir::new().unwrap();
+        let (conn, db) = ledger_with_wal(t.path());
+        drop(conn);
+        move_aside(&db, true).unwrap();
+        assert!(!db.exists());
+        assert!(!sidecar(&db, "-wal").exists());
+        let aside_db = t.path().join("lumen.db.pre-legacy");
+        assert_eq!(rows(&aside_db), 1);
+    }
 }

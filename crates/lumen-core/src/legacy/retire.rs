@@ -49,6 +49,14 @@ pub fn backup_path(parent: &Path, id: &str, date: &str) -> PathBuf {
     unused_name(parent, &format!("{id}.{date}.migrated"))
 }
 
+/// The backup folder for a migration: `<holder>/legacy-backup-<date>`, then `-2`, `-3`, ...
+/// until unused. `holder` is the new identifier's folder beside the one being moved (usually
+/// N itself); `date` is `YYYY-MM-DD`. Call it once, before the commit, and store the name in
+/// the marker.
+pub fn backup_name(holder: &Path, date: &str) -> PathBuf {
+    unused_name(holder, &format!("legacy-backup-{date}"))
+}
+
 fn unused_name(parent: &Path, base: &str) -> PathBuf {
     let mut p = parent.join(base);
     let mut n = 2u32;
