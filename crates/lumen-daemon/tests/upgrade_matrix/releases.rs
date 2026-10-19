@@ -25,6 +25,10 @@ mod v1_7_0 {
 mod v1_8_0 {
     include!("schema_v1_8_0.rs");
 }
+#[allow(dead_code)]
+mod v1_9_0 {
+    include!("schema_v1_9_0.rs");
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Release {
@@ -33,6 +37,7 @@ pub enum Release {
     V1_6_0,
     V1_7_0,
     V1_8_0,
+    V1_9_0,
 }
 
 impl Release {
@@ -43,6 +48,7 @@ impl Release {
             Release::V1_6_0 => v1_6_0::init_schema(pool).await,
             Release::V1_7_0 => v1_7_0::init_schema(pool).await,
             Release::V1_8_0 => v1_8_0::init_schema(pool).await,
+            Release::V1_9_0 => v1_9_0::init_schema(pool).await,
         };
         done.unwrap_or_else(|e| panic!("{self:?}'s own init_schema failed: {e}"));
     }
@@ -55,6 +61,7 @@ impl Release {
             Release::V1_6_0 => v1_6_0::READ_EVENTS_COLUMNS,
             Release::V1_7_0 => v1_7_0::READ_EVENTS_COLUMNS,
             Release::V1_8_0 => v1_8_0::READ_EVENTS_COLUMNS,
+            Release::V1_9_0 => v1_9_0::READ_EVENTS_COLUMNS,
         }
     }
 
@@ -105,6 +112,17 @@ const TABLES_1_7_0: &[&str] = &[
     "turns",
 ];
 
+/// 1.9.0 dropped `sessions` and added the two tables the hooks write.
+const TABLES_1_9_0: &[&str] = &[
+    "calibration",
+    "faults",
+    "intercept_blocks",
+    "read_events",
+    "session_events",
+    "transcript_scans",
+    "turns",
+];
+
 impl Fixture {
     /// The releases that opened this ledger, oldest first.
     fn history(self) -> &'static [Release] {
@@ -134,6 +152,7 @@ impl Fixture {
             Release::V1_5_0 | Release::V1_6_0 => TABLES_1_5_0,
             // 1.8.0 added a column and no table.
             Release::V1_7_0 | Release::V1_8_0 => TABLES_1_7_0,
+            Release::V1_9_0 => TABLES_1_9_0,
         }
     }
 

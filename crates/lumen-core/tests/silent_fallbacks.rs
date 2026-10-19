@@ -178,6 +178,15 @@ const ALLOWED: &[Allowed] = &[
          themselves are synced with their errors returned.",
     ),
     allow(
+        "crates/lumen-core/src/legacy/marker.rs",
+        DroppedWrite,
+        "sync_all()",
+        "A directory fsync after the marker's rename is a durability hint (and does not exist on \
+         Windows); the marker file itself is synced with its error returned, and the next start \
+         reads the marker from the disk, so a rename that did not reach the journal is a marker \
+         that is not there yet, never a wrong one.",
+    ),
+    allow(
         "crates/lumen-core/src/meter.rs",
         OrDefault,
         "CLAUDE_CODE_ENTRYPOINT",
