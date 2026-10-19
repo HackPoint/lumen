@@ -190,11 +190,13 @@ fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
 fn rewrite_rows(conn: &Connection) -> rusqlite::Result<()> {
     for backfill in BACKFILLS {
         let pending = backfill_pending(conn, backfill).unwrap_or(0);
-        if pending != 0
-            && let Err(e) = conn.execute_batch(backfill.rewrite)
-            && busy::is_busy_rusqlite(&e)
-        {
-            return Err(e);
+        if pending != 0 {
+            crate::schema::probe::before_rewrite();
+            if let Err(e) = conn.execute_batch(backfill.rewrite)
+                && busy::is_busy_rusqlite(&e)
+            {
+                return Err(e);
+            }
         }
     }
     Ok(())
