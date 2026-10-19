@@ -178,6 +178,31 @@ const ALLOWED: &[Allowed] = &[
          themselves are synced with their errors returned.",
     ),
     allow(
+        "crates/lumen-core/src/legacy/commit.rs",
+        DroppedWrite,
+        "remove_dir_all(",
+        "Cleaning up the staging directory after the outcome is decided (a failed run, or the \
+         tidy after the marker is written); a leftover is removed by the next run before it \
+         stages, and nothing reads it.",
+    )
+    .times(2),
+    allow(
+        "crates/lumen-core/src/legacy/commit.rs",
+        DroppedWrite,
+        "remove_file(&back)",
+        "Clears a stale copy in our own stage so the rename that takes the file back can land \
+         (Windows will not rename over a file); if the removal fails the rename after it fails \
+         and returns the error.",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/commit.rs",
+        DroppedWrite,
+        "MOVED_STAMP",
+        "The move stamp is a record of when L was renamed, read by nothing that gates anything; \
+         a missing stamp is written by the next start's retry.",
+    )
+    .times(2),
+    allow(
         "crates/lumen-core/src/legacy/marker.rs",
         DroppedWrite,
         "sync_all()",

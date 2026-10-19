@@ -213,7 +213,11 @@ pub(super) fn ro_uri(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn columns(conn: &Connection, schema: &str, table: &str) -> rusqlite::Result<Vec<String>> {
+pub(super) fn columns(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> rusqlite::Result<Vec<String>> {
     let mut st = conn.prepare(&format!("PRAGMA {schema}.table_info({})", quote(table)))?;
     st.query_map([], |r| r.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -355,12 +359,24 @@ fn row_sig(
     src_cols: &[String],
     id: i64,
 ) -> Result<Option<String>, String> {
-    let cols: Vec<&str> = src_cols.iter().map(String::as_str).collect();
+    row_sig_in(conn, "src", table, src_cols, id)
+}
+
+/// [`row_sig`] in the named schema; the migration records these in the marker.
+pub(super) fn row_sig_in(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    cols: &[String],
+    id: i64,
+) -> Result<Option<String>, String> {
+    let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
     let key: Option<String> = conn
         .query_row(
             &format!(
-                "SELECT {} FROM src.{} WHERE rowid = ?1",
+                "SELECT {} FROM {}.{} WHERE rowid = ?1",
                 key_expr("", &cols),
+                schema,
                 quote(table)
             ),
             params![id],
