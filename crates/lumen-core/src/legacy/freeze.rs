@@ -25,6 +25,9 @@
 //! the stamp and the read-only bits left to redo.
 
 use super::commit::{DATA_DIR, Lock, LockError, backup_dir, take_lock};
+use super::faultset::{
+    admit_fresh, counts_in_n, read_spool_files, record_digests, row_digests, tally,
+};
 use super::marker::MarkerV2;
 use super::merge::{
     KEYED_TABLES, POSITIONAL_TABLES, columns, progress, quote, ro_uri, row_sig_in, set_progress,
@@ -137,6 +140,7 @@ fn run(
         &key,
         marker,
         &data,
+        n_db.parent().unwrap_or(Path::new(".")),
         has_ledger,
         freeze,
         stop,
@@ -156,6 +160,7 @@ fn pass(
     key: &str,
     marker: &MarkerV2,
     data: &Path,
+    n_dir: &Path,
     has_ledger: bool,
     freeze: bool,
     stop: Stop,
@@ -177,22 +182,28 @@ fn pass(
         rows(&tx, key, marker, report)?;
     }
     if freeze {
-        let spool = data.join("faults.jsonl");
-        let mut bytes = Vec::new();
-        let mut recs = Vec::new();
-        for p in [faults::draining_path(&spool), spool] {
-            match fs::read(&p) {
-                Ok(b) => {
-                    recs.extend(faults::parse_spool_all(&b));
-                    bytes.extend_from_slice(&b);
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
+        // The spool lines come in as a multiset against N (see `faultset`): a line goes in while
+        // the backup (its rows and its spool) holds more of its digest than N does, so one an
+        // import, an earlier pass or N's own drain already brought is not added again.
+        let (recs, bytes) = read_spool_files(&data.join("faults.jsonl"))?;
+        let keys = record_digests(&recs)?;
+        let mut held_by_b = tally(keys.iter());
+        if has_ledger && let Some(rows) = row_digests(&tx, "src")? {
+            for (_, k) in &rows {
+                *held_by_b.entry(k.clone()).or_insert(0) += 1;
             }
         }
-        faults::insert_in(&tx, &recs).map_err(|e| format!("faults from the spool: {e}"))?;
-        set_progress(&tx, key, FROZEN_TBL, recs.len() as i64, Some(&hex(&bytes)))?;
-        report.spool_records = recs.len();
+        let in_n = counts_in_n(&tx, "main", n_dir, None)?;
+        let admitted = admit_fresh(&held_by_b, &in_n, &keys);
+        let fresh: Vec<_> = recs
+            .iter()
+            .zip(&admitted)
+            .filter(|(_, ok)| **ok)
+            .map(|(r, _)| r.clone())
+            .collect();
+        faults::insert_in(&tx, &fresh).map_err(|e| format!("faults from the spool: {e}"))?;
+        set_progress(&tx, key, FROZEN_TBL, fresh.len() as i64, Some(&hex(&bytes)))?;
+        report.spool_records = fresh.len();
     }
     if stop == Stop::BeforeCommit {
         report.stopped = true;
