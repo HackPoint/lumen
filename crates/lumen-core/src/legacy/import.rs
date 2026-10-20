@@ -820,7 +820,8 @@ fn originals(n: &Path, conn: &Connection, current: &Path) -> Result<Vec<PathBuf>
         } else {
             n.join(IMPORTS_DIR).join(k)
         };
-        let db = dir.join(LEDGER);
+        // An in-place import of a ledger FILE records the file's own path.
+        let db = if dir.is_file() { dir } else { dir.join(LEDGER) };
         if db.is_file() && !same_dir(&real(&db), &real(current)) {
             found.push(db);
         }
@@ -1570,6 +1571,27 @@ mod tests {
         drop(held);
         i.import(&d).unwrap();
         assert!(i.first_import().join("lumen.db").is_file());
+    }
+
+    /// A ledger file imported in place (another volume) is an original too: a later copy of it
+    /// adds no row.
+    #[test]
+    fn a_copy_of_an_in_place_imported_ledger_file_adds_no_row() {
+        let i = install();
+        let f = i.root.join("usb").join("old-backup.db");
+        ledger(&f, &["usb1", "usb2"]);
+        let r = import(&i.n, &f, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+        assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+        let after_first = counts(&i.n_db());
+        let copy = i.root.join("home").join("old-backup-copy.db");
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::copy(&f, &copy).unwrap();
+        let r2 = i.import(&copy).unwrap();
+        assert_eq!(
+            counts(&i.n_db()),
+            after_first,
+            "a copy came in twice: {r2:?}"
+        );
     }
 
     /// A rename the OS refuses, or one across volumes.
