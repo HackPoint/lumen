@@ -16,8 +16,11 @@
 //! 3. **Move it out of the way.** A folder outside N becomes `N/legacy-imports/<date>-<k>`; a
 //!    set-aside ledger goes, with its sidecars, to `N/legacy-imports/<date>-<k>/lumen.db*`. On Unix
 //!    the rename happens under the held lock, on Windows the connection is closed first and the
-//!    ledger is probed again at its new place. A rename across volumes leaves the folder where it is
-//!    and says so. This takes the old name out of the data root, and nothing can name it again.
+//!    ledger is probed again at its new place. A rename across volumes cannot move it, so the
+//!    ledger set and the spool are copied into `legacy-imports/<date>-<k>`, checked row for row
+//!    against the source, and that copy is the folder's original; the user's folder stays and is
+//!    never read again. No user path is ever an original or a `$done` key: a folder is judged by
+//!    its rows alone.
 //! 4. **Find what is new.** For each positional table (`read_events`, `faults`), the longest
 //!    rowid-aligned prefix the source shares with each original already merged (`B/data/lumen.db`
 //!    and every `legacy-imports/<k>` with a `$done` row): rows are compared on the columns both
@@ -29,6 +32,9 @@
 //!    reached: a source is compared with those lists the way it is with a live original, so a copy
 //!    that is older or newer than what was imported, or whose schema an app upgraded since, shares
 //!    its prefix even when the original moved, was removed or sits on a volume that is absent.
+//!    The lists are kept twice, over all the source's columns and over the core columns every
+//!    released schema has (`CORE_READ_EVENTS`, `CORE_FAULTS`), so a copy on another schema is still
+//!    recognised. A spool whose bytes an earlier import took is not taken again.
 //! 5. **One transaction** from the held connection, with N attached: the keyed tables with
 //!    `INSERT OR IGNORE`, the new rows of the positional tables, the folder's spool and `.draining`
 //!    lines (only when every prefix is 0: a folder that shares history keeps its spool), and the
@@ -178,7 +184,8 @@ pub enum Placed {
     Moved,
     /// Already under `legacy-imports`.
     Already,
-    /// A rename across volumes: imported where it is. The reason is the OS's.
+    /// A rename across volumes: the folder was copied into `legacy-imports`, verified, and that
+    /// copy is its original; the user's folder stays where it is. The reason is the OS's.
     InPlace(String),
 }
 
@@ -230,7 +237,7 @@ impl ImportReport {
             Placed::Moved => out.push(format!("The folder {moved} to {}", self.dir.display())),
             Placed::Already => out.push(format!("Reading {}", self.dir.display())),
             Placed::InPlace(why) => out.push(format!(
-                "The folder is on another volume and stays where it is, {}: imported in place ({why})",
+                "The folder is on another volume, so it was copied to {} and the original stays where it is ({why})",
                 self.dir.display()
             )),
         }
@@ -522,15 +529,13 @@ pub fn import(
         return Err(ImportError::InBackup(arg.to_path_buf()));
     }
     let imports = n_real.join(IMPORTS_DIR);
+    // Only a folder under `legacy-imports` (ours, never the user's) is known by its name. A user's
+    // path is never a key: what sits there now may be anything, so it is judged by its rows.
     let in_place_name = import_name(&imports, &src_real, &src.kind);
-    let done_key = match &in_place_name {
-        Some(k) => done_source(k),
-        None => done_source(&src_real.to_string_lossy()),
-    };
-    if is_done(&n_db, &done_key) {
-        return Err(ImportError::AlreadyImported(
-            in_place_name.unwrap_or_else(|| src_real.display().to_string()),
-        ));
+    if let Some(k) = &in_place_name
+        && is_done(&n_db, &done_source(k))
+    {
+        return Err(ImportError::AlreadyImported(k.clone()));
     }
     match is_lumen_ledger(&src.ledger) {
         Verdict::Lumen => {}
@@ -553,7 +558,7 @@ pub fn import(
         Err(LockError::Held) => return Err(ImportError::LockHeld),
         Err(LockError::Io(e)) => return Err(failed("lock", e)),
     };
-    let out = import_under(n, &n_real, &src, in_place_name, &done_key, opts, ops);
+    let out = import_under(n, &n_real, &src, in_place_name, opts, ops);
     drop(lock);
     out
 }
@@ -575,13 +580,11 @@ struct Place<'a> {
     done_key: String,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn import_under(
     n: &Path,
     n_real: &Path,
     src: &Source,
     in_place_name: Option<String>,
-    done_key: &str,
     opts: &ImportOptions,
     ops: &dyn Ops,
 ) -> Result<ImportReport, ImportError> {
@@ -628,9 +631,28 @@ fn import_under(
                     actual = dir.clone();
                     Placed::Moved
                 }
-                // Imported where it is. For a set-aside ledger the new folder was not kept.
+                // Another volume: the folder is copied, verified and kept under `legacy-imports`,
+                // and that copy is its original. The user's folder stays where it is.
                 Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                    Placed::InPlace(e.to_string())
+                    // The failed move may have made `target` (a set-aside ledger's); the copy
+                    // makes its own folder.
+                    fs::remove_dir(&target).ok();
+                    match copy_aside(src, &target, held.take(), opts) {
+                        Ok(c) => {
+                            held = Some(c);
+                            sync_dir(&imports);
+                            ledger = target.join(LEDGER);
+                            dir = target;
+                            actual = dir.clone();
+                            Placed::InPlace(e.to_string())
+                        }
+                        Err(err) => {
+                            if made_imports {
+                                fs::remove_dir(&imports).ok();
+                            }
+                            return Err(err);
+                        }
+                    }
                 }
                 // Nothing changed, but for the folder made to receive it, if it was ours.
                 Err(e) => {
@@ -664,10 +686,7 @@ fn import_under(
     // After the move, so a refusal above leaves N as it was: the current schema, `legacy_merge`
     // included, whatever the install last ran.
     drop(crate::meter::connect_db(&n_db).map_err(|e| failed("cannot open the live ledger", e))?);
-    let done_key = match placed {
-        Placed::InPlace(_) => done_key.to_string(),
-        Placed::Moved | Placed::Already => done_source(&name),
-    };
+    let done_key = done_source(&name);
     let place = Place {
         n,
         n_db,
@@ -792,8 +811,130 @@ fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path, spool: bool) ->
     }
 }
 
-/// The originals already merged: `B/data/lumen.db` and every `legacy-imports/<k>` (or in-place
-/// folder) with a `$done` row. Read-only connections, one per ledger, opened on demand.
+/// Every table of the ledger, as the row count and a digest of every row (rowid and all columns),
+/// so a copy can be checked against its source.
+fn fingerprint(conn: &Connection) -> Result<Vec<(String, i64, String)>, ImportError> {
+    let mut out = Vec::new();
+    for table in KEYED_TABLES.iter().chain(POSITIONAL_TABLES.iter()) {
+        let cols = columns(conn, "main", table).map_err(|e| failed(table, e))?;
+        if cols.is_empty() {
+            continue;
+        }
+        let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+        let sql = format!(
+            "SELECT rowid, {} FROM main.{} ORDER BY rowid",
+            key_expr("", &refs),
+            quote(table)
+        );
+        let mut st = conn.prepare(&sql).map_err(|e| failed(table, e))?;
+        let mut rs = st.query([]).map_err(|e| failed(table, e))?;
+        let mut hash = Sha256::new();
+        let mut n = 0i64;
+        while let Some(r) = rs.next().map_err(|e| failed(table, e))? {
+            let id: i64 = r.get(0).map_err(|e| failed(table, e))?;
+            let key: String = r.get(1).map_err(|e| failed(table, e))?;
+            hash.update(id.to_le_bytes());
+            hash.update(Sha256::digest(key.as_bytes()));
+            n += 1;
+        }
+        out.push((table.to_string(), n, hex(&hash.finalize())));
+    }
+    Ok(out)
+}
+
+/// The source is on another volume, so it cannot be renamed: copy its ledger set (and, for a
+/// folder, its spool) into `target`, check the copy row for row against the source, and give back
+/// the copy, taken. Nothing is read from the source's place afterwards. The copy is built in a
+/// hidden folder next to `target` and renamed into place only once it checks out, so a run that
+/// dies half-way leaves no `legacy-imports/<k>` that looks whole. The source is untouched.
+///
+/// `held` is the source's connection (Unix keeps it, so the copy is made under its lock; Windows
+/// closed it, a locked file cannot be copied, so the source is taken again for the check).
+fn copy_aside(
+    src: &Source,
+    target: &Path,
+    held: Option<Connection>,
+    opts: &ImportOptions,
+) -> Result<Connection, ImportError> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| ImportError::Failed(format!("{} has no name", target.display())))?;
+    let tmp = target.with_file_name(format!(".{name}.copying"));
+    clear_dir(&tmp)?;
+    let run = || -> Result<Connection, ImportError> {
+        fs::create_dir_all(&tmp).map_err(|e| failed("cannot copy the folder", e))?;
+        let to_db = tmp.join(LEDGER);
+        let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for sfx in SIDECARS {
+            let from = sidecar(&src.ledger, sfx);
+            if from
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_file())
+            {
+                files.push((from, sidecar(&to_db, sfx)));
+            }
+        }
+        if !matches!(src.kind, Kind::Ledger)
+            && let Some(dir) = src.ledger.parent()
+        {
+            let live = dir.join("faults.jsonl");
+            for from in [faults::draining_path(&live), live] {
+                if from
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_file())
+                    && let Some(f) = from.file_name()
+                {
+                    let to = tmp.join(f);
+                    files.push((from, to));
+                }
+            }
+        }
+        files.push((src.ledger.clone(), to_db.clone()));
+        for (from, to) in &files {
+            fs::copy(from, to).map_err(|e| {
+                failed(
+                    &format!("cannot copy {} to {}", from.display(), to.display()),
+                    e,
+                )
+            })?;
+        }
+        let source = match held {
+            Some(c) => c,
+            None => take(&src.ledger, opts)?,
+        };
+        let copy = take(&to_db, opts)?;
+        if fingerprint(&source)? != fingerprint(&copy)? {
+            return Err(ImportError::Failed(format!(
+                "the copy of {} does not match it row for row; nothing was imported",
+                src.ledger.display()
+            )));
+        }
+        drop(copy);
+        drop(source);
+        fs::rename(&tmp, target).map_err(|e| failed("cannot place the copy", e))?;
+        take(&target.join(LEDGER), opts)
+    };
+    match run() {
+        Ok(c) => Ok(c),
+        Err(e) => match clear_dir(&tmp) {
+            Ok(()) => Err(e),
+            Err(left) => Err(ImportError::Failed(format!("{e}; and {left}"))),
+        },
+    }
+}
+
+/// Remove `dir` and what is in it; one that is not there is already clear.
+fn clear_dir(dir: &Path) -> Result<(), ImportError> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(failed(&format!("cannot clear {}", dir.display()), e)),
+    }
+}
+
+/// The originals already merged: N's own ledger, `B/data/lumen.db` and every `legacy-imports/<k>`
+/// with a `$done` row (a moved folder, or the copy of one from another volume). Read-only connections, one per ledger, opened on demand.
 fn originals(n: &Path, conn: &Connection, current: &Path) -> Result<Vec<PathBuf>, ImportError> {
     // N's own ledger is an original too: a copy of it (a Finder duplicate, a restored backup)
     // holds only rows N already has, so they are prefix, not new.
@@ -819,14 +960,12 @@ fn originals(n: &Path, conn: &Connection, current: &Path) -> Result<Vec<PathBuf>
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| failed("legacy_merge", e))?;
     for s in sources {
+        // Only a folder of ours: no user path is ever an original, whatever a `$done` row says.
         let k = s.strip_prefix("import:").unwrap_or(&s);
-        let dir = if Path::new(k).is_absolute() {
-            PathBuf::from(k)
-        } else {
-            n.join(IMPORTS_DIR).join(k)
-        };
-        // An in-place import of a ledger FILE records the file's own path.
-        let db = if dir.is_file() { dir } else { dir.join(LEDGER) };
+        if Path::new(k).components().count() != 1 || Path::new(k).is_absolute() {
+            continue;
+        }
+        let db = n.join(IMPORTS_DIR).join(k).join(LEDGER);
         if db.is_file() && !same_dir(&real(&db), &real(current)) {
             found.push(db);
         }
@@ -902,13 +1041,72 @@ fn mark_matches(src: &Connection, table: &str, mark: i64, sig: &str) -> bool {
     let Ok(cols) = columns(src, "main", table) else {
         return false;
     };
-    (1..=cols.len()).rev().any(|k| {
-        row_sig_in(src, "main", table, &cols[..k], mark)
+    let hit = |list: &[String]| {
+        row_sig_in(src, "main", table, list, mark)
             .ok()
             .flatten()
             .as_deref()
             == Some(sig)
-    })
+    };
+    if (1..=cols.len()).rev().any(|k| hit(&cols[..k])) {
+        return true;
+    }
+    // Last resort: a schema change that took a column out of the middle leaves no prefix of the
+    // columns that was recorded; the core set is what every release has.
+    let core = core_in(table, &cols);
+    !core.is_empty() && hit(&core)
+}
+
+/// The columns of each positional table that every released schema has and never dropped, so a
+/// row can be recognised across schema changes (1.9.0 added `faults.agent_id` and `read_events`
+/// ones, 1.6.0 dropped `read_events.is_subagent`). `read_events` is the 1.0.0 table, whose nine
+/// columns every later one keeps in its first nine places; `faults` is the table as 1.5.0
+/// created it. The `core_columns_are_in_every_released_schema` test checks them against the
+/// fixtures of 1.4.0, 1.8.0 and 1.9.0.
+const CORE_READ_EVENTS: [&str; 9] = [
+    "ts",
+    "tool",
+    "path",
+    "lines",
+    "tokens_returned",
+    "full_tokens",
+    "saved_tokens",
+    "routed_via",
+    "channel",
+];
+const CORE_FAULTS: [&str; 9] = [
+    "ts",
+    "kind",
+    "variant",
+    "path",
+    "lines",
+    "detail",
+    "session_id",
+    "version",
+    "channel",
+];
+
+fn core_columns(table: &str) -> &'static [&'static str] {
+    match table {
+        "read_events" => &CORE_READ_EVENTS,
+        "faults" => &CORE_FAULTS,
+        _ => &[],
+    }
+}
+
+/// The core columns of `table`, in the ledger's order, when `cols` has all of them; else none.
+fn core_in(table: &str, cols: &[String]) -> Vec<String> {
+    let core = core_columns(table);
+    let have: Vec<String> = cols
+        .iter()
+        .filter(|c| core.contains(&c.as_str()))
+        .cloned()
+        .collect();
+    if have.len() == core.len() {
+        have
+    } else {
+        Vec::new()
+    }
 }
 
 /// Rows per stored chunk of a row list.
@@ -924,11 +1122,27 @@ fn list_source(table: &str, id: &str) -> String {
 /// Keep, in N, the rowid and a digest of every row the source holds in `table` (over all the
 /// source's columns, which are stored too), in chunks, under a key made of the content so two
 /// imports never replace each other's list.
+///
+/// Twice: over all of the source's columns, and over the core set (see [`core_columns`]), which a
+/// copy on another schema can still be compared on.
 fn record_rows(tx: &rusqlite::Transaction<'_>, table: &str) -> Result<(), ImportError> {
     let cols = columns(tx, "main", table).map_err(|e| failed(table, e))?;
     if cols.is_empty() {
         return Ok(());
     }
+    record_list(tx, table, &cols)?;
+    let core = core_in(table, &cols);
+    if !core.is_empty() && core != cols {
+        record_list(tx, table, &core)?;
+    }
+    Ok(())
+}
+
+fn record_list(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    cols: &[String],
+) -> Result<(), ImportError> {
     let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
     let sql = format!(
         "SELECT rowid, {} FROM main.{} ORDER BY rowid",
@@ -1175,8 +1389,26 @@ fn run_import(
                     Err(e) => return Err(failed(&format!("cannot read {}", f.display()), e)),
                 }
             }
-            faults::insert_into(&tx, "n", &recs).map_err(|e| failed("faults from the spool", e))?;
-            (Spool::Taken(recs.len()), Some(hex(&bytes)))
+            let sig = hex(&bytes);
+            // The same spool bytes were taken by an import already (a copy of that folder whose
+            // tables are empty or younger than its lists): not taken twice.
+            let known = !bytes.is_empty()
+                && tx
+                    .query_row(
+                        "SELECT 1 FROM n.legacy_merge WHERE tbl = ?1 AND sig = ?2",
+                        params![DONE_TBL, sig],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(|e| failed("legacy_merge", e))?
+                    .is_some();
+            if known {
+                (Spool::Kept, None)
+            } else {
+                faults::insert_into(&tx, "n", &recs)
+                    .map_err(|e| failed("faults from the spool", e))?;
+                (Spool::Taken(recs.len()), Some(sig))
+            }
         }
     };
     // What this source held in each positional table, row by row, so a later copy of it is
@@ -1215,10 +1447,9 @@ fn run_import(
         return Ok(rep);
     }
 
-    // 6. Finish: what moved is read-only. A folder imported in place is the user's, and is not touched.
-    if matches!(rep.placed, Placed::Moved | Placed::Already)
-        && let Err(e) = make_read_only(&p.actual)
-    {
+    // 6. Finish: what moved, or was copied, into `legacy-imports` is read-only. The user's own
+    // folder, when it was copied from another volume, is never touched.
+    if let Err(e) = make_read_only(&p.actual) {
         return Err(failed(
             "imported, but the folder could not be made read-only",
             e,
@@ -1903,18 +2134,22 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_on_another_volume_is_imported_where_it_is() {
+    fn a_folder_on_another_volume_is_copied_into_legacy_imports() {
         let i = install();
         let before = counts(&i.n_db());
         let d = recreated(&i);
         let r = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
         assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
         assert!(r.lines().join("\n").contains("on another volume"));
-        assert!(d.join("lumen.db").is_file(), "it stayed");
+        assert!(d.join("lumen.db").is_file(), "the original stayed");
         assert_eq!(count(&i.n_db(), "read_events"), before["read_events"] + 1);
-        // A second run on the same place is recognised by where it is.
-        let err = i.import(&d).unwrap_err();
-        assert!(matches!(err, ImportError::AlreadyImported(_)), "{err:?}");
+        assert!(
+            real(&r.dir).starts_with(real(&i.imports())),
+            "its copy is the original: {r:?}"
+        );
+        // A second run on the same place is known by its rows, never by the place: it adds none.
+        let again = i.import(&d).unwrap();
+        assert_eq!(again.total_rows(), 0, "{again:?}");
         assert_eq!(count(&i.n_db(), "read_events"), before["read_events"] + 1);
     }
 
@@ -2506,6 +2741,261 @@ mod tests {
             o.dry_run = true;
             let r = import(&i.n, &d, &o, &Native).unwrap();
             assert_eq!(r.rows.get("read_events"), Some(&1), "{r:?}");
+        }
+    }
+
+    mod review_attacks {
+        use super::*;
+        /// The core sets are in every released schema, and none of the columns that came or went.
+        #[test]
+        fn core_columns_are_in_every_released_schema() {
+            for ddl in [V140, V180, V190] {
+                let c = Connection::open_in_memory().unwrap();
+                c.execute_batch(ddl).unwrap();
+                for t in POSITIONAL_TABLES {
+                    let cols = columns(&c, "main", t).unwrap();
+                    if cols.is_empty() {
+                        continue; // `faults` first shipped in 1.5.0
+                    }
+                    for core in core_columns(t) {
+                        assert!(cols.iter().any(|x| x == core), "{t}.{core}");
+                    }
+                    assert_eq!(core_in(t, &cols).len(), core_columns(t).len());
+                    assert!(!core_columns(t).contains(&"is_subagent"));
+                    assert!(!core_columns(t).contains(&"agent_id"));
+                }
+            }
+        }
+
+        /// The copy of a cross-volume folder is kept, whole, under legacy-imports and the user's
+        /// folder is never touched or read again.
+        #[test]
+        fn the_copy_is_the_original_and_the_source_is_not_read_afterwards() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1"]);
+            let before = snap(&d);
+            let r = in_place(&i, &d);
+            assert!(real(&r.dir).starts_with(real(&i.imports())), "{r:?}");
+            assert!(r.dir.join("lumen.db").is_file());
+            assert_eq!(snap(&d), before, "the user's folder is untouched");
+            assert!(!i.imports().join(".2026-10-20-1.copying").exists());
+        }
+
+        const V180: &str = include_str!("../../tests/fixtures/ledger_schema_v1.8.0.sql");
+        const V140: &str = include_str!("../../tests/fixtures/ledger_schema_v1.4.0.sql");
+
+        fn in_place(i: &Install, d: &Path) -> ImportReport {
+            let r = import(&i.n, d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+            r
+        }
+
+        /// G (a drive letter that changed): another drive's Lumen folder now sits at the path the
+        /// first in-place import had. Its rows were never imported.
+        #[test]
+        fn rev_a_different_ledger_at_the_old_in_place_path_is_not_lost() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            in_place(&i, &d);
+            fs::remove_dir_all(&d).unwrap();
+            ledger(&d.join("lumen.db"), &["x1", "x2", "x3"]);
+            let before = counts(&i.n_db());
+            let direct = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices));
+            eprintln!("direct import of the new drive at the old path: {direct:?}");
+            let copy = i.root.join("home").join("xcopy");
+            copy_dir(&d, &copy);
+            let r = i.import(&copy).unwrap();
+            eprintln!("copy: {:?}", r.lines());
+            assert_eq!(
+                counts(&i.n_db())["read_events"],
+                before["read_events"] + 3,
+                "x1..x3 never came in: {r:?}"
+            );
+        }
+
+        /// An old app wrote into the in-place folder after its import; a copy of it is imported.
+        #[test]
+        fn rev_rows_written_after_an_in_place_import_are_not_lost() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            in_place(&i, &d);
+            q(&d.join("lumen.db"), &rows_for("u3"));
+            let before = counts(&i.n_db());
+            let direct = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices));
+            eprintln!("direct: {direct:?}");
+            let copy = i.root.join("home").join("pcopy");
+            copy_dir(&d, &copy);
+            let copy2 = i.root.join("home").join("pcopy2");
+            copy_dir(&d, &copy2);
+            let r = i.import(&copy).unwrap();
+            eprintln!("copy: {:?}", r.lines());
+            let mid = counts(&i.n_db());
+            // And once the volume is gone, the lists now say u3 came in.
+            fs::remove_dir_all(i.root.join("usb")).unwrap();
+            let r2 = i.import(&copy2).unwrap();
+            eprintln!("copy2: {:?}", r2.lines());
+            assert_eq!(
+                (mid["read_events"], counts(&i.n_db())["read_events"]),
+                (before["read_events"] + 1, before["read_events"] + 1),
+                "u3 never came in"
+            );
+        }
+
+        fn ledger180(path: &Path, tags: &[&str]) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let c = Connection::open(path).unwrap();
+            c.execute_batch(V180).unwrap();
+            for t in tags {
+                c.execute_batch(&format!(
+                    "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, \
+                       saved_tokens, routed_via) VALUES ('t-{t}', 'Read', '/{t}', 1, 2, 1, 'builtin_read'); \
+                     INSERT INTO faults (ts, kind, session_id) VALUES ('t-{t}', 'row-{t}', 's');"
+                ))
+                .unwrap();
+            }
+        }
+
+        /// H with an upgrade between: a 1.8.0 backup copy, the original later opened by 1.9.0
+        /// (faults.agent_id), imported in place, the drive lost, then the 1.8.0 copy.
+        #[test]
+        fn rev_h_an_older_schema_copy_after_the_volume_is_gone() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger180(&d.join("lumen.db"), &["u1", "u2"]);
+            let older = i.root.join("timemachine").join("old");
+            copy_dir(&d, &older);
+            q(
+                &d.join("lumen.db"),
+                "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+            );
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("usb")).unwrap();
+            let r = i.import(&older).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        fn ledger140(path: &Path, tags: &[&str]) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let c = Connection::open(path).unwrap();
+            c.execute_batch(V140).unwrap();
+            for t in tags {
+                c.execute_batch(&format!(
+                    "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, \
+                       saved_tokens, routed_via) VALUES ('t-{t}', 'Read', '/{t}', 1, 2, 1, 'builtin_read');"
+                ))
+                .unwrap();
+            }
+        }
+
+        /// H with an upgrade after: a 1.4.x folder imported in place, its copy later opened by a
+        /// 1.6+ app (read_events.is_subagent dropped), the drive lost, then the copy.
+        #[test]
+        fn rev_h_a_copy_that_lost_a_column_after_the_volume_is_gone() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger140(&d.join("lumen.db"), &["u1", "u2"]);
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE read_events DROP COLUMN is_subagent",
+            );
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("usb")).unwrap();
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// Control for the above with the volume present.
+        #[test]
+        fn rev_control_a_copy_that_lost_a_column_with_the_volume_present() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger140(&d.join("lumen.db"), &["u1", "u2"]);
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE read_events DROP COLUMN is_subagent",
+            );
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// A folder whose positional tables are empty but whose spool is not: a copy of it.
+        #[test]
+        fn rev_a_copy_of_a_spool_only_folder_takes_its_spool_once() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &[]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("only-spool"))).unwrap();
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "spool came in twice: {r:?}");
+        }
+
+        /// The same with a moved (same-volume) folder.
+        #[test]
+        fn rev_a_copy_of_a_moved_spool_only_folder_takes_its_spool_once() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            ledger(&d.join("lumen.db"), &[]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("only-spool"))).unwrap();
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            i.import(&d).unwrap();
+            let after_first = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "spool came in twice: {r:?}");
+        }
+
+        /// The previous folder as a 1.8.0-era copy (faults without agent_id), after the backup was
+        /// deleted: the marker fallback and the merge marks only try shorter column lists.
+        #[test]
+        fn rev_an_older_schema_copy_of_the_previous_folder_after_its_backup_is_deleted() {
+            let i = install();
+            let copy = i.root.join("example.previous.app copy");
+            copy_dir(&i.b_data(), &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE faults DROP COLUMN agent_id",
+            );
+            make_writable(&i.b);
+            fs::remove_dir_all(i.b_data()).unwrap();
+            let before = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), before, "came in twice: {r:?}");
+        }
+
+        /// G remount while the old path is still there with the same content: no row twice, and
+        /// the spool is kept.
+        #[test]
+        fn rev_two_overlapping_copies_imported_in_place_then_the_union() {
+            let i = install();
+            let a = i.root.join("vola").join("old");
+            ledger(&a.join("lumen.db"), &["u1", "u2"]);
+            let b = i.root.join("volb").join("old");
+            copy_dir(&a, &b);
+            q(&a.join("lumen.db"), &rows_for("a3"));
+            q(&b.join("lumen.db"), &rows_for("b3"));
+            in_place(&i, &a);
+            let r = in_place(&i, &b);
+            eprintln!("b: {:?}", r.lines());
+            let after = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("vola")).unwrap();
+            fs::remove_dir_all(i.root.join("volb")).unwrap();
+            // u1,u2 once, a3 once, b3 once: the snapshot has snap, snap2.
+            assert_eq!(after["read_events"], 2 + 4, "{after:?}");
         }
     }
 }
