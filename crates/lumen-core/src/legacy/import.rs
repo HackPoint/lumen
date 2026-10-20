@@ -24,10 +24,11 @@
 //!    ledgers have, in rowid order, until the first mismatch. Rows above the longest prefix are new.
 //!    A re-created ledger has prefix 0; a restored copy of the previous folder is all prefix; a
 //!    restored copy an old app wrote to afterwards is prefix up to where it diverged.
-//!    Every import also records, per positional table, the top rowid it took and the signature of
-//!    that row (in `legacy_merge`, with the merge's own marks): a source with that row at that rowid
-//!    shares the prefix, so identity is by content even when the original moved, was removed or
-//!    sits on a volume that is absent.
+//!    Every import also records, per positional table, the rowid and a digest of every row it held
+//!    (in `legacy_merge`, with the columns they were taken over), and the merge records the row it
+//!    reached: a source is compared with those lists the way it is with a live original, so a copy
+//!    that is older or newer than what was imported, or whose schema an app upgraded since, shares
+//!    its prefix even when the original moved, was removed or sits on a volume that is absent.
 //! 5. **One transaction** from the held connection, with N attached: the keyed tables with
 //!    `INSERT OR IGNORE`, the new rows of the positional tables, the folder's spool and `.draining`
 //!    lines (only when every prefix is 0: a folder that shares history keeps its spool), and the
@@ -891,6 +892,157 @@ fn common_prefix(src: &Connection, orig: &Connection, table: &str) -> Result<i64
     Ok(prefix)
 }
 
+/// Does `src` hold, at rowid `mark`, the row whose signature `sig` was recorded? The signature
+/// depends on the column list it was taken over, and an old app that opened the ledger since may
+/// have added columns at the end, so the shorter lists, from the end, are tried too.
+fn mark_matches(src: &Connection, table: &str, mark: i64, sig: &str) -> bool {
+    if mark <= 0 {
+        return false;
+    }
+    let Ok(cols) = columns(src, "main", table) else {
+        return false;
+    };
+    (1..=cols.len()).rev().any(|k| {
+        row_sig_in(src, "main", table, &cols[..k], mark)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(sig)
+    })
+}
+
+/// Rows per stored chunk of a row list.
+const LIST_CHUNK: usize = 4096;
+/// Bytes of one list entry: the rowid, then the first 8 bytes of the row's digest.
+const ENTRY: usize = 16;
+
+/// The `legacy_merge` source of the row list of `table` with this content.
+fn list_source(table: &str, id: &str) -> String {
+    format!("rows:{table}:{id}")
+}
+
+/// Keep, in N, the rowid and a digest of every row the source holds in `table` (over all the
+/// source's columns, which are stored too), in chunks, under a key made of the content so two
+/// imports never replace each other's list.
+fn record_rows(tx: &rusqlite::Transaction<'_>, table: &str) -> Result<(), ImportError> {
+    let cols = columns(tx, "main", table).map_err(|e| failed(table, e))?;
+    if cols.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+    let sql = format!(
+        "SELECT rowid, {} FROM main.{} ORDER BY rowid",
+        key_expr("", &refs),
+        quote(table)
+    );
+    let mut all: Vec<u8> = Vec::new();
+    {
+        let mut st = tx.prepare(&sql).map_err(|e| failed(table, e))?;
+        let mut rs = st.query([]).map_err(|e| failed(table, e))?;
+        while let Some(r) = rs.next().map_err(|e| failed(table, e))? {
+            let id: i64 = r.get(0).map_err(|e| failed(table, e))?;
+            let key: String = r.get(1).map_err(|e| failed(table, e))?;
+            all.extend_from_slice(&id.to_le_bytes());
+            all.extend_from_slice(&Sha256::digest(key.as_bytes())[..8]);
+        }
+    }
+    if all.is_empty() {
+        return Ok(());
+    }
+    let joined = cols.join("\t");
+    let id = hex(&Sha256::digest([joined.as_bytes(), &all].concat())[..8]);
+    let source = list_source(table, &id);
+    let put =
+        "INSERT OR REPLACE INTO n.legacy_merge (source, tbl, hwm, sig) VALUES (?1, ?2, ?3, ?4)";
+    tx.execute(
+        put,
+        params![source, "cols", (all.len() / ENTRY) as i64, joined],
+    )
+    .map_err(|e| failed("legacy_merge", e))?;
+    for (i, chunk) in all.chunks(LIST_CHUNK * ENTRY).enumerate() {
+        tx.execute(
+            put,
+            params![
+                source,
+                format!("{i:08}"),
+                (chunk.len() / ENTRY) as i64,
+                chunk
+            ],
+        )
+        .map_err(|e| failed("legacy_merge", e))?;
+    }
+    Ok(())
+}
+
+/// A row list an earlier import recorded: the columns it was taken over and the entries.
+struct RowList {
+    cols: Vec<String>,
+    entries: Vec<u8>,
+}
+
+fn recorded_lists(conn: &Connection, table: &str) -> Result<Vec<RowList>, ImportError> {
+    let mut st = conn
+        .prepare("SELECT source, sig FROM n.legacy_merge WHERE tbl = 'cols' AND source LIKE ?1")
+        .map_err(|e| failed("legacy_merge", e))?;
+    let heads = st
+        .query_map(params![format!("rows:{table}:%")], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| failed("legacy_merge", e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| failed("legacy_merge", e))?;
+    let mut out = Vec::new();
+    for (source, cols) in heads {
+        let mut st = conn
+            .prepare(
+                "SELECT sig FROM n.legacy_merge WHERE source = ?1 AND tbl GLOB '[0-9]*' \
+                 ORDER BY tbl",
+            )
+            .map_err(|e| failed("legacy_merge", e))?;
+        let chunks = st
+            .query_map(params![source], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(|e| failed("legacy_merge", e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| failed("legacy_merge", e))?;
+        out.push(RowList {
+            cols: cols.split('\t').map(str::to_string).collect(),
+            entries: chunks.concat(),
+        });
+    }
+    Ok(out)
+}
+
+/// How many leading rowids the source shares with a recorded list, row for row, over the list's
+/// columns: the same walk as [`common_prefix`], against a list instead of a live ledger.
+fn prefix_in_list(src: &Connection, table: &str, list: &RowList) -> Result<i64, String> {
+    let refs: Vec<&str> = list.cols.iter().map(String::as_str).collect();
+    let sql = format!(
+        "SELECT rowid, {} FROM main.{} ORDER BY rowid",
+        key_expr("", &refs),
+        quote(table)
+    );
+    let mut st = src.prepare(&sql).map_err(|e| format!("{table}: {e}"))?;
+    let mut rs = st.query([]).map_err(|e| format!("{table}: {e}"))?;
+    let mut prefix = 0i64;
+    for entry in list.entries.chunks(ENTRY) {
+        if entry.len() < ENTRY {
+            break;
+        }
+        let Some(r) = rs.next().map_err(|e| format!("{table}: {e}"))? else {
+            break;
+        };
+        let id: i64 = r.get(0).map_err(|e| e.to_string())?;
+        let key: String = r.get(1).map_err(|e| e.to_string())?;
+        let mut want = [0u8; 8];
+        want.copy_from_slice(&entry[..8]);
+        if id != i64::from_le_bytes(want) || Sha256::digest(key.as_bytes())[..8] != entry[8..] {
+            break;
+        }
+        prefix = id;
+    }
+    Ok(prefix)
+}
+
 fn run_import(
     p: &Place<'_>,
     src: &Source,
@@ -930,39 +1082,34 @@ fn run_import(
                 let (Some(&mark), Some(sig)) = (m.hwm.get(table), m.hwm_sig.get(table)) else {
                     continue;
                 };
-                let Ok(cols) = columns(&conn, "main", table) else {
-                    continue;
-                };
-                if mark > 0
-                    && row_sig_in(&conn, "main", table, &cols, mark)
-                        .ok()
-                        .flatten()
-                        .as_deref()
-                        == Some(sig.as_str())
-                {
+                if mark_matches(&conn, table, mark, sig) {
                     let slot = prefix.entry(table.to_string()).or_insert(0);
                     *slot = (*slot).max(mark);
                 }
             }
         }
     }
-    // Identity by content: every row N recorded for a positional table (the top row an earlier
-    // import took, the row the merge from the backup reached) holds a rowid and the signature of
-    // the row there. A source with that row at that rowid shares everything up to it, wherever
-    // it lives now and whether or not the ledger it was recorded from still exists.
+    // Identity by content, part one: the rows the merge from the backup reached, each a rowid and
+    // the signature of the row there. A source with that row at that rowid shares everything up to it.
     for (table, mark, sig) in recorded_marks(&conn)? {
-        let Ok(cols) = columns(&conn, "main", &table) else {
-            continue;
-        };
-        if mark > 0
-            && row_sig_in(&conn, "main", &table, &cols, mark)
-                .ok()
-                .flatten()
-                .as_deref()
-                == Some(sig.as_str())
-        {
+        if mark_matches(&conn, &table, mark, &sig) {
             let slot = prefix.entry(table).or_insert(0);
             *slot = (*slot).max(mark);
+        }
+    }
+    // Part two: every earlier import left the whole row list of each positional table (a hash per
+    // row, with its rowid), so a copy of that source, older or newer than the one imported, shares
+    // the rows it has in common with the list, in order, whether or not the ledger it came from
+    // still exists.
+    for table in POSITIONAL_TABLES {
+        let s_cols = columns(&conn, "main", table).map_err(|e| failed(table, e))?;
+        for list in recorded_lists(&conn, table)? {
+            if list.cols.iter().any(|c| !s_cols.contains(c)) {
+                continue;
+            }
+            let k = prefix_in_list(&conn, table, &list).map_err(|e| failed("prefix", e))?;
+            let slot = prefix.entry(table.to_string()).or_insert(0);
+            *slot = (*slot).max(k);
         }
     }
     let shares_history = prefix.values().any(|&v| v > 0);
@@ -1032,29 +1179,10 @@ fn run_import(
             (Spool::Taken(recs.len()), Some(hex(&bytes)))
         }
     };
-    // What this source held at the top of each positional table, so a later source is recognised
-    // by those rows alone.
+    // What this source held in each positional table, row by row, so a later copy of it is
+    // recognised by content alone.
     for table in POSITIONAL_TABLES {
-        let cols = columns(&tx, "main", table).map_err(|e| failed(table, e))?;
-        let top: Option<i64> = tx
-            .query_row(
-                &format!("SELECT max(rowid) FROM main.{}", quote(table)),
-                [],
-                |r| r.get(0),
-            )
-            .map_err(|e| failed(table, e))?;
-        let Some(top) = top.filter(|&t| t > 0 && !cols.is_empty()) else {
-            continue;
-        };
-        let sig = row_sig_in(&tx, "main", table, &cols, top).map_err(|e| failed(table, e))?;
-        if let Some(sig) = sig {
-            tx.execute(
-                "INSERT INTO n.legacy_merge (source, tbl, hwm, sig) VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT (source, tbl) DO UPDATE SET hwm = excluded.hwm, sig = excluded.sig",
-                params![p.done_key, table, top, sig],
-            )
-            .map_err(|e| failed("legacy_merge", e))?;
-        }
+        record_rows(&tx, table)?;
     }
     let total: usize = rows.values().sum::<usize>()
         + match &spool {
@@ -2148,6 +2276,236 @@ mod tests {
             let r = i.import(&spare).unwrap();
             assert_eq!(counts(&i.n_db()), after_first);
             assert_eq!(r.spool, Spool::Kept);
+        }
+    }
+    mod content_identity {
+        use super::*;
+        const V180: &str = include_str!("../../tests/fixtures/ledger_schema_v1.8.0.sql");
+
+        fn in_place(i: &Install, d: &Path) -> ImportReport {
+            let r = import(&i.n, d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+            r
+        }
+
+        fn rows180(tag: &str) -> String {
+            format!(
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                   routed_via) VALUES ('t-{tag}', 'Read', '/{tag}', 1, 2, 1, 'builtin_read'); \
+                 INSERT INTO faults (ts, kind, session_id) VALUES ('t-{tag}', 'row-{tag}', 's');"
+            )
+        }
+
+        fn ledger180(path: &Path, tags: &[&str]) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let c = Connection::open(path).unwrap();
+            c.execute_batch(V180).unwrap();
+            for t in tags {
+                c.execute_batch(&rows180(t)).unwrap();
+            }
+        }
+
+        /// P1: an OLDER copy (taken before the original grew), imported once the volume is gone.
+        #[test]
+        fn an_older_copy_after_the_volume_is_gone_adds_no_row() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("usb-spool"))).unwrap();
+            let older = i.root.join("timemachine").join("old");
+            copy_dir(&d, &older);
+            q(&d.join("lumen.db"), &rows_for("u3"));
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("usb")).unwrap();
+            let r = i.import(&older).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// P1 control: the same, with the volume still there.
+        #[test]
+        fn control_older_with_the_volume_present_adds_no_row() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("usb-spool"))).unwrap();
+            let older = i.root.join("timemachine").join("old");
+            copy_dir(&d, &older);
+            q(&d.join("lumen.db"), &rows_for("u3"));
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            let r = i.import(&older).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// P2: a copy an old (1.9.0) app opened after the copy was taken: faults gained agent_id.
+        #[test]
+        fn a_copy_whose_schema_an_old_app_upgraded_adds_no_row() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger180(&d.join("lumen.db"), &["u1", "u2"]);
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+            );
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("usb")).unwrap();
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// P2 control: with the volume present the column intersection makes it all prefix.
+        #[test]
+        fn control_upgraded_with_the_volume_present_adds_no_row() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger180(&d.join("lumen.db"), &["u1", "u2"]);
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+            );
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// P3: two in-place imports of overlapping copies, both volumes gone, then a copy between them.
+        #[test]
+        fn an_intermediate_copy_after_two_overlapping_imports_adds_no_row() {
+            let i = install();
+            let c1 = i.root.join("vol1").join("old");
+            ledger(&c1.join("lumen.db"), &["u1", "u2"]);
+            let c3 = i.root.join("home").join("mid");
+            copy_dir(&c1, &c3);
+            q(&c3.join("lumen.db"), &rows_for("u3"));
+            let c2 = i.root.join("vol2").join("old");
+            copy_dir(&c3, &c2);
+            q(&c2.join("lumen.db"), &rows_for("u4"));
+            in_place(&i, &c1);
+            in_place(&i, &c2);
+            let after = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("vol1")).unwrap();
+            fs::remove_dir_all(i.root.join("vol2")).unwrap();
+            let r = i.import(&c3).unwrap();
+            assert_eq!(counts(&i.n_db()), after, "came in twice: {r:?}");
+        }
+
+        /// P4: two different in-place ledgers, then a copy of the FIRST once its volume is gone
+        /// (guards the per-source key of the marks).
+        #[test]
+        fn a_copy_of_the_first_of_two_in_place_ledgers_adds_no_row() {
+            let i = install();
+            let a = i.root.join("vola").join("old");
+            ledger(&a.join("lumen.db"), &["a1", "a2"]);
+            let ac = i.root.join("home").join("ac");
+            copy_dir(&a, &ac);
+            let b = i.root.join("volb").join("old");
+            ledger(&b.join("lumen.db"), &["b1", "b2", "b3"]);
+            in_place(&i, &a);
+            in_place(&i, &b);
+            let after = counts(&i.n_db());
+            fs::remove_dir_all(i.root.join("vola")).unwrap();
+            let r = i.import(&ac).unwrap();
+            assert_eq!(counts(&i.n_db()), after, "came in twice: {r:?}");
+        }
+
+        /// P5: late rows the merge took from the backup, then the backup deleted, then a copy of
+        /// the previous folder with those late rows (the merge-progress marks).
+        #[test]
+        fn a_copy_with_the_merged_late_rows_after_the_backup_is_deleted_adds_no_row() {
+            let i = install();
+            q(&i.b_data().join("lumen.db"), &rows_for("late"));
+            // N's own row first, so N's rowids are not the backup's.
+            q(
+                &i.n_db(),
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                 routed_via) VALUES ('t-own', 'Read', '/own', 1, 2, 1, 'builtin_read'); \
+                 INSERT INTO faults (ts, kind, session_id) VALUES ('t-own', 'row-own', 's');",
+            );
+            let Seen::Migrated(m) = marker::read(&i.n) else {
+                panic!()
+            };
+            crate::legacy::freeze::merge_backup(&i.n_db(), &i.b, &m).unwrap();
+            let copy = i.root.join("example.previous.app copy");
+            copy_dir(&i.b_data(), &copy);
+            make_writable(&i.b);
+            fs::remove_dir_all(i.b_data()).unwrap();
+            let before = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), before, "came in twice: {r:?}");
+        }
+
+        /// The same, and the copy was opened by a newer app that added a column to faults.
+        #[test]
+        fn a_merged_copy_with_a_later_column_after_the_backup_is_deleted_adds_no_row() {
+            let i = install();
+            q(&i.b_data().join("lumen.db"), &rows_for("late"));
+            q(
+                &i.n_db(),
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                 routed_via) VALUES ('t-own', 'Read', '/own', 1, 2, 1, 'builtin_read'); \
+                 INSERT INTO faults (ts, kind, session_id) VALUES ('t-own', 'row-own', 's');",
+            );
+            let Seen::Migrated(m) = marker::read(&i.n) else {
+                panic!()
+            };
+            crate::legacy::freeze::merge_backup(&i.n_db(), &i.b, &m).unwrap();
+            let copy = i.root.join("example.previous.app copy");
+            copy_dir(&i.b_data(), &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE faults ADD COLUMN extra_col TEXT",
+            );
+            make_writable(&i.b);
+            fs::remove_dir_all(i.b_data()).unwrap();
+            let before = counts(&i.n_db());
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), before, "came in twice: {r:?}");
+        }
+    }
+
+    mod no_faults_table {
+        use super::*;
+        const V140: &str = include_str!("../../tests/fixtures/ledger_schema_v1.4.0.sql");
+
+        fn old_ledger(i: &Install) -> PathBuf {
+            let d = i.root.join("home").join("old-140");
+            fs::create_dir_all(&d).unwrap();
+            let c = Connection::open(d.join("lumen.db")).unwrap();
+            c.execute_batch(V140).unwrap();
+            c.execute_batch(
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                   routed_via) VALUES ('t-140', 'Read', '/140', 1, 2, 1, 'builtin_read');",
+            )
+            .unwrap();
+            d
+        }
+
+        /// A ledger from 1.1.4 to 1.4.x has no faults table: it imports, and so does a dry run.
+        #[test]
+        fn a_ledger_without_a_faults_table_imports() {
+            let i = install();
+            let d = old_ledger(&i);
+            let before = counts(&i.n_db());
+            let r = i.import(&d).unwrap();
+            assert_eq!(r.rows.get("read_events"), Some(&1), "{r:?}");
+            assert_eq!(counts(&i.n_db())["read_events"], before["read_events"] + 1);
+        }
+
+        #[test]
+        fn a_dry_run_on_a_ledger_without_a_faults_table_works() {
+            let i = install();
+            let d = old_ledger(&i);
+            let mut o = opts();
+            o.dry_run = true;
+            let r = import(&i.n, &d, &o, &Native).unwrap();
+            assert_eq!(r.rows.get("read_events"), Some(&1), "{r:?}");
         }
     }
 }
