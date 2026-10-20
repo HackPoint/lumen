@@ -71,6 +71,10 @@ pub const IMPORTS_DIR: &str = "legacy-imports";
 /// it added, `sig` the SHA-256 of the spool bytes it took.
 pub const DONE_TBL: &str = "$done";
 
+/// The `tbl` of the `legacy_merge` rows that count the spool records imports took: `source` is
+/// `spool:<digest over the core fault columns>`, `hwm` how many records with that digest.
+const SPOOL_TBL: &str = "spool";
+
 const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Where a run is cut short, for the tests that stand in for a killed process.
@@ -606,12 +610,12 @@ fn import_under(
     let (name, placed) = match in_place_name {
         Some(k) => (k, Placed::Already),
         None if opts.dry_run => {
-            let k = free_name(&imports, opts.date());
+            let k = free_name(&imports, &n_db, opts.date());
             dir = imports.join(&k);
             (k, Placed::Moved)
         }
         None => {
-            let k = free_name(&imports, opts.date());
+            let k = free_name(&imports, &n_db, opts.date());
             let target = imports.join(&k);
             let made_imports = !imports.exists();
             fs::create_dir_all(&imports).map_err(|e| failed("legacy-imports", e))?;
@@ -738,12 +742,16 @@ fn take(ledger: &Path, opts: &ImportOptions) -> Result<Connection, ImportError> 
     }
 }
 
-/// `<date>-1`, `<date>-2`, ... the first name not yet in `imports`.
-fn free_name(imports: &Path, date: &str) -> String {
+/// `<date>-1`, `<date>-2`, ... the first name not yet in `imports` and with no `$done` row in N.
+/// A folder the user deleted leaves its `$done` row behind; a new folder given that name would
+/// inherit it, and a run cut short after the move could never be finished (refused as "already
+/// imported", while its rows were never taken).
+fn free_name(imports: &Path, n_db: &Path, date: &str) -> String {
     let mut k = 1u32;
     loop {
         let name = format!("{date}-{k}");
-        if fs::symlink_metadata(imports.join(&name)).is_err() {
+        if fs::symlink_metadata(imports.join(&name)).is_err() && !is_done(n_db, &done_source(&name))
+        {
             return name;
         }
         k += 1;
@@ -1257,6 +1265,96 @@ fn prefix_in_list(src: &Connection, table: &str, list: &RowList) -> Result<i64, 
     Ok(prefix)
 }
 
+/// Digests of spool records, each over the core fault columns ([`CORE_FAULTS`]) as a `faults` row
+/// holds them, so a row an old app wrote from the spool has the digest of its record.
+fn spool_keys(recs: &[faults::FaultRecord]) -> Result<Vec<String>, ImportError> {
+    let mem = Connection::open_in_memory().map_err(|e| failed("spool digests", e))?;
+    let cols = CORE_FAULTS.join(", ");
+    mem.execute_batch(&format!("CREATE TABLE s ({cols})"))
+        .map_err(|e| failed("spool digests", e))?;
+    let mut ins = mem
+        .prepare(&format!(
+            "INSERT INTO s ({cols}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+        ))
+        .map_err(|e| failed("spool digests", e))?;
+    for r in recs {
+        ins.execute(params![
+            r.ts,
+            r.kind,
+            r.variant,
+            r.path,
+            r.lines,
+            r.detail,
+            r.session_id,
+            r.version,
+            r.channel
+        ])
+        .map_err(|e| failed("spool digests", e))?;
+    }
+    let mut st = mem
+        .prepare(&format!(
+            "SELECT {} FROM s ORDER BY rowid",
+            key_expr("", &CORE_FAULTS)
+        ))
+        .map_err(|e| failed("spool digests", e))?;
+    let keys = st
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| failed("spool digests", e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| failed("spool digests", e))?;
+    Ok(keys.iter().map(|k| hex(k.as_bytes())).collect())
+}
+
+/// How many spool records of each digest earlier imports took.
+fn recorded_spool(conn: &Connection) -> Result<BTreeMap<String, i64>, ImportError> {
+    let mut st = conn
+        .prepare("SELECT source, hwm FROM n.legacy_merge WHERE tbl = ?1")
+        .map_err(|e| failed("legacy_merge", e))?;
+    let rows = st
+        .query_map(params![SPOOL_TBL], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(|e| failed("legacy_merge", e))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| failed("legacy_merge", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(s, c)| (s.trim_start_matches("spool:").to_string(), c))
+        .collect())
+}
+
+/// Rowids past `from` in the source's `faults` that are records an import took from a spool (the
+/// old app drained the same spool into its table), each digest at most as often as it was taken.
+fn drained_spool_rows(
+    conn: &Connection,
+    from: i64,
+    spooled: &BTreeMap<String, i64>,
+) -> Result<Vec<i64>, ImportError> {
+    let cols = columns(conn, "main", "faults").map_err(|e| failed("faults", e))?;
+    if spooled.is_empty() || CORE_FAULTS.iter().any(|c| !cols.iter().any(|x| x == c)) {
+        return Ok(Vec::new());
+    }
+    let mut budget = spooled.clone();
+    let mut st = conn
+        .prepare(&format!(
+            "SELECT rowid, {} FROM main.faults WHERE rowid > ?1 ORDER BY rowid",
+            key_expr("", &CORE_FAULTS)
+        ))
+        .map_err(|e| failed("faults", e))?;
+    let mut rs = st.query(params![from]).map_err(|e| failed("faults", e))?;
+    let mut out = Vec::new();
+    while let Some(r) = rs.next().map_err(|e| failed("faults", e))? {
+        let key: String = r.get(1).map_err(|e| failed("faults", e))?;
+        if let Some(b) = budget.get_mut(&hex(key.as_bytes()))
+            && *b > 0
+        {
+            *b -= 1;
+            out.push(r.get(0).map_err(|e| failed("faults", e))?);
+        }
+    }
+    Ok(out)
+}
+
 fn run_import(
     p: &Place<'_>,
     src: &Source,
@@ -1333,6 +1431,7 @@ fn run_import(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| failed("cannot start the import", e))?;
     let mut rows: BTreeMap<String, usize> = BTreeMap::new();
+    let spooled = recorded_spool(&tx)?;
     let tables = KEYED_TABLES
         .iter()
         .map(|t| (*t, false))
@@ -1359,11 +1458,24 @@ fn run_import(
         } else {
             "INSERT OR IGNORE"
         };
+        // Fault rows an earlier import took from a spool, since drained into this source's table
+        // by an old app, are not taken again.
+        let skip = if table == "faults" {
+            drained_spool_rows(&tx, from, &spooled)?
+        } else {
+            Vec::new()
+        };
+        let not_in = if skip.is_empty() {
+            String::new()
+        } else {
+            let ids: Vec<String> = skip.iter().map(i64::to_string).collect();
+            format!(" AND rowid NOT IN ({})", ids.join(","))
+        };
         let added = tx
             .execute(
                 &format!(
                     "{verb} INTO n.{t} ({list}) SELECT {list} FROM main.{t} \
-                     WHERE rowid > ?1 ORDER BY rowid"
+                     WHERE rowid > ?1{not_in} ORDER BY rowid"
                 ),
                 params![from],
             )
@@ -1402,12 +1514,32 @@ fn run_import(
                     .optional()
                     .map_err(|e| failed("legacy_merge", e))?
                     .is_some();
-            if known {
+            // Record by record: a spool that grew, or an older copy of one, takes only the lines
+            // no import has taken (each digest counted, so two equal lines are two).
+            let keys = spool_keys(&recs)?;
+            let mut count: BTreeMap<String, i64> = BTreeMap::new();
+            let mut fresh = Vec::new();
+            for (r, k) in recs.iter().zip(&keys) {
+                let c = count.entry(k.clone()).or_insert(0);
+                *c += 1;
+                if spooled.get(k).is_none_or(|taken| *c > *taken) {
+                    fresh.push(r.clone());
+                }
+            }
+            if known || (fresh.is_empty() && !recs.is_empty()) {
                 (Spool::Kept, None)
             } else {
-                faults::insert_into(&tx, "n", &recs)
+                faults::insert_into(&tx, "n", &fresh)
                     .map_err(|e| failed("faults from the spool", e))?;
-                (Spool::Taken(recs.len()), Some(sig))
+                for (k, c) in &count {
+                    tx.execute(
+                        "INSERT INTO n.legacy_merge (source, tbl, hwm, sig) VALUES (?1, ?2, ?3, NULL) \
+                         ON CONFLICT (source, tbl) DO UPDATE SET hwm = max(hwm, excluded.hwm)",
+                        params![format!("spool:{k}"), SPOOL_TBL, c],
+                    )
+                    .map_err(|e| failed("legacy_merge", e))?;
+                }
+                (Spool::Taken(fresh.len()), Some(sig))
             }
         }
     };
@@ -2996,6 +3128,352 @@ mod tests {
             fs::remove_dir_all(i.root.join("volb")).unwrap();
             // u1,u2 once, a3 once, b3 once: the snapshot has snap, snap2.
             assert_eq!(after["read_events"], 2 + 4, "{after:?}");
+        }
+    }
+
+    mod rev0_attacks {
+        use super::*;
+
+        fn in_place(i: &Install, d: &Path) -> ImportReport {
+            let r = import(&i.n, d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+            r
+        }
+
+        fn kind_count(p: &Path, kind: &str) -> i64 {
+            Connection::open(p)
+                .unwrap()
+                .query_row("SELECT count(*) FROM faults WHERE kind = ?1", [kind], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+
+        /// What an old app does at its start: the spool's lines become rows of its own ledger,
+        /// and the spool goes.
+        fn old_app_drains(d: &Path) {
+            let spool = d.join("faults.jsonl");
+            let recs = faults::parse_spool_all(&fs::read(&spool).unwrap());
+            let mut c = Connection::open(d.join("lumen.db")).unwrap();
+            let tx = c.transaction().unwrap();
+            faults::insert_into(&tx, "main", &recs).unwrap();
+            tx.commit().unwrap();
+            fs::remove_file(&spool).unwrap();
+        }
+
+        /// A1: the user's folder stays after a cross-volume copy; the spool the import took is
+        /// still in it, an old app drains it into rows, and the next import of that folder brings
+        /// those rows in again.
+        #[test]
+        fn r0_a_spool_drained_after_a_cross_volume_import_comes_in_once() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("usb-spool"))).unwrap();
+            let r = in_place(&i, &d);
+            assert_eq!(r.spool, Spool::Taken(1), "{r:?}");
+            assert_eq!(kind_count(&i.n_db(), "usb-spool"), 1);
+            old_app_drains(&d);
+            let r2 = in_place(&i, &d);
+            eprintln!("second: {:?}", r2.lines());
+            assert_eq!(
+                kind_count(&i.n_db(), "usb-spool"),
+                1,
+                "came in twice: {r2:?}"
+            );
+        }
+
+        /// A2: a spool-only folder on another volume; its spool grows after the import; the
+        /// second import takes the first line again.
+        #[test]
+        fn r0_a_spool_only_folder_whose_spool_grew_takes_each_line_once() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &[]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("first"))).unwrap();
+            in_place(&i, &d);
+            let mut s = fs::read_to_string(d.join("faults.jsonl")).unwrap();
+            s.push_str(&format!("{}\n", line("second")));
+            fs::write(d.join("faults.jsonl"), s).unwrap();
+            let r = in_place(&i, &d);
+            eprintln!("second: {:?}", r.lines());
+            assert_eq!(
+                (
+                    kind_count(&i.n_db(), "first"),
+                    kind_count(&i.n_db(), "second")
+                ),
+                (1, 1),
+                "{r:?}"
+            );
+        }
+
+        /// A3: an older copy of a spool-only folder (fewer spool lines), same volume.
+        #[test]
+        fn r0_an_older_copy_of_a_spool_only_folder_takes_nothing_twice() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            ledger(&d.join("lumen.db"), &[]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("first"))).unwrap();
+            let older = i.root.join("tm").join("old");
+            copy_dir(&d, &older);
+            let mut s = fs::read_to_string(d.join("faults.jsonl")).unwrap();
+            s.push_str(&format!("{}\n", line("second")));
+            fs::write(d.join("faults.jsonl"), s).unwrap();
+            i.import(&d).unwrap();
+            let r = i.import(&older).unwrap();
+            assert_eq!(kind_count(&i.n_db(), "first"), 1, "{r:?}");
+        }
+
+        /// A4: a `legacy-imports/<k>` the user deleted; the next import that day gets the same
+        /// name, the `$done` row of the deleted one still names it, and a run cut short after the
+        /// move cannot be finished: its rows never come in.
+        #[test]
+        fn r0_a_reused_import_name_does_not_lose_the_new_folder() {
+            let i = install();
+            let d = recreated(&i);
+            i.import(&d).unwrap();
+            assert!(i.first_import().is_dir());
+            make_writable(&i.first_import());
+            fs::remove_dir_all(i.first_import()).unwrap();
+            let x = i.root.join("home").join("x");
+            ledger(&x.join("lumen.db"), &["x1", "x2"]);
+            let xcopy = i.root.join("home").join("xcopy");
+            copy_dir(&x, &xcopy);
+            let before = counts(&i.n_db());
+            let mut o = opts();
+            o.stop = Stop::AfterMove;
+            let r = import(&i.n, &x, &o, &Native).unwrap();
+            assert_ne!(r.name, "2026-10-20-1", "the name is reused: {r:?}");
+            let rerun = i.import(&i.first_import());
+            eprintln!("rerun on the landed folder: {rerun:?}");
+            let viacopy = i.import(&xcopy);
+            eprintln!("a copy of it: {viacopy:?}");
+            assert_eq!(
+                counts(&i.n_db())["read_events"],
+                before["read_events"] + 2,
+                "x1, x2 never came in"
+            );
+        }
+
+        /// A5: the same, with no kill: a commit that fails after the move (here, the stop before
+        /// the commit stands in for a busy live ledger), then the command the error names.
+        #[test]
+        fn r0_a_reused_import_name_after_a_failed_commit() {
+            let i = install();
+            let d = recreated(&i);
+            i.import(&d).unwrap();
+            make_writable(&i.first_import());
+            fs::remove_dir_all(i.first_import()).unwrap();
+            let x = i.root.join("home").join("x");
+            ledger(&x.join("lumen.db"), &["x1", "x2"]);
+            let before = counts(&i.n_db());
+            let mut o = opts();
+            o.stop = Stop::BeforeCommit;
+            let r = import(&i.n, &x, &o, &Native).unwrap();
+            assert_ne!(r.name, "2026-10-20-1", "the name is reused: {r:?}");
+            let rerun = i.import(&r.dir);
+            assert!(rerun.is_ok(), "the rerun the error names: {rerun:?}");
+            assert_eq!(counts(&i.n_db())["read_events"], before["read_events"] + 2);
+        }
+
+        /// A6: a cross-volume import killed after the copy is placed, then the user reruns on
+        /// their own folder; then the leftover copy is imported too.
+        #[test]
+        fn r0_a_cross_volume_copy_killed_after_placing_then_both_runs() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("usb-spool"))).unwrap();
+            let before = counts(&i.n_db());
+            let mut o = opts();
+            o.stop = Stop::AfterMove;
+            let r = import(&i.n, &d, &o, &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            assert!(r.stopped);
+            let left = r.dir.clone();
+            in_place(&i, &d);
+            let r3 = i.import(&left).unwrap();
+            eprintln!("leftover: {:?}", r3.lines());
+            let after = counts(&i.n_db());
+            assert_eq!(after["read_events"], before["read_events"] + 2);
+            assert_eq!(kind_count(&i.n_db(), "usb-spool"), 1);
+        }
+
+        /// A7: cross-volume dry run then a real run.
+        #[test]
+        fn r0_cross_volume_dry_run_writes_nothing() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1", "u2"]);
+            let before = (snap(&i.n), snap(&d));
+            let mut o = opts();
+            o.dry_run = true;
+            let r = import(&i.n, &d, &o, &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            eprintln!("dry: {:?}", r.lines());
+            assert_eq!(r.rows["read_events"], 2);
+            let after = (snap(&i.n), snap(&d));
+            assert_eq!(after.1, before.1);
+            assert_eq!(
+                after.0.keys().collect::<Vec<_>>(),
+                before.0.keys().collect::<Vec<_>>()
+            );
+        }
+
+        /// A8: the user's folder is not made read-only by a cross-volume copy.
+        #[cfg(unix)]
+        #[test]
+        fn r0_the_users_folder_keeps_its_permissions() {
+            use std::os::unix::fs::PermissionsExt;
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1"]);
+            let mode = fs::metadata(d.join("lumen.db"))
+                .unwrap()
+                .permissions()
+                .mode();
+            in_place(&i, &d);
+            assert_eq!(
+                fs::metadata(d.join("lumen.db"))
+                    .unwrap()
+                    .permissions()
+                    .mode(),
+                mode
+            );
+        }
+    }
+
+    mod rev0_deleted_originals {
+        use super::*;
+        const V180: &str = include_str!("../../tests/fixtures/ledger_schema_v1.8.0.sql");
+        const V140: &str = include_str!("../../tests/fixtures/ledger_schema_v1.4.0.sql");
+
+        fn in_place(i: &Install, d: &Path) -> ImportReport {
+            let r = import(&i.n, d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+            r
+        }
+
+        fn drop_imports(i: &Install) {
+            make_writable(&i.imports());
+            fs::remove_dir_all(i.imports()).unwrap();
+        }
+
+        fn ledger_with(ddl: &str, path: &Path, tags: &[&str], faults: bool) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let c = Connection::open(path).unwrap();
+            c.execute_batch(ddl).unwrap();
+            for t in tags {
+                c.execute_batch(&format!(
+                    "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, \
+                       saved_tokens, routed_via) VALUES ('t-{t}', 'Read', '/{t}', 1, 2, 1, 'builtin_read');"
+                ))
+                .unwrap();
+                if faults {
+                    c.execute_batch(&format!(
+                        "INSERT INTO faults (ts, kind, session_id) VALUES ('t-{t}', 'row-{t}', 's');"
+                    ))
+                    .unwrap();
+                }
+            }
+        }
+
+        /// D1: 1.8.0 copy kept aside; the original later gets faults.agent_id, is imported across
+        /// volumes; the copy in legacy-imports is deleted and the volume is gone; the older copy.
+        #[test]
+        fn d1_older_schema_copy_after_every_original_is_gone() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger_with(V180, &d.join("lumen.db"), &["u1", "u2"], true);
+            let older = i.root.join("tm").join("old");
+            copy_dir(&d, &older);
+            q(
+                &d.join("lumen.db"),
+                "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+            );
+            in_place(&i, &d);
+            let after_first = counts(&i.n_db());
+            drop_imports(&i);
+            fs::remove_dir_all(i.root.join("usb")).unwrap();
+            let r = i.import(&older).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// D2: 1.4.0 folder moved (same volume) and imported; its copy later lost
+        /// read_events.is_subagent; legacy-imports is deleted; the copy.
+        #[test]
+        fn d2_a_copy_that_lost_a_column_after_the_moved_original_is_deleted() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            ledger_with(V140, &d.join("lumen.db"), &["u1", "u2"], false);
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE read_events DROP COLUMN is_subagent",
+            );
+            i.import(&d).unwrap();
+            let after_first = counts(&i.n_db());
+            drop_imports(&i);
+            let r = i.import(&copy).unwrap();
+            assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
+        }
+
+        /// D3: a copy upgraded by 1.9.0 (agent_id at the end) after its 1.8.0 original was imported
+        /// and deleted, and the copy grew by one row.
+        #[test]
+        fn d3_an_upgraded_copy_that_grew_after_the_original_is_deleted() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            ledger_with(V180, &d.join("lumen.db"), &["u1", "u2"], true);
+            let copy = i.root.join("home").join("c");
+            copy_dir(&d, &copy);
+            i.import(&d).unwrap();
+            let before = counts(&i.n_db());
+            drop_imports(&i);
+            q(
+                &copy.join("lumen.db"),
+                "ALTER TABLE faults ADD COLUMN agent_id TEXT",
+            );
+            q(
+                &copy.join("lumen.db"),
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                 routed_via) VALUES ('t-u3', 'Read', '/u3', 1, 2, 1, 'builtin_read'); \
+                 INSERT INTO faults (ts, kind, session_id, agent_id) VALUES ('t-u3', 'row-u3', 's', 'a');",
+            );
+            let r = i.import(&copy).unwrap();
+            let after = counts(&i.n_db());
+            assert_eq!(
+                (after["read_events"], after["faults"]),
+                (before["read_events"] + 1, before["faults"] + 1),
+                "{r:?}"
+            );
+        }
+
+        /// D4: the previous folder's 1.4.0-era copy (before 1.5.0 there is no faults table) after the
+        /// backup is deleted: the marker and N's own rows.
+        #[test]
+        fn d4_two_chained_imports_then_both_deleted_then_the_middle_copy() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            ledger_with(V180, &d.join("lumen.db"), &["u1", "u2"], true);
+            let mid = i.root.join("home").join("mid");
+            copy_dir(&d, &mid);
+            i.import(&d).unwrap();
+            // The middle copy grows and is imported (adds one), then a later copy of it.
+            q(
+                &mid.join("lumen.db"),
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, routed_via) VALUES ('t-m3', 'Read', '/m3', 1, 2, 1, 'builtin_read')",
+            );
+            let late = i.root.join("home").join("late");
+            copy_dir(&mid, &late);
+            q(
+                &late.join("lumen.db"),
+                "ALTER TABLE read_events DROP COLUMN target_outline",
+            );
+            i.import(&mid).unwrap();
+            let after = counts(&i.n_db());
+            drop_imports(&i);
+            let r = i.import(&late).unwrap();
+            assert_eq!(counts(&i.n_db()), after, "came in twice: {r:?}");
         }
     }
 }
