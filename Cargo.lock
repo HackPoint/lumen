@@ -2832,6 +2832,7 @@ name = "lumen-core"
 version = "1.9.0"
 dependencies = [
  "dirs 7.0.0",
+ "libc",
  "once_cell",
  "rusqlite",
  "serde",

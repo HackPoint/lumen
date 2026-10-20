@@ -11,16 +11,21 @@
 //! 1. **Refuse** what must not be imported: a start that has neither committed nor settled, the
 //!    live ledger, anything under the backup, something that is not a Lumen ledger, a folder that
 //!    was imported already.
-//! 2. **Lock, then probe.** The lock is `N/.lumen-migrate.lock`. The source is taken exclusively
-//!    ([`super::migrate::probe`]); one that is held is refused and nothing changes.
+//! 2. **Lock, then ask whether it is held.** The lock is `N/.lumen-migrate.lock`. Whether an older
+//!    Lumen has the source open is asked without writing a byte and without opening it through
+//!    SQLite (taking a ledger switches its journal mode, a write to the user's file): POSIX lock
+//!    queries on Unix, a share-mode open on Windows. One that is held is refused and nothing changes.
 //! 3. **Move it out of the way.** A folder outside N becomes `N/legacy-imports/<date>-<k>`; a
-//!    set-aside ledger goes, with its sidecars, to `N/legacy-imports/<date>-<k>/lumen.db*`. On Unix
-//!    the rename happens under the held lock, on Windows the connection is closed first and the
-//!    ledger is probed again at its new place. A rename across volumes cannot move it, so the
-//!    ledger set and the spool are copied byte for byte into `legacy-imports/<date>-<k>` (the source
-//!    is never opened through SQLite, so never written), and that copy is the folder's original;
-//!    the user's folder stays and is never read again. No user path is ever an original or a `$done` key: a folder is judged by
-//!    its rows alone.
+//!    set-aside ledger goes, with its sidecars, to `N/legacy-imports/<date>-<k>/lumen.db*`. The
+//!    rename is the only judge of whether it can move (a bind mount or a mounted folder looks like
+//!    one volume to any prediction), and the ledger is taken, exclusively, only where it now is.
+//!    One that turns out to be held then goes back where it was, and nothing changes. A rename that
+//!    answers EXDEV cannot move it, so the ledger set and the spool are copied byte for byte into
+//!    `legacy-imports/<date>-<k>` (the source was never opened through SQLite, so never written),
+//!    and that copy is the folder's original; the user's folder stays and is never read again.
+//!    The copy is whole only when every file equals its source twice over (right after it was
+//!    copied, and again once the last was) and SQLite's `quick_check` passes on it. No user path
+//!    is ever an original or a `$done` key: a folder is judged by its rows alone.
 //! 4. **Find what is new.** For each positional table (`read_events`, `faults`), the longest
 //!    rowid-aligned prefix the source shares with each original already merged (`B/data/lumen.db`
 //!    and every `legacy-imports/<k>` with a `$done` row): rows are compared on the columns both
@@ -45,8 +50,9 @@
 //!
 //! A run killed before step 3 changed nothing. Killed after it, `legacy-imports/<k>` has no `$done`
 //! row, so a rerun on that path imports. Killed after step 5, the rerun says "already imported".
-//! `--dry-run` runs the refusals, the probe and the prefix search, takes the same transaction and
-//! rolls it back: it moves nothing and writes nothing.
+//! `--dry-run` runs the refusals and the prefix search on a scratch copy of the source (removed when
+//! the run ends), takes the same transaction and rolls it back: it moves nothing and writes nothing,
+//! not even to the source's journal mode.
 
 use super::commit::{LockError, backup_dir, take_lock};
 use super::discover::{Verdict, is_lumen_ledger};
@@ -594,13 +600,19 @@ fn import_under(
     ops: &dyn Ops,
 ) -> Result<ImportReport, ImportError> {
     let n_db = n.join(LEDGER);
-    // A source on another volume is never opened for writing (taking it would change the journal
-    // mode in its header): it is copied byte for byte, and the copy is what gets taken.
-    let crossing = in_place_name.is_none() && ops.crosses_volumes(&src.path, n_real);
-    let mut held = if crossing {
-        None
-    } else {
-        Some(take(&src.ledger, opts)?)
+    // The user's source is never opened through SQLite before it has moved: taking a ledger
+    // switches its journal mode (a write to its header) and a failed rename afterwards would leave
+    // it so. Whether an older Lumen has it open is asked without writing (`held_elsewhere`); the
+    // rename is the only judge of whether it can move (a bind mount or a volume in a folder looks
+    // like one volume to any prediction and answers EXDEV to the rename); and the ledger is taken
+    // only where it now is, ours. A source that cannot move is copied byte for byte, and the copy is
+    // taken.
+    if in_place_name.is_none() {
+        held_elsewhere(&src.ledger)?;
+    }
+    let mut held: Option<Connection> = match in_place_name {
+        Some(_) => Some(take(&src.ledger, opts)?),
+        None => None,
     };
     let mut scratch: Option<PathBuf> = None;
 
@@ -621,18 +633,20 @@ fn import_under(
         None if opts.dry_run => {
             let k = free_name(&imports, &n_db, opts.date());
             dir = imports.join(&k);
-            if crossing {
-                // Looked at through a copy in a scratch folder that goes when the run ends.
-                static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let tmp = std::env::temp_dir().join(format!(
-                    "lumen-import-dry-{}-{}",
-                    std::process::id(),
-                    RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                held = Some(copy_aside(src, &tmp, None, opts)?);
-                ledger = tmp.join(LEDGER);
-                actual = tmp.clone();
-                scratch = Some(tmp);
+            // Looked at through a copy in a scratch folder that goes when the run ends: the
+            // source is not taken, so a dry run writes nothing to it.
+            static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let tmp = std::env::temp_dir().join(format!(
+                "lumen-import-dry-{}-{}",
+                std::process::id(),
+                RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            held = Some(copy_aside(src, &tmp, opts)?);
+            ledger = tmp.join(LEDGER);
+            actual = tmp.clone();
+            scratch = Some(tmp);
+            // Only the report's wording depends on the guess; nothing is decided by it.
+            if ops.crosses_volumes(&src.path, n_real) {
                 (k, Placed::InPlace("another volume".into()))
             } else {
                 (k, Placed::Moved)
@@ -643,36 +657,39 @@ fn import_under(
             let target = imports.join(&k);
             let made_imports = !imports.exists();
             fs::create_dir_all(&imports).map_err(|e| failed("legacy-imports", e))?;
-            if cfg!(windows) {
-                held = None; // an open handle in the folder refuses the rename
-            }
-            let moved = if crossing {
-                Err(io::Error::new(
-                    io::ErrorKind::CrossesDevices,
-                    "on another volume",
-                ))
-            } else {
-                match src.kind {
-                    Kind::Folder => ops.rename(&src.path, &target),
-                    Kind::Shared => move_ledger_set(ops, &src.ledger, &target, true),
-                    Kind::Ledger => move_ledger_set(ops, &src.path, &target, false),
-                }
+            let moved = match src.kind {
+                Kind::Folder => ops
+                    .rename(&src.path, &target)
+                    .map(|()| vec![(src.path.clone(), target.clone())]),
+                Kind::Shared => move_ledger_set(ops, &src.ledger, &target, true),
+                Kind::Ledger => move_ledger_set(ops, &src.path, &target, false),
             };
             let placed = match moved {
-                Ok(()) => {
+                Ok(items) => {
                     sync_dir(&imports);
+                    // Taken only now, where it is ours. A source that turns out to be held (a
+                    // connection in this process, or one opened since the check above) goes back,
+                    // and nothing changes.
+                    match take(&target.join(LEDGER), opts) {
+                        Ok(c) => held = Some(c),
+                        Err(err) => {
+                            let imports_made = made_imports.then_some(imports.as_path());
+                            return Err(put_back(err, &items, &target, imports_made));
+                        }
+                    }
                     ledger = target.join(LEDGER);
                     dir = target;
                     actual = dir.clone();
                     Placed::Moved
                 }
                 // Another volume: the folder is copied, verified and kept under `legacy-imports`,
-                // and that copy is its original. The user's folder stays where it is.
+                // and that copy is its original. The user's folder was never opened and stays
+                // where it is.
                 Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
                     // The failed move may have made `target` (a set-aside ledger's); the copy
                     // makes its own folder.
                     fs::remove_dir(&target).ok();
-                    match copy_aside(src, &target, held.take(), opts) {
+                    match copy_aside(src, &target, opts) {
                         Ok(c) => {
                             held = Some(c);
                             sync_dir(&imports);
@@ -705,8 +722,6 @@ fn import_under(
             (k, placed)
         }
     };
-    // On Unix the rename left the connection holding the (moved) file under its lock. On Windows it
-    // was closed first, so the ledger is taken again where it is now.
     let held = match held {
         Some(c) => c,
         None => take(&ledger, opts)?,
@@ -799,8 +814,13 @@ fn free_name(imports: &Path, n_db: &Path, date: &str) -> String {
 /// A set-aside ledger goes, sidecars first, to `<target>/lumen.db*`; with `spool`, the folder's
 /// fault spool and its `.draining` file go too, ahead of the ledger. A failed rename puts back
 /// what was moved, newest first, so the ledger is whole under its own name again, and removes the
-/// folder it made.
-fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path, spool: bool) -> io::Result<()> {
+/// folder it made. Gives what moved, as `(from, to)`, so a later refusal can put it back.
+fn move_ledger_set(
+    ops: &dyn Ops,
+    from_db: &Path,
+    target: &Path,
+    spool: bool,
+) -> io::Result<Vec<(PathBuf, PathBuf)>> {
     fs::create_dir_all(target)?;
     let to_db = target.join(LEDGER);
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -827,17 +847,14 @@ fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path, spool: bool) ->
                 moved.push((from, to));
             }
         }
-        ops.rename(from_db, &to_db)
+        ops.rename(from_db, &to_db)?;
+        moved.push((from_db.to_path_buf(), to_db.clone()));
+        Ok(())
     };
     match run() {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(moved),
         Err(e) => {
-            let mut stuck = Vec::new();
-            for (from, to) in moved.iter().rev() {
-                if let Err(u) = fs::rename(to, from) {
-                    stuck.push(format!("{}: {u}", to.display()));
-                }
-            }
+            let stuck = undo_moves(&moved);
             if stuck.is_empty() {
                 // Empty by now; a folder that is not empty is somebody's and stays.
                 if let Err(u) = fs::remove_dir(target) {
@@ -857,21 +874,85 @@ fn move_ledger_set(ops: &dyn Ops, from_db: &Path, target: &Path, spool: bool) ->
     }
 }
 
-/// The source is on another volume, so it cannot be renamed: copy its ledger set (and, for a
-/// folder, its spool) into `target`, byte for byte, and give back the copy, taken. Nothing is read
-/// from the source's place afterwards. The copy is built in a hidden folder next to `target` and
-/// renamed into place only once every file of it is equal to its source, so a run that dies
-/// half-way leaves no `legacy-imports/<k>` that looks whole, and a source that changed while it was
-/// copied is refused.
+/// Rename what `moved` moved back, newest first; what could not be put back, as text.
+fn undo_moves(moved: &[(PathBuf, PathBuf)]) -> Vec<String> {
+    let mut stuck = Vec::new();
+    for (from, to) in moved.iter().rev() {
+        if let Err(u) = fs::rename(to, from) {
+            stuck.push(format!("{}: {u}", to.display()));
+        }
+    }
+    stuck
+}
+
+/// A source that moved and then turned out to be held (or not writable): put it back where it
+/// was, remove the folders made for it, and give the reason it was refused. When it cannot be
+/// put back the message says where it is, and that a rerun on that path finishes the import.
+fn put_back(
+    why: ImportError,
+    moved: &[(PathBuf, PathBuf)],
+    target: &Path,
+    imports_made: Option<&Path>,
+) -> ImportError {
+    let stuck = undo_moves(moved);
+    if !stuck.is_empty() {
+        return ImportError::Failed(format!(
+            "{why}; and it could not be put back ({}): it is now at {}, and this finishes it: {}",
+            stuck.join(", "),
+            target.display(),
+            command_for(target)
+        ));
+    }
+    // Whoever holds the ledger may have made its sidecars at the new place since it moved (an
+    // older Lumen opening it there): they belong with the ledger.
+    for (from, to) in moved
+        .iter()
+        .filter(|(_, to)| to.file_name().is_some_and(|n| n == LEDGER))
+    {
+        for sfx in SIDECARS {
+            let (stray, home) = (sidecar(to, sfx), sidecar(from, sfx));
+            if stray.symlink_metadata().is_ok()
+                && home.symlink_metadata().is_err()
+                && let Err(u) = fs::rename(&stray, &home)
+            {
+                return ImportError::Failed(format!(
+                    "{why}; and could not put back {}: {u}",
+                    stray.display()
+                ));
+            }
+        }
+    }
+    // A folder made for a set of files is empty by now; a folder that is not empty is somebody's.
+    if target.exists()
+        && let Err(u) = fs::remove_dir(target)
+    {
+        return ImportError::Failed(format!(
+            "{why}; and could not remove {}: {u}",
+            target.display()
+        ));
+    }
+    if let Some(dir) = imports_made {
+        fs::remove_dir(dir).ok();
+    }
+    why
+}
+
+/// The source cannot be renamed (another volume, a bind mount, a mount in a folder): copy its
+/// ledger set (and, for a folder, its spool) into `target`, byte for byte, and give back the copy,
+/// taken. Nothing is read from the source's place afterwards. The copy is built in a hidden folder
+/// next to `target` and renamed into place only when it is whole, so a run that dies half-way
+/// leaves no `legacy-imports/<k>` that looks whole.
 ///
 /// The source is never opened through SQLite and never written: a connection that can checkpoint
-/// or change the journal mode would rewrite the user's file. `held` is a connection the caller took
-/// on it before it knew the move would cross volumes (a rename that failed on its own); it is
-/// dropped once the copy is checked.
+/// or change the journal mode would rewrite the user's file. A source an older Lumen has open is
+/// refused before anything is copied (`held_elsewhere`). The files cannot be copied at one instant,
+/// so the copy is proved whole in three steps: each file is compared with its source right after it
+/// is copied; once the last is copied, every file is compared again, in the same order, and the
+/// set of files must be the same (a write that landed between two files changes the one copied
+/// first, and shows here); and SQLite's `quick_check` passes on the copy.
 fn copy_aside(
     src: &Source,
     target: &Path,
-    held: Option<Connection>,
     opts: &ImportOptions,
 ) -> Result<Connection, ImportError> {
     let name = target
@@ -880,35 +961,17 @@ fn copy_aside(
         .ok_or_else(|| ImportError::Failed(format!("{} has no name", target.display())))?;
     let tmp = target.with_file_name(format!(".{name}.copying"));
     clear_dir(&tmp)?;
+    let changed = |from: &Path| {
+        ImportError::Failed(format!(
+            "{} changed while it was copied (or the copy does not match it); nothing was \
+             imported. Quit the older Lumen and retry",
+            from.display()
+        ))
+    };
     let run = || -> Result<Connection, ImportError> {
         fs::create_dir_all(&tmp).map_err(|e| failed("cannot copy the folder", e))?;
         let to_db = tmp.join(LEDGER);
-        let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for sfx in SIDECARS {
-            let from = sidecar(&src.ledger, sfx);
-            if from
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_file())
-            {
-                files.push((from, sidecar(&to_db, sfx)));
-            }
-        }
-        if !matches!(src.kind, Kind::Ledger)
-            && let Some(dir) = src.ledger.parent()
-        {
-            let live = dir.join("faults.jsonl");
-            for from in [faults::draining_path(&live), live] {
-                if from
-                    .symlink_metadata()
-                    .is_ok_and(|m| m.file_type().is_file())
-                    && let Some(f) = from.file_name()
-                {
-                    let to = tmp.join(f);
-                    files.push((from, to));
-                }
-            }
-        }
-        files.push((src.ledger.clone(), to_db.clone()));
+        let files = files_of(src, &to_db, &tmp);
         for (from, to) in &files {
             fs::copy(from, to).map_err(|e| {
                 failed(
@@ -919,16 +982,34 @@ fn copy_aside(
             let same = same_bytes(from, to)
                 .map_err(|e| failed(&format!("cannot check the copy of {}", from.display()), e))?;
             if !same {
-                return Err(ImportError::Failed(format!(
-                    "{} changed while it was copied (or the copy does not match it); nothing was \
-                     imported. Quit the older Lumen and retry",
-                    from.display()
-                )));
+                return Err(changed(from));
             }
         }
-        drop(held);
+        // The second pass: a change since a file was copied, in any file.
+        for (from, to) in &files {
+            let same = same_bytes(from, to)
+                .map_err(|e| failed(&format!("cannot check the copy of {}", from.display()), e))?;
+            if !same {
+                return Err(changed(from));
+            }
+        }
+        if files_of(src, &to_db, &tmp) != files {
+            return Err(changed(&src.ledger));
+        }
+        held_elsewhere(&src.ledger)?;
         // The copy is ours: taking it replays a WAL the source left, and proves it opens.
-        drop(take(&to_db, opts)?);
+        let c = take(&to_db, opts)?;
+        let verdict: String = c
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(|e| failed("cannot check the copy", e))?;
+        if verdict != "ok" {
+            return Err(ImportError::Failed(format!(
+                "the copy of {} is not a sound ledger ({verdict}); nothing was imported. Quit the \
+                 older Lumen and retry",
+                src.ledger.display()
+            )));
+        }
+        drop(c);
         fs::rename(&tmp, target).map_err(|e| failed("cannot place the copy", e))?;
         take(&target.join(LEDGER), opts)
     };
@@ -939,6 +1020,131 @@ fn copy_aside(
             Err(left) => Err(ImportError::Failed(format!("{e}; and {left}"))),
         },
     }
+}
+
+/// What `copy_aside` copies: the source's files that exist, sidecars and spool first, the ledger
+/// last, each with where its copy goes.
+fn files_of(src: &Source, to_db: &Path, tmp: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for sfx in SIDECARS {
+        // The `-shm` is SQLite's wal-index: derived from the `-wal`, rebuilt by the first
+        // connection that opens the copy, and rewritten by every reader of a live ledger.
+        if sfx == "-shm" {
+            continue;
+        }
+        let from = sidecar(&src.ledger, sfx);
+        if from
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_file())
+        {
+            files.push((from, sidecar(to_db, sfx)));
+        }
+    }
+    if !matches!(src.kind, Kind::Ledger)
+        && let Some(dir) = src.ledger.parent()
+    {
+        let live = dir.join("faults.jsonl");
+        for from in [faults::draining_path(&live), live] {
+            if from
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_file())
+                && let Some(f) = from.file_name()
+            {
+                let to = tmp.join(f);
+                files.push((from, to));
+            }
+        }
+    }
+    files.push((src.ledger.clone(), to_db.to_path_buf()));
+    files
+}
+
+/// Whether an older Lumen has the ledger open, asked without writing a byte and without opening it
+/// through SQLite (taking a ledger switches its journal mode, a write to its header).
+///
+/// Unix: SQLite holds POSIX locks, and `fcntl(F_GETLK)` reports a lock another process holds. The
+/// ranges are the ones SQLite documents: the database's pending, reserved and shared bytes (a
+/// transaction in rollback mode), and the `-shm` file's lock slots and its dead-man byte (every
+/// connection in WAL mode holds the latter for as long as it is open). A lock of this process is
+/// not reported, and the descriptors this opens must not be closed while this process has the
+/// ledger open through SQLite (closing one releases that process's locks on the file), so a caller
+/// that holds the ledger itself asks the probe instead.
+///
+/// Windows: the ledger is opened for reading with only `FILE_SHARE_READ`; a handle that has it
+/// open for writing refuses that.
+fn held_elsewhere(ledger: &Path) -> Result<(), ImportError> {
+    let held = |why: String| ImportError::InUse(why);
+    #[cfg(unix)]
+    {
+        // SQLite's lock bytes: PENDING_BYTE, and the shm's lock slots from byte 120 and its DMS.
+        const PENDING: i64 = 0x4000_0000;
+        let ranges = [
+            (ledger.to_path_buf(), PENDING, 512),
+            (sidecar(ledger, "-shm"), 120, 9),
+        ];
+        for (path, start, len) in &ranges {
+            match locked_by_another(path, *start, *len) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Err(held(format!(
+                        "{} is open in another process",
+                        ledger.display()
+                    )));
+                }
+                Err(e) => {
+                    return Err(failed(&format!("cannot look at {}", path.display()), e));
+                }
+            }
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        match fs::OpenOptions::new().read(true).share_mode(1).open(ledger) {
+            Ok(_) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(32) => Err(held(format!(
+                "{} is open in another process",
+                ledger.display()
+            ))),
+            Err(e) => Err(failed(&format!("cannot look at {}", ledger.display()), e)),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (ledger, held);
+        Ok(())
+    }
+}
+
+/// Whether another process holds a lock that conflicts with a write lock on `len` bytes at
+/// `start` of `path`. A file that is not there holds none.
+#[cfg(unix)]
+fn locked_by_another(path: &Path, start: i64, len: i64) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let f = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        // A read-only file or folder: the lock query needs no write access.
+        Err(_) => match fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        },
+    };
+    // SAFETY: a zeroed `flock` is a valid value for every field; `fcntl(F_GETLK)` only reads the
+    // request and writes the answer into it, on a descriptor that stays open for the call.
+    let mut fl: libc::flock = unsafe { std::mem::zeroed() };
+    fl.l_type = libc::F_WRLCK as _;
+    fl.l_whence = libc::SEEK_SET as _;
+    fl.l_start = start as _;
+    fl.l_len = len as _;
+    // SAFETY: see above.
+    let r = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETLK, &mut fl) };
+    if r == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(i32::from(fl.l_type) != i32::from(libc::F_UNLCK))
 }
 
 /// Whether two files hold the same bytes.
@@ -2045,16 +2251,72 @@ mod tests {
         assert!(d.join("lumen.db").is_file());
     }
 
+    /// An older Lumen in another process, with the ledger open in WAL mode and a row committed
+    /// that is still in its `-wal`: the test binary run again on `hold_helper` below. A lock of
+    /// this process is not one another process can see (POSIX locks belong to a process, and
+    /// closing any descriptor of the file releases them), so a held ledger is held by a child.
+    struct Holder(std::process::Child);
+
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            self.0.kill().ok();
+            self.0.wait().ok();
+        }
+    }
+
+    fn hold(db: &Path) -> Holder {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "legacy::import::tests::hold_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LUMEN_TEST_HOLD_LEDGER", db)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = child.stdout.take().unwrap();
+        let mut lines = io::BufReader::new(out).lines();
+        loop {
+            let l = lines
+                .next()
+                .expect("the holder died before it was ready")
+                .unwrap();
+            // libtest writes "test <name> ... " first, on the same line.
+            if l.trim_end().ends_with("HOLDING") {
+                break;
+            }
+        }
+        Holder(child)
+    }
+
+    /// Not a test: the child's body. Run by itself it does nothing.
+    #[test]
+    fn hold_helper() {
+        use std::io::Read;
+        let Some(db) = std::env::var_os("LUMEN_TEST_HOLD_LEDGER") else {
+            return;
+        };
+        let c = Connection::open(db).unwrap();
+        c.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
+            .unwrap();
+        c.execute_batch("INSERT INTO faults (ts, kind) VALUES ('t', 'held')")
+            .unwrap();
+        println!("HOLDING");
+        std::io::Write::flush(&mut io::stdout()).unwrap();
+        io::stdin().read_to_end(&mut Vec::new()).unwrap();
+        drop(c);
+    }
+
     #[test]
     fn a_held_ledger_is_refused_and_nothing_moves() {
         let i = install();
         let d = recreated(&i);
         // An older Lumen with the ledger open in WAL mode, as its daemon holds it.
-        let old = Connection::open(d.join("lumen.db")).unwrap();
-        old.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
-            .unwrap();
-        old.execute_batch("INSERT INTO faults (ts, kind) VALUES ('t', 'held')")
-            .unwrap();
+        let old = hold(&d.join("lumen.db"));
         let before = (snap(&i.n), snap(&d));
 
         let err = i.import(&d).unwrap_err();
@@ -3659,8 +3921,423 @@ mod tests {
             let r = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
             assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
             let after = fs::read(d.join("lumen.db")).unwrap();
-            assert_eq!(before, after, "the user's ledger was rewritten");
+            assert!(before == after, "the user's ledger was rewritten");
             assert_eq!(kind_count(&i.n_db(), "row-u2"), 1, "{r:?}");
+        }
+    }
+
+    mod source_untouched {
+        use super::*;
+        use crate::legacy::freeze::{Freeze, freeze_if_ready};
+        #[cfg(unix)]
+        use std::sync::Arc;
+        #[cfg(unix)]
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn kind_count(p: &Path, kind: &str) -> i64 {
+            Connection::open(p)
+                .unwrap()
+                .query_row("SELECT count(*) FROM faults WHERE kind = ?1", [kind], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+
+        fn marker_of(i: &Install) -> MarkerV2 {
+            match marker::read(&i.n) {
+                Seen::Migrated(m) => (*m).clone(),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        fn freeze(i: &Install) {
+            let rec = i.root.join(".setup_done");
+            fs::write(&rec, format!("data_dir={}\n", i.n.display())).unwrap();
+            match freeze_if_ready(&i.n, &rec, &marker_of(i)) {
+                Freeze::Frozen(_) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+
+        fn fixed(kind: &str, agent: Option<&str>) -> String {
+            let mut r = FaultRecord::now(kind, "v");
+            r.ts = "2026-10-01T00:00:00Z".into();
+            r.session_id = Some("s".into());
+            r.version = Some("1.9.0".into());
+            r.agent_id = agent.map(str::to_string);
+            serde_json::to_string(&r).unwrap()
+        }
+
+        /// A rename that crosses mount points of one file system (a Linux bind mount): the same
+        /// st_dev, so `crosses_volumes` says no, and the rename says EXDEV.
+        struct BindMount;
+        impl Ops for BindMount {
+            fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+                Err(io::Error::new(io::ErrorKind::CrossesDevices, "EXDEV"))
+            }
+            fn link_dir(&self, _l: &Path, _t: &Path) -> io::Result<()> {
+                Err(io::Error::new(io::ErrorKind::Unsupported, "no"))
+            }
+            fn crosses_volumes(&self, _f: &Path, _t: &Path) -> bool {
+                false
+            }
+        }
+
+        fn wal_source(d: &Path) -> Vec<u8> {
+            ledger(&d.join("lumen.db"), &["u1"]);
+            let c = Connection::open(d.join("lumen.db")).unwrap();
+            let m: String = c
+                .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(m, "wal");
+            c.execute_batch(&rows_for("u2")).unwrap();
+            drop(c);
+            fs::read(d.join("lumen.db")).unwrap()
+        }
+
+        #[test]
+        fn ds1_exdev_fallback_leaves_the_source_as_it_was() {
+            let i = install();
+            let d = i.root.join("bind").join("old");
+            let before = wal_source(&d);
+            let r = import(&i.n, &d, &opts(), &BindMount).unwrap();
+            assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+            let after = fs::read(d.join("lumen.db")).unwrap();
+            eprintln!(
+                "ds1 header 18/19 before {:?} after {:?}",
+                &before[18..20],
+                &after[18..20]
+            );
+            assert!(before == after, "the user's ledger was rewritten");
+        }
+
+        /// An older Lumen holds the ledger on another volume: refused, and nothing was copied.
+        #[test]
+        fn ds2_a_held_ledger_on_another_volume_is_refused() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1"]);
+            let old = hold(&d.join("lumen.db"));
+            let before = snap(&i.n);
+            let r = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices));
+            assert!(matches!(r, Err(ImportError::InUse(_))), "{r:?}");
+            assert_eq!(snap(&i.n), before, "nothing changed");
+            assert!(!i.imports().exists(), "nothing was copied");
+            drop(old);
+            // Quit: the same import goes through.
+            let r = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            assert!(matches!(r.placed, Placed::InPlace(_)), "{r:?}");
+        }
+
+        #[test]
+        fn ds3_a_dry_run_leaves_a_wal_source_as_it_was() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            let before = wal_source(&d);
+            let mut o = opts();
+            o.dry_run = true;
+            import(&i.n, &d, &o, &Native).unwrap();
+            let after = fs::read(d.join("lumen.db")).unwrap();
+            eprintln!(
+                "ds3 header 18/19 before {:?} after {:?}",
+                &before[18..20],
+                &after[18..20]
+            );
+            assert!(before == after, "a dry run rewrote the user's ledger");
+        }
+
+        #[test]
+        fn ds3b_a_refused_move_leaves_a_wal_source_as_it_was() {
+            let i = install();
+            let d = i.root.join("home").join("old");
+            let before = wal_source(&d);
+            let e =
+                import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::PermissionDenied)).unwrap_err();
+            assert!(matches!(e, ImportError::InUse(_)), "{e:?}");
+            let after = fs::read(d.join("lumen.db")).unwrap();
+            assert!(
+                before == after,
+                "nothing changes: but the user's ledger was rewritten"
+            );
+        }
+
+        /// A rename that works, after which an older Lumen opens the ledger at its new place (in
+        /// this process, so the probe sees it): what a connection that opened between the check
+        /// and the move looks like.
+        #[cfg(unix)]
+        struct RenameThenOpen(std::cell::RefCell<Vec<Connection>>);
+        #[cfg(unix)]
+        impl Ops for RenameThenOpen {
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                fs::rename(from, to)?;
+                let db = if to.is_dir() {
+                    to.join(LEDGER)
+                } else {
+                    to.to_path_buf()
+                };
+                if db.file_name().is_some_and(|n| n == LEDGER) && db.is_file() {
+                    let c = Connection::open(&db).unwrap();
+                    c.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
+                        .unwrap();
+                    c.execute_batch("INSERT INTO faults (ts, kind) VALUES ('t', 'late-open')")
+                        .unwrap();
+                    self.0.borrow_mut().push(c);
+                }
+                Ok(())
+            }
+            fn link_dir(&self, _l: &Path, _t: &Path) -> io::Result<()> {
+                Err(io::Error::new(io::ErrorKind::Unsupported, "no"))
+            }
+            fn crosses_volumes(&self, _f: &Path, _t: &Path) -> bool {
+                false
+            }
+        }
+
+        /// ds9: the source moved, and then it turns out to be held: it goes back, whatever kind it
+        /// is (a folder, a ledger file, a set-aside ledger with its wal), and nothing is left in
+        /// N; once the older Lumen is gone the import goes through.
+        #[cfg(unix)]
+        #[test]
+        fn ds9_a_source_found_held_after_the_move_goes_back() {
+            for kind in ["folder", "file", "set"] {
+                let i = install();
+                let (arg, files): (PathBuf, Vec<PathBuf>) = match kind {
+                    "folder" => {
+                        let d = recreated(&i);
+                        (d.clone(), vec![d.join("lumen.db"), d.join("faults.jsonl")])
+                    }
+                    "file" => {
+                        let f = i.root.join("usb").join("old.db");
+                        ledger(&f, &["u1"]);
+                        (f.clone(), vec![f])
+                    }
+                    _ => {
+                        let f = i.n.join("lumen.db.pre-legacy");
+                        ledger(&f, &["u1"]);
+                        (f.clone(), vec![f])
+                    }
+                };
+                let before = snap(&i.n);
+                let ops = RenameThenOpen(Default::default());
+                let r = import(&i.n, &arg, &opts(), &ops);
+                assert!(matches!(r, Err(ImportError::InUse(_))), "{kind}: {r:?}");
+                for f in &files {
+                    assert!(f.is_file(), "{kind}: {} did not go back", f.display());
+                }
+                assert!(!i.imports().exists(), "{kind}: a folder was left in N");
+                if kind != "set" {
+                    // (A set-aside ledger lives in N, and the connection that opened it wrote there.)
+                    assert_eq!(snap(&i.n), before, "{kind}: N changed");
+                }
+                ops.0.borrow_mut().clear();
+                // The older Lumen gone, nothing is in the way: the same import goes through.
+                let r = import(&i.n, &arg, &opts(), &Native).unwrap();
+                assert!(matches!(r.placed, Placed::Moved), "{kind}: {r:?}");
+            }
+        }
+
+        /// 1.8.0 schema: the previous folder on 1.8.0 with a spool line; a restored copy that a
+        /// 1.8.0 app drained (nine columns) and wrote a row to, in both orders.
+        #[test]
+        fn ds6_schema_1_8_restored_drained_copy_both_orders() {
+            const V180: &str = include_str!("../../tests/fixtures/ledger_schema_v1.8.0.sql");
+            for import_first in [true, false] {
+                let t = TempDir::new().unwrap();
+                let root = t.path().join("data");
+                let l = root.join("example.previous.app");
+                let n = root.join("example.current.app");
+                fs::create_dir_all(&l).unwrap();
+                {
+                    let c = Connection::open(l.join("lumen.db")).unwrap();
+                    c.execute_batch(V180).unwrap();
+                    c.execute_batch(
+                        "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, routed_via) VALUES ('t1','Read','/a',1,2,1,'builtin_read'); \
+                         INSERT INTO faults (ts, kind, session_id) VALUES ('t1', 'row-old', 's');",
+                    )
+                    .unwrap();
+                }
+                let rec = fixed("spool180", None);
+                fs::write(l.join("faults.jsonl"), format!("{rec}\n")).unwrap();
+                let mut o = CommitOptions::new("2026-10-19T08:00:00Z");
+                o.probe_tries = 1;
+                o.probe_delay = Duration::from_millis(10);
+                let m: MarkerV2 = match commit::migrate(&l, &n, &o, &Native) {
+                    Outcome::Migrated { marker, .. } => marker,
+                    other => panic!("{other:?}"),
+                };
+                let b = backup_dir(&n, &m).unwrap();
+                let i = Install { _t: t, root, n, b };
+                let c = i.old_place();
+                copy_dir(&i.b_data(), &c);
+                make_writable(&c);
+                // a 1.8.0 drain: nine columns
+                {
+                    let r: FaultRecord = serde_json::from_str(&rec).unwrap();
+                    let conn = Connection::open(c.join("lumen.db")).unwrap();
+                    conn.execute(
+                        "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                        rusqlite::params![r.ts, r.kind, r.variant, r.path, r.lines, r.detail, r.session_id, r.version, r.channel],
+                    )
+                    .unwrap();
+                    conn.execute_batch(
+                        "INSERT INTO faults (ts, kind, session_id) VALUES ('t2', 'row-new', 's');",
+                    )
+                    .unwrap();
+                }
+                fs::remove_file(c.join("faults.jsonl")).unwrap();
+                if import_first {
+                    i.import(&c).unwrap();
+                    freeze(&i);
+                } else {
+                    freeze(&i);
+                    i.import(&c).unwrap();
+                }
+                assert_eq!(
+                    (
+                        kind_count(&i.n_db(), "spool180"),
+                        kind_count(&i.n_db(), "row-new"),
+                        kind_count(&i.n_db(), "row-old")
+                    ),
+                    (1, 1, 1),
+                    "import_first={import_first}"
+                );
+            }
+        }
+
+        /// 1.4.0 schema (no faults table): a re-created 1.4.0 folder with a spool imported twice
+        /// (the second time a copy).
+        #[test]
+        fn ds6b_schema_1_4_folder_with_spool_twice() {
+            const V140: &str = include_str!("../../tests/fixtures/ledger_schema_v1.4.0.sql");
+            let i = install();
+            let d = i.root.join("home").join("o14");
+            fs::create_dir_all(&d).unwrap();
+            Connection::open(d.join("lumen.db"))
+                .unwrap()
+                .execute_batch(V140)
+                .unwrap();
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("s14"))).unwrap();
+            let copy = i.root.join("tm").join("o14");
+            copy_dir(&d, &copy);
+            let r1 = i.import(&d);
+            eprintln!("ds6b r1 {r1:?}");
+            let r2 = i.import(&copy);
+            eprintln!("ds6b r2 {r2:?}");
+            assert!(kind_count(&i.n_db(), "s14") <= 1);
+        }
+
+        /// The same, slower, with each copy checked.
+        #[cfg(unix)]
+        #[test]
+        fn ds8_a_slow_live_writer_on_another_volume() {
+            let sleep_us: u64 = std::env::var("DS_SLEEP_US")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3000);
+            let batch: u64 = std::env::var("DS_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5);
+            let iters: u32 = std::env::var("DS_ITERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200);
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u0"]);
+            {
+                // a bigger file, so a copy takes a while
+                let c = Connection::open(d.join("lumen.db")).unwrap();
+                c.execute_batch("BEGIN").unwrap();
+                for k in 0..20000 {
+                    c.execute(
+                        "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, routed_via) VALUES ('t','Read',?1,1,2,1,'builtin_read')",
+                        [format!("/p/{k}/{}", "x".repeat(200))],
+                    ).unwrap();
+                }
+                c.execute_batch("COMMIT").unwrap();
+            }
+            let stop = Arc::new(AtomicBool::new(false));
+            let db = d.join("lumen.db");
+            let st = stop.clone();
+            let h = std::thread::spawn(move || {
+                let c = Connection::open(&db).unwrap();
+                c.busy_timeout(Duration::from_secs(5)).unwrap();
+                let _: String = c
+                    .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+                    .unwrap();
+                c.execute_batch("PRAGMA wal_autocheckpoint=4").unwrap();
+                let mut k = 0u64;
+                while !st.load(Ordering::Relaxed) {
+                    let mut ok = true;
+                    let _ = c.execute_batch("BEGIN IMMEDIATE");
+                    for _ in 0..batch {
+                        if c.execute(
+                            "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, routed_via) VALUES ('t','Read',?1,1,2,1,'builtin_read')",
+                            [format!("/w/{k}/{}", "y".repeat(std::env::var("DS_PAD").ok().and_then(|v| v.parse().ok()).unwrap_or(0)))],
+                        ).is_err() { ok = false; break; }
+                        k += 1;
+                    }
+                    if ok {
+                        if c.execute_batch("COMMIT").is_err() {
+                            let _ = c.execute_batch("ROLLBACK");
+                        }
+                    } else {
+                        let _ = c.execute_batch("ROLLBACK");
+                    }
+                    std::thread::sleep(Duration::from_micros(sleep_us));
+                }
+            });
+            let (mut ok, mut err, mut malformed) = (0, 0, 0);
+            for _ in 0..iters {
+                match import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)) {
+                    Ok(_) => ok += 1,
+                    Err(e) => {
+                        err += 1;
+                        if e.to_string().contains("malformed") {
+                            malformed += 1;
+                        }
+                    }
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            h.join().unwrap();
+            let last = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices));
+            let mut bad_copies = 0;
+            for e in fs::read_dir(i.imports()).unwrap() {
+                let p = e.unwrap().path().join("lumen.db");
+                if !p.is_file() {
+                    continue;
+                }
+                let c = Connection::open_with_flags(&p, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+                let r: String = c
+                    .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                    .unwrap_or_else(|e| e.to_string());
+                if r != "ok" {
+                    bad_copies += 1;
+                    eprintln!("ds8 bad copy {}: {r}", p.display());
+                }
+            }
+            let src: i64 = Connection::open(d.join("lumen.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM read_events WHERE path LIKE '/w/%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let c = Connection::open(i.n_db()).unwrap();
+            let (n_rows, n_distinct, p_rows): (i64, i64, i64) = c
+                .query_row("SELECT sum(path LIKE '/w/%'), count(DISTINCT CASE WHEN path LIKE '/w/%' THEN path END), sum(path LIKE '/p/%') FROM read_events", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            eprintln!(
+                "ds8 ok={ok} err={err} malformed={malformed} bad_copies={bad_copies} last_ok={} src={src} n_rows={n_rows} n_distinct={n_distinct} p_rows={p_rows}",
+                last.is_ok()
+            );
+            assert_eq!(
+                (n_rows, n_distinct, p_rows, bad_copies),
+                (src, src, 20000, 0)
+            );
         }
     }
 }

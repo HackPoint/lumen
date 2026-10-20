@@ -24,10 +24,9 @@ pub trait Ops {
     }
     /// Make `link` resolve to the directory `target`: a symlink, or a junction on Windows.
     fn link_dir(&self, link: &Path, target: &Path) -> io::Result<()>;
-    /// Whether a rename of `from` to somewhere under `to` would cross volumes. Asked before the
-    /// manual import touches a source it must leave as it was, so that one is copied, never
-    /// opened for writing. A path that cannot be looked at is not called another volume (the
-    /// rename then says so itself).
+    /// A guess whether a rename of `from` to somewhere under `to` would cross volumes. Advisory:
+    /// the manual import words a dry run's report by it. It never decides whether a source is
+    /// written (a bind mount shows one device and still answers EXDEV); the rename does.
     fn crosses_volumes(&self, from: &Path, to: &Path) -> bool {
         on_another_volume(from, to)
     }
