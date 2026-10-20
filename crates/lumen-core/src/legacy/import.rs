@@ -205,9 +205,9 @@ pub enum Placed {
 pub enum Spool {
     /// The folder's `.draining` and live spool were taken: this many records.
     Taken(usize),
-    /// The source shares history with a ledger already imported, so its spool, which that ledger's
-    /// owner already drained or kept, was left where it is.
-    Kept,
+    /// The folder has spool records and N already held every one of them (the count rule took
+    /// none): its spool was read, not added.
+    AlreadyHeld,
     /// A ledger on its own has no spool.
     NoneHere,
 }
@@ -223,6 +223,11 @@ pub struct ImportReport {
     /// Rows added, per table (a dry run: that would be added).
     pub rows: BTreeMap<String, usize>,
     pub spool: Spool,
+    /// Fault records (rows and spool lines) the source holds that N already held enough of.
+    pub faults_held: usize,
+    /// Set when the source's `faults` table lacks a core column, so no digest can be made and
+    /// its rows were not taken: why.
+    pub faults_refused: Option<String>,
     pub dry_run: bool,
     /// A test seam stopped the run.
     pub stopped: bool,
@@ -261,7 +266,8 @@ impl ImportReport {
             }
         }
         for (t, p) in &self.prefix {
-            if *p > 0 {
+            // Faults have no prefix: the count rule alone decides what is added.
+            if *p > 0 && t != "faults" {
                 out.push(format!(
                     "{t}: the first {p} rowids are already in the live ledger and were skipped"
                 ));
@@ -270,11 +276,23 @@ impl ImportReport {
         match &self.spool {
             Spool::Taken(0) | Spool::NoneHere => {}
             Spool::Taken(n) => out.push(format!("Fault records taken from its spool: {n}")),
-            Spool::Kept => out.push(
-                "Its fault spool was left alone: this folder shares history with a ledger that \
-                 was already merged, so the same faults are not taken twice"
-                    .into(),
-            ),
+            Spool::AlreadyHeld => {}
+        }
+        let added = self.rows.get("faults").into_iter().sum::<usize>()
+            + match &self.spool {
+                Spool::Taken(n) => *n,
+                _ => 0,
+            };
+        if added + self.faults_held > 0 {
+            out.push(format!(
+                "Fault records: {added} added, {} already held",
+                self.faults_held
+            ));
+        }
+        if let Some(why) = &self.faults_refused {
+            out.push(format!(
+                "Fault records from its table were not taken: {why}"
+            ));
         }
         out
     }
@@ -775,6 +793,8 @@ fn empty_report(name: String, dir: PathBuf, placed: Placed, opts: &ImportOptions
         prefix: BTreeMap::new(),
         rows: BTreeMap::new(),
         spool: Spool::NoneHere,
+        faults_held: 0,
+        faults_refused: None,
         dry_run: opts.dry_run,
         stopped: false,
     }
@@ -1558,7 +1578,6 @@ fn run_import(
             *slot = (*slot).max(k);
         }
     }
-    let shares_history = prefix.values().any(|&v| v > 0);
 
     // 5. One transaction.
     let tx = conn
@@ -1567,7 +1586,7 @@ fn run_import(
     // Faults merge as a multiset by core-content digest against N (see `faultset`): the rows
     // above the prefix and the spool lines come in only while the source holds more of a digest
     // than N does, whatever route the others took.
-    let spool_active = !matches!(src.kind, Kind::Ledger) && !shares_history;
+    let spool_active = !matches!(src.kind, Kind::Ledger);
     let (spool_recs, spool_bytes) = if spool_active {
         read_spool_files(&p.actual.join("faults.jsonl")).map_err(|e| failed("the spool", e))?
     } else {
@@ -1580,6 +1599,11 @@ fn run_import(
         *src_counts.entry(k.clone()).or_insert(0) += 1;
     }
     let n_counts = counts_in_n(&tx, "n", p.n).map_err(|e| failed("faults", e))?;
+    // The rule (see `faultset`): for each digest N ends with the maximum count any single source
+    // holds, so each candidate here is a record of THIS source (every row of its table, every
+    // line of its spool and `.draining`), none skipped by a prefix, and one is added only while
+    // this source's count of its digest is above what N holds right now (`admit_fresh`). Nothing
+    // is anticipated: the backup's unmerged rows or unfrozen spool are not counted as N's.
     let row_cands: Vec<(i64, String)> = src_rows.iter().flatten().cloned().collect();
     let cands: Vec<String> = row_cands
         .iter()
@@ -1596,6 +1620,7 @@ fn run_import(
     let (_, spool_admitted) = admitted.split_at(row_cands.len());
 
     let mut rows: BTreeMap<String, usize> = BTreeMap::new();
+    let mut faults_refused: Option<String> = None;
     let tables = KEYED_TABLES
         .iter()
         .map(|t| (*t, false))
@@ -1610,6 +1635,15 @@ fn run_import(
             .collect::<Vec<_>>()
             .join(", ");
         if n_cols.is_empty() || s_cols.is_empty() || list.is_empty() {
+            continue;
+        }
+        if table == "faults" && src_rows.is_none() {
+            // No digest can be made, so the count rule cannot tell held from new: take none
+            // rather than every row.
+            faults_refused = Some(format!(
+                "its faults table lacks one of the columns {} that every release has",
+                CORE_FAULTS.join(", ")
+            ));
             continue;
         }
         let t = quote(table);
@@ -1661,8 +1695,8 @@ fn run_import(
     }
     let (spool, spool_sig) = match src.kind {
         Kind::Ledger => (Spool::NoneHere, None),
-        // A folder that shares history keeps its spool: it is the old one's.
-        Kind::Folder | Kind::Shared if shares_history => (Spool::Kept, None),
+        // A folder's spool goes by the same count rule as its rows: a record comes in only while
+        // the folder holds more of its digest than N does.
         Kind::Folder | Kind::Shared => {
             let fresh: Vec<faults::FaultRecord> = spool_recs
                 .iter()
@@ -1671,7 +1705,7 @@ fn run_import(
                 .map(|(r, _)| r.clone())
                 .collect();
             if fresh.is_empty() && !spool_recs.is_empty() {
-                (Spool::Kept, None)
+                (Spool::AlreadyHeld, None)
             } else {
                 faults::insert_into(&tx, "n", &fresh)
                     .map_err(|e| failed("faults from the spool", e))?;
@@ -1695,10 +1729,18 @@ fn run_import(
         params![p.done_key, DONE_TBL, total as i64, spool_sig],
     )
     .map_err(|e| failed("legacy_merge", e))?;
+    let faults_held = skip.len()
+        + if matches!(spool, Spool::Taken(_) | Spool::AlreadyHeld) {
+            spool_admitted.iter().filter(|ok| !**ok).count()
+        } else {
+            0
+        };
     let mut rep = ImportReport {
         prefix,
         rows,
         spool,
+        faults_held,
+        faults_refused,
         ..empty_report(p.name.clone(), p.dir.clone(), p.placed.clone(), opts)
     };
     if opts.dry_run || opts.stop == Stop::BeforeCommit {
@@ -1764,6 +1806,55 @@ mod tests {
             .iter()
             .map(|t| (t.to_string(), count(p, t)))
             .collect()
+    }
+
+    /// The merge of the backup's rows, then the freeze that takes its spool.
+    fn merge_and_freeze(i: &Install) {
+        let m = match marker::read(&i.n) {
+            Seen::Migrated(m) => m,
+            other => panic!("{other:?}"),
+        };
+        crate::legacy::freeze::merge_backup(&i.n_db(), &i.b, &m).unwrap();
+        let rec = i.root.join(".setup_done");
+        fs::write(&rec, format!("data_dir={}\n", i.n.display())).unwrap();
+        assert!(matches!(
+            crate::legacy::freeze::freeze_if_ready(&i.n, &rec, &m),
+            crate::legacy::freeze::Freeze::Frozen(_)
+        ));
+    }
+
+    /// Every fault kind of the ledger with its count.
+    fn kind_counts(p: &Path) -> BTreeMap<String, i64> {
+        let c = Connection::open(p).unwrap();
+        let mut st = c
+            .prepare("SELECT kind, count(*) FROM faults GROUP BY kind")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// The copy of the previous folder came after its backup was deleted. Every table but faults
+    /// gained nothing; faults gained the one spool line the freeze could no longer take from the
+    /// backup (the copy holds it, N held none), and now each digest is held exactly once, the
+    /// maximum over sources.
+    fn assert_after_deleted_backup(i: &Install, before: &BTreeMap<String, i64>, r: &ImportReport) {
+        let after = counts(&i.n_db());
+        for t in TABLES {
+            assert_eq!(after[t], before[t] + i64::from(t == "faults"), "{t}: {r:?}");
+        }
+        assert_eq!(fault_kind_count(&i.n_db(), "backup-spool"), 1, "{r:?}");
+        assert!(kind_counts(&i.n_db()).values().all(|&n| n == 1), "{r:?}");
+    }
+
+    fn fault_kind_count(p: &Path, kind: &str) -> i64 {
+        Connection::open(p)
+            .unwrap()
+            .query_row("SELECT count(*) FROM faults WHERE kind = ?1", [kind], |r| {
+                r.get(0)
+            })
+            .unwrap()
     }
 
     fn kinds(p: &Path) -> BTreeSet<String> {
@@ -1927,10 +2018,9 @@ mod tests {
     // ---- what is new ----
 
     #[test]
-    fn a_restored_copy_of_the_old_folder_adds_no_row() {
+    fn a_restored_copy_of_the_old_folder_ends_at_the_maximum_and_adds_no_row() {
         let i = install();
         let before = counts(&i.n_db());
-        let kinds_before = kinds(&i.n_db());
         let copy = restored(&i);
         assert!(
             copy.join("faults.jsonl").is_file(),
@@ -1939,14 +2029,18 @@ mod tests {
 
         let r = i.import(&copy).unwrap();
 
+        // Tables other than faults: not one row came in twice.
         assert_eq!(r.total_rows(), 0, "{r:?}");
-        assert_eq!(counts(&i.n_db()), before, "not one row came in twice");
-        assert_eq!(kinds(&i.n_db()), kinds_before);
-        assert_eq!(
-            r.spool,
-            Spool::Kept,
-            "a folder that shares history keeps its spool"
-        );
+        // The copy's spool line is the backup's one `backup-spool`: right after the import the
+        // freeze has not taken the backup's, so N holds none and the copy's one comes in; the
+        // freeze then adds max(0, 1 - 1) = 0 and the final count is the max over sources, 1.
+        merge_and_freeze(&i);
+        let after = counts(&i.n_db());
+        for t in TABLES {
+            assert_eq!(after[t], before[t] + i64::from(t == "faults"), "{t}: {r:?}");
+        }
+        assert_eq!(fault_kind_count(&i.n_db(), "backup-spool"), 1);
+        assert_eq!(r.spool, Spool::Taken(1), "{r:?}");
         assert!(
             r.prefix["read_events"] > 0 && r.prefix["faults"] > 0,
             "{r:?}"
@@ -2008,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restored_copy_written_to_after_the_restore_adds_only_its_new_rows() {
+    fn a_restored_copy_written_to_after_the_restore_ends_at_the_maximum_per_digest() {
         let i = install();
         let before = counts(&i.n_db());
         let copy = restored(&i);
@@ -2021,19 +2115,27 @@ mod tests {
 
         let r = i.import(&copy).unwrap();
 
-        let after = counts(&i.n_db());
-        for t in TABLES {
-            assert_eq!(after[t], before[t] + 1, "{t}: {r:?}");
-        }
         assert_eq!(r.rows["read_events"], 1);
         assert_eq!(r.rows["faults"], 1);
-        assert!(kinds(&i.n_db()).contains("row-after"));
         assert_eq!(
             r.spool,
-            Spool::Kept,
-            "the spool is the old one's: not taken twice"
+            Spool::Taken(1),
+            "its own spool line comes in: {r:?}"
         );
-        assert!(!kinds(&i.n_db()).contains("late-spool"));
+        // The freeze then takes the backup's spool line. Final state: each digest at the max
+        // over sources (the copy's rows and spool, the backup's rows and spool), never a loss.
+        merge_and_freeze(&i);
+        let after = counts(&i.n_db());
+        for t in TABLES {
+            let extra = match t {
+                "faults" => 3, // row-after, late-spool, backup-spool (the freeze)
+                _ => 1,
+            };
+            assert_eq!(after[t], before[t] + extra, "{t}: {r:?}");
+        }
+        for kind in ["row-after", "late-spool", "backup-spool"] {
+            assert_eq!(fault_kind_count(&i.n_db(), kind), 1, "{kind}");
+        }
     }
 
     #[test]
@@ -2364,7 +2466,7 @@ mod tests {
             fs::rename(&d, &again).unwrap();
             let r = i.import(&again).unwrap();
             assert_eq!(counts(&i.n_db()), after_first, "came in twice: {r:?}");
-            assert!(matches!(r.spool, Spool::Kept), "{r:?}");
+            assert!(matches!(r.spool, Spool::AlreadyHeld), "{r:?}");
         }
 
         /// H: the original is gone, then a copy of it is imported.
@@ -2675,7 +2777,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_of_the_previous_folder_adds_no_row_after_its_backup_is_deleted() {
+    fn a_copy_of_the_previous_folder_after_its_backup_is_deleted_adds_no_row_but_its_spool_line() {
         let i = install();
         let copy = i.root.join("example.previous.app copy");
         copy_dir(&i.b_data(), &copy);
@@ -2688,7 +2790,14 @@ mod tests {
             "{:?}",
             r.prefix
         );
-        assert_eq!(counts(&i.n_db()), before, "its rows came in twice");
+        // Every table but faults: no row twice. The backup's spool line, which the deleted
+        // backup can no longer give the freeze, is held by the copy: it comes in once, so the
+        // max over sources (1) is reached and nothing is lost.
+        let after = counts(&i.n_db());
+        for t in TABLES {
+            assert_eq!(after[t], before[t] + i64::from(t == "faults"), "{t}: {r:?}");
+        }
+        assert_eq!(fault_kind_count(&i.n_db(), "backup-spool"), 1);
     }
 
     /// Everything in a folder that is not a Lumen name.
@@ -2837,7 +2946,7 @@ mod tests {
             let after_first = counts(&i.n_db());
             let r = i.import(&spare).unwrap();
             assert_eq!(counts(&i.n_db()), after_first);
-            assert_eq!(r.spool, Spool::Kept);
+            assert_eq!(r.spool, Spool::AlreadyHeld);
         }
     }
     mod content_identity {
@@ -2980,7 +3089,8 @@ mod tests {
         /// P5: late rows the merge took from the backup, then the backup deleted, then a copy of
         /// the previous folder with those late rows (the merge-progress marks).
         #[test]
-        fn a_copy_with_the_merged_late_rows_after_the_backup_is_deleted_adds_no_row() {
+        fn a_copy_with_the_merged_late_rows_after_the_backup_is_deleted_adds_no_row_but_its_spool_line()
+         {
             let i = install();
             q(&i.b_data().join("lumen.db"), &rows_for("late"));
             // N's own row first, so N's rowids are not the backup's.
@@ -3000,12 +3110,13 @@ mod tests {
             fs::remove_dir_all(i.b_data()).unwrap();
             let before = counts(&i.n_db());
             let r = i.import(&copy).unwrap();
-            assert_eq!(counts(&i.n_db()), before, "came in twice: {r:?}");
+            assert_after_deleted_backup(&i, &before, &r);
         }
 
         /// The same, and the copy was opened by a newer app that added a column to faults.
         #[test]
-        fn a_merged_copy_with_a_later_column_after_the_backup_is_deleted_adds_no_row() {
+        fn a_merged_copy_with_a_later_column_after_the_backup_is_deleted_adds_no_row_but_its_spool_line()
+         {
             let i = install();
             q(&i.b_data().join("lumen.db"), &rows_for("late"));
             q(
@@ -3028,7 +3139,7 @@ mod tests {
             fs::remove_dir_all(i.b_data()).unwrap();
             let before = counts(&i.n_db());
             let r = i.import(&copy).unwrap();
-            assert_eq!(counts(&i.n_db()), before, "came in twice: {r:?}");
+            assert_after_deleted_backup(&i, &before, &r);
         }
     }
 
@@ -3289,7 +3400,8 @@ mod tests {
         /// The previous folder as a 1.8.0-era copy (faults without agent_id), after the backup was
         /// deleted: the marker fallback and the merge marks only try shorter column lists.
         #[test]
-        fn rev_an_older_schema_copy_of_the_previous_folder_after_its_backup_is_deleted() {
+        fn rev_an_older_schema_copy_of_the_previous_folder_after_its_backup_is_deleted_adds_only_its_spool_line()
+         {
             let i = install();
             let copy = i.root.join("example.previous.app copy");
             copy_dir(&i.b_data(), &copy);
@@ -3301,7 +3413,7 @@ mod tests {
             fs::remove_dir_all(i.b_data()).unwrap();
             let before = counts(&i.n_db());
             let r = i.import(&copy).unwrap();
-            assert_eq!(counts(&i.n_db()), before, "came in twice: {r:?}");
+            assert_after_deleted_backup(&i, &before, &r);
         }
 
         /// G remount while the old path is still there with the same content: no row twice, and
@@ -5073,6 +5185,302 @@ mod tests {
             merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
             assert!(matches!(freeze(&i), Freeze::Frozen(_)));
             assert_eq!(kind_count(&i.n_db(), "dup"), 2);
+        }
+    }
+
+    mod t6_report {
+        use super::*;
+
+        /// The faults line says how many were added and how many were already held, and the
+        /// prefix line is never printed for faults.
+        #[test]
+        fn the_report_says_added_and_held_not_skipped_by_prefix() {
+            let i = install();
+            let copy = restored(&i);
+            q(&copy.join("lumen.db"), &rows_for("after"));
+            let r = i.import(&copy).unwrap();
+            assert!(r.prefix["faults"] > 0, "{r:?}");
+            let text = r.lines().join("\n");
+            assert!(!text.contains("faults: the first"), "{text}");
+            // 1 new row; the 2 old rows are held; the spool line is new to N (the freeze has not
+            // taken the backup's).
+            assert!(
+                text.contains("Fault records: 2 added, 2 already held"),
+                "{text}"
+            );
+        }
+
+        /// A faults table without a core column gives no digest: none of its rows come in, and
+        /// the report says why.
+        #[test]
+        fn a_faults_table_without_a_core_column_is_refused_not_inserted_whole() {
+            let i = install();
+            let d = recreated(&i);
+            q(
+                &d.join("lumen.db"),
+                "ALTER TABLE faults DROP COLUMN channel",
+            );
+            let before = counts(&i.n_db());
+            let r = i.import(&d).unwrap();
+            let after = counts(&i.n_db());
+            assert_eq!(
+                after["faults"],
+                before["faults"] + 1,
+                "only the spool line: {r:?}"
+            );
+            assert!(!kinds(&i.n_db()).contains("row-fresh"));
+            assert!(r.faults_refused.is_some(), "{r:?}");
+            assert!(
+                r.lines().iter().any(|l| l.contains("were not taken")),
+                "{:?}",
+                r.lines()
+            );
+            assert_eq!(after["read_events"], before["read_events"] + 1);
+        }
+    }
+
+    mod rev_t6max {
+        use super::*;
+        use crate::legacy::freeze::{Freeze, freeze_if_ready, merge_backup};
+
+        fn kind_count(p: &Path, kind: &str) -> i64 {
+            Connection::open(p)
+                .unwrap()
+                .query_row("SELECT count(*) FROM faults WHERE kind = ?1", [kind], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+        fn marker_of(i: &Install) -> MarkerV2 {
+            match marker::read(&i.n) {
+                Seen::Migrated(m) => (*m).clone(),
+                other => panic!("{other:?}"),
+            }
+        }
+        fn freeze(i: &Install) -> Freeze {
+            let rec = i.root.join(".setup_done");
+            fs::write(&rec, format!("data_dir={}\n", i.n.display())).unwrap();
+            freeze_if_ready(&i.n, &rec, &marker_of(i))
+        }
+        /// rows + spool + .draining of `kind` in a folder
+        fn held(dir: &Path, kind: &str) -> i64 {
+            let (recs, _) = read_spool_files(&dir.join("faults.jsonl")).unwrap();
+            kind_count(&dir.join("lumen.db"), kind)
+                + recs.iter().filter(|r| r.kind == kind).count() as i64
+        }
+        /// An old app's drain killed after its insert: the rows are in, `.draining` stays.
+        fn drain_killed_after_insert(d: &Path) {
+            let live = d.join("faults.jsonl");
+            let recs = faults::parse_spool_all(&fs::read(&live).unwrap());
+            fs::rename(&live, d.join("faults.jsonl.draining")).unwrap();
+            let mut c = Connection::open(d.join("lumen.db")).unwrap();
+            let tx = c.transaction().unwrap();
+            faults::insert_into(&tx, "main", &recs).unwrap();
+            tx.commit().unwrap();
+        }
+
+        /// T1: a restored copy of the previous folder whose old app's drain was killed after its
+        /// insert (a row and the same line in `.draining`, the y1 double, in the copy). The copy
+        /// holds 2, the backup 1. Both orders must end at 2.
+        #[test]
+        fn t1_a_restored_copy_with_a_draining_double() {
+            let mut got = Vec::new();
+            for import_first in [true, false] {
+                let i = install();
+                let c = i.root.join("tm").join("copy");
+                copy_dir(&i.b_data(), &c);
+                make_writable(&c);
+                drain_killed_after_insert(&c);
+                let srcs = (held(&i.b_data(), "backup-spool"), held(&c, "backup-spool"));
+                assert_eq!(srcs, (1, 2));
+                if import_first {
+                    let r = i.import(&c).unwrap();
+                    eprintln!("t1 import-first: {:?}", r.lines());
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                } else {
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    let r = i.import(&c).unwrap();
+                    eprintln!("t1 freeze-first: {:?}", r.lines());
+                }
+                got.push(kind_count(&i.n_db(), "backup-spool"));
+            }
+            assert_eq!(got, vec![2, 2], "max(backup 1, copy 2)");
+        }
+
+        /// T2: a restored copy of the previous folder that an old app wrote a new fault to (spool
+        /// only, not drained yet). The copy holds it once, nobody else does.
+        #[test]
+        fn t2_a_restored_copy_with_a_new_spool_line() {
+            let mut got = Vec::new();
+            for import_first in [true, false] {
+                let i = install();
+                let c = i.root.join("tm").join("copy");
+                copy_dir(&i.b_data(), &c);
+                make_writable(&c);
+                let mut s = fs::read_to_string(c.join("faults.jsonl")).unwrap();
+                s.push_str(&format!("{}\n", line("after-restore")));
+                fs::write(c.join("faults.jsonl"), s).unwrap();
+                assert_eq!(held(&c, "after-restore"), 1);
+                if import_first {
+                    let r = i.import(&c).unwrap();
+                    eprintln!("t2 import-first: {:?}", r.lines());
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                } else {
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    let r = i.import(&c).unwrap();
+                    eprintln!("t2 freeze-first: {:?}", r.lines());
+                }
+                got.push((
+                    kind_count(&i.n_db(), "after-restore"),
+                    kind_count(&i.n_db(), "backup-spool"),
+                ));
+            }
+            assert_eq!(got, vec![(1, 1), (1, 1)], "copy holds after-restore once");
+        }
+
+        /// T3 (t6nup x6): a cross-volume folder whose spool gains a line after its first import.
+        #[test]
+        fn t3_a_spool_line_added_after_a_cross_volume_copy() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1"]);
+            fs::write(d.join("faults.jsonl"), format!("{}\n", line("s1"))).unwrap();
+            import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            let mut s = fs::read_to_string(d.join("faults.jsonl")).unwrap();
+            s.push_str(&format!("{}\n", line("s2")));
+            fs::write(d.join("faults.jsonl"), s).unwrap();
+            let r = import(&i.n, &d, &opts(), &Refuse(io::ErrorKind::CrossesDevices)).unwrap();
+            eprintln!("t3: {:?} {:?}", r.spool, r.lines());
+            assert_eq!(
+                (kind_count(&i.n_db(), "s1"), kind_count(&i.n_db(), "s2")),
+                (1, 1),
+                "{r:?}"
+            );
+        }
+
+        /// T4 (control, should hold): read_events and faults rows of a restored copy that grew,
+        /// imported twice (two copies, the second a superset), around the merge and the freeze:
+        /// no read_events row doubled or lost, faults at the max.
+        #[test]
+        fn t4_read_events_never_doubled_across_orders() {
+            for ord in 0..4u8 {
+                let i = install();
+                let c1 = i.root.join("tm1").join("copy");
+                copy_dir(&i.b_data(), &c1);
+                make_writable(&c1);
+                q(&c1.join("lumen.db"), &rows_for("g1"));
+                let c2 = i.root.join("tm2").join("copy");
+                copy_dir(&c1, &c2);
+                q(&c2.join("lumen.db"), &rows_for("g2"));
+                let re = |p: &Path| count(p, "read_events");
+                let base = re(&i.n_db());
+                match ord {
+                    0 => {
+                        i.import(&c1).unwrap();
+                        i.import(&c2).unwrap();
+                        assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    }
+                    1 => {
+                        i.import(&c2).unwrap();
+                        i.import(&c1).unwrap();
+                        assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    }
+                    2 => {
+                        assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                        i.import(&c2).unwrap();
+                        i.import(&c1).unwrap();
+                    }
+                    _ => {
+                        merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                        i.import(&c1).unwrap();
+                        assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                        i.import(&c2).unwrap();
+                    }
+                }
+                assert_eq!(re(&i.n_db()), base + 2, "order {ord}");
+                assert_eq!(
+                    (
+                        kind_count(&i.n_db(), "row-g1"),
+                        kind_count(&i.n_db(), "row-g2"),
+                        kind_count(&i.n_db(), "row-snap"),
+                        kind_count(&i.n_db(), "backup-spool")
+                    ),
+                    (1, 1, 1, 1),
+                    "order {ord}"
+                );
+            }
+        }
+
+        /// T5: property over orders of {merge, freeze, import c1, import c2}, where c1 is a
+        /// restored copy of the backup that KEEPS its spool (no drain), with its own `.draining`
+        /// double and a line nobody else has; c2 is a spool-only folder. Final per-digest counts
+        /// must equal the max over sources.
+        #[test]
+        fn t5_every_order_with_a_shared_history_copy_that_keeps_its_spool() {
+            fn digests(db: &Path, dir: &Path) -> crate::legacy::faultset::FaultCounts {
+                let mut all = crate::legacy::faultset::FaultCounts::new();
+                let c = Connection::open(db).unwrap();
+                for (_, k) in row_digests(&c, "main").unwrap().unwrap() {
+                    *all.entry(k).or_insert(0) += 1;
+                }
+                let (recs, _) = read_spool_files(&dir.join("faults.jsonl")).unwrap();
+                for k in record_digests(&recs).unwrap() {
+                    *all.entry(k).or_insert(0) += 1;
+                }
+                all
+            }
+            let orders: Vec<[u8; 4]> = vec![
+                [0, 1, 2, 3],
+                [2, 3, 0, 1],
+                [2, 0, 3, 1],
+                [3, 2, 1, 0],
+                [1, 2, 3, 0],
+                [0, 2, 1, 3],
+            ];
+            let mut bad = Vec::new();
+            for ord in orders {
+                let i = install();
+                let c1 = i.root.join("tm").join("copy");
+                copy_dir(&i.b_data(), &c1);
+                make_writable(&c1);
+                drain_killed_after_insert(&c1); // row + .draining of backup-spool
+                fs::write(c1.join("faults.jsonl"), format!("{}\n", line("c1-spool"))).unwrap();
+                let c2 = i.root.join("home").join("s");
+                ledger(&c2.join("lumen.db"), &[]);
+                fs::write(c2.join("faults.jsonl"), format!("{}\n", line("c2-spool"))).unwrap();
+                let sources = [
+                    digests(&i.n_db(), &i.n),
+                    digests(&i.b_data().join("lumen.db"), &i.b_data()),
+                    digests(&c1.join("lumen.db"), &c1),
+                    digests(&c2.join("lumen.db"), &c2),
+                ];
+                let mut want = crate::legacy::faultset::FaultCounts::new();
+                for s in &sources {
+                    for (k, v) in s {
+                        let e = want.entry(k.clone()).or_insert(0);
+                        *e = (*e).max(*v);
+                    }
+                }
+                for op in ord {
+                    match op {
+                        0 => {
+                            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                        }
+                        1 => assert!(matches!(freeze(&i), Freeze::Frozen(_))),
+                        2 => {
+                            i.import(&c1).unwrap();
+                        }
+                        _ => {
+                            i.import(&c2).unwrap();
+                        }
+                    }
+                }
+                let got = digests(&i.n_db(), &i.n);
+                if got != want {
+                    bad.push(ord);
+                }
+            }
+            assert!(bad.is_empty(), "orders below the max: {bad:?}");
         }
     }
 }
