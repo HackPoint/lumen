@@ -1580,15 +1580,7 @@ fn run_import(
         *src_counts.entry(k.clone()).or_insert(0) += 1;
     }
     let n_counts = counts_in_n(&tx, "n", p.n).map_err(|e| failed("faults", e))?;
-    let Some(&faults_from) = prefix.get("faults") else {
-        return Err(failed("faults", "no prefix was computed"));
-    };
-    let row_cands: Vec<(i64, String)> = src_rows
-        .iter()
-        .flatten()
-        .filter(|(id, _)| *id > faults_from)
-        .cloned()
-        .collect();
+    let row_cands: Vec<(i64, String)> = src_rows.iter().flatten().cloned().collect();
     let cands: Vec<String> = row_cands
         .iter()
         .map(|(_, k)| k.clone())
@@ -1621,7 +1613,10 @@ fn run_import(
             continue;
         }
         let t = quote(table);
+        // Faults have no positional prefix: the count rule alone decides, so a
+        // row the source shares with a backup that is not merged yet still counts.
         let from: i64 = match prefix.get(table) {
+            Some(_) if table == "faults" => 0,
             Some(&v) if positional => v,
             _ => 0,
         };
@@ -4915,6 +4910,169 @@ mod tests {
                 let got = digests(Some(&i.n_db()), &i.n);
                 assert_eq!(got, want, "order {ord:?}");
             }
+        }
+
+        // ---- rev-max0 attacks ----
+
+        fn insert_recs(db: &Path, recs: &[FaultRecord]) {
+            let c = Connection::open(db).unwrap();
+            for r in recs {
+                c.execute(
+                    "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel,agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    rusqlite::params![r.ts, r.kind, r.variant, r.path, r.lines, r.detail, r.session_id, r.version, r.channel, r.agent_id],
+                )
+                .unwrap();
+            }
+        }
+
+        /// An older app's drain killed between its insert and its delete (the `.draining` batch
+        /// stays), then the next start's drain folds it back and drains again: the double that is
+        /// older than F53 (spec 8.4).
+        fn old_app_drain_killed_then_redrained(d: &Path) {
+            let live = d.join("faults.jsonl");
+            let (recs, _) = read_spool_files(&live).unwrap();
+            fs::rename(&live, d.join("faults.jsonl.draining")).unwrap();
+            let c = Connection::open(d.join("lumen.db")).unwrap();
+            for r in &recs {
+                c.execute(
+                    "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    rusqlite::params![r.ts, r.kind, r.variant, r.path, r.lines, r.detail, r.session_id, r.version, r.channel],
+                )
+                .unwrap();
+            }
+            drop(c);
+            // killed here; the next start drains the batch again
+            old_app_drains(d);
+        }
+
+        fn src_count(db: &Path, dir: &Path, kind: &str) -> i64 {
+            let (recs, _) = read_spool_files(&dir.join("faults.jsonl")).unwrap();
+            kind_count(db, kind) + recs.iter().filter(|r| r.kind == kind).count() as i64
+        }
+
+        /// X1: S2; a Time Machine copy taken before the old app's drain; the old app drains L
+        /// (row k); the next start moves L and is killed before its merge. In the restored copy an
+        /// older app's drain is killed after its insert and redone (rows k and k+1, the first the
+        /// same row as the backup's k). Sources: backup 1, copy 2. Every order must end at 2.
+        #[test]
+        fn x1_a_drain_double_in_a_copy_straddles_the_backups_unmerged_row() {
+            let mut got = Vec::new();
+            for order in 0..4u8 {
+                let t = TempDir::new().unwrap();
+                let root = t.path().join("data");
+                let l = root.join("example.previous.app");
+                ledger(&l.join("lumen.db"), &["snap"]);
+                fs::write(l.join("faults.jsonl"), format!("{}\n", fixed("late", None))).unwrap();
+                let tm = root.join("tm").join("example.previous.app");
+                copy_dir(&l, &tm);
+                let (l, n, m) = migrate_deferred(&root);
+                old_app_drains(&l);
+                do_retry_move(&n, &m);
+                let b = backup_dir(&n, &m).unwrap();
+                let i = Install { _t: t, root, n, b };
+                old_app_drain_killed_then_redrained(&tm);
+                let src_b = src_count(&i.b_data().join("lumen.db"), &i.b_data(), "late");
+                let src_c = src_count(&tm.join("lumen.db"), &tm, "late");
+                assert_eq!((src_b, src_c), (1, 2));
+                match order {
+                    0 => {
+                        i.import(&tm).unwrap();
+                        merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                    }
+                    1 => {
+                        merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                        i.import(&tm).unwrap();
+                    }
+                    2 => {
+                        i.import(&tm).unwrap();
+                        assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    }
+                    _ => {
+                        assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                        i.import(&tm).unwrap();
+                    }
+                }
+                merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                let _ = freeze(&i);
+                got.push(kind_count(&i.n_db(), "late"));
+            }
+            eprintln!("x1 import-merge / merge-import / import-freeze / freeze-import: {got:?}");
+            assert_eq!(
+                got,
+                vec![2, 2, 2, 2],
+                "max(backup 1, copy 2) in every order"
+            );
+        }
+
+        /// X2: the same with two genuinely identical faults (two agents, the same second): the
+        /// backup holds one as a row above the mark (written before the move), a restored copy
+        /// holds that row and the other one.
+        #[test]
+        fn x2_identical_faults_straddle_the_backups_unmerged_row() {
+            let mut got = Vec::new();
+            for import_first in [true, false] {
+                let i = install();
+                make_writable(&i.b);
+                let a1 =
+                    faults::parse_spool_all(format!("{}\n", fixed("dup", Some("a1"))).as_bytes());
+                let a2 =
+                    faults::parse_spool_all(format!("{}\n", fixed("dup", Some("a2"))).as_bytes());
+                insert_recs(&i.b_data().join("lumen.db"), &a1);
+                let c = i.root.join("tm").join("copy");
+                copy_dir(&i.b_data(), &c);
+                make_writable(&c);
+                insert_recs(&c.join("lumen.db"), &a2);
+                if import_first {
+                    i.import(&c).unwrap();
+                    merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                } else {
+                    merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                    i.import(&c).unwrap();
+                }
+                let _ = freeze(&i);
+                got.push(kind_count(&i.n_db(), "dup"));
+            }
+            eprintln!("x2 import-first / merge-first: {got:?}");
+            assert_eq!(got, vec![2, 2], "max(backup 1, copy 2) in both orders");
+        }
+
+        /// Y1: the backup holds the double older than F53 itself: a row above the mark and the
+        /// same line still in `.draining` (a drain killed after its insert). The backup holds 2.
+        #[test]
+        fn y1_a_backup_row_and_its_draining_line_count_twice() {
+            let i = install();
+            make_writable(&i.b);
+            let d = faults::parse_spool_all(format!("{}\n", fixed("dbl", None)).as_bytes());
+            insert_recs(&i.b_data().join("lumen.db"), &d);
+            fs::write(
+                i.b_data().join("faults.jsonl.draining"),
+                format!("{}\n", fixed("dbl", None)),
+            )
+            .unwrap();
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+            assert_eq!(kind_count(&i.n_db(), "dbl"), 2);
+        }
+
+        /// Y2: identical faults on both sides of the mark: the snapshot's last row and a row an old
+        /// binary wrote in S2. The backup holds 2, the snapshot gave N 1.
+        #[test]
+        fn y2_identical_faults_on_both_sides_of_the_mark() {
+            let t = TempDir::new().unwrap();
+            let root = t.path().join("data");
+            let l = root.join("example.previous.app");
+            ledger(&l.join("lumen.db"), &["snap"]);
+            let a1 = faults::parse_spool_all(format!("{}\n", fixed("dup", Some("a1"))).as_bytes());
+            let a2 = faults::parse_spool_all(format!("{}\n", fixed("dup", Some("a2"))).as_bytes());
+            insert_recs(&l.join("lumen.db"), &a1);
+            let (l, n, m) = migrate_deferred(&root);
+            insert_recs(&l.join("lumen.db"), &a2);
+            do_retry_move(&n, &m);
+            let b = backup_dir(&n, &m).unwrap();
+            let i = Install { _t: t, root, n, b };
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+            assert_eq!(kind_count(&i.n_db(), "dup"), 2);
         }
     }
 }
