@@ -179,7 +179,7 @@ fn pass(
         if !report.rewound.is_empty() {
             return Ok(()); // the transaction rolls back
         }
-        rows(&tx, key, marker, report)?;
+        rows(&tx, key, marker, report, data, n_dir)?;
     }
     if freeze {
         // The spool lines come in as a multiset against N (see `faultset`): a line goes in while
@@ -193,7 +193,7 @@ fn pass(
                 *held_by_b.entry(k.clone()).or_insert(0) += 1;
             }
         }
-        let in_n = counts_in_n(&tx, "main", n_dir, None)?;
+        let in_n = counts_in_n(&tx, "main", n_dir)?;
         let admitted = admit_fresh(&held_by_b, &in_n, &keys);
         let fresh: Vec<_> = recs
             .iter()
@@ -295,12 +295,50 @@ fn rewound(conn: &Connection, key: &str, marker: &MarkerV2, table: &str) -> Resu
     )?)
 }
 
+/// ` AND rowid NOT IN (...)` for the backup's fault rows in `(mark, top]` that N already holds
+/// enough of (empty when none, or when the table has no digest). N is counted as it is now.
+fn skipped_fault_rows(
+    conn: &Connection,
+    data: &Path,
+    n_dir: &Path,
+    mark: i64,
+    top: i64,
+) -> Result<String, String> {
+    let Some(b_rows) = row_digests(conn, "src")? else {
+        return Ok(String::new());
+    };
+    let (recs, _) = read_spool_files(&data.join("faults.jsonl"))?;
+    let mut held_by_b = tally(record_digests(&recs)?.iter());
+    for (_, k) in &b_rows {
+        *held_by_b.entry(k.clone()).or_insert(0) += 1;
+    }
+    let in_n = counts_in_n(conn, "main", n_dir)?;
+    let cands: Vec<(i64, String)> = b_rows
+        .into_iter()
+        .filter(|(id, _)| *id > mark && *id <= top)
+        .collect();
+    let keys: Vec<String> = cands.iter().map(|(_, k)| k.clone()).collect();
+    let skip: Vec<String> = cands
+        .iter()
+        .zip(admit_fresh(&held_by_b, &in_n, &keys))
+        .filter(|(_, ok)| !ok)
+        .map(|((id, _), _)| id.to_string())
+        .collect();
+    Ok(if skip.is_empty() {
+        String::new()
+    } else {
+        format!(" AND rowid NOT IN ({})", skip.join(","))
+    })
+}
+
 /// The row pass: every table of both kinds, on the columns both ledgers have.
 fn rows(
     conn: &Connection,
     key: &str,
     marker: &MarkerV2,
     report: &mut MergeReport,
+    data: &Path,
+    n_dir: &Path,
 ) -> Result<(), String> {
     let tables = KEYED_TABLES
         .iter()
@@ -343,11 +381,18 @@ fn rows(
         } else {
             "INSERT OR IGNORE"
         };
+        // Faults: the backup is one source (its rows, its spool and its `.draining` batch) and
+        // adds only what it holds above N's count of a digest (see `faultset`).
+        let not_in = if table == "faults" {
+            skipped_fault_rows(conn, data, n_dir, mark, top)?
+        } else {
+            String::new()
+        };
         let n = conn
             .execute(
                 &format!(
                     "{verb} INTO main.{t} ({list}) SELECT {list} FROM src.{t} \
-                     WHERE rowid > ?1 AND rowid <= ?2 ORDER BY rowid"
+                     WHERE rowid > ?1 AND rowid <= ?2{not_in} ORDER BY rowid"
                 ),
                 params![mark, top],
             )

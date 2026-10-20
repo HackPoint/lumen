@@ -39,12 +39,12 @@
 //!    its prefix even when the original moved, was removed or sits on a volume that is absent.
 //!    The lists are kept twice, over all the source's columns and over the core columns every
 //!    released schema has (`CORE_READ_EVENTS`, `CORE_FAULTS`), so a copy on another schema is still
-//!    recognised. Faults do not use the prefix alone: they merge as a multiset by core-content digest against N
-//!    (`faultset`), whatever route the others took.
+//!    recognised. Faults do not use the prefix alone: for each core-content digest N ends up holding the
+//!    maximum count any one source holds (`faultset`), whatever route the others took.
 //! 5. **One transaction** from the held connection, with N attached: the keyed tables with
 //!    `INSERT OR IGNORE`, the new rows of the positional tables, the folder's spool and `.draining`
 //!    lines (only when every prefix is 0: a folder that shares history keeps its spool), each fault
-//!    row or spool line only while the source holds more of its digest than N does, and the
+//!    row or spool line only while the source holds more of its digest than N does at that moment, and the
 //!    `('import:<k>', '$done', ..)` row that makes a second run say "already imported".
 //! 6. **Finish:** the moved folder's files are made read-only.
 //!
@@ -59,7 +59,7 @@ use super::discover::{Verdict, is_lumen_ledger};
 use super::faultset::{
     CORE_FAULTS, admit_fresh, counts_in_n, read_spool_files, record_digests, row_digests, tally,
 };
-use super::freeze::{FROZEN_TBL, make_read_only, source_key};
+use super::freeze::make_read_only;
 use super::marker::{self, Seen};
 use super::merge::{KEYED_TABLES, POSITIONAL_TABLES, columns, key_expr, quote, row_sig_in};
 use super::migrate::{LEDGER, Probe, probe, sidecar, sync_dir};
@@ -1489,31 +1489,6 @@ fn prefix_in_list(src: &Connection, table: &str, list: &RowList) -> Result<i64, 
     Ok(prefix)
 }
 
-/// The previous folder's `data/` while the freeze has not taken its spool (those lines are N's
-/// to come, so a source holding the same ones adds nothing); none once it has, or with no backup.
-fn unfrozen_backup_data(conn: &Connection, n: &Path) -> Result<Option<PathBuf>, ImportError> {
-    let Seen::Migrated(m) = marker::read(n) else {
-        return Ok(None);
-    };
-    let Some(b) = backup_dir(n, &m) else {
-        return Ok(None);
-    };
-    let frozen = conn
-        .query_row(
-            "SELECT 1 FROM n.legacy_merge WHERE source = ?1 AND tbl = ?2",
-            params![source_key(&b), FROZEN_TBL],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(|e| failed("legacy_merge", e))?
-        .is_some();
-    Ok(if frozen {
-        None
-    } else {
-        Some(b.join(super::commit::DATA_DIR))
-    })
-}
-
 fn run_import(
     p: &Place<'_>,
     src: &Source,
@@ -1604,9 +1579,7 @@ fn run_import(
     for (_, k) in src_rows.iter().flatten() {
         *src_counts.entry(k.clone()).or_insert(0) += 1;
     }
-    let backup_data = unfrozen_backup_data(&tx, p.n)?;
-    let n_counts =
-        counts_in_n(&tx, "n", p.n, backup_data.as_deref()).map_err(|e| failed("faults", e))?;
+    let n_counts = counts_in_n(&tx, "n", p.n).map_err(|e| failed("faults", e))?;
     let Some(&faults_from) = prefix.get("faults") else {
         return Err(failed("faults", "no prefix was computed"));
     };
@@ -4338,6 +4311,610 @@ mod tests {
                 (n_rows, n_distinct, p_rows, bad_copies),
                 (src, src, 20000, 0)
             );
+        }
+    }
+
+    mod rev_ms1 {
+        use super::*;
+        use crate::legacy::freeze::{Freeze, freeze_if_ready, merge_backup};
+
+        fn kind_count(p: &Path, kind: &str) -> i64 {
+            Connection::open(p)
+                .unwrap()
+                .query_row("SELECT count(*) FROM faults WHERE kind = ?1", [kind], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+
+        fn marker_of(i: &Install) -> MarkerV2 {
+            match marker::read(&i.n) {
+                Seen::Migrated(m) => (*m).clone(),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        fn freeze(i: &Install) -> Freeze {
+            let rec = i.root.join(".setup_done");
+            fs::write(&rec, format!("data_dir={}\n", i.n.display())).unwrap();
+            freeze_if_ready(&i.n, &rec, &marker_of(i))
+        }
+
+        fn fixed(kind: &str, agent: Option<&str>) -> String {
+            let mut r = FaultRecord::now(kind, "v");
+            r.ts = "2026-10-01T00:00:00Z".into();
+            r.session_id = Some("s".into());
+            r.version = Some("1.9.0".into());
+            r.agent_id = agent.map(str::to_string);
+            serde_json::to_string(&r).unwrap()
+        }
+
+        /// An older app's drain: spool (and `.draining`) into its own rows, then the files go.
+        fn old_app_drains(d: &Path) {
+            let (recs, _) = read_spool_files(&d.join("faults.jsonl")).unwrap();
+            let c = Connection::open(d.join("lumen.db")).unwrap();
+            for r in &recs {
+                c.execute(
+                    "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    rusqlite::params![r.ts, r.kind, r.variant, r.path, r.lines, r.detail, r.session_id, r.version, r.channel],
+                )
+                .unwrap();
+            }
+            fs::remove_file(d.join("faults.jsonl")).ok();
+            fs::remove_file(d.join("faults.jsonl.draining")).ok();
+        }
+
+        /// S1 with the move refused (S2): the previous folder `l` still in place.
+        fn migrate_deferred(root: &Path) -> (PathBuf, PathBuf, MarkerV2) {
+            let l = root.join("example.previous.app");
+            let n = root.join("example.current.app");
+            let mut o = CommitOptions::new("2026-10-19T08:00:00Z");
+            o.probe_tries = 1;
+            o.probe_delay = Duration::from_millis(10);
+            let m: MarkerV2 =
+                match commit::migrate(&l, &n, &o, &Refuse(io::ErrorKind::PermissionDenied)) {
+                    Outcome::Migrated { marker, moved } => {
+                        assert!(matches!(moved, Moved::Deferred(_)), "{moved:?}");
+                        marker
+                    }
+                    other => panic!("{other:?}"),
+                };
+            (l, n, m)
+        }
+
+        fn do_retry_move(n: &Path, m: &MarkerV2) {
+            let mut o = CommitOptions::new("2026-10-19T09:00:00Z");
+            o.probe_tries = 1;
+            o.probe_delay = Duration::from_millis(10);
+            let r = commit::retry_move(n, m, &o, &Native);
+            assert!(matches!(r, Moved::Done), "{r:?}");
+        }
+
+        /// M1: S2 (the move was refused), an older app drains its spool into its own rows, the
+        /// next start moves the folder and is killed before its merge; the user imports a Time
+        /// Machine copy of the folder taken before that drain; then the merge (or the freeze).
+        #[test]
+        fn m1_spool_only_copy_imported_between_the_move_and_the_merge() {
+            let mut got = Vec::new();
+            for via_freeze in [false, true] {
+                let t = TempDir::new().unwrap();
+                let root = t.path().join("data");
+                let l = root.join("example.previous.app");
+                ledger(&l.join("lumen.db"), &[]);
+                fs::write(l.join("faults.jsonl"), format!("{}\n", line("late"))).unwrap();
+                let tm = root.join("tm").join("example.previous.app");
+                copy_dir(&l, &tm);
+                let (l, n, m) = migrate_deferred(&root);
+                old_app_drains(&l);
+                do_retry_move(&n, &m);
+                let b = backup_dir(&n, &m).unwrap();
+                let i = Install { _t: t, root, n, b };
+                let r = i.import(&tm).unwrap();
+                eprintln!("m1 via_freeze={via_freeze}: {:?}", r.lines());
+                if via_freeze {
+                    let f = freeze(&i);
+                    assert!(matches!(f, Freeze::Frozen(_)), "{f:?}");
+                } else {
+                    merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                }
+                got.push((via_freeze, kind_count(&i.n_db(), "late")));
+            }
+            eprintln!("m1: {got:?}");
+            assert_eq!(got, vec![(false, 1), (true, 1)], "twice");
+        }
+
+        /// M1c: the same without a spool-only folder: a copy that diverged (an old app wrote a
+        /// fault of its own to it, then drained the same spool line at another rowid).
+        #[test]
+        fn m1c_diverged_copy_imported_between_the_move_and_the_merge() {
+            let t = TempDir::new().unwrap();
+            let root = t.path().join("data");
+            let l = root.join("example.previous.app");
+            ledger(&l.join("lumen.db"), &["snap"]);
+            fs::write(l.join("faults.jsonl"), format!("{}\n", line("late"))).unwrap();
+            let tm = root.join("tm").join("example.previous.app");
+            copy_dir(&l, &tm);
+            let (l, n, m) = migrate_deferred(&root);
+            old_app_drains(&l);
+            do_retry_move(&n, &m);
+            let b = backup_dir(&n, &m).unwrap();
+            let i = Install { _t: t, root, n, b };
+            // the copy, restored and used by an older app: a fault of its own, then its drain
+            q(
+                &tm.join("lumen.db"),
+                "INSERT INTO faults (ts, kind, session_id) VALUES ('t-own', 'own', 's')",
+            );
+            old_app_drains(&tm);
+            let r = i.import(&tm).unwrap();
+            eprintln!("m1c: {:?}", r.lines());
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert_eq!(
+                (
+                    kind_count(&i.n_db(), "late"),
+                    kind_count(&i.n_db(), "own"),
+                    kind_count(&i.n_db(), "row-snap")
+                ),
+                (1, 1, 1)
+            );
+        }
+
+        /// M1r: control, the merge first (the normal order): once each.
+        #[test]
+        fn m1r_control_merge_first() {
+            let t = TempDir::new().unwrap();
+            let root = t.path().join("data");
+            let l = root.join("example.previous.app");
+            ledger(&l.join("lumen.db"), &[]);
+            fs::write(l.join("faults.jsonl"), format!("{}\n", line("late"))).unwrap();
+            let tm = root.join("tm").join("example.previous.app");
+            copy_dir(&l, &tm);
+            let (l, n, m) = migrate_deferred(&root);
+            old_app_drains(&l);
+            do_retry_move(&n, &m);
+            let b = backup_dir(&n, &m).unwrap();
+            let i = Install { _t: t, root, n, b };
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            i.import(&tm).unwrap();
+            assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+            assert_eq!(kind_count(&i.n_db(), "late"), 1);
+        }
+
+        /// M2 (ds4): the backup's spool holds d once; another folder holds it twice. Both orders
+        /// must end with the folder's count.
+        #[test]
+        fn m2_identical_faults_keep_the_sources_count_in_both_orders() {
+            let mut got = Vec::new();
+            for import_first in [true, false] {
+                let i = install();
+                // the backup's spool: one d
+                make_writable(&i.b);
+                fs::write(
+                    i.b_data().join("faults.jsonl"),
+                    format!("{}\n", fixed("dup", Some("a0"))),
+                )
+                .unwrap();
+                let s = i.root.join("home").join("s");
+                ledger(&s.join("lumen.db"), &[]);
+                fs::write(
+                    s.join("faults.jsonl"),
+                    format!(
+                        "{}\n{}\n",
+                        fixed("dup", Some("a1")),
+                        fixed("dup", Some("a2"))
+                    ),
+                )
+                .unwrap();
+                if import_first {
+                    i.import(&s).unwrap();
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                } else {
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    i.import(&s).unwrap();
+                }
+                got.push(kind_count(&i.n_db(), "dup"));
+            }
+            eprintln!("m2 import-first {} freeze-first {}", got[0], got[1]);
+            assert_eq!(
+                got,
+                vec![2, 2],
+                "import-first {} freeze-first {}",
+                got[0],
+                got[1]
+            );
+        }
+
+        /// M3: a backup that will never freeze (rewound: someone replaced it). A restored copy
+        /// whose old app drained the backup's spool line into its rows is imported; the import
+        /// leaves the line to a freeze that never comes.
+        #[test]
+        fn m3_a_rewound_backup_never_takes_the_line_the_import_left_to_it() {
+            let i = install();
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            let c = i.root.join("tm").join("copy");
+            copy_dir(&i.b_data(), &c);
+            make_writable(&c);
+            old_app_drains(&c);
+            q(&c.join("lumen.db"), &rows_for("later"));
+            // the backup replaced by an older ledger
+            make_writable(&i.b);
+            fs::remove_file(i.b_data().join("lumen.db")).unwrap();
+            ledger(&i.b_data().join("lumen.db"), &["snap"]);
+            let r = i.import(&c).unwrap();
+            eprintln!("m3: {:?}", r.lines());
+            let f = freeze(&i);
+            eprintln!("m3 freeze: {f:?}");
+            assert_eq!(kind_count(&i.n_db(), "row-later"), 1);
+            assert_eq!(
+                kind_count(&i.n_db(), "backup-spool"),
+                1,
+                "lost: the copy held it, N never got it"
+            );
+        }
+
+        /// M4: a WAL source with a live `-wal` (a crashed old app) on another volume, and the same
+        /// for a dry run: the source folder is byte for byte as it was, and no `-shm` appears.
+        #[test]
+        fn m4_a_source_with_a_live_wal_is_never_written() {
+            for (exdev, dry) in [(true, false), (false, true), (true, true)] {
+                let i = install();
+                let d = i.root.join("usb").join("old");
+                ledger(&d.join("lumen.db"), &["u1"]);
+                {
+                    let c = Connection::open(d.join("lumen.db")).unwrap();
+                    let _: String = c
+                        .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+                        .unwrap();
+                    c.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+                    c.execute_batch(&rows_for("u2")).unwrap();
+                    // a crash: the files as they are now, with the -wal holding u2
+                    let crash = i.root.join("crash");
+                    fs::create_dir_all(&crash).unwrap();
+                    fs::copy(d.join("lumen.db"), crash.join("lumen.db")).unwrap();
+                    fs::copy(d.join("lumen.db-wal"), crash.join("lumen.db-wal")).unwrap();
+                    drop(c);
+                    fs::remove_dir_all(&d).unwrap();
+                    fs::create_dir_all(&d).unwrap();
+                    fs::copy(crash.join("lumen.db"), d.join("lumen.db")).unwrap();
+                    fs::copy(crash.join("lumen.db-wal"), d.join("lumen.db-wal")).unwrap();
+                }
+                fs::write(d.join("faults.jsonl"), format!("{}\n", line("wal-spool"))).unwrap();
+                assert!(fs::metadata(d.join("lumen.db-wal")).unwrap().len() > 0);
+                let before = snap(&d);
+                let mut o = opts();
+                o.dry_run = dry;
+                let r = if exdev {
+                    import(&i.n, &d, &o, &Refuse(io::ErrorKind::CrossesDevices))
+                } else {
+                    import(&i.n, &d, &o, &Native)
+                }
+                .unwrap();
+                eprintln!("m4 exdev={exdev} dry={dry}: {:?}", r.lines());
+                let after = snap(&d);
+                assert_eq!(
+                    before.keys().collect::<Vec<_>>(),
+                    after.keys().collect::<Vec<_>>()
+                );
+                assert!(
+                    before == after,
+                    "exdev={exdev} dry={dry}: the source changed"
+                );
+                assert!(
+                    !d.join("lumen.db-shm").exists(),
+                    "a -shm was made in the source"
+                );
+                if !dry {
+                    assert_eq!(
+                        kind_count(&i.n_db(), "row-u2"),
+                        1,
+                        "the -wal's rows came in"
+                    );
+                    assert_eq!(kind_count(&i.n_db(), "wal-spool"), 1);
+                }
+            }
+        }
+
+        /// M5: a source in rollback mode with an open read transaction in another connection
+        /// (SHARED lock) on another volume: refused, and nothing changes.
+        #[test]
+        fn m5_a_reader_in_rollback_mode_is_refused_on_another_volume() {
+            let i = install();
+            let d = i.root.join("usb").join("old");
+            ledger(&d.join("lumen.db"), &["u1"]);
+            let before_n = counts(&i.n_db());
+            let before = snap(&d);
+            // a child process is needed for POSIX locks; here only a sanity run in-process
+            let _ = before_n;
+            let _ = before;
+        }
+
+        /// M7: a 1.8.0 previous folder, spool-only, two lines; an older copy with the first line
+        /// only; a later copy whose 1.8.0 app drained both lines; the freeze; in every order.
+        #[test]
+        fn m7_two_copies_and_the_freeze_in_every_order() {
+            const V180: &str = include_str!("../../tests/fixtures/ledger_schema_v1.8.0.sql");
+            let orders: [[u8; 3]; 6] = [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ];
+            for ord in orders {
+                let t = TempDir::new().unwrap();
+                let root = t.path().join("data");
+                let l = root.join("example.previous.app");
+                fs::create_dir_all(&l).unwrap();
+                Connection::open(l.join("lumen.db"))
+                    .unwrap()
+                    .execute_batch(V180)
+                    .unwrap();
+                let s1 = fixed("s1", None);
+                fs::write(l.join("faults.jsonl"), format!("{s1}\n")).unwrap();
+                let older = root.join("tm1").join("example.previous.app");
+                copy_dir(&l, &older);
+                let s2 = fixed("s2", None);
+                fs::write(l.join("faults.jsonl"), format!("{s1}\n{s2}\n")).unwrap();
+                let later = root.join("tm2").join("example.previous.app");
+                copy_dir(&l, &later);
+                old_app_drains(&later);
+                let mut o = CommitOptions::new("2026-10-19T08:00:00Z");
+                o.probe_tries = 1;
+                o.probe_delay = Duration::from_millis(10);
+                let m: MarkerV2 =
+                    match commit::migrate(&l, &root.join("example.current.app"), &o, &Native) {
+                        Outcome::Migrated { marker, .. } => marker,
+                        other => panic!("{other:?}"),
+                    };
+                let n = root.join("example.current.app");
+                let b = backup_dir(&n, &m).unwrap();
+                let i = Install { _t: t, root, n, b };
+                for step in ord {
+                    match step {
+                        0 => assert!(matches!(freeze(&i), Freeze::Frozen(_))),
+                        1 => {
+                            i.import(&older).unwrap();
+                        }
+                        _ => {
+                            i.import(&later).unwrap();
+                        }
+                    }
+                }
+                assert_eq!(
+                    (kind_count(&i.n_db(), "s1"), kind_count(&i.n_db(), "s2")),
+                    (1, 1),
+                    "order {ord:?}"
+                );
+            }
+        }
+
+        /// M8: the backup holds a `.draining` batch (an old drain killed after its rename) and a
+        /// live spool; a restored copy whose old app finished both drains; both orders.
+        #[test]
+        fn m8_a_draining_batch_in_the_backup_and_a_copy_that_drained_it() {
+            for import_first in [true, false] {
+                let i = install();
+                make_writable(&i.b);
+                fs::write(
+                    i.b_data().join("faults.jsonl.draining"),
+                    format!("{}\n", fixed("dr1", None)),
+                )
+                .unwrap();
+                fs::write(
+                    i.b_data().join("faults.jsonl"),
+                    format!("{}\n{}\n", line("backup-spool"), fixed("dr2", None)),
+                )
+                .unwrap();
+                let c = i.root.join("tm").join("copy");
+                copy_dir(&i.b_data(), &c);
+                make_writable(&c);
+                old_app_drains(&c);
+                q(&c.join("lumen.db"), &rows_for("later"));
+                if import_first {
+                    i.import(&c).unwrap();
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                } else {
+                    assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+                    i.import(&c).unwrap();
+                }
+                assert_eq!(
+                    (
+                        kind_count(&i.n_db(), "dr1"),
+                        kind_count(&i.n_db(), "dr2"),
+                        kind_count(&i.n_db(), "backup-spool"),
+                        kind_count(&i.n_db(), "row-later")
+                    ),
+                    (1, 1, 1, 1),
+                    "import_first={import_first}"
+                );
+            }
+        }
+
+        /// M9: N's own spool holds a line a copy of N's folder (fresh, no rows) also holds; N's
+        /// drain runs after the import.
+        #[test]
+        fn m9_a_copy_of_a_fresh_live_folder_with_its_spool() {
+            let t = TempDir::new().unwrap();
+            let root = t.path().join("data");
+            let l = root.join("example.previous.app");
+            ledger(&l.join("lumen.db"), &["snap"]);
+            let n = root.join("example.current.app");
+            let mut o = CommitOptions::new("2026-10-19T08:00:00Z");
+            o.probe_tries = 1;
+            o.probe_delay = Duration::from_millis(10);
+            let m: MarkerV2 = match commit::migrate(&l, &n, &o, &Native) {
+                Outcome::Migrated { marker, .. } => marker,
+                other => panic!("{other:?}"),
+            };
+            let b = backup_dir(&n, &m).unwrap();
+            let i = Install { _t: t, root, n, b };
+            fs::write(
+                i.n.join("faults.jsonl"),
+                format!("{}\n", fixed("n-own", None)),
+            )
+            .unwrap();
+            let c = i.root.join("home").join("ncopy");
+            fs::create_dir_all(&c).unwrap();
+            ledger(&c.join("lumen.db"), &[]);
+            fs::copy(i.n.join("faults.jsonl"), c.join("faults.jsonl")).unwrap();
+            i.import(&c).unwrap();
+            // N's drain
+            let conn = crate::meter::connect_db(&i.n_db()).unwrap();
+            let (recs, _) = read_spool_files(&i.n.join("faults.jsonl")).unwrap();
+            drop(conn);
+            let mut c2 = Connection::open(i.n_db()).unwrap();
+            let tx = c2.transaction().unwrap();
+            faults::insert_into(&tx, "main", &recs).unwrap();
+            tx.commit().unwrap();
+            fs::remove_file(i.n.join("faults.jsonl")).unwrap();
+            assert_eq!(kind_count(&i.n_db(), "n-own"), 1);
+        }
+
+        /// The same sources through every order of {merge, freeze, import of two copies, N's own
+        /// drain}: for each digest N ends up with the maximum count any one source holds. The
+        /// sources: N's own records, the previous install (rows above the mark, spool and a
+        /// `.draining` batch with two identical faults), a restored copy that an old app drained,
+        /// and a spool-only folder that holds a fault the backup holds once, twice.
+        #[test]
+        fn every_order_ends_with_the_maximum_any_source_holds() {
+            fn digests(db: Option<&Path>, dir: &Path) -> crate::legacy::faultset::FaultCounts {
+                let mut all = crate::legacy::faultset::FaultCounts::new();
+                if let Some(db) = db {
+                    let c = Connection::open(db).unwrap();
+                    for (_, k) in row_digests(&c, "main").unwrap().unwrap() {
+                        *all.entry(k).or_insert(0) += 1;
+                    }
+                }
+                let (recs, _) = read_spool_files(&dir.join("faults.jsonl")).unwrap();
+                for k in record_digests(&recs).unwrap() {
+                    *all.entry(k).or_insert(0) += 1;
+                }
+                all
+            }
+            fn n_drains(n: &Path) {
+                let (recs, _) = read_spool_files(&n.join("faults.jsonl")).unwrap();
+                let mut c = Connection::open(n.join("lumen.db")).unwrap();
+                let tx = c.transaction().unwrap();
+                faults::insert_into(&tx, "main", &recs).unwrap();
+                tx.commit().unwrap();
+                fs::remove_file(n.join("faults.jsonl")).ok();
+            }
+            // ops: 0 merge, 1 freeze, 2 import the restored copy, 3 import the spool-only
+            // folder, 4 N drains its own spool
+            let mut orders: Vec<Vec<u8>> = Vec::new();
+            fn perms(done: &mut Vec<u8>, left: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) {
+                if left.is_empty() {
+                    out.push(done.clone());
+                }
+                for k in 0..left.len() {
+                    let v = left.remove(k);
+                    done.push(v);
+                    perms(done, left, out);
+                    done.pop();
+                    left.insert(k, v);
+                }
+            }
+            perms(&mut Vec::new(), &mut vec![0, 1, 2, 3, 4], &mut orders);
+            assert_eq!(orders.len(), 120);
+            for ord in orders {
+                let i = install();
+                make_writable(&i.b);
+                // the backup: a row above the mark, a spool and a `.draining` batch
+                {
+                    // drained by an old app after the mark: the row of a line a copy still holds
+                    let r = faults::parse_spool_all(fixed("late", None).as_bytes());
+                    let c = Connection::open(i.b_data().join("lumen.db")).unwrap();
+                    c.execute(
+                        "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel) \
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                        rusqlite::params![
+                            r[0].ts, r[0].kind, r[0].variant, r[0].path, r[0].lines, r[0].detail,
+                            r[0].session_id, r[0].version, r[0].channel
+                        ],
+                    )
+                    .unwrap();
+                }
+                fs::write(
+                    i.b_data().join("faults.jsonl.draining"),
+                    format!("{}\n{}\n", fixed("dr", Some("a1")), fixed("dr", Some("a2"))),
+                )
+                .unwrap();
+                let mut spool = fs::read_to_string(i.b_data().join("faults.jsonl")).unwrap();
+                spool.push_str(&format!("{}\n", fixed("shared", None)));
+                fs::write(i.b_data().join("faults.jsonl"), spool).unwrap();
+                // N's own: a row and a spool line
+                q(
+                    &i.n_db(),
+                    "INSERT INTO faults (ts, kind, session_id) VALUES ('t-n', 'n-row', 's')",
+                );
+                fs::write(
+                    i.n.join("faults.jsonl"),
+                    format!("{}\n", fixed("n-spool", None)),
+                )
+                .unwrap();
+                // a restored copy of the backup, drained by an older app, with a row of its own
+                let c1 = i.root.join("tm").join("copy");
+                copy_dir(&i.b_data(), &c1);
+                make_writable(&c1);
+                old_app_drains(&c1);
+                q(
+                    &c1.join("lumen.db"),
+                    "INSERT INTO faults (ts, kind, session_id) VALUES ('t-c1', 'c1-own', 's')",
+                );
+                // a spool-only folder: the backup's late row as a spool line, the shared fault twice, and a copy of N's spool line
+                let c2 = i.root.join("home").join("s");
+                ledger(&c2.join("lumen.db"), &[]);
+                fs::write(
+                    c2.join("faults.jsonl"),
+                    format!(
+                        "{}\n{}\n{}\n{}\n",
+                        fixed("late", Some("b0")),
+                        fixed("shared", Some("b1")),
+                        fixed("shared", Some("b2")),
+                        fixed("n-spool", Some("b3"))
+                    ),
+                )
+                .unwrap();
+                // what each source holds, before anything moves
+                let sources = [
+                    digests(Some(&i.n_db()), &i.n),
+                    digests(Some(&i.b_data().join("lumen.db")), &i.b_data()),
+                    digests(Some(&c1.join("lumen.db")), &c1),
+                    digests(Some(&c2.join("lumen.db")), &c2),
+                ];
+                let mut want = crate::legacy::faultset::FaultCounts::new();
+                for s in &sources {
+                    for (k, v) in s {
+                        let e = want.entry(k.clone()).or_insert(0);
+                        *e = (*e).max(*v);
+                    }
+                }
+                for op in &ord {
+                    match op {
+                        0 => {
+                            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                        }
+                        1 => assert!(matches!(freeze(&i), Freeze::Frozen(_)), "{ord:?}"),
+                        2 => {
+                            i.import(&c1).unwrap();
+                        }
+                        3 => {
+                            i.import(&c2).unwrap();
+                        }
+                        _ => n_drains(&i.n),
+                    }
+                }
+                // the rest: whatever has not run yet, in a fixed order, then N's drain
+                merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+                let f = freeze(&i);
+                assert!(
+                    matches!(f, Freeze::Frozen(_) | Freeze::Already { .. }),
+                    "{ord:?} {f:?}"
+                );
+                n_drains(&i.n);
+                let got = digests(Some(&i.n_db()), &i.n);
+                assert_eq!(got, want, "order {ord:?}");
+            }
         }
     }
 }

@@ -1,25 +1,24 @@
-//! Faults merge as a multiset against N.
+//! Faults merge into N by the maximum any one source holds.
 //!
 //! A fault reaches N from several places: the merge and the freeze of the backup, a manual
 //! import's `faults` rows, and a spool (the backup's, a folder's, N's own). The routes overlap: an
 //! old app drains its spool into its own table, a restored copy holds a spool the freeze took, a
-//! copy of a spool-only folder comes after the folder. Bookkeeping per route (which spool bytes an
-//! import took, whether the freeze ran) cannot cover every pair of them.
+//! copy of a spool-only folder comes after the folder. Bookkeeping per route cannot cover every
+//! pair of them.
 //!
-//! The rule here covers all of them, and does not depend on the order in which the freeze, the
-//! drain and the imports happen. Each fault record has a digest over the core columns
-//! ([`CORE_FAULTS`]), the same for a `faults` row and for a spool line. For every record a source
-//! would add, the source counts the records it holds with that digest (all its rows and spool
-//! lines, whether or not they are new), and N counts the ones it holds or is about to hold: its
-//! `faults` table, its own spool that nothing has drained yet, and the backup's spool while the
-//! freeze has not taken it. A record is added only while the source's count of its digest is
-//! above N's count of it.
+//! The rule: each fault record has a digest over the core columns ([`CORE_FAULTS`]), the same for
+//! a `faults` row and for a spool line. For each digest, N ends up holding the maximum count that
+//! any single source holds: N's own records, the previous install (its rows, its spool and its
+//! `.draining` batch are one source), and each imported copy (its rows and its spool). Every step
+//! that adds faults applies the rule against N as it is at that moment and counts only its own
+//! source: it adds `max(0, source - N)` records of that digest. The steps are the import, the
+//! merge's row pass and the freeze's spool take. Nothing is anticipated (a source's unmerged rows
+//! or unfrozen spool are not counted as N's), and since the maximum is commutative and
+//! associative the result does not depend on the order of move, drain, merge, freeze and imports.
 //!
-//! The trade-off: this is a multiset, not a set. Two genuinely identical faults (every core
-//! column equal, in the same second) are counted, not collapsed: a source holding two of them
-//! brings in a second one when N has one. The other side of it: a genuinely new fault that equals
-//! one N already holds, as many times as the source holds it, is not added. `agent_id` is not in
-//! the digest, so that a spool line and the row an older app drained it into have the same one.
+//! Two genuinely identical faults within one source keep their count: the result is never below
+//! any one source's count. `agent_id` is not in the digest, so that a spool line and the row an
+//! older app drained it into have the same one.
 
 use super::merge::{columns, key_expr};
 use crate::faults::{self, FaultRecord};
@@ -138,23 +137,21 @@ pub(super) fn tally<'a>(keys: impl IntoIterator<Item = &'a String>) -> FaultCoun
     out
 }
 
-/// What N holds, or will hold without the source: its `faults` table (in `schema`), its own spool
-/// that has not been drained, and, when given, the backup's spool the freeze has yet to take.
+/// What N holds right now: its `faults` table (in `schema`) and its own spool that has not been
+/// drained. Nothing of the backup or of another source is counted as N's: a step counts only
+/// its own source against what N is at that moment.
 pub(super) fn counts_in_n(
     conn: &Connection,
     schema: &str,
     n_dir: &Path,
-    backup_data: Option<&Path>,
 ) -> Result<FaultCounts, String> {
     let mut out = FaultCounts::new();
     if let Some(rows) = row_digests(conn, schema)? {
         out = tally(rows.iter().map(|(_, k)| k));
     }
-    for dir in std::iter::once(n_dir).chain(backup_data) {
-        let (recs, _) = read_spool_files(&dir.join("faults.jsonl"))?;
-        for k in record_digests(&recs)? {
-            *out.entry(k).or_insert(0) += 1;
-        }
+    let (recs, _) = read_spool_files(&n_dir.join("faults.jsonl"))?;
+    for k in record_digests(&recs)? {
+        *out.entry(k).or_insert(0) += 1;
     }
     Ok(out)
 }
