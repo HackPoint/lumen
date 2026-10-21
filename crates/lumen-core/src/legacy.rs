@@ -22,11 +22,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 pub mod merge;
 
-/// A placeholder until F53 v2 T8 deletes it. Nothing at runtime reads it: the previous install is
-/// found by what it holds (`discover`), never by its folder's name, and no file in the repository
-/// names it. The identifier guard, the bench sandbox and the app e2e still read it until then.
-pub const LEGACY_APP_ID: &str = "io.previous.lumen";
-
 /// Written into the new directory as the migration's commit point.
 pub const MARKER_NAME: &str = ".legacy-migration.json";
 
