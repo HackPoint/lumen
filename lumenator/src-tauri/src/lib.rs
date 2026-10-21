@@ -277,12 +277,21 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION")
             );
 
-            // Move an older data directory over, before anything opens a ledger or spawns
-            // the daemon, and say what could not be done. Nothing here is fatal: a ledger
-            // that has not moved yet is simply used where it is (`upgrade::Ctx::db_path`).
-            let upgrade_ctx = upgrade::Ctx::current();
+            // Find the previous install by what it holds, move it into the backup inside the
+            // new data folder, and say what could not be done, before anything opens a ledger
+            // or spawns the daemon. Nothing here is fatal: a ledger that has not moved yet is
+            // simply used where it is (`upgrade::Ctx::db_path`).
+            let login_item = setup::PluginAutoStart(app.handle());
+            #[cfg(windows)]
+            let run_key = upgrade::autostart::HkcuRun;
+            #[cfg(windows)]
+            let run_key_ref: Option<&dyn upgrade::autostart::RunKey> = Some(&run_key);
+            #[cfg(not(windows))]
+            let run_key_ref: Option<&dyn upgrade::autostart::RunKey> = None;
+            let find_mcp = setup::baked_mcp;
+            let upgrade_ctx = upgrade::Ctx::real(&login_item, run_key_ref, &find_mcp);
             if let Some(ctx) = &upgrade_ctx {
-                let report = upgrade::at_start(ctx, &upgrade::AppOps);
+                let report = upgrade::at_start(ctx);
                 report.apply(&health, "STARTUP");
             }
 

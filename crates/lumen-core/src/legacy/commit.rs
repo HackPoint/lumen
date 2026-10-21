@@ -317,7 +317,7 @@ fn copy_verify_commit(
     };
     let mut want: BTreeMap<String, String> = BTreeMap::new();
     for name in &names {
-        match copy_hashed(&l.join(name), &stage.join(name), false) {
+        match copy_hashed(&l.join(name), &stage.join(name)) {
             Ok(h) => {
                 want.insert(name.clone(), h);
                 fire(

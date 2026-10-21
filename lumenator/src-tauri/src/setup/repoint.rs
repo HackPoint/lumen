@@ -10,7 +10,7 @@
 //! N, with one exception: a `command` is this build's `lumen-mcp`, never a path mapped into
 //! `B/data/bin`, which holds the old binary.
 //!
-//! Nothing here runs at start yet: the app calls it from T7.
+//! The app calls it at every start once a migration has committed (`upgrade::at_start`).
 
 use super::{
     back_up, claude_json_path_in, fold_path, global_settings_path_in, hook_command, write_atomic,
@@ -19,6 +19,28 @@ use lumen_core::legacy::commit::{backup_dir, DATA_DIR};
 use lumen_core::legacy::marker::MarkerV2;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+
+/// `?` on an `Option`, spelled out. The start-up scan (`startup_scan.rs`) reads a call of this as
+/// the `?` it replaces, so a function that uses it is in its `EXEMPT` list. An early `None`
+/// here only means "nothing to change".
+macro_rules! some {
+    ($e:expr) => {
+        match $e {
+            Some(v) => v,
+            None => return None,
+        }
+    };
+}
+
+/// `?` on a `Result` whose error is text, spelled out for the same reason.
+macro_rules! tried {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    };
+}
 
 /// How many times a rewrite is rebuilt when another writer changes the file under it.
 const ATTEMPTS: usize = 3;
@@ -75,7 +97,7 @@ impl Moved {
                 ""
             } else if f.starts_with(&format!("{fp}/")) {
                 // Case folding keeps byte lengths (ASCII only), so the cut is the same.
-                s.get(p.len() + 1..)?
+                some!(s.get(p.len() + 1..))
             } else {
                 continue;
             };
@@ -93,7 +115,7 @@ impl Moved {
 
     /// The same file in N.
     fn moved_path(&self, value: &str) -> Option<PathBuf> {
-        let tail = self.tail_inside(value)?;
+        let tail = some!(self.tail_inside(value));
         let mut out = self.n.clone();
         for c in tail.split('/').filter(|c| !c.is_empty()) {
             out.push(c);
@@ -285,7 +307,7 @@ pub(super) fn stale_values(
 
 /// What a re-point did.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct Report {
+pub(crate) struct Report {
     /// The files that were rewritten.
     pub rewritten: Vec<String>,
     /// Why something was skipped; the next start or Setup does it.
@@ -295,7 +317,7 @@ pub(super) struct Report {
 /// Re-point Lumen's entries in `~/.claude.json` and `~/.claude/settings.json`.
 ///
 /// `mcp_bin` is this build's `lumen-mcp`, `new_db` the ledger now in use (in N).
-pub(super) fn repoint_lumen_entries_in(
+pub(crate) fn repoint_lumen_entries_in(
     home: &Path,
     marker: &MarkerV2,
     mcp_bin: &str,
@@ -354,11 +376,13 @@ pub(super) fn repoint_with(
             Slot::Hook => {
                 let (word, rest) = first_word(v);
                 let program = if is_mcp_program(&word) {
-                    need_mcp()?
+                    need_mcp()
                 } else {
-                    moved.moved_path(&word)?.to_string_lossy().into_owned()
+                    moved
+                        .moved_path(&word)
+                        .map(|p| p.to_string_lossy().into_owned())
                 };
-                Some(format!("{}{rest}", hook_command(Path::new(&program))))
+                program.map(|program| format!("{}{rest}", hook_command(Path::new(&program))))
             }
         }
     };
@@ -443,8 +467,8 @@ fn repoint_file(
         if !changed {
             return Ok(false);
         }
-        let text = serde_json::to_string_pretty(&root)
-            .map_err(|e| format!("serialize {}: {e} — left unchanged", path.display()))?;
+        let text = tried!(serde_json::to_string_pretty(&root)
+            .map_err(|e| format!("serialize {}: {e} — left unchanged", path.display())));
 
         // The first time only: the original goes into the backup, so the undo is there
         // whatever happens to the `.lumen_bak` beside the file.
@@ -457,7 +481,7 @@ fn repoint_file(
             let dir = b.join("claude");
             let dest = dir.join(label);
             if !dest.exists() {
-                std::fs::create_dir_all(&dir)
+                tried!(std::fs::create_dir_all(&dir)
                     .and_then(|_| std::fs::write(&dest, &bytes))
                     .map_err(|e| {
                         format!(
@@ -465,7 +489,7 @@ fn repoint_file(
                             path.display(),
                             dir.display()
                         )
-                    })?;
+                    }));
             }
             copied = true;
         }
@@ -476,9 +500,9 @@ fn repoint_file(
         if std::fs::read(path).ok().as_deref() != Some(&bytes[..]) {
             continue;
         }
-        back_up(path)?;
-        write_atomic(path, &text, 0)
-            .map_err(|e| format!("cannot write {}: {e} — left unchanged", path.display()))?;
+        tried!(back_up(path));
+        tried!(write_atomic(path, &text, 0)
+            .map_err(|e| format!("cannot write {}: {e} — left unchanged", path.display())));
         return Ok(true);
     }
     Err(format!(
@@ -495,7 +519,7 @@ fn repoint_file(
 /// `Ok(true)` when the link was replaced. Windows has a copy, not a link, so nothing is done
 /// there.
 #[cfg_attr(windows, allow(unused_variables))]
-pub(super) fn repoint_cli_link(
+pub(crate) fn repoint_cli_link(
     link: &Path,
     marker: &MarkerV2,
     n: &Path,
@@ -520,13 +544,13 @@ pub(super) fn repoint_cli_link(
         };
         let tmp = link.with_file_name(".lumen-link-tmp");
         let _ = std::fs::remove_file(&tmp);
-        std::os::unix::fs::symlink(cli, &tmp)
-            .and_then(|_| std::fs::rename(&tmp, link))
-            .map_err(|e| {
+        match std::os::unix::fs::symlink(cli, &tmp).and_then(|_| std::fs::rename(&tmp, link)) {
+            Ok(()) => Ok(true),
+            Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
-                format!("cannot re-point {}: {e}", link.display())
-            })?;
-        Ok(true)
+                Err(format!("cannot re-point {}: {e}", link.display()))
+            }
+        }
     }
     #[cfg(not(unix))]
     {

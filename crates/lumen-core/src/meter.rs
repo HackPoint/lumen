@@ -86,21 +86,8 @@ pub fn canonical_db_path_in(home: &std::path::Path) -> std::path::PathBuf {
 /// Separated so the ordering can be tested directly: mutating LUMEN_DB / HOME in
 /// a test is racy across threads and `unsafe` in edition 2024.
 pub fn resolve_db_path(lumen_db: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
-    let roots = crate::legacy::data_roots(home.map(std::path::Path::new));
-    let refs: Vec<&std::path::Path> = roots.iter().map(std::path::PathBuf::as_path).collect();
-    resolve_db_path_with(lumen_db, home, APP_ID, crate::legacy::LEGACY_APP_ID, &refs)
-}
-
-/// [`resolve_db_path`] with the identifiers passed in, for tests with fake ones.
-fn resolve_db_path_with(
-    lumen_db: Option<&str>,
-    home: Option<&str>,
-    new_id: &str,
-    legacy_id: &str,
-    roots: &[&std::path::Path],
-) -> Option<std::path::PathBuf> {
     resolve_db_path_unmapped(lumen_db, home)
-        .map(|p| crate::legacy::effective_with(&p, new_id, legacy_id, roots))
+        .map(|p| crate::legacy::redirect::redirect_for_home(&p, home.map(std::path::Path::new)))
 }
 
 /// The precedence policy alone, before the legacy-directory mapping.
@@ -1028,38 +1015,33 @@ mod tests {
             "  precedence alone: {unmapped:.0} ns; one stat: {stat:.0} ns; budget (alone + 2 stats): {:.0} ns",
             unmapped + 2.0 * stat
         );
-        // After the flip the two ids differ: the cost of the extra stat.
-        let (new, old) = ("t.new", "t.old");
-        let canon = home.path().join(new).join("lumen.db");
-        let ph = home.path().join(old);
-        std::fs::create_dir_all(&ph).unwrap();
+        // The same call once N carries its marker: the parsed marker is cached for the life of
+        // the process, so no syscall is left on the path.
+        crate::legacy::marker::write_settled(&app_data_dir_in(home.path())).unwrap();
+        for _ in 0..1000 {
+            std::hint::black_box(resolve_db_path(None, Some(&h)));
+        }
         let t = std::time::Instant::now();
         for _ in 0..n {
-            std::hint::black_box(crate::legacy::effective_with(
-                std::hint::black_box(&canon),
-                new,
-                old,
-                &[home.path()],
-            ));
+            std::hint::black_box(resolve_db_path(None, Some(std::hint::black_box(&h))));
         }
         eprintln!(
-            "effective_with, pending (1 stat): {:.0} ns/call",
+            "resolve_db_path, marker seen (0 syscalls): {:.0} ns/call",
             t.elapsed().as_nanos() as f64 / f64::from(n)
         );
-        std::fs::remove_dir(&ph).unwrap();
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            std::hint::black_box(crate::legacy::effective_with(
-                std::hint::black_box(&canon),
-                new,
-                old,
-                &[home.path()],
-            ));
-        }
-        eprintln!(
-            "effective_with, fresh (2 stats): {:.0} ns/call",
-            t.elapsed().as_nanos() as f64 / f64::from(n)
-        );
+    }
+
+    /// [`resolve_db_path`] with the identifier, the data roots and the marker cache passed in, for
+    /// tests with fake ones.
+    fn resolve_db_path_with(
+        lumen_db: Option<&str>,
+        home: Option<&str>,
+        new_id: &str,
+        roots: &[&std::path::Path],
+        cache: &crate::legacy::redirect::MarkerCache,
+    ) -> Option<std::path::PathBuf> {
+        resolve_db_path_unmapped(lumen_db, home)
+            .map(|p| crate::legacy::redirect::redirect_in(&p, new_id, roots, cache))
     }
 
     // ── resolve_db_path precedence ───────────────────────────────────────────
@@ -1145,12 +1127,30 @@ mod tests {
         assert_eq!(a, Some(canonical_db_path_in(home.path())));
     }
 
+    /// A committed migration's marker in `new`, naming `prev` as the folder it came from.
+    fn mark_migrated(new: &std::path::Path, prev: &std::path::Path) {
+        use crate::legacy::marker::{FORMAT, MarkerV2, STATE_MIGRATED, write_marker};
+        std::fs::create_dir_all(new).unwrap();
+        write_marker(
+            new,
+            &MarkerV2 {
+                format: FORMAT,
+                state: STATE_MIGRATED.into(),
+                source: prev.file_name().unwrap().to_string_lossy().into_owned(),
+                source_dir: prev.to_string_lossy().into_owned(),
+                backup: "legacy-backup-2026-10-19".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn a_stale_pointer_or_env_path_is_redirected_only_with_the_marker() {
         // RED against the unmapped policy: it returns the stale path as written.
         let home = TempDir::new().unwrap();
         let root = home.path().join("root");
-        let (old, new) = (root.join("fake.old"), root.join("fake.new"));
+        let (old, new) = (root.join("example.previous.app"), root.join("fake.new"));
         std::fs::create_dir_all(&old).unwrap();
         let stale = old.join("lumen.db");
         let h = home.path().to_string_lossy().to_string();
@@ -1160,22 +1160,22 @@ mod tests {
         )
         .unwrap();
 
+        let cache = crate::legacy::redirect::MarkerCache::new();
         let via_pointer =
-            || resolve_db_path_with(None, Some(&h), "fake.new", "fake.old", &[root.as_path()]);
+            || resolve_db_path_with(None, Some(&h), "fake.new", &[root.as_path()], &cache);
         let via_env = || {
             resolve_db_path_with(
                 Some(&stale.to_string_lossy()),
                 None,
                 "fake.new",
-                "fake.old",
                 &[root.as_path()],
+                &cache,
             )
         };
         assert_eq!(via_pointer(), Some(stale.clone()), "no marker, no move");
         assert_eq!(via_env(), Some(stale.clone()));
 
-        std::fs::create_dir_all(&new).unwrap();
-        std::fs::write(new.join(crate::legacy::MARKER_NAME), b"{}").unwrap();
+        mark_migrated(&new, &old);
         assert_eq!(via_pointer(), Some(new.join("lumen.db")));
         assert_eq!(via_env(), Some(new.join("lumen.db")));
     }
@@ -1184,20 +1184,16 @@ mod tests {
     fn a_custom_lumen_db_outside_the_app_dir_is_untouched_by_the_mapping() {
         let home = TempDir::new().unwrap();
         let root = home.path().join("root");
-        std::fs::create_dir_all(root.join("fake.old")).unwrap();
-        std::fs::create_dir_all(root.join("fake.new")).unwrap();
-        std::fs::write(
-            root.join("fake.new").join(crate::legacy::MARKER_NAME),
-            b"{}",
-        )
-        .unwrap();
+        let old = root.join("example.previous.app");
+        std::fs::create_dir_all(&old).unwrap();
+        mark_migrated(&root.join("fake.new"), &old);
         let custom = home.path().join("mine").join("ledger.db");
         let got = resolve_db_path_with(
             Some(&custom.to_string_lossy()),
             None,
             "fake.new",
-            "fake.old",
             &[root.as_path()],
+            &crate::legacy::redirect::MarkerCache::new(),
         );
         assert_eq!(got, Some(custom));
     }

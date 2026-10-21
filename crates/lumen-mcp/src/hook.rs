@@ -75,12 +75,17 @@ impl Env<'_> {
     }
 
     /// `LUMEN_FAULT_SPOOL`, else `faults.jsonl` beside the database — the same rule as
-    /// [`faults::spool_path`], over the injected environment.
+    /// [`faults::spool_path`], over the injected environment: both go through the redirect, so a
+    /// spool an old shim exported into the previous folder lands in the new one, and an empty
+    /// variable counts as unset.
     fn spool_path(&self) -> Option<PathBuf> {
-        if let Some(p) = self.get("LUMEN_FAULT_SPOOL") {
-            return Some(PathBuf::from(p));
-        }
-        Some(self.db_path()?.parent()?.join("faults.jsonl"))
+        let home = self.get("HOME").or_else(|| self.get("USERPROFILE"));
+        let env_spool = self.get("LUMEN_FAULT_SPOOL");
+        faults::spool_path_with(
+            env_spool.as_deref().map(std::ffi::OsStr::new),
+            self.db_path().as_deref(),
+            home.as_deref(),
+        )
     }
 }
 
@@ -764,6 +769,60 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |k: &str| map.get(k).cloned()
+    }
+
+    /// `Env::spool_path` is `faults::spool_path`'s rule over the injected environment: an empty
+    /// variable is unset, and a spool an old shim exported into the previous folder lands in N
+    /// once the marker says where that folder went.
+    #[test]
+    fn the_spool_goes_through_the_redirect_and_an_empty_variable_is_unset() {
+        use lumen_core::legacy::marker::{FORMAT, MarkerV2, STATE_MIGRATED, write_marker};
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path().to_string_lossy().into_owned();
+        let n = meter::app_data_dir_in(home.path());
+        let prev = n.parent().unwrap().join("example.previous.app");
+        std::fs::create_dir_all(&prev).unwrap();
+        std::fs::create_dir_all(&n).unwrap();
+        write_marker(
+            &n,
+            &MarkerV2 {
+                format: FORMAT,
+                state: STATE_MIGRATED.into(),
+                source: "example.previous.app".into(),
+                source_dir: prev.to_string_lossy().into_owned(),
+                backup: "legacy-backup-2026-10-19".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let state = home.path().join("state");
+        let spool_for = |pairs: &[(&str, &str)]| {
+            let var = vars(pairs);
+            Env {
+                var: &var,
+                state_dir: &state,
+            }
+            .spool_path()
+        };
+        let stale = prev.join("faults.jsonl");
+        assert_eq!(
+            spool_for(&[
+                ("HOME", &h),
+                ("LUMEN_FAULT_SPOOL", &stale.to_string_lossy())
+            ]),
+            Some(n.join("faults.jsonl")),
+            "red before the redirect: the stale path was used as it stood"
+        );
+        let stale_db = prev.join("lumen.db");
+        assert_eq!(
+            spool_for(&[
+                ("HOME", &h),
+                ("LUMEN_DB", &stale_db.to_string_lossy()),
+                ("LUMEN_FAULT_SPOOL", ""),
+            ]),
+            Some(n.join("faults.jsonl")),
+            "empty is unset: beside the database, which is N's"
+        );
     }
 
     fn hook(

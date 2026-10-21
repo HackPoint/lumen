@@ -121,6 +121,9 @@ fn is_real_dir(p: &Path) -> bool {
 /// The fault spool's path under the same rule, over an injected environment: the value of
 /// `LUMEN_FAULT_SPOOL` redirected like any path, else `faults.jsonl` beside the database.
 ///
+/// An empty `LUMEN_FAULT_SPOOL` counts as unset, as an empty `LUMEN_DB` does and as the shims'
+/// `${VAR:-default}` did: an exported but blank variable must not name a spool called "".
+///
 /// `resolved_db` is the database as `meter::resolve_db_path` returns it, already redirected,
 /// so a spool beside it follows. Both `faults::spool_path` and the hook's `Env::spool_path`
 /// apply this one rule. Old shims export `LUMEN_FAULT_SPOOL` into the previous folder, and
@@ -132,7 +135,7 @@ pub fn spool_in(
     roots: &[&Path],
     cache: &MarkerCache,
 ) -> Option<PathBuf> {
-    if let Some(p) = env_spool {
+    if let Some(p) = env_spool.filter(|p| !p.as_os_str().is_empty()) {
         return Some(redirect_in(p, new_id, roots, cache));
     }
     Some(resolved_db?.parent()?.join("faults.jsonl"))
@@ -143,13 +146,35 @@ fn process_cache() -> &'static MarkerCache {
     CACHE.get_or_init(MarkerCache::new)
 }
 
-/// [`redirect_in`] for this build's identifier, the platform's data roots and the process-wide
-/// marker cache.
-pub fn redirect(path: &Path) -> PathBuf {
-    let home = dirs::home_dir();
-    let roots = super::data_roots_cached(home.as_deref());
+/// [`redirect_in`] for this build's identifier, the platform's data roots under `home` (the
+/// home the caller resolved its path against) and the process-wide marker cache.
+pub fn redirect_for_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    let roots = super::data_roots_cached(home);
     let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
     redirect_in(path, crate::meter::APP_ID, &refs, process_cache())
+}
+
+/// [`redirect_for_home`] for the real home.
+pub fn redirect(path: &Path) -> PathBuf {
+    redirect_for_home(path, dirs::home_dir().as_deref())
+}
+
+/// [`spool_in`] for this build's identifier, the data roots under `home` and the process-wide
+/// marker cache. `faults::spool_path` and the hook's `Env::spool_path` both call this.
+pub fn spool_for_home(
+    env_spool: Option<&Path>,
+    resolved_db: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let roots = super::data_roots_cached(home);
+    let refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    spool_in(
+        env_spool,
+        resolved_db,
+        crate::meter::APP_ID,
+        &refs,
+        process_cache(),
+    )
 }
 
 #[cfg(test)]

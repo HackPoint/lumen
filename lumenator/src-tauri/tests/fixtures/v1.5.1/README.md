@@ -10,8 +10,8 @@ are rewritten, the configs are left byte-identical until Setup is re-run, and a 
 keeps the user's settings and other MCP servers.
 
 There is one edit: the data directory in each script's default paths was replaced with
-`__APP_DIR__`. The test substitutes the legacy directory in a temp home, taken from
-`legacy::LEGACY_APP_ID`, so no fixture carries the identifier. Every other byte is as installed.
+`__APP_DIR__`. The test substitutes a neutral previous directory (`example.previous.app`) in a temp home,
+so no fixture carries the identifier. Every other byte is as installed.
 
 | file | what it shows |
 | --- | --- |
