@@ -112,7 +112,7 @@ impl FaultRecord {
 ///
 /// Days-from-civil is the inverse of Howard Hinnant's civil-from-days, which is the
 /// algorithm `chrono` uses; it is exact for every date this will ever see.
-fn utc_now() -> String {
+pub fn utc_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -141,12 +141,32 @@ fn utc_now() -> String {
 /// Beside the database on purpose — that path is already resolved consistently by every
 /// component (env var, pointer file, binary-relative), so the spool cannot end up
 /// somewhere `lumen report` will not look.
+///
+/// Both ways go through [`crate::legacy::redirect`]: an old shim exports `LUMEN_FAULT_SPOOL`
+/// into the previous folder, and after the migration a line appended there would be lost
+/// from the live ledger. An empty `LUMEN_FAULT_SPOOL` counts as unset, here and in the hook.
 pub fn spool_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("LUMEN_FAULT_SPOOL") {
-        return Some(PathBuf::from(p));
-    }
-    let db = crate::meter::db_path()?;
-    Some(db.parent()?.join("faults.jsonl"))
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    spool_path_with(
+        std::env::var_os("LUMEN_FAULT_SPOOL").as_deref(),
+        crate::meter::db_path().as_deref(),
+        home.as_deref(),
+    )
+}
+
+/// [`spool_path`] over an explicit environment.
+pub fn spool_path_with(
+    env_spool: Option<&std::ffi::OsStr>,
+    resolved_db: Option<&Path>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
+    crate::legacy::redirect::spool_for_home(
+        env_spool.map(Path::new),
+        resolved_db,
+        home.map(Path::new),
+    )
 }
 
 /// Append one fault to the resolved spool. Best-effort by contract: callers are on
@@ -275,7 +295,7 @@ pub fn peek_spool_at(path: &Path) -> std::io::Result<Vec<FaultRecord>> {
 }
 
 /// Where a drain moves the spool while it inserts it.
-fn draining_path(spool: &Path) -> PathBuf {
+pub(crate) fn draining_path(spool: &Path) -> PathBuf {
     spool.with_extension("jsonl.draining")
 }
 
@@ -285,9 +305,23 @@ fn draining_path(spool: &Path) -> PathBuf {
 /// good fault in the spool. Decoded lossily for the same reason: a tail cut inside a
 /// multi-byte character is one bad line, not a spool that cannot be read.
 fn parse_spool(bytes: &[u8]) -> Vec<FaultRecord> {
+    records(bytes, DRAIN_LINE_CAP)
+}
+
+/// Every record in spool bytes, with no [`DRAIN_LINE_CAP`].
+///
+/// For the one reader that takes a spool whole and for good: the freeze of a migrated
+/// install's backup, which would otherwise leave the lines past the cap behind for ever.
+/// A line that does not parse (a partial last line, a corrupt one) is skipped and left
+/// where it is: nothing here writes to the bytes' source.
+pub fn parse_spool_all(bytes: &[u8]) -> Vec<FaultRecord> {
+    records(bytes, usize::MAX)
+}
+
+fn records(bytes: &[u8], cap: usize) -> Vec<FaultRecord> {
     String::from_utf8_lossy(bytes)
         .lines()
-        .take(DRAIN_LINE_CAP)
+        .take(cap)
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .filter_map(|l| serde_json::from_str::<FaultRecord>(l).ok())
@@ -336,27 +370,43 @@ pub fn insert(conn: &rusqlite::Connection, recs: &[FaultRecord]) -> rusqlite::Re
         return Ok(0);
     }
     let tx = conn.unchecked_transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
-             agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        )?;
-        for r in recs {
-            stmt.execute(rusqlite::params![
-                r.ts,
-                r.kind,
-                r.variant,
-                r.path,
-                r.lines,
-                r.detail,
-                r.session_id,
-                r.version,
-                r.channel,
-                r.agent_id,
-            ])?;
-        }
-    }
+    insert_in(&tx, recs)?;
     tx.commit()?;
+    Ok(recs.len())
+}
+
+/// [`insert`] inside a transaction the caller owns and commits: the rows land with whatever
+/// else the caller writes in it, or not at all.
+pub fn insert_in(tx: &rusqlite::Transaction<'_>, recs: &[FaultRecord]) -> rusqlite::Result<usize> {
+    insert_into(tx, "main", recs)
+}
+
+/// [`insert_in`] into the `faults` table of the named schema, for a caller whose `main` is
+/// another ledger and whose target is attached (the manual import). `schema` is a name the caller
+/// chose, never user input.
+pub fn insert_into(
+    tx: &rusqlite::Transaction<'_>,
+    schema: &str,
+    recs: &[FaultRecord],
+) -> rusqlite::Result<usize> {
+    let mut stmt = tx.prepare(&format!(
+        "INSERT INTO {schema}.faults(ts,kind,variant,path,lines,detail,session_id,version,channel,\
+         agent_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+    ))?;
+    for r in recs {
+        stmt.execute(rusqlite::params![
+            r.ts,
+            r.kind,
+            r.variant,
+            r.path,
+            r.lines,
+            r.detail,
+            r.session_id,
+            r.version,
+            r.channel,
+            r.agent_id,
+        ])?;
+    }
     Ok(recs.len())
 }
 
@@ -398,6 +448,59 @@ pub fn drain_spool_at(conn: &rusqlite::Connection, path: &Path) -> rusqlite::Res
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The spool rule, over an explicit environment: an empty `LUMEN_FAULT_SPOOL` is unset (the
+    /// hook's `Env::spool_path` applies the same rule), and a spool an old shim exported into
+    /// the previous folder is redirected into N once the marker says where the folder went.
+    #[test]
+    fn the_spool_is_redirected_and_an_empty_variable_counts_as_unset() {
+        use crate::legacy::marker::{FORMAT, MarkerV2, STATE_MIGRATED, write_marker};
+        let home = TempDir::new().unwrap();
+        let h = home.path().to_string_lossy().to_string();
+        let n = crate::meter::app_data_dir_in(home.path());
+        let prev = n.parent().unwrap().join("example.previous.app");
+        std::fs::create_dir_all(&prev).unwrap();
+        let db = n.join("lumen.db");
+
+        // Nothing migrated yet: the variable is used as it stands, and an empty one is unset.
+        let stale = prev.join("faults.jsonl");
+        std::fs::create_dir_all(&n).unwrap();
+        assert_eq!(
+            spool_path_with(Some(stale.as_os_str()), Some(&db), Some(&h)),
+            Some(stale.clone())
+        );
+        assert_eq!(
+            spool_path_with(Some(std::ffi::OsStr::new("")), Some(&db), Some(&h)),
+            Some(n.join("faults.jsonl")),
+            "empty counts as unset: beside the database"
+        );
+        assert_eq!(spool_path_with(None, None, Some(&h)), None);
+
+        write_marker(
+            &n,
+            &MarkerV2 {
+                format: FORMAT,
+                state: STATE_MIGRATED.into(),
+                source: "example.previous.app".into(),
+                source_dir: prev.to_string_lossy().into_owned(),
+                backup: "legacy-backup-2026-10-19".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Red before the redirect: the stale spool was used as it stood, in the folder the
+        // migration moved away.
+        assert_eq!(
+            spool_path_with(Some(stale.as_os_str()), Some(&db), Some(&h)),
+            Some(n.join("faults.jsonl"))
+        );
+        let own = home.path().join("elsewhere").join("spool.jsonl");
+        assert_eq!(
+            spool_path_with(Some(own.as_os_str()), Some(&db), Some(&h)),
+            Some(own),
+            "a spool the user placed elsewhere is theirs"
+        );
+    }
 
     /// A spool private to this test. Deliberately not via `LUMEN_FAULT_SPOOL`: the
     /// environment is process-global, so tests sharing it through env would race under
@@ -797,5 +900,41 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{build} arm did not create faults");
         }
+    }
+
+    #[test]
+    fn the_whole_spool_is_parsed_past_the_drain_cap_and_a_cut_line_is_skipped() {
+        let line = |k: usize| {
+            serde_json::to_string(&FaultRecord::now(&format!("k{k}"), "v")).unwrap() + "\n"
+        };
+        let mut bytes = String::new();
+        for k in 0..DRAIN_LINE_CAP + 3 {
+            bytes += &line(k);
+        }
+        bytes += "{\"ts\":\"t\",\"kind\":\"cut";
+        assert_eq!(parse_spool(bytes.as_bytes()).len(), DRAIN_LINE_CAP);
+        let all = parse_spool_all(bytes.as_bytes());
+        assert_eq!(all.len(), DRAIN_LINE_CAP + 3);
+        assert_eq!(all.last().unwrap().kind, format!("k{}", DRAIN_LINE_CAP + 2));
+    }
+
+    #[test]
+    fn insert_in_lands_with_its_transaction_or_not_at_all() {
+        let mut c = conn_with_schema();
+        let recs = [FaultRecord::now("a", "v"), FaultRecord::now("b", "v")];
+        {
+            let tx = c.transaction().unwrap();
+            assert_eq!(insert_in(&tx, &recs).unwrap(), 2);
+            // dropped: rolled back
+        }
+        let n = |c: &rusqlite::Connection| -> i64 {
+            c.query_row("SELECT count(*) FROM faults", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(n(&c), 0);
+        let tx = c.transaction().unwrap();
+        insert_in(&tx, &recs).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(n(&c), 2);
     }
 }

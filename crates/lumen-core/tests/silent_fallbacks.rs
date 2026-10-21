@@ -164,6 +164,63 @@ const ALLOWED: &[Allowed] = &[
         "The batch is already in the ledger; one left behind may be counted twice, never lost.",
     ),
     allow(
+        "crates/lumen-core/src/legacy/migrate.rs",
+        DroppedWrite,
+        "sync_all()",
+        "A directory fsync is a durability hint (and does not exist on Windows); the files \
+         themselves are synced with their errors returned.",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/commit.rs",
+        DroppedWrite,
+        "remove_dir_all(",
+        "The tidy after the marker is written: the migration is committed, the stage is only \
+         leftovers, and a leftover is removed by the next run. (A failed run does not delete \
+         its stage: undo_half_commit takes back what was renamed into N first, because the \
+         next run reads the intent.)",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/commit.rs",
+        DroppedWrite,
+        "remove_file(&back)",
+        "Clears a stale copy in our own stage so the rename that takes the file back can land \
+         (Windows will not rename over a file); if the removal fails the rename after it fails \
+         and returns the error.",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/commit.rs",
+        DroppedWrite,
+        "MOVED_STAMP",
+        "The move stamp is a record of when L was renamed, read by nothing that gates anything; \
+         a missing stamp is written by the next start's retry.",
+    )
+    .times(2),
+    allow(
+        "crates/lumen-core/src/legacy/marker.rs",
+        DroppedWrite,
+        "sync_all()",
+        "A directory fsync after the marker's rename is a durability hint (and does not exist on \
+         Windows); the marker file itself is synced with its error returned, and the next start \
+         reads the marker from the disk, so a rename that did not reach the journal is a marker \
+         that is not there yet, never a wrong one.",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/freeze.rs",
+        OrDefault,
+        "to_string_lossy().into_owned()",
+        "The label of a backup folder in the `legacy_merge` key. The folder comes from the marker \
+         and always has a name; a path without one would give the key `backup:`, which names one \
+         backup as well as any other, and no figure is derived from it.",
+    ),
+    allow(
+        "crates/lumen-core/src/legacy/freeze.rs",
+        NumberForError,
+        ".copied()",
+        "Where the merge starts in a table the marker has no mark for: the table was not in the \
+         snapshot, so no row of it was carried and the position is 0. A rowid position, not a \
+         measurement; a table whose mark is there is never read as 0.",
+    ),
+    allow(
         "crates/lumen-core/src/meter.rs",
         OrDefault,
         "CLAUDE_CODE_ENTRYPOINT",
@@ -438,6 +495,14 @@ const ALLOWED: &[Allowed] = &[
         "remove_file(&tmp)",
         "Cleanup on a path that returns the error it is cleaning up after.",
     ),
+    allow(
+        "lumenator/src-tauri/src/setup/repoint.rs",
+        DroppedWrite,
+        "remove_file(&tmp)",
+        "The CLI link's scratch name: cleared before the new link is made, and after a failed \
+         symlink or rename whose own error is returned. A leftover is cleared the next time.",
+    )
+    .times(2),
     allow(
         "lumenator/src-tauri/src/setup.rs",
         OrDefault,

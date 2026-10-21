@@ -19,6 +19,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod data;
 mod doctor;
+mod import_ledger;
 mod savings;
 mod ui;
 
@@ -71,6 +72,16 @@ enum Cmd {
     Show,
     /// Print everything a bug report needs: status-item preferences, processes, paths, logs.
     Doctor,
+    /// Bring in a Lumen ledger an older install left behind: a folder an old app re-created, a
+    /// restored copy of the previous folder, or a ledger Lumen set aside. Rows already in this
+    /// ledger are not added twice; the folder moves into `legacy-imports` beside it.
+    ImportLedger {
+        /// The folder, its `lumen.db`, or a set-aside ledger such as `lumen.db.pre-legacy`.
+        path: PathBuf,
+        /// Say what would be added, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// The fault report's flags.
@@ -168,6 +179,10 @@ enum Route {
     },
     Show,
     Doctor,
+    ImportLedger {
+        path: PathBuf,
+        dry_run: bool,
+    },
 }
 
 fn route(cli: Cli) -> Route {
@@ -192,6 +207,7 @@ fn route(cli: Cli) -> Route {
         Some(Cmd::Faults(args)) => Route::Faults { args, moved: false },
         Some(Cmd::Show) => Route::Show,
         Some(Cmd::Doctor) => Route::Doctor,
+        Some(Cmd::ImportLedger { path, dry_run }) => Route::ImportLedger { path, dry_run },
     }
 }
 
@@ -287,6 +303,7 @@ fn main() {
             print!("{}", doctor::render(&doctor::collect()));
             0
         }
+        Route::ImportLedger { path, dry_run } => import_ledger::run(&path, dry_run),
         Route::Dash { no_anim, moved } => {
             if moved {
                 eprintln!(
@@ -500,6 +517,24 @@ mod tests {
         };
         over(&mut a);
         a
+    }
+
+    #[test]
+    fn import_ledger_takes_a_path_and_a_dry_run_flag() {
+        assert_eq!(
+            routed(&["import-ledger", "/x/lumen.db"]),
+            Route::ImportLedger {
+                path: PathBuf::from("/x/lumen.db"),
+                dry_run: false
+            }
+        );
+        assert_eq!(
+            routed(&["import-ledger", "/x", "--dry-run"]),
+            Route::ImportLedger {
+                path: PathBuf::from("/x"),
+                dry_run: true
+            }
+        );
     }
 
     #[test]

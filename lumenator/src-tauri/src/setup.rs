@@ -1,7 +1,10 @@
 #![allow(clippy::unnecessary_map_or)] // map_or style kept for clarity in async context
+use lumen_core::legacy::marker::Seen;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
+
+pub(crate) mod repoint;
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
@@ -61,13 +64,84 @@ impl SetupStep {
 /// Returns true when setup has not been completed yet.
 #[tauri::command]
 pub fn lumen_setup_needed() -> bool {
-    !marker_path().exists()
+    let home = home();
+    let n = app_support_dir_in(&home);
+    setup_needed_with(&home, &n, &lumen_core::legacy::marker::read(&n))
+}
+
+/// Setup is needed when it has never completed, when a migration has committed and Setup has
+/// not yet recorded the new data folder (it records the folder it baked in `.setup_done`, and
+/// a Setup run while the old folder was still in use names that one), or when one of Lumen's
+/// entries in Claude's files still has a value inside the previous folder or its backup (the
+/// redirect keeps that working until Setup moves it).
+///
+/// A fresh install that settled, and a pre-release migration, need Setup only for the first
+/// reason, or the last.
+pub(crate) fn setup_needed_with(home: &Path, n: &Path, seen: &Seen) -> bool {
+    let Ok(done) = std::fs::read_to_string(marker_path_in(home)) else {
+        return true;
+    };
+    if matches!(seen, Seen::Migrated(_)) && !setup_done_names(&done, n) {
+        return true;
+    }
+    !legacy_references_with(home, n, seen).is_empty()
+}
+
+/// Whether `.setup_done` says the data folder it baked was `n`.
+fn setup_done_names(done: &str, n: &Path) -> bool {
+    let want = fold_path(&n.to_string_lossy());
+    done.lines()
+        .filter_map(|l| l.trim().strip_prefix("data_dir="))
+        .any(|d| fold_path(d.trim()) == want)
+}
+
+/// The values of Lumen's entries, in `~/.claude.json` and `~/.claude/settings.json`, that sit
+/// inside the previous folder or its backup, as "where value". Empty when nothing moved.
+fn legacy_references_with(home: &Path, n: &Path, seen: &Seen) -> Vec<String> {
+    let moved = match seen {
+        Seen::Migrated(m) => repoint::Moved::of(m, n),
+        Seen::V1 { source } => Some(repoint::Moved::of_names(
+            &lumen_core::legacy::data_roots(Some(home)),
+            source,
+            n,
+        )),
+        _ => None,
+    };
+    let Some(moved) = moved else {
+        return Vec::new();
+    };
+    let mut claude = read_config_object(&claude_json_path_in(home)).ok();
+    let mut settings = read_config_object(&global_settings_path_in(home)).ok();
+    repoint::stale_values(claude.as_mut(), settings.as_mut(), &moved)
+}
+
+/// A path as one comparable string: forward slashes, no trailing one, and
+/// lower-case where the file system folds case.
+fn fold_path(p: &str) -> String {
+    let s = p.replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    if cfg!(any(windows, target_os = "macos")) {
+        s.to_ascii_lowercase()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Run all setup steps. Returns one entry per step.
 #[tauri::command]
 pub fn lumen_run_setup(app: AppHandle) -> Vec<SetupStep> {
-    run_setup(&PluginAutoStart(&app))
+    use tauri::Manager;
+    let steps = run_setup(&PluginAutoStart(&app));
+    // Setup has re-registered: when it recorded the new data folder, the backup is merged once
+    // more and frozen, and nothing is merged from it again.
+    let home = home();
+    // The folder the start resolved: the same function as `Ctx::real` and the Setup prompt.
+    let n = app_support_dir_in(&home);
+    let report = crate::upgrade::freeze_after_setup(&home, &n);
+    if let Some(health) = app.try_state::<crate::health::StartupHealth>() {
+        report.apply(&health, "SETUP");
+    }
+    steps
 }
 
 /// Remove all Lumen configuration from ~/.claude/. Returns one entry per action.
@@ -229,7 +303,7 @@ pub fn ensure_autostart_once(a: &dyn AutoStart, marker: &Path, current_exe: &str
 }
 
 /// Marker recording that the one-time login-item registration has happened.
-fn autostart_marker_in(home: &Path) -> PathBuf {
+pub(crate) fn autostart_marker_in(home: &Path) -> PathBuf {
     lumen_dir_in(home).join(".autostart_done")
 }
 
@@ -244,7 +318,7 @@ pub fn ensure_autostart_once_for(app: &AppHandle) -> bool {
 }
 
 /// [`AutoStart`] backed by the real plugin.
-struct PluginAutoStart<'a>(&'a AppHandle);
+pub(crate) struct PluginAutoStart<'a>(pub(crate) &'a AppHandle);
 
 impl AutoStart for PluginAutoStart<'_> {
     fn is_enabled(&self) -> Result<bool, String> {
@@ -305,8 +379,15 @@ fn lumen_dir_in(home: &Path) -> PathBuf {
     home.join(".claude/lumen")
 }
 
-fn marker_path_in(home: &Path) -> PathBuf {
+pub(crate) fn marker_path_in(home: &Path) -> PathBuf {
     lumen_dir_in(home).join(".setup_done")
+}
+
+/// What `.setup_done` holds: the data folder this Setup baked into the shims and the config,
+/// the parent of the ledger it was given. Old installs have it empty.
+fn setup_done_text(db: &str) -> String {
+    let dir = Path::new(db).parent().unwrap_or_else(|| Path::new(""));
+    format!("data_dir={}\n", dir.display())
 }
 
 fn claude_json_path_in(home: &Path) -> PathBuf {
@@ -320,10 +401,6 @@ fn global_settings_path_in(home: &Path) -> PathBuf {
 #[cfg_attr(not(test), allow(dead_code))]
 fn lumen_dir() -> PathBuf {
     lumen_dir_in(&home())
-}
-
-fn marker_path() -> PathBuf {
-    marker_path_in(&home())
 }
 
 /// How to run Setup again, as a person at the keyboard can do it. There is no menu item for
@@ -353,7 +430,7 @@ fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn find_binary(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_binary(name: &str) -> Option<PathBuf> {
     find_binary_from(&exe_dir(), name)
 }
 
@@ -392,7 +469,7 @@ fn find_binary_from(start: &Path, name: &str) -> Option<PathBuf> {
 /// module derives from a single `home` argument so tests can never escape their
 /// tempdir, and one env var reading differently in tests than in production is
 /// exactly the class of bug that costs more than it saves.
-fn app_support_dir_in(home: &Path) -> PathBuf {
+pub(crate) fn app_support_dir_in(home: &Path) -> PathBuf {
     // Delegated to lumen-core so there is exactly one definition of where Lumen's
     // data lives. Two copies of this would be the split-ledger bug in a new place:
     // the GUI and the metering writers must agree on one directory, and a drift
@@ -420,7 +497,7 @@ fn is_ephemeral_path(p: &std::path::Path) -> bool {
 
 // Resolve a sidecar binary to a path that survives the DMG being ejected. If the
 // bundled binary lives on an ephemeral mount, copy it into a stable, user-writable
-// location (`…/io.hackpoint.lumen/bin/<name>`) and return that; otherwise return
+// location (`<data dir>/bin/<name>`) and return that; otherwise return
 // the resolved path unchanged. Copying the standalone Mach-O preserves its
 // embedded code signature, so it still launches.
 fn stable_binary(name: &str) -> Option<PathBuf> {
@@ -455,6 +532,17 @@ fn baked_paths(home: &Path) -> (String, String) {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     (db, mcp)
+}
+
+/// The `lumen-mcp` this build bakes into the scripts and Claude's entries, as `baked_paths` finds
+/// it. `None` when this build cannot find its sidecar.
+pub(crate) fn baked_mcp() -> Option<String> {
+    let (_, mcp) = baked_paths(&home());
+    if mcp.is_empty() {
+        None
+    } else {
+        Some(mcp)
+    }
 }
 
 /// The metering DB inside the per-OS data directory. Derived from
@@ -524,6 +612,16 @@ fn sync_dir(dir: &Path) {
 /// deliberately tightened permission. Pass 0 when no bit is functionally
 /// required.
 fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result<()> {
+    // No `?` here: the start-up scan allows none in code startup reaches (the app's start
+    // re-points Claude's files through this), so each error is returned by hand.
+    macro_rules! tried {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            }
+        };
+    }
     // Resolve symlinks first. Users who keep ~/.claude.json in a dotfile repo
     // symlink it, and renaming onto the link would replace it with a regular
     // file and silently detach their config. The temp must also live in the
@@ -534,7 +632,7 @@ fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result
         Some(d) => d.to_path_buf(),
         None => return Err(std::io::Error::other("target has no parent directory")),
     };
-    std::fs::create_dir_all(&dir)?;
+    tried!(std::fs::create_dir_all(&dir));
 
     let mode = mode_of(&target) | mode_floor;
     let name = target
@@ -545,13 +643,13 @@ fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result
 
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
+        let mut f = tried!(std::fs::File::create(&tmp));
+        tried!(f.write_all(contents.as_bytes()));
+        tried!(f.sync_all());
     }
     // Mode before rename, so the file is never visible at the target path with
     // the wrong permissions.
-    set_mode(&tmp, mode)?;
+    tried!(set_mode(&tmp, mode));
     if let Err(e) = std::fs::rename(&tmp, &target) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -753,6 +851,11 @@ fn validate_cli() -> ArtifactStatus {
 }
 
 fn validate_mcp_in(home: &Path) -> ArtifactStatus {
+    let n = app_support_dir_in(home);
+    validate_mcp_with(home, &n, &lumen_core::legacy::marker::read(&n))
+}
+
+pub(crate) fn validate_mcp_with(home: &Path, n: &Path, seen: &Seen) -> ArtifactStatus {
     // An unreadable file is reported as one. "No lumen entry — run Setup" would send
     // the user to a Setup that refuses the same file.
     let mcp = match read_config_object(&claude_json_path_in(home)) {
@@ -790,7 +893,18 @@ fn validate_mcp_in(home: &Path) -> ArtifactStatus {
                     }
                 }
             }
-            if dead.is_empty() {
+            // Still working through the redirect, but Setup is what moves it.
+            let stale = legacy_references_with(home, n, seen);
+            if dead.is_empty() && !stale.is_empty() {
+                ArtifactStatus {
+                    id: "mcp".into(),
+                    healthy: false,
+                    detail: format!(
+                        "points into the legacy data directory: {} — run Setup",
+                        stale.join("; ")
+                    ),
+                }
+            } else if dead.is_empty() {
                 ArtifactStatus {
                     id: "mcp".into(),
                     healthy: true,
@@ -1887,7 +2001,7 @@ fn run_setup_with(
         .all(|s| s.status == StepStatus::Ok || s.status == StepStatus::Warn);
     if all_good {
         let _ = std::fs::create_dir_all(lumen_dir_in(home));
-        let _ = std::fs::write(marker_path_in(home), "");
+        let _ = std::fs::write(marker_path_in(home), setup_done_text(db_str));
     }
 
     steps
@@ -2077,7 +2191,7 @@ fn step_remove_cli_symlink() -> SetupStep {
 }
 
 #[cfg(unix)]
-fn cli_symlink_path() -> PathBuf {
+pub(crate) fn cli_symlink_path() -> PathBuf {
     if std::path::Path::new("/usr/local/bin").is_dir() {
         PathBuf::from("/usr/local/bin/lumen")
     } else {
@@ -2088,7 +2202,7 @@ fn cli_symlink_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn cli_symlink_path() -> PathBuf {
+pub(crate) fn cli_symlink_path() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(".local").join("bin").join("lumen.exe"))
         .unwrap_or_else(|| PathBuf::from("lumen.exe"))
@@ -3146,9 +3260,9 @@ mod tests {
 
     #[test]
     fn a_user_local_path_is_not_ephemeral() {
-        assert!(!is_ephemeral_path(Path::new(
-            "/Users/someone/Library/Application Support/io.hackpoint.lumen/bin/lumen-mcp"
-        )));
+        assert!(!is_ephemeral_path(Path::new(&format!(
+            "/Users/someone/Library/Application Support/{APP_ID}/bin/lumen-mcp"
+        ))));
     }
 
     #[test]
@@ -3183,17 +3297,19 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(
             app_support_dir_in(h),
-            Path::new("/tmp/fake-home/Library/Application Support/io.hackpoint.lumen")
+            Path::new(&format!(
+                "/tmp/fake-home/Library/Application Support/{APP_ID}"
+            ))
         );
         #[cfg(target_os = "windows")]
         assert_eq!(
             app_support_dir_in(h),
-            Path::new("/tmp/fake-home/AppData/Roaming/io.hackpoint.lumen")
+            Path::new(&format!("/tmp/fake-home/AppData/Roaming/{APP_ID}"))
         );
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             app_support_dir_in(h),
-            Path::new("/tmp/fake-home/.local/share/io.hackpoint.lumen"),
+            Path::new(&format!("/tmp/fake-home/.local/share/{APP_ID}")),
             "Linux follows the XDG default"
         );
     }
@@ -3235,7 +3351,6 @@ mod tests {
         // Guards against the wrappers drifting from the *_in functions.
         let h = home();
         assert_eq!(lumen_dir(), lumen_dir_in(&h));
-        assert_eq!(marker_path(), marker_path_in(&h));
         assert_eq!(app_support_dir(), app_support_dir_in(&h));
     }
 
@@ -5216,6 +5331,50 @@ mod tests {
         )
     }
 
+    /// The Setup that satisfies the prompt after a migration is the one that re-registers: it
+    /// records the data folder it baked, and a login item the user turned off stays off.
+    #[test]
+    fn setup_still_leaves_an_opted_out_login_item_off() {
+        let h = TempDir::new().unwrap();
+        let (db, mcp) = setup_home(h.path());
+        let a = FakeAutoStart::default();
+        assert!(ensure_autostart_once(
+            &a,
+            &autostart_marker_in(h.path()),
+            EXE
+        ));
+        a.disable().unwrap();
+
+        let steps = run_setup_with(h.path(), &a, &db, &mcp);
+
+        assert!(find(&steps, AUTOSTART_ID).detail.contains("Left off"));
+        assert!(!a.enabled.get(), "Setup switched the login item back on");
+        let n = h.path().join("data");
+        assert_eq!(
+            std::fs::read_to_string(marker_path_in(h.path())).unwrap(),
+            format!("data_dir={}\n", n.display()),
+            "Setup records the folder it baked"
+        );
+        let m = lumen_core::legacy::marker::MarkerV2 {
+            format: 2,
+            state: "migrated".into(),
+            source: "example.previous.app".into(),
+            source_dir: h
+                .path()
+                .join("old/example.previous.app")
+                .to_string_lossy()
+                .into(),
+            backup: "legacy-backup-2026-10-19".into(),
+            ..Default::default()
+        };
+        let seen = Seen::Migrated(std::sync::Arc::new(m));
+        assert!(!setup_needed_with(h.path(), &n, &seen));
+        assert!(
+            setup_needed_with(h.path(), &h.path().join("elsewhere"), &seen),
+            "a Setup that baked another folder does not satisfy it"
+        );
+    }
+
     /// 1.6.0 tells Windows users to re-run Setup to repair their hook commands. A
     /// re-run that switched the login item back on would be 1.1.2's bug again, through
     /// a second door.
@@ -5470,7 +5629,7 @@ mod tests {
 
     /// The cask must uninstall the LaunchAgent that actually exists.
     ///
-    /// It targeted `io.hackpoint.lumen` — the bundle id — while the autostart plugin writes
+    /// It targeted the bundle id while the autostart plugin writes
     /// `Lumen.plist` with Label `Lumen`. `launchctl` matches on the Label, so every
     /// uninstall left the login item in place, still trying to launch a deleted app at
     /// each boot. Reported from the field as part of issue #5.
@@ -5494,6 +5653,11 @@ mod tests {
         assert!(
             text.contains("~/Library/LaunchAgents/Lumen.plist"),
             "zap must remove the plist the plugin actually writes"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("uninstall quit:") && l.contains(&format!("\"{APP_ID}\""))),
+            "the cask must quit the app by its current bundle id"
         );
     }
 }

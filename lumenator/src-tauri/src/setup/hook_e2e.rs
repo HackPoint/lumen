@@ -681,14 +681,23 @@ fn fixture_bytes(name: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
-/// A script as 1.5.1 installed it, for a user whose home is `home`.
+/// A script as 1.5.1 installed it, for a user whose home is `home`: its default paths are in
+/// the data directory 1.5.1 baked, which is the previous one.
 fn v151_script(name: &str, home: &Path) -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/v1.5.1")
         .join(name);
     std::fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
-        .replace("__HOME__", &shell_path(&home.to_string_lossy()))
+        .replace(
+            "__APP_DIR__",
+            &shell_path(
+                &home
+                    .join("Library/Application Support")
+                    .join(PREVIOUS)
+                    .to_string_lossy(),
+            ),
+        )
 }
 
 /// A stub `lumen-mcp` at `at`, answering to `name`.
@@ -2710,4 +2719,273 @@ fn verify_hooks_fails_hooks_whose_lumen_mcp_is_gone() {
     assert_eq!(code, 1, "{raw}");
     assert!(!rig.spool.exists(), "{:?}", rig.faults());
     assert_eq!(scratch_left(&rig), Vec::<PathBuf>::new());
+}
+
+// ── An upgrade across the data-directory move ────────────────────────────────
+//
+// The shims in `tests/fixtures/v1.9.0` and `v1.8.0` are what those tags' Setup
+// generated, with `__APP_DIR__` (the data directory they baked) and `__MCP__` (the
+// sidecar) as placeholders. The previous directory is substituted at test time with a
+// neutral name, so no fixture carries the old identifier, and this build's start finds
+// it by what it holds: a Lumen ledger.
+//
+// `APP_ID` is the real new identifier, because the sidecar the hooks exec is the real one
+// and redirects through it. The data root is the rig's own, so the start looks nowhere
+// else. Setup is the real `run_setup_in`.
+
+const UPGRADE_NEW_ID: &str = lumen_core::meter::APP_ID;
+
+/// The folder the previous install used. Nothing but this test knows it: the start finds it.
+const PREVIOUS: &str = "example.previous.app";
+
+fn upgrade_shim(version: &str, name: &str, app_dir: &Path, mcp: &Path) -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(format!("v{version}"))
+        .join(name);
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    assert!(
+        text.contains("__APP_DIR__") && text.contains("__MCP__"),
+        "{} lost its placeholders",
+        p.display()
+    );
+    text.replace("__APP_DIR__", &shell_path(&app_dir.to_string_lossy()))
+        .replace("__MCP__", &shell_path(&mcp.to_string_lossy()))
+}
+
+fn ledger_rows(db: &Path) -> i64 {
+    Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap_or_else(|e| panic!("open {}: {e}", db.display()))
+        .query_row("SELECT count(*) FROM read_events", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// An install made by `version`, then this build's first launch, then Setup.
+fn upgrade_from(version: &str, login_on: bool) {
+    use crate::upgrade::{at_start, freeze_after_setup, Ctx};
+    use lumen_core::legacy::commit::backup_dir;
+    use lumen_core::legacy::freeze::is_frozen;
+    use lumen_core::legacy::marker::Seen;
+    use lumen_core::legacy::retire::Native;
+    use lumen_core::legacy::satellites::{Platform, Roots};
+
+    let rig = Rig::with_home("Jane Doe", SHIM_TOOLS);
+    let real = rig.real_mcp();
+    let root = app_support_dir_in(&rig.home)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let item = LoginItem(Cell::new(login_on));
+    let find_mcp = || Some(real.to_string_lossy().into_owned());
+    let ctx = Ctx {
+        n: root.join(UPGRADE_NEW_ID),
+        new_id: UPGRADE_NEW_ID.into(),
+        roots: vec![root.clone()],
+        home: rig.home.clone(),
+        platform: Platform::current(),
+        satellite_roots: Roots::default(),
+        ledger_only: Vec::new(),
+        autostart: &item,
+        autostart_dir: None,
+        run_key: None,
+        exe: Some(APP_EXE.into()),
+        appimage: None,
+        plugin_name: "Lumen".into(),
+        ops: &Native,
+        mcp_bin: &find_mcp,
+        cli_link: None,
+        cli_bin: None,
+        commit: lumen_core::legacy::commit::CommitOptions::new("2026-10-18T08:00:00Z"),
+    };
+    let (old, new_db) = (root.join(PREVIOUS), ctx.n.join("lumen.db"));
+    std::fs::create_dir_all(&old).unwrap();
+    let old_db = old.join("lumen.db");
+
+    // What `version` left on disk.
+    let dir = lumen_dir_in(&rig.home);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut old_shims = Vec::new();
+    for name in ["lumen_meter.sh", "lumen_read_intercept.sh"] {
+        let at = dir.join(name);
+        let text = upgrade_shim(version, name, &old, &real);
+        std::fs::write(&at, &text).unwrap();
+        set_mode(&at, 0o755).unwrap();
+        old_shims.push((at, text));
+    }
+    let audit = json!({"type": "command", "command": "/usr/local/bin/audit-read"});
+    let settings = global_settings_path_in(&rig.home);
+    write_json(
+        &settings,
+        &json!({"model": "opus", "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}]}}),
+    );
+    let step = step_install_hooks_in(&rig.home);
+    assert_eq!(step.status, StepStatus::Ok, "{step:?}");
+    let claude_json = claude_json_path_in(&rig.home);
+    let github =
+        json!({"type": "stdio", "command": "/usr/local/bin/github-mcp", "args": [], "env": {}});
+    write_json(
+        &claude_json,
+        &json!({"numStartups": 7, "mcpServers": {
+            "lumen": {"type": "stdio", "command": real.to_string_lossy(), "args": [],
+                      "env": {"LUMEN_DB": old_db.to_string_lossy()}},
+            "github": github
+        }}),
+    );
+    std::fs::write(marker_path_in(&rig.home), "").unwrap();
+    let login_marker = autostart_marker_in(&rig.home);
+    std::fs::write(&login_marker, APP_EXE).unwrap();
+    let settings_before = std::fs::read(&settings).unwrap();
+
+    let env = rig.claude_env(READ_SESSION);
+    let file = rig.file("hello.rs", HELLO);
+    let read = rig.captured("read_post.json", Some(&file));
+
+    // 1. The old hooks work before this build has ever run.
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&old_db), 1);
+
+    // 2. This build's first launch finds the previous folder by its ledger, copies what is
+    // Lumen's, and moves the folder whole into the backup. Nothing is left at the old path.
+    let report = at_start(&ctx);
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(ledger_rows(&new_db), 1);
+    let Seen::Migrated(marker) = lumen_core::legacy::marker::read(&ctx.n) else {
+        panic!("no committed marker");
+    };
+    let backup = backup_dir(&ctx.n, &marker).unwrap();
+    let backup_db = backup.join("data").join("lumen.db");
+    assert_eq!(ledger_rows(&backup_db), 1);
+    assert!(
+        !old.exists(),
+        "no folder named like the previous one is left"
+    );
+
+    // 3. Before Setup the old hooks still fire. The saved old shim writes the old path, which
+    // the redirect maps to the new ledger; the refreshed shim writes the new one. The backup
+    // is left as it was.
+    let refreshed: Vec<_> = old_shims
+        .iter()
+        .map(|(at, _)| (at.clone(), std::fs::read_to_string(at).unwrap()))
+        .collect();
+    assert!(
+        refreshed
+            .iter()
+            .zip(&old_shims)
+            .all(|(new, old)| new.1 != old.1 && !new.1.contains(PREVIOUS)),
+        "the start refreshed the shims to bake the new folder"
+    );
+    for (at, text) in &old_shims {
+        std::fs::write(at, text).unwrap();
+    }
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&new_db), 2, "through the saved old shim");
+    for (at, text) in &refreshed {
+        std::fs::write(at, text).unwrap();
+    }
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&new_db), 3, "through the refreshed shim");
+    assert_eq!(ledger_rows(&backup_db), 1);
+
+    // 4. The next launches find nothing to carry over, however often they run, and nothing
+    // freezes before Setup.
+    for _ in 0..2 {
+        let report = at_start(&ctx);
+        assert!(report.problems.is_empty(), "{report:?}");
+        assert_eq!(ledger_rows(&new_db), 3);
+    }
+    assert!(!is_frozen(&new_db, &backup));
+
+    // 5. The start re-pointed Lumen's own entry and nothing else, the prompt still asks for
+    // Setup, and the login item is as the user had it.
+    let cfg: Value = serde_json::from_slice(&std::fs::read(&claude_json).unwrap()).unwrap();
+    assert_eq!(
+        cfg["mcpServers"]["lumen"]["env"]["LUMEN_DB"],
+        new_db.to_string_lossy().as_ref()
+    );
+    assert_eq!(cfg["mcpServers"]["github"], github);
+    assert_eq!(cfg["numStartups"], 7);
+    assert!(std::fs::read(&settings).unwrap() == settings_before);
+    let n = ctx.n.clone();
+    let seen = lumen_core::legacy::marker::read(&n);
+    assert!(setup_needed_with(&rig.home, &n, &seen));
+    assert!(!ensure_autostart_once(&item, &login_marker, APP_EXE));
+    assert_eq!(item.0.get(), login_on);
+
+    // 6. Setup rewrites what is Lumen's and keeps the rest. The real `run_setup_in` bakes an
+    // exported LUMEN_DB in place of the data-dir ledger (`baked_paths`), which would make the
+    // assertions below compare against the developer's own ledger path, so say so instead.
+    assert!(
+        std::env::var_os("LUMEN_DB").is_none(),
+        "unset LUMEN_DB to run the upgrade tests: Setup bakes it into the config they check"
+    );
+    let steps = run_setup_in(&rig.home, &item);
+    assert!(
+        steps
+            .iter()
+            .all(|s| matches!(s.status, StepStatus::Ok | StepStatus::Warn)),
+        "{steps:?}"
+    );
+    let cfg: Value = serde_json::from_slice(&std::fs::read(&claude_json).unwrap()).unwrap();
+    assert_eq!(
+        cfg["mcpServers"]["lumen"]["env"]["LUMEN_DB"],
+        new_db.to_string_lossy().as_ref()
+    );
+    assert_eq!(cfg["mcpServers"]["github"], github);
+    let saved = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        saved.contains("audit-read") && saved.contains("\"model\""),
+        "{saved}"
+    );
+    assert!(!setup_needed_with(&rig.home, &n, &seen));
+    assert!(validate_mcp_with(&rig.home, &n, &seen).healthy);
+    assert_eq!(
+        item.0.get(),
+        login_on,
+        "Setup keeps the login item as it was"
+    );
+
+    // 7. The freeze comes after Setup, and only then: the backup is read-only, and what
+    // the hooks write afterwards goes to the new ledger directly.
+    assert!(!is_frozen(&new_db, &backup), "Setup alone freezes nothing");
+    let report = freeze_after_setup(&rig.home, &n);
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert!(is_frozen(&new_db, &backup));
+    assert!(
+        std::fs::metadata(&backup_db)
+            .unwrap()
+            .permissions()
+            .readonly(),
+        "the backup is read-only"
+    );
+    rig.meter(&read, &env);
+    assert_eq!(ledger_rows(&new_db), 4);
+    let report = at_start(&ctx);
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(ledger_rows(&new_db), 4);
+    assert_eq!(ledger_rows(&backup_db), 1, "the backup is only read");
+    assert!(
+        !old.exists(),
+        "no folder named like the previous one is left"
+    );
+    assert_eq!(item.0.get(), login_on);
+}
+
+#[test]
+fn an_upgrade_from_1_9_0_keeps_the_hooks_firing_and_the_login_item_on() {
+    upgrade_from("1.9.0", true);
+}
+
+#[test]
+fn an_upgrade_from_1_9_0_keeps_the_login_item_off() {
+    upgrade_from("1.9.0", false);
+}
+
+#[test]
+fn an_upgrade_from_1_8_0_keeps_the_hooks_firing_and_the_login_item_off() {
+    upgrade_from("1.8.0", false);
+}
+
+#[test]
+fn an_upgrade_from_1_8_0_keeps_the_login_item_on() {
+    upgrade_from("1.8.0", true);
 }

@@ -500,7 +500,7 @@ fn describe(x: &Finding) -> String {
 /// The preference domains Lumen has written status-item state under. Both are real — this
 /// machine has `NSStatusItem Preferred Position Item-0` in each, with different values.
 #[cfg(target_os = "macos")]
-pub const PREF_DOMAINS: [&str; 2] = ["io.hackpoint.lumen", "Lumen"];
+pub const PREF_DOMAINS: [&str; 2] = [lumen_core::meter::APP_ID, "Lumen"];
 
 #[cfg(target_os = "macos")]
 const MENU_BAR_MANAGERS: [&str; 7] = [
@@ -695,7 +695,10 @@ pub fn collect() -> Facts {
             }
         }
 
-        let log = home.join("Library/Logs/io.hackpoint.lumen/Lumen.log");
+        let log = home
+            .join("Library/Logs")
+            .join(lumen_core::meter::APP_ID)
+            .join("Lumen.log");
         f.log_size_bytes = std::fs::metadata(&log).ok().map(|m| m.len());
         f.log_path = Some(log.to_string_lossy().to_string());
 
@@ -739,7 +742,7 @@ pub fn show() -> i32 {
     #[cfg(target_os = "macos")]
     {
         match std::process::Command::new("/usr/bin/open")
-            .args(["-b", "io.hackpoint.lumen"])
+            .args(["-b", lumen_core::meter::APP_ID])
             .status()
         {
             Ok(s) if s.success() => {
@@ -772,6 +775,7 @@ pub fn show() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lumen_core::meter::APP_ID;
 
     fn healthy() -> Facts {
         Facts {
@@ -803,12 +807,12 @@ mod tests {
         f.menu_bar_managers = vec!["Bartender".into()];
         f.status_item_prefs = vec![
             StatusItemPref {
-                domain: "io.hackpoint.lumen".into(),
+                domain: APP_ID.into(),
                 key: "NSStatusItem Preferred Position Item-0".into(),
                 visible: None,
             },
             StatusItemPref {
-                domain: "io.hackpoint.lumen".into(),
+                domain: APP_ID.into(),
                 key: "NSStatusItem Visible Item-0".into(),
                 visible: Some(false),
             },
@@ -828,7 +832,7 @@ mod tests {
         // Lumen's own domain once held it false, and a match on "Visible " with a trailing
         // space never saw it, so doctor reported nothing wrong on a machine hiding the icon.
         let pref = |visible| StatusItemPref {
-            domain: "io.hackpoint.lumen".into(),
+            domain: APP_ID.into(),
             key: "NSStatusItem VisibleCC Item-0".into(),
             visible,
         };
@@ -838,15 +842,13 @@ mod tests {
         assert_eq!(
             found,
             [Finding::IconHiddenByPreference {
-                domain: "io.hackpoint.lumen".into(),
+                domain: APP_ID.into(),
                 key: "NSStatusItem VisibleCC Item-0".into(),
             }]
         );
-        assert!(
-            found[0]
-                .remedy()
-                .contains(r#"defaults delete io.hackpoint.lumen "NSStatusItem VisibleCC Item-0""#)
-        );
+        assert!(found[0].remedy().contains(&format!(
+            r#"defaults delete {APP_ID} "NSStatusItem VisibleCC Item-0""#
+        )));
         // The control: the same key set true is what every other app on a Mac has.
         f.status_item_prefs = vec![pref(Some(true))];
         assert!(findings(&f).is_empty(), "{:?}", findings(&f));
@@ -928,7 +930,7 @@ mod tests {
         // chasing a non-problem — this machine has exactly this shape and the tray works.
         let mut f = healthy();
         f.status_item_prefs = vec![StatusItemPref {
-            domain: "io.hackpoint.lumen".into(),
+            domain: APP_ID.into(),
             key: "NSStatusItem Preferred Position Item-0".into(),
             visible: None,
         }];
@@ -951,7 +953,7 @@ mod tests {
         let mut f = healthy();
         f.status_item_prefs = vec![
             StatusItemPref {
-                domain: "io.hackpoint.lumen".into(),
+                domain: APP_ID.into(),
                 key: "NSStatusItem Visible Item-0".into(),
                 visible: Some(false),
             },
@@ -963,7 +965,7 @@ mod tests {
         ];
         let found = findings(&f);
         assert_eq!(found.len(), 2, "{found:?}");
-        assert!(found[0].remedy().contains("io.hackpoint.lumen"));
+        assert!(found[0].remedy().contains(APP_ID));
         assert!(found[1].remedy().contains("delete Lumen "));
     }
 
@@ -1030,7 +1032,7 @@ mod tests {
     fn a_hidden_icon_is_described_in_terms_a_user_can_act_on() {
         let f = Facts {
             status_item_prefs: vec![StatusItemPref {
-                domain: "io.hackpoint.lumen".into(),
+                domain: APP_ID.into(),
                 key: "NSStatusItem Visible Item-0".into(),
                 visible: Some(false),
             }],

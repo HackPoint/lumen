@@ -6,7 +6,7 @@
 //! enforces exactly this, and nothing wider:
 //!
 //! 1. The `.setup` closure, and every function of the crate it can reach by naming it, contain no
-//!    `?`, except the functions in `EXEMPT`: each returns an error its one caller handles, and the
+//!    `?` (or `some!`/`tried!`, the macros that spell it out), except the functions in `EXEMPT`: each returns an error its one caller handles, and the
 //!    scan checks that the caller still does.
 //! 2. The only `expect` in production code is `Builder::build`'s, in `run`, outside the closure.
 //! 3. The log plugin is registered at the top level of the closure with no profile, `cfg` or branch
@@ -25,7 +25,15 @@ use std::path::{Path, PathBuf};
 const APP_SRC: &str = "lumenator/src-tauri/src";
 const APP_MANIFEST: &str = "lumenator/src-tauri/Cargo.toml";
 /// The production files of the app. Anything else under `APP_SRC` must be a test-only module.
-const APP_FILES: [&str; 4] = ["lib.rs", "health.rs", "setup.rs", "main.rs"];
+const APP_FILES: [&str; 7] = [
+    "lib.rs",
+    "health.rs",
+    "setup.rs",
+    "main.rs",
+    "upgrade.rs",
+    "upgrade/autostart.rs",
+    "setup/repoint.rs",
+];
 const SKIP_DIRS: [&str; 6] = [
     ".git",
     "target",
@@ -550,11 +558,28 @@ fn setup_closures(name: &str, code: &[u8]) -> Vec<(usize, usize)> {
 
 // ── What the claims are about ─────────────────────────────────────────────────────────────────
 
-/// Where a `?` operator sits in `from..to`. `?Sized` is a bound, not an operator.
+/// The macros the app spells `?` with, so that startup code can return early without the
+/// operator: each is `match $e { Ok(v) => v, Err(e) => return Err(e) }` or its `Option` twin.
+/// The scan reads a call of one as the `?` it replaces.
+const TRY_MACROS: [&str; 2] = ["some", "tried"];
+
+/// Where a `?` operator, or a call of a `?` macro, sits in `from..to`. `?Sized` is a bound, not
+/// an operator.
 fn tries(code: &[u8], from: usize, to: usize) -> Vec<usize> {
-    (from..to)
+    let mut at: Vec<usize> = (from..to)
         .filter(|&i| code[i] == b'?' && !matches!(prev_non_space(code, i), Some(b':' | b'+')))
-        .collect()
+        .collect();
+    at.extend(
+        idents(code, from, to)
+            .into_iter()
+            .filter(|&(s, e)| {
+                TRY_MACROS.iter().any(|m| m.as_bytes() == &code[s..e])
+                    && next_non_space(code, e) == Some(b'!')
+            })
+            .map(|(s, _)| s),
+    );
+    at.sort_unstable();
+    at
 }
 
 /// Where `expect` and `expect_err` are called in `from..to`, as a method or as `Result::expect`.
@@ -631,6 +656,13 @@ enum Handled {
     ByMatch,
     /// The statement it is in turns a failure into a value through this adapter.
     By(&'static str),
+    /// The call is wrapped in `some!`/`tried!`, so the error goes up one more level, and the
+    /// calling function is itself in `EXEMPT`: its own entry says who deals with it.
+    Forwarded,
+    /// The function returns an `Option`: its `?` or `some!` is an early `None`, which no caller
+    /// can turn into an error that aborts startup (the closure's `?` would not compile on it).
+    /// Any caller may use it. The scan checks the return type.
+    Option,
 }
 
 #[derive(Clone, Copy)]
@@ -643,10 +675,11 @@ struct Exempt {
     why: &'static str,
 }
 
-/// Functions startup reaches that use `?`. In each, the `?` hands an error back to a caller that
-/// deals with it, so none can abort startup. The scan fails if one stops using `?` (the entry is
-/// stale) or if its caller stops dealing with the error.
-const EXEMPT: [Exempt; 4] = [
+/// Functions startup reaches that use `?`, or `some!`/`tried!`, which the scan reads as `?`. In
+/// each, it hands an error back to a caller that deals with it, so none can abort startup. The
+/// scan fails if one stops using `?` (the entry is stale) or if its caller stops dealing with the
+/// error. A function with several callers has one entry per caller.
+const EXEMPT: [Exempt; 15] = [
     Exempt {
         name: "build_tray_menu_items",
         file: "health.rs",
@@ -662,6 +695,13 @@ const EXEMPT: [Exempt; 4] = [
         why: "the tray refresh setup spawns logs an `Err` and shows no savings line",
     },
     Exempt {
+        name: "stable_binary",
+        file: "setup.rs",
+        caller: Some("baked_paths"),
+        handled: Handled::By("unwrap_or_default"),
+        why: "it returns an `Option`, so its `?` is an early `None`, and its caller defaults it",
+    },
+    Exempt {
         name: "write_atomic",
         file: "setup.rs",
         caller: Some("ensure_scripts_fresh_in"),
@@ -669,11 +709,81 @@ const EXEMPT: [Exempt; 4] = [
         why: "its caller logs a warning on `Err` and leaves the script as it was",
     },
     Exempt {
-        name: "stable_binary",
+        name: "write_atomic",
         file: "setup.rs",
-        caller: Some("baked_paths"),
-        handled: Handled::By("unwrap_or_default"),
-        why: "it returns an `Option`, so its `?` is an early `None`, and its caller defaults it",
+        caller: Some("repoint_file"),
+        handled: Handled::Forwarded,
+        why: "repoint_file hands the error on, and its own caller reports it as a problem",
+    },
+    Exempt {
+        name: "repoint_file",
+        file: "setup/repoint.rs",
+        caller: Some("repoint_with"),
+        handled: Handled::ByMatch,
+        why: "repoint_with records an `Err` as a problem and goes on to the next file",
+    },
+    Exempt {
+        name: "settle",
+        file: "upgrade/autostart.rs",
+        caller: Some("adopt_other_entries"),
+        handled: Handled::ByMatch,
+        why: "adopt_other_entries records an `Err` as a problem and goes on to the next entry",
+    },
+    Exempt {
+        name: "write_run_json",
+        file: "upgrade/autostart.rs",
+        caller: Some("settle"),
+        handled: Handled::Forwarded,
+        why: "settle hands the error on, and its own caller records it as a problem",
+    },
+    Exempt {
+        name: "scan_registry",
+        file: "upgrade/autostart.rs",
+        caller: Some("scan"),
+        handled: Handled::ByMatch,
+        why: "scan passes the error on, and adopt_other_entries reports it as a problem",
+    },
+    Exempt {
+        name: "tail_inside",
+        file: "setup/repoint.rs",
+        caller: None,
+        handled: Handled::Option,
+        why: "an early `None` means the value is not inside the moved folder",
+    },
+    Exempt {
+        name: "moved_path",
+        file: "setup/repoint.rs",
+        caller: None,
+        handled: Handled::Option,
+        why: "an early `None` means the value is not inside the moved folder",
+    },
+    Exempt {
+        name: "parse_value",
+        file: "upgrade/autostart.rs",
+        caller: None,
+        handled: Handled::Option,
+        why: "an early `None` means the text is not a plist Lumen can read, so not its entry",
+    },
+    Exempt {
+        name: "parse_plist",
+        file: "upgrade/autostart.rs",
+        caller: None,
+        handled: Handled::Option,
+        why: "an early `None` means the text is not a plist Lumen can read, so not its entry",
+    },
+    Exempt {
+        name: "agent_of",
+        file: "upgrade/autostart.rs",
+        caller: None,
+        handled: Handled::Option,
+        why: "an early `None` means the plist is not a Lumen entry",
+    },
+    Exempt {
+        name: "plist_text",
+        file: "upgrade/autostart.rs",
+        caller: None,
+        handled: Handled::Option,
+        why: "an early `None` means the file or `plutil` gave no text, so not an entry",
     },
 ];
 
@@ -737,6 +847,7 @@ fn unhandled(code: &[u8], at: usize, end: usize, body: &Body, how: &Handled) -> 
                 None
             }
         }
+        Handled::Forwarded | Handled::Option => None,
         Handled::By(adapter) => {
             let stmt = &code[at..statement_end(code, end, body.close)];
             if !has_word(stmt, adapter) {
@@ -750,6 +861,36 @@ fn unhandled(code: &[u8], at: usize, end: usize, body: &Body, how: &Handled) -> 
             }
         }
     }
+}
+
+/// `None` when the call at `at` is wrapped in `some!`/`tried!` inside an exempt function.
+fn forwarded(code: &[u8], at: usize, body: &Body, exempt: &[Exempt]) -> Option<String> {
+    let start = statement_start(code, at, body.open + 1);
+    let wrapped = idents(code, start, at).into_iter().any(|(s, e)| {
+        TRY_MACROS.iter().any(|m| m.as_bytes() == &code[s..e])
+            && next_non_space(code, e) == Some(b'!')
+    });
+    if !wrapped {
+        Some("the call is not wrapped in `some!` or `tried!`".into())
+    } else if !exempt.iter().any(|y| y.name == body.name) {
+        Some(format!(
+            "`{}` is not itself exempt, so nothing deals with it",
+            body.name
+        ))
+    } else {
+        None
+    }
+}
+
+/// The last place `needle` occurs in `b`, or 0.
+fn rfind(b: &[u8], needle: &[u8]) -> usize {
+    let mut last = 0;
+    let mut from = 0;
+    while let Some(i) = find(b, needle, from) {
+        last = i;
+        from = i + 1;
+    }
+    last
 }
 
 /// Scans `files` for the two startup claims. `files` must hold exactly one `.setup` closure.
@@ -859,7 +1000,7 @@ fn startup(files: &[Source], exempt: &[Exempt]) -> Report {
     }
 
     // Each exemption is live, and its caller still deals with the error.
-    for x in exempt {
+    for (xi, x) in exempt.iter().enumerate() {
         let own: Vec<&Body> = defs
             .get(x.name)
             .into_iter()
@@ -877,6 +1018,28 @@ fn startup(files: &[Source], exempt: &[Exempt]) -> Report {
             ));
             continue;
         }
+        if matches!(x.handled, Handled::Option) {
+            for b in &own {
+                let code = &files[b.file].code;
+                let head = &code[..b.open];
+                let from = rfind(head, format!("fn {}", x.name).as_bytes());
+                if !squash(&head[from..]).contains("->Option<") {
+                    r.violations.push(format!(
+                        "{}: `{}` is exempt because it returns an `Option`, so its `?` is an \
+                         early `None`, but it no longer does: {}",
+                        files[b.file].at(b.open),
+                        x.name,
+                        x.why
+                    ));
+                }
+            }
+            continue;
+        }
+        // The calls are checked once per name, against whichever entry names the caller.
+        if exempt[..xi].iter().any(|y| y.name == x.name) {
+            continue;
+        }
+        let entries: Vec<&Exempt> = exempt.iter().filter(|y| y.name == x.name).collect();
         for body in &scanned {
             let f = &files[body.file];
             for (s, e) in idents(&f.code, body.open, body.close) {
@@ -886,25 +1049,31 @@ fn startup(files: &[Source], exempt: &[Exempt]) -> Report {
                 if !is_call {
                     continue;
                 }
-                let right_caller = match x.caller {
+                let entry = entries.iter().find(|y| match y.caller {
                     None => body.name == CLOSURE,
                     Some(c) => body.name == c,
-                };
-                let problem = if right_caller {
-                    unhandled(&f.code, s, e, body, &x.handled)
-                } else {
-                    Some(format!(
+                });
+                let problem = match entry {
+                    Some(y) if matches!(y.handled, Handled::Forwarded) => {
+                        forwarded(&f.code, s, body, exempt)
+                    }
+                    Some(y) => unhandled(&f.code, s, e, body, &y.handled),
+                    None => Some(format!(
                         "it is called from {}, not from {}",
                         body.name,
-                        x.caller.unwrap_or(CLOSURE)
-                    ))
+                        entries
+                            .iter()
+                            .map(|y| y.caller.unwrap_or(CLOSURE))
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    )),
                 };
                 if let Some(p) = problem {
                     r.violations.push(format!(
                         "{}: `{}` uses `?` and is exempt because {}, but {p}",
                         f.at(s),
                         x.name,
-                        x.why
+                        entry.unwrap_or(&x).why
                     ));
                 }
             }
@@ -1864,10 +2033,27 @@ fn startup_seeds() -> Vec<Seed> {
             says: "it is not the scrutinee of a `match`",
         },
         Seed {
+            what: "a `tried!` in a function startup reaches: the macro is a `?`",
+            file: "setup.rs",
+            edit: |s| in_fn(s, "ensure_scripts_fresh_in", " tried!(g()); "),
+            says: "`?` in `ensure_scripts_fresh_in`",
+        },
+        Seed {
+            what: "a `some!` in a function the closure starts calling",
+            file: "lib.rs",
+            edit: |s| {
+                appended(
+                    &in_closure(s, " startup_extra(); "),
+                    "fn startup_extra() -> Option<u8> { let v = some!(g()); Some(v) }",
+                )
+            },
+            says: "`?` in `startup_extra`",
+        },
+        Seed {
             what: "write_atomic called from the closure, where nothing handles its error",
             file: "lib.rs",
             edit: |s| in_closure(s, " let _ = write_atomic(p, c, 0); "),
-            says: "called from the .setup closure, not from ensure_scripts_fresh_in",
+            says: "called from the .setup closure, not from ensure_scripts_fresh_in or repoint_file",
         },
         Seed {
             what: "write_atomic's caller returns on its error",
@@ -1880,6 +2066,30 @@ fn startup_seeds() -> Vec<Seed> {
                 )
             },
             says: "the `match` arms use `return`",
+        },
+        Seed {
+            what: "write_run_json called without handing its error on",
+            file: "upgrade/autostart.rs",
+            edit: |s| {
+                once(
+                    s,
+                    "tried!(write_run_json(env, e));",
+                    "write_run_json(env, e).unwrap();",
+                )
+            },
+            says: "the call is not wrapped in `some!` or `tried!`",
+        },
+        Seed {
+            what: "an Option helper that no longer returns an Option",
+            file: "upgrade/autostart.rs",
+            edit: |s| {
+                once(
+                    s,
+                    "fn plist_text(path: &Path) -> Option<String> {",
+                    "fn plist_text(path: &Path) -> Result<String, String> {",
+                )
+            },
+            says: "it no longer does",
         },
         Seed {
             what: "stable_binary unwrapped where baked_paths defaults it",

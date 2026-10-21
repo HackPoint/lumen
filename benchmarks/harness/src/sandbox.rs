@@ -245,9 +245,8 @@ pub fn preflight_old_daemon() -> Res<()> {
 /// can match a user's own row.
 pub const BENCH_PREFIXES: [&str; 2] = ["lumen-bench-", "bench-"];
 
-/// The data-directory name the next release moves to. A literal because nothing in lumen-core
-/// on this branch knows it yet; it is a bundle identifier, not a person or a company.
-const NEXT_APP_ID: &str = "io.hackpoint.lumen";
+/// The data-directory name Lumen uses today, from lumen-core.
+const NEXT_APP_ID: &str = lumen_core::meter::APP_ID;
 
 /// The ledgers a run must never write, for a real home: the current data directory's, every
 /// Lumen ledger directly under the platform's data root whatever its folder is called (a

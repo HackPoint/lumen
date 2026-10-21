@@ -42,9 +42,9 @@ if [ -z "${LUMEN_FAULT_SPOOL:-}" ]; then
     fi
     if [ -z "$db" ] && [ -n "$home" ]; then
         case "${OSTYPE:-}" in
-            darwin*) db="$home/Library/Application Support/io.hackpoint.lumen/lumen.db" ;;
-            msys* | cygwin*) db="$home/AppData/Roaming/io.hackpoint.lumen/lumen.db" ;;
-            *) db="$home/.local/share/io.hackpoint.lumen/lumen.db" ;;
+            darwin*) db="$home/Library/Application Support/__LUMEN_APP_ID__/lumen.db" ;;
+            msys* | cygwin*) db="$home/AppData/Roaming/__LUMEN_APP_ID__/lumen.db" ;;
+            *) db="$home/.local/share/__LUMEN_APP_ID__/lumen.db" ;;
         esac
     fi
     case "$db" in
@@ -62,7 +62,11 @@ fn plugin_script(template: &str) -> String {
             .replace("__LUMEN_ORIGIN__", PLUGIN_ORIGIN)
             .replace("__LUMEN_LOCATE__", PLUGIN_LOCATE)
             .replace("__LUMEN_WRITER__", "repo:.claude/hooks/lumen_meter.sh")
-            .replace("__LUMEN_REPORT__", &format!("{PLUGIN_SPOOL}{REPORT_TAIL}")),
+            .replace(
+                "__LUMEN_REPORT__",
+                &format!("{PLUGIN_SPOOL}{REPORT_TAIL}")
+                    .replace("__LUMEN_APP_ID__", lumen_core::meter::APP_ID),
+            ),
     )
 }
 

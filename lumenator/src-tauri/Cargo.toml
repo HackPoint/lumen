@@ -57,6 +57,12 @@ objc2-app-kit = { version = "0.3", features = ["NSStatusItem"] }
 objc2 = "0.6"
 tray-icon = "=0.25.1"
 
+[target.'cfg(windows)'.dependencies]
+# Lumen's own login entries are found by the program they run: the Run key's values and their
+# StartupApproved bytes (`upgrade/autostart.rs`). Already in the lockfile through `auto-launch`;
+# named here because the app reads the registry itself.
+winreg = "0.56"
+
 [dev-dependencies]
 tempfile = "3"
 # Reads the ledger the installed hooks write in `setup::hook_e2e`. Same version and
