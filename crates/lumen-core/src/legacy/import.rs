@@ -59,7 +59,7 @@ use super::discover::{Verdict, is_lumen_ledger};
 use super::faultset::{
     CORE_FAULTS, admit_fresh, counts_in_n, read_spool_files, record_digests, row_digests, tally,
 };
-use super::freeze::make_read_only;
+use super::freeze::{make_read_only, source_key};
 use super::marker::{self, Seen};
 use super::merge::{KEYED_TABLES, POSITIONAL_TABLES, columns, key_expr, quote, row_sig_in};
 use super::migrate::{LEDGER, Probe, probe, sidecar, sync_dir};
@@ -269,7 +269,7 @@ impl ImportReport {
             // Faults have no prefix: the count rule alone decides what is added.
             if *p > 0 && t != "faults" {
                 out.push(format!(
-                    "{t}: the first {p} rowids are already in the live ledger and were skipped"
+                    "{t}: the first {p} rowids are rows the live ledger already holds and were skipped"
                 ));
             }
         }
@@ -284,10 +284,17 @@ impl ImportReport {
                 _ => 0,
             };
         if added + self.faults_held > 0 {
-            out.push(format!(
-                "Fault records: {added} added, {} already held",
-                self.faults_held
-            ));
+            out.push(if self.dry_run {
+                format!(
+                    "Fault records: would add {added}, {} already held",
+                    self.faults_held
+                )
+            } else {
+                format!(
+                    "Fault records: {added} added, {} already held",
+                    self.faults_held
+                )
+            });
         }
         if let Some(why) = &self.faults_refused {
             out.push(format!(
@@ -1251,6 +1258,30 @@ fn recorded_marks(conn: &Connection) -> Result<Vec<(String, i64, String)>, Impor
         .map_err(|e| failed("legacy_merge", e))
 }
 
+/// How far the merge from the backup has taken `table`: its progress row in N, else the marker's
+/// mark (the rows of the snapshot).
+fn merged_mark(
+    conn: &Connection,
+    key: &str,
+    marker: &marker::MarkerV2,
+    table: &str,
+) -> Result<i64, ImportError> {
+    let row: Option<i64> = conn
+        .query_row(
+            "SELECT hwm FROM n.legacy_merge WHERE source = ?1 AND tbl = ?2",
+            params![key, table],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| failed("legacy_merge", e))?;
+    Ok(match (row, marker.hwm.get(table)) {
+        (Some(done), _) => done,
+        (None, Some(&mark)) => mark,
+        // No progress row and no mark: nothing of this table was ever merged.
+        (None, None) => 0,
+    })
+}
+
 /// How many leading rowids of `table` the two ledgers share, row for row, on the columns they both
 /// have. Stops at the first row that differs, or at the end of either.
 fn common_prefix(src: &Connection, orig: &Connection, table: &str) -> Result<i64, String> {
@@ -1377,37 +1408,48 @@ fn list_source(table: &str, id: &str) -> String {
 ///
 /// Twice: over all of the source's columns, and over the core set (see [`core_columns`]), which a
 /// copy on another schema can still be compared on.
-fn record_rows(tx: &rusqlite::Transaction<'_>, table: &str) -> Result<(), ImportError> {
-    let cols = columns(tx, "main", table).map_err(|e| failed(table, e))?;
+///
+/// `rows_in` is the schema of the source whose rows are listed, `n_in` the schema of the new
+/// ledger that keeps the list (the import: `main` and `n`; the merge from the backup: `src` and
+/// `main`).
+pub(super) fn record_rows(
+    tx: &Connection,
+    rows_in: &str,
+    n_in: &str,
+    table: &str,
+) -> Result<(), String> {
+    let cols = columns(tx, rows_in, table).map_err(|e| format!("{table}: {e}"))?;
     if cols.is_empty() {
         return Ok(());
     }
-    record_list(tx, table, &cols)?;
+    record_list(tx, rows_in, n_in, table, &cols)?;
     let core = core_in(table, &cols);
     if !core.is_empty() && core != cols {
-        record_list(tx, table, &core)?;
+        record_list(tx, rows_in, n_in, table, &core)?;
     }
     Ok(())
 }
 
 fn record_list(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
+    rows_in: &str,
+    n_in: &str,
     table: &str,
     cols: &[String],
-) -> Result<(), ImportError> {
+) -> Result<(), String> {
     let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
     let sql = format!(
-        "SELECT rowid, {} FROM main.{} ORDER BY rowid",
+        "SELECT rowid, {} FROM {rows_in}.{} ORDER BY rowid",
         key_expr("", &refs),
         quote(table)
     );
     let mut all: Vec<u8> = Vec::new();
     {
-        let mut st = tx.prepare(&sql).map_err(|e| failed(table, e))?;
-        let mut rs = st.query([]).map_err(|e| failed(table, e))?;
-        while let Some(r) = rs.next().map_err(|e| failed(table, e))? {
-            let id: i64 = r.get(0).map_err(|e| failed(table, e))?;
-            let key: String = r.get(1).map_err(|e| failed(table, e))?;
+        let mut st = tx.prepare(&sql).map_err(|e| format!("{table}: {e}"))?;
+        let mut rs = st.query([]).map_err(|e| format!("{table}: {e}"))?;
+        while let Some(r) = rs.next().map_err(|e| format!("{table}: {e}"))? {
+            let id: i64 = r.get(0).map_err(|e| format!("{table}: {e}"))?;
+            let key: String = r.get(1).map_err(|e| format!("{table}: {e}"))?;
             all.extend_from_slice(&id.to_le_bytes());
             all.extend_from_slice(&Sha256::digest(key.as_bytes())[..8]);
         }
@@ -1418,13 +1460,16 @@ fn record_list(
     let joined = cols.join("\t");
     let id = hex(&Sha256::digest([joined.as_bytes(), &all].concat())[..8]);
     let source = list_source(table, &id);
-    let put =
-        "INSERT OR REPLACE INTO n.legacy_merge (source, tbl, hwm, sig) VALUES (?1, ?2, ?3, ?4)";
+    let put = format!(
+        "INSERT OR REPLACE INTO {n_in}.legacy_merge (source, tbl, hwm, sig) \
+         VALUES (?1, ?2, ?3, ?4)"
+    );
+    let put = put.as_str();
     tx.execute(
         put,
         params![source, "cols", (all.len() / ENTRY) as i64, joined],
     )
-    .map_err(|e| failed("legacy_merge", e))?;
+    .map_err(|e| format!("legacy_merge: {e}"))?;
     for (i, chunk) in all.chunks(LIST_CHUNK * ENTRY).enumerate() {
         tx.execute(
             put,
@@ -1435,20 +1480,27 @@ fn record_list(
                 chunk
             ],
         )
-        .map_err(|e| failed("legacy_merge", e))?;
+        .map_err(|e| format!("legacy_merge: {e}"))?;
     }
     Ok(())
 }
 
 /// A row list an earlier import recorded: the columns it was taken over and the entries.
-struct RowList {
-    cols: Vec<String>,
+pub(super) struct RowList {
+    pub(super) cols: Vec<String>,
     entries: Vec<u8>,
 }
 
-fn recorded_lists(conn: &Connection, table: &str) -> Result<Vec<RowList>, ImportError> {
+pub(super) fn recorded_lists(
+    conn: &Connection,
+    n_in: &str,
+    table: &str,
+) -> Result<Vec<RowList>, String> {
+    let failed = |_: &str, e: rusqlite::Error| format!("legacy_merge: {e}");
     let mut st = conn
-        .prepare("SELECT source, sig FROM n.legacy_merge WHERE tbl = 'cols' AND source LIKE ?1")
+        .prepare(&format!(
+            "SELECT source, sig FROM {n_in}.legacy_merge WHERE tbl = 'cols' AND source LIKE ?1"
+        ))
         .map_err(|e| failed("legacy_merge", e))?;
     let heads = st
         .query_map(params![format!("rows:{table}:%")], |r| {
@@ -1460,10 +1512,10 @@ fn recorded_lists(conn: &Connection, table: &str) -> Result<Vec<RowList>, Import
     let mut out = Vec::new();
     for (source, cols) in heads {
         let mut st = conn
-            .prepare(
-                "SELECT sig FROM n.legacy_merge WHERE source = ?1 AND tbl GLOB '[0-9]*' \
-                 ORDER BY tbl",
-            )
+            .prepare(&format!(
+                "SELECT sig FROM {n_in}.legacy_merge WHERE source = ?1 AND tbl GLOB '[0-9]*' \
+                 ORDER BY tbl"
+            ))
             .map_err(|e| failed("legacy_merge", e))?;
         let chunks = st
             .query_map(params![source], |r| r.get::<_, Vec<u8>>(0))
@@ -1480,10 +1532,15 @@ fn recorded_lists(conn: &Connection, table: &str) -> Result<Vec<RowList>, Import
 
 /// How many leading rowids the source shares with a recorded list, row for row, over the list's
 /// columns: the same walk as [`common_prefix`], against a list instead of a live ledger.
-fn prefix_in_list(src: &Connection, table: &str, list: &RowList) -> Result<i64, String> {
+pub(super) fn prefix_in_list(
+    src: &Connection,
+    rows_in: &str,
+    table: &str,
+    list: &RowList,
+) -> Result<i64, String> {
     let refs: Vec<&str> = list.cols.iter().map(String::as_str).collect();
     let sql = format!(
-        "SELECT rowid, {} FROM main.{} ORDER BY rowid",
+        "SELECT rowid, {} FROM {rows_in}.{} ORDER BY rowid",
         key_expr("", &refs),
         quote(table)
     );
@@ -1529,11 +1586,26 @@ fn run_import(
         .iter()
         .map(|t| (t.to_string(), 0))
         .collect();
+    let backup = match marker::read(p.n) {
+        Seen::Migrated(m) => backup_dir(p.n, &m).map(|b| (b, m)),
+        _ => None,
+    };
     for db in originals(p.n, &conn, &p.ledger)? {
         let orig = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| failed(&format!("cannot read {}", db.display()), e))?;
+        // The backup holds rows the merge has not taken yet (a start killed after the move, before
+        // its merge): only what its merge reached is in N.
+        let is_backup = backup.as_ref().filter(|(b, _)| {
+            same_dir(
+                &real(&b.join(super::commit::DATA_DIR)),
+                &real(db.parent().unwrap_or(&db)),
+            )
+        });
         for table in POSITIONAL_TABLES {
-            let k = common_prefix(&conn, &orig, table).map_err(|e| failed("prefix", e))?;
+            let mut k = common_prefix(&conn, &orig, table).map_err(|e| failed("prefix", e))?;
+            if let Some((b, m)) = is_backup {
+                k = k.min(merged_mark(&conn, &source_key(b), m, table)?);
+            }
             let slot = prefix.entry(table.to_string()).or_insert(0);
             *slot = (*slot).max(k);
         }
@@ -1569,11 +1641,11 @@ fn run_import(
     // still exists.
     for table in POSITIONAL_TABLES {
         let s_cols = columns(&conn, "main", table).map_err(|e| failed(table, e))?;
-        for list in recorded_lists(&conn, table)? {
+        for list in recorded_lists(&conn, "n", table).map_err(|e| failed(table, e))? {
             if list.cols.iter().any(|c| !s_cols.contains(c)) {
                 continue;
             }
-            let k = prefix_in_list(&conn, table, &list).map_err(|e| failed("prefix", e))?;
+            let k = prefix_in_list(&conn, "main", table, &list).map_err(|e| failed("prefix", e))?;
             let slot = prefix.entry(table.to_string()).or_insert(0);
             *slot = (*slot).max(k);
         }
@@ -1716,7 +1788,7 @@ fn run_import(
     // What this source held in each positional table, row by row, so a later copy of it is
     // recognised by content alone.
     for table in POSITIONAL_TABLES {
-        record_rows(&tx, table)?;
+        record_rows(&tx, "main", "n", table).map_err(|e| failed(table, e))?;
     }
     let total: usize = rows.values().sum::<usize>()
         + match &spool {
@@ -5481,6 +5553,187 @@ mod tests {
                 }
             }
             assert!(bad.is_empty(), "orders below the max: {bad:?}");
+        }
+    }
+
+    mod rev_final {
+        use super::*;
+        use crate::legacy::freeze::{Freeze, freeze_if_ready, merge_backup};
+
+        fn marker_of(i: &Install) -> MarkerV2 {
+            match marker::read(&i.n) {
+                Seen::Migrated(m) => (*m).clone(),
+                other => panic!("{other:?}"),
+            }
+        }
+        fn freeze(i: &Install) -> Freeze {
+            let rec = i.root.join(".setup_done");
+            fs::write(&rec, format!("data_dir={}\n", i.n.display())).unwrap();
+            freeze_if_ready(&i.n, &rec, &marker_of(i))
+        }
+        fn re_tag(p: &Path, tag: &str) -> i64 {
+            Connection::open(p)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM read_events WHERE ts = ?1",
+                    [format!("t-{tag}")],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+        fn own_row(i: &Install) {
+            q(
+                &i.n_db(),
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                 routed_via) VALUES ('t-own', 'Read', '/own', 1, 2, 1, 'builtin_read');",
+            );
+        }
+
+        /// F1: a Time Machine copy of the previous folder taken between the snapshot and the move
+        /// (it has late1, not late2); N wrote its own row; the merge took late1 and late2; the
+        /// user deleted the read-only backup; then imports the copy. late1 must stay once.
+        #[test]
+        fn f1_partial_late_copy_after_the_backup_is_deleted() {
+            let i = install();
+            q(&i.b_data().join("lumen.db"), &rows_for("late1"));
+            let c = i.root.join("tm").join("copy");
+            copy_dir(&i.b_data(), &c);
+            q(&i.b_data().join("lumen.db"), &rows_for("late2"));
+            own_row(&i);
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+            assert_eq!(re_tag(&i.n_db(), "late1"), 1);
+            make_writable(&i.b);
+            fs::remove_dir_all(i.b_data()).unwrap();
+            let r = i.import(&c).unwrap();
+            eprintln!("f1: prefix {:?} rows {:?}", r.prefix, r.rows);
+            assert_eq!(
+                re_tag(&i.n_db(), "late1"),
+                1,
+                "read_events late1 doubled: {r:?}"
+            );
+        }
+
+        /// F1 control: the same with the backup still there.
+        #[test]
+        fn f1_control_backup_present() {
+            let i = install();
+            q(&i.b_data().join("lumen.db"), &rows_for("late1"));
+            let c = i.root.join("tm").join("copy");
+            copy_dir(&i.b_data(), &c);
+            q(&i.b_data().join("lumen.db"), &rows_for("late2"));
+            own_row(&i);
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+            let r = i.import(&c).unwrap();
+            assert_eq!(re_tag(&i.n_db(), "late1"), 1, "{r:?}");
+        }
+
+        /// L1: a start killed after the move, before its merge; the user imports a Time Machine
+        /// copy that holds a late row of the backup (prefix against the unmerged backup); then
+        /// deletes the read-only backup. late1 was in the copy, the import said it was held.
+        #[test]
+        fn l1_import_skips_rows_only_the_unmerged_backup_holds() {
+            let i = install();
+            q(&i.b_data().join("lumen.db"), &rows_for("late1"));
+            let c = i.root.join("tm").join("copy");
+            copy_dir(&i.b_data(), &c);
+            let r = i.import(&c).unwrap();
+            eprintln!(
+                "l1: prefix {:?} rows {:?} lines {:?}",
+                r.prefix,
+                r.rows,
+                r.lines()
+            );
+            make_writable(&i.b);
+            fs::remove_dir_all(i.b_data()).unwrap();
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert_eq!(
+                re_tag(&i.n_db(), "late1"),
+                1,
+                "read_events late1 lost: {r:?}"
+            );
+        }
+
+        /// F2: the real sequence. S2 (move refused), the old app writes late1, Time Machine
+        /// copies the folder, the old app writes late2, N writes its own row, the move, the merge,
+        /// the freeze; the user deletes the backup; imports the Time Machine copy.
+        #[test]
+        fn f2_real_sequence_partial_copy_after_the_backup_is_deleted() {
+            let t = TempDir::new().unwrap();
+            let root = t.path().join("data");
+            let l = root.join("example.previous.app");
+            let n = root.join("example.current.app");
+            ledger(&l.join("lumen.db"), &["snap"]);
+            let mut o = CommitOptions::new("2026-10-19T08:00:00Z");
+            o.probe_tries = 1;
+            o.probe_delay = Duration::from_millis(10);
+            let m: MarkerV2 =
+                match commit::migrate(&l, &n, &o, &Refuse(io::ErrorKind::PermissionDenied)) {
+                    Outcome::Migrated { marker, moved } => {
+                        assert!(matches!(moved, Moved::Deferred(_)), "{moved:?}");
+                        marker
+                    }
+                    other => panic!("{other:?}"),
+                };
+            q(&l.join("lumen.db"), &rows_for("late1"));
+            let tm = root.join("tm").join("example.previous.app");
+            copy_dir(&l, &tm);
+            q(&l.join("lumen.db"), &rows_for("late2"));
+            q(
+                &n.join("lumen.db"),
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                 routed_via) VALUES ('t-own', 'Read', '/own', 1, 2, 1, 'builtin_read');",
+            );
+            let mut o2 = CommitOptions::new("2026-10-19T09:00:00Z");
+            o2.probe_tries = 1;
+            o2.probe_delay = Duration::from_millis(10);
+            assert!(matches!(
+                commit::retry_move(&n, &m, &o2, &Native),
+                Moved::Done
+            ));
+            let b = backup_dir(&n, &m).unwrap();
+            let i = Install { _t: t, root, n, b };
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert!(matches!(freeze(&i), Freeze::Frozen(_)));
+            let before = counts(&i.n_db());
+            assert_eq!(re_tag(&i.n_db(), "late1"), 1);
+            make_writable(&i.b);
+            fs::remove_dir_all(i.b_data()).unwrap();
+            let r = i.import(&tm).unwrap();
+            eprintln!("f2: prefix {:?} rows {:?}", r.prefix, r.rows);
+            let after = counts(&i.n_db());
+            assert_eq!(
+                (re_tag(&i.n_db(), "late1"), after["read_events"]),
+                (1, before["read_events"]),
+                "read_events doubled: {r:?}"
+            );
+        }
+        /// L1 with the backup kept: the import took late1, so the merge that comes later must not.
+        #[test]
+        fn l1_the_merge_after_the_import_does_not_add_late1_again() {
+            let i = install();
+            q(&i.b_data().join("lumen.db"), &rows_for("late1"));
+            let c = i.root.join("tm").join("copy");
+            copy_dir(&i.b_data(), &c);
+            i.import(&c).unwrap();
+            merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
+            assert_eq!(re_tag(&i.n_db(), "late1"), 1);
+        }
+
+        /// A dry run says "would add" on the faults line.
+        #[test]
+        fn the_dry_run_faults_line_says_would_add() {
+            let mut r = empty_report("x".into(), PathBuf::from("x"), Placed::Already, &opts());
+            r.faults_held = 2;
+            r.dry_run = true;
+            let text = r.lines().join("\n");
+            assert!(
+                text.contains("Fault records: would add 0, 2 already held"),
+                "{text}"
+            );
+            r.dry_run = false;
+            assert!(r.lines().join("\n").contains("0 added, 2 already held"));
         }
     }
 }

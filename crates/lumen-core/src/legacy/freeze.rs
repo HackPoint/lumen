@@ -28,6 +28,7 @@ use super::commit::{DATA_DIR, Lock, LockError, backup_dir, take_lock};
 use super::faultset::{
     admit_fresh, counts_in_n, read_spool_files, record_digests, row_digests, tally,
 };
+use super::import::{prefix_in_list, record_rows, recorded_lists};
 use super::marker::MarkerV2;
 use super::merge::{
     KEYED_TABLES, POSITIONAL_TABLES, columns, progress, quote, ro_uri, row_sig_in, set_progress,
@@ -331,6 +332,19 @@ fn skipped_fault_rows(
     })
 }
 
+/// How many leading rows of the backup's `table` a row list in N already holds: an import of a
+/// copy of the previous folder put them there, so the merge must not add them again.
+fn listed_prefix(conn: &Connection, src_cols: &[String], table: &str) -> Result<i64, String> {
+    let mut best = 0;
+    for list in recorded_lists(conn, "main", table)? {
+        if list.cols.iter().any(|c| !src_cols.contains(c)) {
+            continue;
+        }
+        best = best.max(prefix_in_list(conn, "src", table, &list)?);
+    }
+    Ok(best)
+}
+
 /// The row pass: every table of both kinds, on the columns both ledgers have.
 fn rows(
     conn: &Connection,
@@ -375,6 +389,9 @@ fn rows(
         if !positional && top < mark {
             mark = 0; // a keyed table that shrank: one full pass, the keys keep it exact
         }
+        if table == "read_events" {
+            mark = mark.max(listed_prefix(conn, &src_cols, table)?);
+        }
         let t = quote(table);
         let verb = if positional {
             "INSERT"
@@ -399,6 +416,11 @@ fn rows(
             .map_err(|e| format!("{table}: {e}"))?;
         if n > 0 {
             report.rows.insert(table.to_string(), n);
+            if table == "read_events" {
+                // Keep the backup's rows, one by one, in N: an import of a copy of the previous
+                // folder is then told what N holds even after the backup is deleted.
+                record_rows(conn, "src", "main", table)?;
+            }
         }
         let sig = if positional && top > 0 {
             row_sig_in(conn, "src", table, &src_cols, top)?
