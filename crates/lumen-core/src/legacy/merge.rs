@@ -352,7 +352,7 @@ fn copy_rows(
 
 /// SQL for one string that is equal for two rows exactly when every listed column is equal
 /// (NULL equal to NULL): each value quoted, so no value can be mistaken for the separator.
-fn key_expr(alias: &str, cols: &[&str]) -> String {
+pub(super) fn key_expr(alias: &str, cols: &[&str]) -> String {
     cols.iter()
         .map(|c| format!("quote({alias}{})", quote(c)))
         .collect::<Vec<_>>()

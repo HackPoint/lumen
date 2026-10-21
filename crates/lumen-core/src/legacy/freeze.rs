@@ -25,6 +25,10 @@
 //! the stamp and the read-only bits left to redo.
 
 use super::commit::{DATA_DIR, Lock, LockError, backup_dir, take_lock};
+use super::faultset::{
+    admit_fresh, counts_in_n, read_spool_files, record_digests, row_digests, tally,
+};
+use super::import::{prefix_in_list, record_rows, recorded_lists};
 use super::marker::MarkerV2;
 use super::merge::{
     KEYED_TABLES, POSITIONAL_TABLES, columns, progress, quote, ro_uri, row_sig_in, set_progress,
@@ -137,6 +141,7 @@ fn run(
         &key,
         marker,
         &data,
+        n_db.parent().unwrap_or(Path::new(".")),
         has_ledger,
         freeze,
         stop,
@@ -156,6 +161,7 @@ fn pass(
     key: &str,
     marker: &MarkerV2,
     data: &Path,
+    n_dir: &Path,
     has_ledger: bool,
     freeze: bool,
     stop: Stop,
@@ -174,25 +180,31 @@ fn pass(
         if !report.rewound.is_empty() {
             return Ok(()); // the transaction rolls back
         }
-        rows(&tx, key, marker, report)?;
+        rows(&tx, key, marker, report, data, n_dir)?;
     }
     if freeze {
-        let spool = data.join("faults.jsonl");
-        let mut bytes = Vec::new();
-        let mut recs = Vec::new();
-        for p in [faults::draining_path(&spool), spool] {
-            match fs::read(&p) {
-                Ok(b) => {
-                    recs.extend(faults::parse_spool_all(&b));
-                    bytes.extend_from_slice(&b);
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
+        // The spool lines come in as a multiset against N (see `faultset`): a line goes in while
+        // the backup (its rows and its spool) holds more of its digest than N does, so one an
+        // import, an earlier pass or N's own drain already brought is not added again.
+        let (recs, bytes) = read_spool_files(&data.join("faults.jsonl"))?;
+        let keys = record_digests(&recs)?;
+        let mut held_by_b = tally(keys.iter());
+        if has_ledger && let Some(rows) = row_digests(&tx, "src")? {
+            for (_, k) in &rows {
+                *held_by_b.entry(k.clone()).or_insert(0) += 1;
             }
         }
-        faults::insert_in(&tx, &recs).map_err(|e| format!("faults from the spool: {e}"))?;
-        set_progress(&tx, key, FROZEN_TBL, recs.len() as i64, Some(&hex(&bytes)))?;
-        report.spool_records = recs.len();
+        let in_n = counts_in_n(&tx, "main", n_dir)?;
+        let admitted = admit_fresh(&held_by_b, &in_n, &keys);
+        let fresh: Vec<_> = recs
+            .iter()
+            .zip(&admitted)
+            .filter(|(_, ok)| **ok)
+            .map(|(r, _)| r.clone())
+            .collect();
+        faults::insert_in(&tx, &fresh).map_err(|e| format!("faults from the spool: {e}"))?;
+        set_progress(&tx, key, FROZEN_TBL, fresh.len() as i64, Some(&hex(&bytes)))?;
+        report.spool_records = fresh.len();
     }
     if stop == Stop::BeforeCommit {
         report.stopped = true;
@@ -284,12 +296,63 @@ fn rewound(conn: &Connection, key: &str, marker: &MarkerV2, table: &str) -> Resu
     )?)
 }
 
+/// ` AND rowid NOT IN (...)` for the backup's fault rows in `(mark, top]` that N already holds
+/// enough of (empty when none, or when the table has no digest). N is counted as it is now.
+fn skipped_fault_rows(
+    conn: &Connection,
+    data: &Path,
+    n_dir: &Path,
+    mark: i64,
+    top: i64,
+) -> Result<String, String> {
+    let Some(b_rows) = row_digests(conn, "src")? else {
+        return Ok(String::new());
+    };
+    let (recs, _) = read_spool_files(&data.join("faults.jsonl"))?;
+    let mut held_by_b = tally(record_digests(&recs)?.iter());
+    for (_, k) in &b_rows {
+        *held_by_b.entry(k.clone()).or_insert(0) += 1;
+    }
+    let in_n = counts_in_n(conn, "main", n_dir)?;
+    let cands: Vec<(i64, String)> = b_rows
+        .into_iter()
+        .filter(|(id, _)| *id > mark && *id <= top)
+        .collect();
+    let keys: Vec<String> = cands.iter().map(|(_, k)| k.clone()).collect();
+    let skip: Vec<String> = cands
+        .iter()
+        .zip(admit_fresh(&held_by_b, &in_n, &keys))
+        .filter(|(_, ok)| !ok)
+        .map(|((id, _), _)| id.to_string())
+        .collect();
+    Ok(if skip.is_empty() {
+        String::new()
+    } else {
+        format!(" AND rowid NOT IN ({})", skip.join(","))
+    })
+}
+
+/// How many leading rows of the backup's `table` a row list in N already holds: an import of a
+/// copy of the previous folder put them there, so the merge must not add them again.
+fn listed_prefix(conn: &Connection, src_cols: &[String], table: &str) -> Result<i64, String> {
+    let mut best = 0;
+    for list in recorded_lists(conn, "main", table)? {
+        if list.cols.iter().any(|c| !src_cols.contains(c)) {
+            continue;
+        }
+        best = best.max(prefix_in_list(conn, "src", table, &list)?);
+    }
+    Ok(best)
+}
+
 /// The row pass: every table of both kinds, on the columns both ledgers have.
 fn rows(
     conn: &Connection,
     key: &str,
     marker: &MarkerV2,
     report: &mut MergeReport,
+    data: &Path,
+    n_dir: &Path,
 ) -> Result<(), String> {
     let tables = KEYED_TABLES
         .iter()
@@ -326,23 +389,38 @@ fn rows(
         if !positional && top < mark {
             mark = 0; // a keyed table that shrank: one full pass, the keys keep it exact
         }
+        if table == "read_events" {
+            mark = mark.max(listed_prefix(conn, &src_cols, table)?);
+        }
         let t = quote(table);
         let verb = if positional {
             "INSERT"
         } else {
             "INSERT OR IGNORE"
         };
+        // Faults: the backup is one source (its rows, its spool and its `.draining` batch) and
+        // adds only what it holds above N's count of a digest (see `faultset`).
+        let not_in = if table == "faults" {
+            skipped_fault_rows(conn, data, n_dir, mark, top)?
+        } else {
+            String::new()
+        };
         let n = conn
             .execute(
                 &format!(
                     "{verb} INTO main.{t} ({list}) SELECT {list} FROM src.{t} \
-                     WHERE rowid > ?1 AND rowid <= ?2 ORDER BY rowid"
+                     WHERE rowid > ?1 AND rowid <= ?2{not_in} ORDER BY rowid"
                 ),
                 params![mark, top],
             )
             .map_err(|e| format!("{table}: {e}"))?;
         if n > 0 {
             report.rows.insert(table.to_string(), n);
+            if table == "read_events" {
+                // Keep the backup's rows, one by one, in N: an import of a copy of the previous
+                // folder is then told what N holds even after the backup is deleted.
+                record_rows(conn, "src", "main", table)?;
+            }
         }
         let sig = if positional && top > 0 {
             row_sig_in(conn, "src", table, &src_cols, top)?

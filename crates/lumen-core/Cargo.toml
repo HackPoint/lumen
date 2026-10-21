@@ -27,6 +27,11 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-python = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 
+# Unix only, for `fcntl(F_GETLK)` in the manual import: asking whether an older Lumen holds a ledger
+# without opening it. Already in Cargo.lock (std's own libc binding, tokio, sqlx), so no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

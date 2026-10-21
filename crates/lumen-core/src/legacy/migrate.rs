@@ -283,7 +283,7 @@ pub(super) fn probe(db: &Path, tries: u32, delay: Duration) -> Result<Connection
             if !mode.eq_ignore_ascii_case("delete") {
                 return Ok(Some(format!("journal mode stays {mode}")));
             }
-            conn.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")?;
+            conn.execute_batch("PRAGMA main.locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")?;
             Ok(None)
         })();
         match attempt {

@@ -24,6 +24,47 @@ pub trait Ops {
     }
     /// Make `link` resolve to the directory `target`: a symlink, or a junction on Windows.
     fn link_dir(&self, link: &Path, target: &Path) -> io::Result<()>;
+    /// A guess whether a rename of `from` to somewhere under `to` would cross volumes. Advisory:
+    /// the manual import words a dry run's report by it. It never decides whether a source is
+    /// written (a bind mount shows one device and still answers EXDEV); the rename does.
+    fn crosses_volumes(&self, from: &Path, to: &Path) -> bool {
+        on_another_volume(from, to)
+    }
+}
+
+/// The nearest ancestor of `p` (or `p`) that exists.
+fn existing_ancestor(p: &Path) -> Option<&Path> {
+    p.ancestors().find(|a| a.symlink_metadata().is_ok())
+}
+
+#[cfg(unix)]
+fn on_another_volume(from: &Path, to: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let dev = |p: &Path| {
+        existing_ancestor(p)
+            .and_then(|a| a.metadata().ok())
+            .map(|m| m.dev())
+    };
+    matches!((dev(from), dev(to)), (Some(a), Some(b)) if a != b)
+}
+
+#[cfg(windows)]
+fn on_another_volume(from: &Path, to: &Path) -> bool {
+    use std::path::Component;
+    let root = |p: &Path| {
+        existing_ancestor(p)
+            .and_then(|a| std::fs::canonicalize(a).ok())
+            .and_then(|c| match c.components().next() {
+                Some(Component::Prefix(x)) => Some(x.as_os_str().to_ascii_lowercase()),
+                _ => None,
+            })
+    };
+    matches!((root(from), root(to)), (Some(a), Some(b)) if a != b)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn on_another_volume(_from: &Path, _to: &Path) -> bool {
+    false
 }
 
 /// Symlink on unix; on Windows it returns `Unsupported` (the app supplies a junction).
