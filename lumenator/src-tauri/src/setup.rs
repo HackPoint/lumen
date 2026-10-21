@@ -135,10 +135,8 @@ pub fn lumen_run_setup(app: AppHandle) -> Vec<SetupStep> {
     // Setup has re-registered: when it recorded the new data folder, the backup is merged once
     // more and frozen, and nothing is merged from it again.
     let home = home();
-    // The folder the start resolved (`dirs`, which honours XDG), as `Ctx::real` does.
-    let n = dirs::data_dir()
-        .map(|d| d.join(lumen_core::meter::APP_ID))
-        .unwrap_or_else(|| app_support_dir_in(&home));
+    // The folder the start resolved: the same function as `Ctx::real` and the Setup prompt.
+    let n = app_support_dir_in(&home);
     let report = crate::upgrade::freeze_after_setup(&home, &n);
     if let Some(health) = app.try_state::<crate::health::StartupHealth>() {
         report.apply(&health, "SETUP");
@@ -471,7 +469,7 @@ fn find_binary_from(start: &Path, name: &str) -> Option<PathBuf> {
 /// module derives from a single `home` argument so tests can never escape their
 /// tempdir, and one env var reading differently in tests than in production is
 /// exactly the class of bug that costs more than it saves.
-fn app_support_dir_in(home: &Path) -> PathBuf {
+pub(crate) fn app_support_dir_in(home: &Path) -> PathBuf {
     // Delegated to lumen-core so there is exactly one definition of where Lumen's
     // data lives. Two copies of this would be the split-ledger bug in a new place:
     // the GUI and the metering writers must agree on one directory, and a drift

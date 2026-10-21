@@ -20,8 +20,9 @@ use lumen_core::legacy::marker::MarkerV2;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// `?` on an `Option`, spelled out: the start-up scan (`startup_scan.rs`) allows no `?` in code
-/// startup reaches, and an early `None` here only means "nothing to change".
+/// `?` on an `Option`, spelled out. The start-up scan (`startup_scan.rs`) reads a call of this as
+/// the `?` it replaces, so a function that uses it is in its `EXEMPT` list. An early `None`
+/// here only means "nothing to change".
 macro_rules! some {
     ($e:expr) => {
         match $e {
@@ -375,13 +376,13 @@ pub(super) fn repoint_with(
             Slot::Hook => {
                 let (word, rest) = first_word(v);
                 let program = if is_mcp_program(&word) {
-                    some!(need_mcp())
+                    need_mcp()
                 } else {
-                    some!(moved.moved_path(&word))
-                        .to_string_lossy()
-                        .into_owned()
+                    moved
+                        .moved_path(&word)
+                        .map(|p| p.to_string_lossy().into_owned())
                 };
-                Some(format!("{}{rest}", hook_command(Path::new(&program))))
+                program.map(|program| format!("{}{rest}", hook_command(Path::new(&program))))
             }
         }
     };

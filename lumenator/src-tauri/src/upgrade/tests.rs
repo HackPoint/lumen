@@ -719,3 +719,128 @@ fn dates_are_iso() {
     assert_eq!(now.len(), 20, "{now}");
     assert!(now.ends_with('Z') && now.as_bytes()[10] == b'T', "{now}");
 }
+
+// ── one data folder, S2 with nothing to move, a kill before tidy ───────────────────────────
+
+#[test]
+fn the_prompt_the_start_and_setup_name_the_same_data_folder() {
+    // `Ctx::real_in` is the start's context for a given home. Setup's prompt and `lumen_run_setup`
+    // use `setup::app_support_dir_in(home)` too: were one of them on `dirs::data_dir()` (which
+    // follows XDG_DATA_HOME, or a redirected Roaming AppData), the prompt would look for the
+    // marker in a folder the start never wrote to. The home is injected, so this runs on every OS.
+    let t = TempDir::new().unwrap();
+    let login = Login(Cell::new(true));
+    let home = t.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut c = Ctx::real_in(home.clone(), &login, None, &mcp).unwrap();
+    let n = setup::app_support_dir_in(&home);
+    assert_eq!(c.n, n, "the start and the prompt disagree about N");
+    // Keep the start off the real machine: only the temp folders are searched and touched.
+    c.roots = vec![t.path().to_path_buf()];
+    c.ledger_only = vec![generic_source()];
+    c.autostart_dir = None;
+    c.cli_link = None;
+    c.cli_bin = None;
+    c.satellite_roots = Roots::default();
+    c.commit.probe_tries = 2;
+    c.commit.probe_delay = Duration::from_millis(20);
+    c.commit.move_tries = 2;
+    c.commit.move_delay = Duration::from_millis(10);
+    seed_prev(t.path(), 3);
+
+    // Setup ran once, for a folder that is not N.
+    let done = c.setup_done();
+    std::fs::create_dir_all(done.parent().unwrap()).unwrap();
+    std::fs::write(&done, "data_dir=/somewhere/else\n").unwrap();
+    assert!(
+        !setup::setup_needed_with(&home, &n, &marker::read(&n)),
+        "premise: nothing is committed yet"
+    );
+    clean(&at_start(&c));
+
+    // The prompt reads the marker the start wrote, and asks for Setup again.
+    assert!(
+        matches!(marker::read(&n), Seen::Migrated(_)),
+        "the marker is in the folder the prompt reads"
+    );
+    assert!(
+        setup::setup_needed_with(&home, &n, &marker::read(&n)),
+        "the prompt did not see the marker"
+    );
+
+    // Setup records N, and the freeze (which `lumen_run_setup` calls with the same N) happens.
+    let b = backup_of(&c);
+    assert!(!freeze::is_frozen(&c.new_db(), &b));
+    record_setup(&c);
+    assert!(!setup::setup_needed_with(&home, &n, &marker::read(&n)));
+    clean(&freeze_after_setup(
+        &home,
+        &setup::app_support_dir_in(&home),
+    ));
+    assert!(freeze::is_frozen(&c.new_db(), &b), "the backup never froze");
+}
+
+#[test]
+fn a_previous_folder_deleted_before_its_move_is_a_problem() {
+    let t = TempDir::new().unwrap();
+    let login = Login(Cell::new(true));
+    let gate = Gate {
+        refuse: Cell::new(true),
+    };
+    let c = ctx(t.path(), &login, &gate);
+    seed_prev(t.path(), 2);
+    // The commit stands and the move is refused: S2.
+    let r = at_start(&c);
+    assert!(r.problems[0].1.contains("could not be moved"), "{r:?}");
+
+    // The folder goes before the move is retried (S2 with nothing to move).
+    std::fs::remove_dir_all(t.path().join(PREV)).unwrap();
+    gate.refuse.set(false);
+    let r = at_start(&c);
+    assert!(
+        r.problems.iter().any(|(_, why)| why.contains("is gone")),
+        "a lost previous folder was not reported as a problem: {r:?}"
+    );
+    assert!(
+        !r.notes.iter().any(|n| n.contains("is gone")),
+        "it is a problem, not a note: {r:?}"
+    );
+}
+
+#[test]
+fn a_start_killed_between_the_commit_and_the_tidy_leaves_a_pending_file_the_marker_overrides() {
+    let t = TempDir::new().unwrap();
+    let (login, ops) = (Login(Cell::new(true)), Native);
+    let c = ctx(t.path(), &login, &ops);
+    seed_prev(t.path(), 3);
+    clean(&at_start(&c));
+    assert!(marker::read_pending(&c.n).is_none());
+
+    // The kill: the marker is committed and the pending file, written before anything could
+    // fail, was not yet removed. The previous path is a real folder again (a re-created one),
+    // which is what a pending file would be trusted for if there were no marker.
+    std::fs::create_dir_all(t.path().join(PREV)).unwrap();
+    marker::write_pending(
+        &c.n,
+        &marker::Pending {
+            source: PREV.into(),
+            dir: t.path().join(PREV),
+        },
+    )
+    .unwrap();
+    assert!(marker::read_pending(&c.n).is_some(), "premise");
+    assert_eq!(
+        c.db_path(),
+        c.new_db(),
+        "the marker overrides the pending file before the next start has tidied it"
+    );
+
+    // The next start tidies it, and nothing splits.
+    clean(&at_start(&c));
+    assert!(
+        marker::read_pending(&c.n).is_none(),
+        "the pending file outlived the tidy"
+    );
+    assert_eq!(c.db_path(), c.new_db());
+    assert_eq!(paths(&c.new_db()).len(), 3);
+}

@@ -67,21 +67,30 @@ pub struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    /// The real machine. `None` when the platform has no data directory or home.
+    /// The real machine. `None` when there is no home.
     pub fn real(
         autostart: &'a dyn AutoStart,
         run_key: Option<&'a dyn RunKey>,
         mcp_bin: &'a dyn Fn() -> Option<String>,
     ) -> Option<Ctx<'a>> {
-        let root = dirs::data_dir();
-        let home = dirs::home_dir();
-        let (Some(root), Some(home)) = (root, home) else {
-            return None;
-        };
+        dirs::home_dir().and_then(|home| Self::real_in(home, autostart, run_key, mcp_bin))
+    }
+
+    /// [`Ctx::real`] for a given home. N is `setup::app_support_dir_in(home)`, the one function
+    /// the Setup prompt, the health check, `lumen_run_setup` and the metering writers all use:
+    /// were any of them to read `dirs::data_dir()` (which follows `XDG_DATA_HOME`, or a
+    /// redirected Roaming AppData), the prompt would look for the marker in another folder than
+    /// the start wrote it in.
+    pub fn real_in(
+        home: PathBuf,
+        autostart: &'a dyn AutoStart,
+        run_key: Option<&'a dyn RunKey>,
+        mcp_bin: &'a dyn Fn() -> Option<String>,
+    ) -> Option<Ctx<'a>> {
         let platform = Platform::current();
         let now = now_utc();
         Some(Ctx {
-            n: root.join(lumen_core::meter::APP_ID),
+            n: setup::app_support_dir_in(&home),
             new_id: lumen_core::meter::APP_ID.into(),
             roots: legacy::data_roots(Some(&home)),
             home,
@@ -344,8 +353,10 @@ fn committed(ctx: &Ctx, lock: &commit::Lock, m: &MarkerV2, moved: Option<Moved>,
             "the previous folder could not be moved into the backup yet, tried again at the next \
              start: {why}"
         )),
-        Moved::Gone => r.notes.push(format!(
-            "the previous folder {} is gone: nothing to merge",
+        // S2 with nothing to move: the folder was deleted between the commit and the move, and
+        // whatever it held is lost. That is said as a problem, not a note.
+        Moved::Gone => r.problem(format!(
+            "the previous folder {} is gone before it was moved: nothing to merge",
             m.source_dir
         )),
         Moved::Already | Moved::Recreated => {}

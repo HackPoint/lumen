@@ -33,8 +33,9 @@ use lumen_core::legacy::retire::Ops;
 use lumen_core::legacy::satellites::{move_into_backup, Platform};
 use std::path::{Path, PathBuf};
 
-/// `?` on an `Option`, spelled out: the start-up scan (`startup_scan.rs`) allows no `?` in code
-/// startup reaches, and an early `None` here only means "not a Lumen entry".
+/// `?` on an `Option`, spelled out. The start-up scan (`startup_scan.rs`) reads a call of this as
+/// the `?` it replaces, so a function that uses it is in its `EXEMPT` list. An early `None`
+/// here only means "not a Lumen entry".
 macro_rules! some {
     ($e:expr) => {
         match $e {
@@ -559,7 +560,10 @@ pub struct Outcome {
 pub fn scan(env: &Env) -> Result<Vec<Entry>, String> {
     match env.platform {
         Platform::Windows => match env.run_key {
-            Some(k) => scan_registry(k, &env.exe, env.plugin_name),
+            Some(k) => match scan_registry(k, &env.exe, env.plugin_name) {
+                Ok(found) => Ok(found),
+                Err(e) => Err(e),
+            },
             None => Ok(Vec::new()),
         },
         p => match env.dir {

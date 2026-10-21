@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::OnceLock;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
