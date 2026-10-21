@@ -654,7 +654,7 @@ struct Exempt {
 /// Functions startup reaches that use `?`. In each, the `?` hands an error back to a caller that
 /// deals with it, so none can abort startup. The scan fails if one stops using `?` (the entry is
 /// stale) or if its caller stops dealing with the error.
-const EXEMPT: [Exempt; 4] = [
+const EXEMPT: [Exempt; 3] = [
     Exempt {
         name: "build_tray_menu_items",
         file: "health.rs",
@@ -668,13 +668,6 @@ const EXEMPT: [Exempt; 4] = [
         caller: Some("refresh_tray_savings"),
         handled: Handled::By("unwrap_or_else"),
         why: "the tray refresh setup spawns logs an `Err` and shows no savings line",
-    },
-    Exempt {
-        name: "write_atomic",
-        file: "setup.rs",
-        caller: Some("ensure_scripts_fresh_in"),
-        handled: Handled::ByMatch,
-        why: "its caller logs a warning on `Err` and leaves the script as it was",
     },
     Exempt {
         name: "stable_binary",
@@ -1870,24 +1863,6 @@ fn startup_seeds() -> Vec<Seed> {
                 )
             },
             says: "it is not the scrutinee of a `match`",
-        },
-        Seed {
-            what: "write_atomic called from the closure, where nothing handles its error",
-            file: "lib.rs",
-            edit: |s| in_closure(s, " let _ = write_atomic(p, c, 0); "),
-            says: "called from the .setup closure, not from ensure_scripts_fresh_in",
-        },
-        Seed {
-            what: "write_atomic's caller returns on its error",
-            file: "setup.rs",
-            edit: |s| {
-                once(
-                    s,
-                    "Err(e) => log::warn!(\"could not refresh {name}: {e}\"),",
-                    "Err(e) => return Some(e.to_string()),",
-                )
-            },
-            says: "the `match` arms use `return`",
         },
         Seed {
             what: "stable_binary unwrapped where baked_paths defaults it",

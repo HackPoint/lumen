@@ -2615,9 +2615,6 @@ mod tests {
         fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
             Err(io::Error::new(self.0, "refused"))
         }
-        fn link_dir(&self, _link: &Path, _target: &Path) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "no links here"))
-        }
         fn crosses_volumes(&self, _from: &Path, _to: &Path) -> bool {
             self.0 == io::ErrorKind::CrossesDevices
         }
@@ -4127,9 +4124,6 @@ mod tests {
             fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
                 Err(io::Error::new(io::ErrorKind::CrossesDevices, "EXDEV"))
             }
-            fn link_dir(&self, _l: &Path, _t: &Path) -> io::Result<()> {
-                Err(io::Error::new(io::ErrorKind::Unsupported, "no"))
-            }
             fn crosses_volumes(&self, _f: &Path, _t: &Path) -> bool {
                 false
             }
@@ -4236,9 +4230,6 @@ mod tests {
                     self.0.borrow_mut().push(c);
                 }
                 Ok(())
-            }
-            fn link_dir(&self, _l: &Path, _t: &Path) -> io::Result<()> {
-                Err(io::Error::new(io::ErrorKind::Unsupported, "no"))
             }
             fn crosses_volumes(&self, _f: &Path, _t: &Path) -> bool {
                 false

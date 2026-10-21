@@ -4,9 +4,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
-// Called from the app's start in T7.
-#[allow(dead_code)]
-mod repoint;
+pub(crate) mod repoint;
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
@@ -134,12 +132,16 @@ fn fold_path(p: &str) -> String {
 pub fn lumen_run_setup(app: AppHandle) -> Vec<SetupStep> {
     use tauri::Manager;
     let steps = run_setup(&PluginAutoStart(&app));
-    // Setup rewrites the paths old shims wrote through; take what they wrote since the start.
-    if let Some(ctx) = crate::upgrade::Ctx::current() {
-        let report = crate::upgrade::merge_again(&ctx);
-        if let Some(health) = app.try_state::<crate::health::StartupHealth>() {
-            report.apply(&health, "SETUP");
-        }
+    // Setup has re-registered: when it recorded the new data folder, the backup is merged once
+    // more and frozen, and nothing is merged from it again.
+    let home = home();
+    // The folder the start resolved (`dirs`, which honours XDG), as `Ctx::real` does.
+    let n = dirs::data_dir()
+        .map(|d| d.join(lumen_core::meter::APP_ID))
+        .unwrap_or_else(|| app_support_dir_in(&home));
+    let report = crate::upgrade::freeze_after_setup(&home, &n);
+    if let Some(health) = app.try_state::<crate::health::StartupHealth>() {
+        report.apply(&health, "SETUP");
     }
     steps
 }
@@ -303,7 +305,7 @@ pub fn ensure_autostart_once(a: &dyn AutoStart, marker: &Path, current_exe: &str
 }
 
 /// Marker recording that the one-time login-item registration has happened.
-fn autostart_marker_in(home: &Path) -> PathBuf {
+pub(crate) fn autostart_marker_in(home: &Path) -> PathBuf {
     lumen_dir_in(home).join(".autostart_done")
 }
 
@@ -318,7 +320,7 @@ pub fn ensure_autostart_once_for(app: &AppHandle) -> bool {
 }
 
 /// [`AutoStart`] backed by the real plugin.
-struct PluginAutoStart<'a>(&'a AppHandle);
+pub(crate) struct PluginAutoStart<'a>(pub(crate) &'a AppHandle);
 
 impl AutoStart for PluginAutoStart<'_> {
     fn is_enabled(&self) -> Result<bool, String> {
@@ -379,7 +381,7 @@ fn lumen_dir_in(home: &Path) -> PathBuf {
     home.join(".claude/lumen")
 }
 
-fn marker_path_in(home: &Path) -> PathBuf {
+pub(crate) fn marker_path_in(home: &Path) -> PathBuf {
     lumen_dir_in(home).join(".setup_done")
 }
 
@@ -430,7 +432,7 @@ fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn find_binary(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_binary(name: &str) -> Option<PathBuf> {
     find_binary_from(&exe_dir(), name)
 }
 
@@ -534,6 +536,17 @@ fn baked_paths(home: &Path) -> (String, String) {
     (db, mcp)
 }
 
+/// The `lumen-mcp` this build bakes into the scripts and Claude's entries, as `baked_paths` finds
+/// it. `None` when this build cannot find its sidecar.
+pub(crate) fn baked_mcp() -> Option<String> {
+    let (_, mcp) = baked_paths(&home());
+    if mcp.is_empty() {
+        None
+    } else {
+        Some(mcp)
+    }
+}
+
 /// The metering DB inside the per-OS data directory. Derived from
 /// [`app_support_dir_in`] so the two can never disagree about where data lives.
 fn db_path_in(home: &Path) -> String {
@@ -601,6 +614,16 @@ fn sync_dir(dir: &Path) {
 /// deliberately tightened permission. Pass 0 when no bit is functionally
 /// required.
 fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result<()> {
+    // No `?` here: the start-up scan allows none in code startup reaches (the app's start
+    // re-points Claude's files through this), so each error is returned by hand.
+    macro_rules! tried {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            }
+        };
+    }
     // Resolve symlinks first. Users who keep ~/.claude.json in a dotfile repo
     // symlink it, and renaming onto the link would replace it with a regular
     // file and silently detach their config. The temp must also live in the
@@ -611,7 +634,7 @@ fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result
         Some(d) => d.to_path_buf(),
         None => return Err(std::io::Error::other("target has no parent directory")),
     };
-    std::fs::create_dir_all(&dir)?;
+    tried!(std::fs::create_dir_all(&dir));
 
     let mode = mode_of(&target) | mode_floor;
     let name = target
@@ -622,13 +645,13 @@ fn write_atomic(path: &Path, contents: &str, mode_floor: u32) -> std::io::Result
 
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
+        let mut f = tried!(std::fs::File::create(&tmp));
+        tried!(f.write_all(contents.as_bytes()));
+        tried!(f.sync_all());
     }
     // Mode before rename, so the file is never visible at the target path with
     // the wrong permissions.
-    set_mode(&tmp, mode)?;
+    tried!(set_mode(&tmp, mode));
     if let Err(e) = std::fs::rename(&tmp, &target) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -2170,7 +2193,7 @@ fn step_remove_cli_symlink() -> SetupStep {
 }
 
 #[cfg(unix)]
-fn cli_symlink_path() -> PathBuf {
+pub(crate) fn cli_symlink_path() -> PathBuf {
     if std::path::Path::new("/usr/local/bin").is_dir() {
         PathBuf::from("/usr/local/bin/lumen")
     } else {
@@ -2181,7 +2204,7 @@ fn cli_symlink_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn cli_symlink_path() -> PathBuf {
+pub(crate) fn cli_symlink_path() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(".local").join("bin").join("lumen.exe"))
         .unwrap_or_else(|| PathBuf::from("lumen.exe"))

@@ -9,8 +9,8 @@ The 1.8.0 and 1.9.0 shims are generated, not copied from a machine, with two pla
 in the baked defaults:
 
 - `__APP_DIR__`: the data directory the install baked. The upgrade tests in
-  `setup::hook_e2e` put the legacy directory there, taken from `legacy::LEGACY_APP_ID` at
-  test time, so no fixture carries the old identifier.
+  `setup::hook_e2e` put a neutral previous directory there (`example.previous.app`) at test
+  time, so no fixture carries the old identifier; the start finds it by the ledger it holds.
 - `__MCP__`: the `lumen-mcp` the install baked.
 
 The two releases' shims differ only in the `lumen-generator` stamp.

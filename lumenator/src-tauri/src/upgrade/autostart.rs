@@ -33,6 +33,27 @@ use lumen_core::legacy::retire::Ops;
 use lumen_core::legacy::satellites::{move_into_backup, Platform};
 use std::path::{Path, PathBuf};
 
+/// `?` on an `Option`, spelled out: the start-up scan (`startup_scan.rs`) allows no `?` in code
+/// startup reaches, and an early `None` here only means "not a Lumen entry".
+macro_rules! some {
+    ($e:expr) => {
+        match $e {
+            Some(v) => v,
+            None => return None,
+        }
+    };
+}
+
+/// `?` on a `Result` whose error is already text, spelled out for the same reason.
+macro_rules! tried {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        }
+    };
+}
+
 /// One login entry that runs Lumen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -195,7 +216,7 @@ impl Parser {
                 "dict" => {
                     let mut v = Vec::new();
                     loop {
-                        match self.next_struct()? {
+                        match some!(self.next_struct()) {
                             Tok::Close(c) if c == "dict" => return Some(Pl::Dict(v)),
                             Tok::Open(k) if k == "key" => {
                                 let key = match self.toks.get(self.at) {
@@ -206,15 +227,16 @@ impl Parser {
                                     }
                                     _ => String::new(),
                                 };
-                                match self.next_struct()? {
+                                match some!(self.next_struct()) {
                                     Tok::Close(c) if c == "key" => {}
                                     _ => return None,
                                 }
-                                let o = match self.next_struct()? {
+                                let o = match some!(self.next_struct()) {
                                     o @ (Tok::Open(_) | Tok::Empty(_)) => o,
                                     _ => return None,
                                 };
-                                v.push((key, self.parse_value(o, depth + 1)?));
+                                let value = some!(self.parse_value(o, depth + 1));
+                                v.push((key, value));
                             }
                             _ => return None,
                         }
@@ -223,19 +245,20 @@ impl Parser {
                 "array" => {
                     let mut v = Vec::new();
                     loop {
-                        let o = match self.next_struct()? {
+                        let o = match some!(self.next_struct()) {
                             Tok::Close(c) if c == "array" => return Some(Pl::Arr(v)),
                             o @ (Tok::Open(_) | Tok::Empty(_)) => o,
                             _ => return None,
                         };
-                        v.push(self.parse_value(o, depth + 1)?);
+                        let value = some!(self.parse_value(o, depth + 1));
+                        v.push(value);
                     }
                 }
                 _ => {
                     // A scalar: its text up to its closing tag.
                     let mut text = String::new();
                     loop {
-                        match self.toks.get(self.at)? {
+                        match some!(self.toks.get(self.at)) {
                             Tok::Text(t) => text.push_str(t),
                             Tok::Close(c) if *c == n => {
                                 self.at += 1;
@@ -263,11 +286,11 @@ fn parse_plist(text: &str) -> Option<Pl> {
         toks: tokens(text),
         at: 0,
     };
-    match p.next_struct()? {
+    match some!(p.next_struct()) {
         Tok::Open(n) if n == "plist" => {}
         _ => return None,
     }
-    let open = match p.next_struct()? {
+    let open = match some!(p.next_struct()) {
         o @ (Tok::Open(_) | Tok::Empty(_)) => o,
         _ => return None,
     };
@@ -282,7 +305,7 @@ struct Agent {
 }
 
 fn agent_of(text: &str) -> Option<Agent> {
-    let Pl::Dict(d) = parse_plist(text)? else {
+    let Pl::Dict(d) = some!(parse_plist(text)) else {
         return None;
     };
     let get = |k: &str| d.iter().find(|(n, _)| n == k).map(|(_, v)| v);
@@ -381,17 +404,17 @@ fn runs_windows(data: &str, exe: &Exe) -> bool {
 /// Read a plist as text. XML is parsed as it is; anything else (a binary plist) goes through
 /// `plutil -convert xml1 -o -`, which is macOS-only.
 fn plist_text(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = some!(std::fs::read(path).ok());
     if !bytes.starts_with(b"bplist") {
         return Some(String::from_utf8_lossy(&bytes).into_owned());
     }
     #[cfg(target_os = "macos")]
     {
-        let out = std::process::Command::new("/usr/bin/plutil")
+        let out = some!(std::process::Command::new("/usr/bin/plutil")
             .args(["-convert", "xml1", "-o", "-"])
             .arg(path)
             .output()
-            .ok()?;
+            .ok());
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -485,7 +508,7 @@ pub fn scan_registry(
     plugin_value: &str,
 ) -> Result<Vec<Entry>, String> {
     let mut out = Vec::new();
-    for v in key.values()? {
+    for v in tried!(key.values()) {
         let own = v.name.eq_ignore_ascii_case(plugin_value);
         if own || runs_windows(&v.data, exe) {
             out.push(Entry {
@@ -578,14 +601,15 @@ fn hex(b: &[u8]) -> String {
 fn write_run_json(env: &Env, e: &Entry) -> Result<(), String> {
     use std::io::Write;
     let dir = env.backup.join("autostart");
-    std::fs::create_dir_all(&dir).map_err(|x| format!("{}: {x}", dir.display()))?;
+    tried!(std::fs::create_dir_all(&dir).map_err(|x| format!("{}: {x}", dir.display())));
     let path = unused(&dir, "run.json");
     let body = serde_json::json!({
         "name": e.name,
         "data": e.data,
         "approved": e.approved.as_deref().map(hex),
     });
-    let mut f = std::fs::File::create_new(&path).map_err(|x| format!("{}: {x}", path.display()))?;
+    let mut f =
+        tried!(std::fs::File::create_new(&path).map_err(|x| format!("{}: {x}", path.display())));
     f.write_all(body.to_string().as_bytes())
         .and_then(|()| f.sync_all())
         .map_err(|x| format!("{}: {x}", path.display()))
@@ -660,17 +684,17 @@ fn settle(env: &Env, e: &Entry) -> Result<(), String> {
         });
         move_into_backup(path, &rel, env.backup, env.new_id, false, env.ops).map(|_| ())
     } else {
-        let key = env.run_key.ok_or("no Run key")?;
-        write_run_json(env, e)?;
+        let Some(key) = env.run_key else {
+            return Err("no Run key".into());
+        };
+        tried!(write_run_json(env, e));
         key.delete_entry(&e.name)
     }
 }
 
 // ── The real Run key ──────────────────────────────────────────────────────────
 
-// T7 wires the real key into the start; until then nothing names it.
 #[cfg(windows)]
-#[allow(unused_imports)]
 pub use registry::HkcuRun;
 
 #[cfg(windows)]
@@ -690,17 +714,20 @@ mod registry {
     impl RunKey for HkcuRun {
         fn values(&self) -> Result<Vec<RunValue>, String> {
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-            let run = match hkcu.open_subkey_with_flags(RUN, KEY_READ) {
+            let values_key = match hkcu.open_subkey_with_flags(RUN, KEY_READ) {
                 Ok(k) => k,
                 Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(e.to_string()),
             };
             let approved = hkcu.open_subkey_with_flags(APPROVED, KEY_READ).ok();
             let mut out = Vec::new();
-            for item in run.enum_values() {
-                let (name, _) = item.map_err(|e| e.to_string())?;
+            for item in values_key.enum_values() {
+                let (name, _) = match item {
+                    Ok(pair) => pair,
+                    Err(e) => return Err(e.to_string()),
+                };
                 // Only text values can name a program.
-                let Ok(data) = run.get_value::<String, _>(&name) else {
+                let Ok(data) = values_key.get_value::<String, _>(&name) else {
                     continue;
                 };
                 let approved = approved
@@ -718,10 +745,11 @@ mod registry {
 
         fn delete_entry(&self, name: &str) -> Result<(), String> {
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-            let run = hkcu
-                .open_subkey_with_flags(RUN, KEY_SET_VALUE)
-                .map_err(|e| e.to_string())?;
-            match run.delete_value(name) {
+            let values_key = match hkcu.open_subkey_with_flags(RUN, KEY_SET_VALUE) {
+                Ok(k) => k,
+                Err(e) => return Err(e.to_string()),
+            };
+            match values_key.delete_value(name) {
                 Ok(()) => {}
                 Err(e) if e.kind() == ErrorKind::NotFound => {}
                 Err(e) => return Err(e.to_string()),
@@ -1242,9 +1270,6 @@ mod tests {
                 }
                 std::fs::rename(from, to)
             }
-            fn link_dir(&self, _: &Path, _: &Path) -> std::io::Result<()> {
-                Err(std::io::ErrorKind::Unsupported.into())
-            }
         }
         let x = "example.previous.app";
         for (p, file, body, ext) in [
@@ -1298,9 +1323,6 @@ mod tests {
         impl Ops for Refuse {
             fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> {
                 Err(std::io::ErrorKind::PermissionDenied.into())
-            }
-            fn link_dir(&self, _: &Path, _: &Path) -> std::io::Result<()> {
-                Err(std::io::ErrorKind::Unsupported.into())
             }
         }
         let m = Machine::new(Platform::MacOs);

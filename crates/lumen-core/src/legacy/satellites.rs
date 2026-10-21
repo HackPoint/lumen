@@ -491,9 +491,6 @@ mod tests {
             }
             std::fs::rename(from, to)
         }
-        fn link_dir(&self, _: &Path, _: &Path) -> io::Result<()> {
-            Err(io::ErrorKind::Unsupported.into())
-        }
     }
 
     #[test]

@@ -1,29 +1,19 @@
-//! Steps 6 and 7 of the migration, and the `com.tauri.dev` source.
+//! The seam for renames, the backup's name, and the `com.tauri.dev` source.
 //!
-//! - [`retire`]: after the marker exists, rename the old directory to a dated
-//!   backup and link the old path to it. Never deletes. Every call checks what
-//!   is already done, so a start after a kill or a failed rename just continues.
-//! - [`migrate_logs`]: best effort; a failure is reported, never fatal.
-//! - [`import_ledger_only`]: the ledger-only source (`com.tauri.dev`, macOS).
-//!
-//! The Windows directory junction needs the `junction` crate, which lives in the
-//! app crate only (it must not enter lumen-core's runtime dependencies or the
-//! hook path). So the link goes through the [`Ops`] trait: the app implements
-//! `link_dir` with a junction on Windows and inherits the default `rename`.
-//! [`Native`] covers macOS and Linux (a symlink) and refuses on Windows rather
-//! than silently skipping the link.
+//! - [`Ops`]: the one filesystem operation the moves go through, so a test can refuse it. [`Native`]
+//!   is the real one.
+//! - [`backup_name`]: where a migration's backup goes.
+//! - [`copy_ledger_verified`] and [`import_ledger_only`]: the ledger-only source (`com.tauri.dev`, macOS).
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The two filesystem operations retirement needs, as a seam.
+/// The filesystem operations the moves need, as a seam.
 pub trait Ops {
-    /// Rename a directory. A failure (on Windows: the directory is in use) defers retirement.
+    /// Rename a file or directory. A failure (on Windows: it is in use) defers the move.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
     }
-    /// Make `link` resolve to the directory `target`: a symlink, or a junction on Windows.
-    fn link_dir(&self, link: &Path, target: &Path) -> io::Result<()>;
     /// A guess whether a rename of `from` to somewhere under `to` would cross volumes. Advisory:
     /// the manual import words a dry run's report by it. It never decides whether a source is
     /// written (a bind mount shows one device and still answers EXDEV); the rename does.
@@ -67,28 +57,10 @@ fn on_another_volume(_from: &Path, _to: &Path) -> bool {
     false
 }
 
-/// Symlink on unix; on Windows it returns `Unsupported` (the app supplies a junction).
+/// The real filesystem: every operation is the default.
 pub struct Native;
 
-impl Ops for Native {
-    #[cfg(unix)]
-    fn link_dir(&self, link: &Path, target: &Path) -> io::Result<()> {
-        std::os::unix::fs::symlink(target, link)
-    }
-    #[cfg(not(unix))]
-    fn link_dir(&self, _link: &Path, _target: &Path) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "directory links on this system need the app's junction implementation",
-        ))
-    }
-}
-
-/// `<parent>/<id>.<date>.migrated`, then `...migrated-2`, `-3`, ... until unused.
-/// `date` is `YYYY-MM-DD`. Call it once, store the name in the marker, and pass it to [`retire`].
-pub fn backup_path(parent: &Path, id: &str, date: &str) -> PathBuf {
-    unused_name(parent, &format!("{id}.{date}.migrated"))
-}
+impl Ops for Native {}
 
 /// The backup folder for a migration: `<holder>/legacy-backup-<date>`, then `-2`, `-3`, ...
 /// until unused. `holder` is the new identifier's folder beside the one being moved (usually
@@ -108,162 +80,9 @@ pub(super) fn unused_name(parent: &Path, base: &str) -> PathBuf {
     p
 }
 
-/// What [`retire`] did.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Retired {
-    /// Renamed and linked.
-    Done,
-    /// The old path is already a link; nothing to do.
-    AlreadyDone,
-    /// Neither the old directory nor a backup to link to exists.
-    Nothing,
-    /// The directory could not be renamed (in use) or must not be touched; try again next start.
-    Deferred(String),
-    /// Renamed, but the link is missing; the next start creates it.
-    LinkPending(String),
-}
-
-/// Retire `old` into `backup` and link `old` -> `backup`. Call only after the
-/// marker is committed.
-///
-/// - `old` is a link: done already.
-/// - `old` is a real directory and `backup` is free: rename, then link.
-/// - `old` is a real directory and `backup` exists: an old binary re-created it
-///   (or a rename was interrupted oddly). It is left alone for the late-row
-///   merge, never renamed over the backup.
-/// - `old` is missing and `backup` exists: only the link is missing; create it.
-///
-/// Nothing here deletes.
-pub fn retire(old: &Path, backup: &Path, ops: &dyn Ops) -> Retired {
-    let old_meta = std::fs::symlink_metadata(old).ok();
-    let backup_is_dir = std::fs::symlink_metadata(backup)
-        .map(|m| m.file_type().is_dir())
-        .unwrap_or(false);
-    match old_meta {
-        Some(m) if m.file_type().is_symlink() => {
-            // Done only when the link really reaches the backup. A dangling or
-            // misdirected link is not repaired (that would mean removing it).
-            match (std::fs::canonicalize(old), std::fs::canonicalize(backup)) {
-                (Ok(a), Ok(b)) if a == b => Retired::AlreadyDone,
-                (Err(e), _) => Retired::Deferred(format!(
-                    "{} is a link that does not resolve: {e}",
-                    old.display()
-                )),
-                _ => Retired::Deferred(format!(
-                    "{} is a link, but not to {}",
-                    old.display(),
-                    backup.display()
-                )),
-            }
-        }
-        Some(m) if m.file_type().is_dir() => {
-            if std::fs::symlink_metadata(backup).is_ok() {
-                return Retired::Deferred(format!(
-                    "{} exists again next to its backup {}; left for the merge",
-                    old.display(),
-                    backup.display()
-                ));
-            }
-            if let Err(e) = ops.rename(old, backup) {
-                return Retired::Deferred(format!(
-                    "could not rename {} to {}: {e}",
-                    old.display(),
-                    backup.display()
-                ));
-            }
-            link(old, backup, ops)
-        }
-        Some(_) => Retired::Deferred(format!("{} is not a directory", old.display())),
-        None if backup_is_dir => link(old, backup, ops),
-        None => Retired::Nothing,
-    }
-}
-
-fn link(old: &Path, backup: &Path, ops: &dyn Ops) -> Retired {
-    match ops.link_dir(old, backup) {
-        Ok(()) => Retired::Done,
-        Err(e) => Retired::LinkPending(format!(
-            "could not link {} to {}: {e}",
-            old.display(),
-            backup.display()
-        )),
-    }
-}
-
-/// The old log directory for `id`, where Tauri put it. `None` on Linux, where
-/// logs live inside the data directory and travel with it.
-pub fn log_dir(id: &str) -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        dirs::home_dir().map(|h| h.join("Library/Logs").join(id))
-    } else if cfg!(windows) {
-        dirs::data_local_dir().map(|d| d.join(id).join("logs"))
-    } else {
-        None
-    }
-}
-
-/// What [`migrate_logs`] did.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct LogReport {
-    pub copied: usize,
-    pub skipped_existing: usize,
-    /// Why the old directory was left where it is, if it was.
-    pub not_renamed: Option<String>,
-    /// First copy error; the old directory is then kept as it is.
-    pub error: Option<String>,
-}
-
-/// Copy every file of `old_logs` into `new_logs` (never overwriting), then
-/// rename `old_logs` to `<old_logs>.<date>.migrated`. Best effort: errors are
-/// in the report. A directory that does not exist is an empty report.
-pub fn migrate_logs(old_logs: &Path, new_logs: &Path, date: &str, ops: &dyn Ops) -> LogReport {
-    let mut r = LogReport::default();
-    match std::fs::symlink_metadata(old_logs) {
-        Ok(m) if m.file_type().is_dir() => {}
-        _ => return r,
-    }
-    if let Err(e) = copy_tree(old_logs, new_logs, &mut r) {
-        r.error = Some(format!("{}: {e}", old_logs.display()));
-        return r;
-    }
-    let (Some(parent), Some(name)) = (old_logs.parent(), old_logs.file_name()) else {
-        return r;
-    };
-    let target = unused_name(
-        parent,
-        &format!("{}.{date}.migrated", name.to_string_lossy()),
-    );
-    if let Err(e) = ops.rename(old_logs, &target) {
-        r.not_renamed = Some(format!("{}: {e}", old_logs.display()));
-    }
-    r
-}
-
-fn copy_tree(from: &Path, to: &Path, r: &mut LogReport) -> io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let src = entry.path();
-        let dst = to.join(entry.file_name());
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            copy_tree(&src, &dst, r)?;
-        } else if ft.is_file() {
-            if std::fs::symlink_metadata(&dst).is_ok() {
-                r.skipped_existing += 1;
-            } else {
-                std::fs::copy(&src, &dst)?;
-                r.copied += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Whether `source` is for this system.
 pub fn applies(source: &super::Source) -> bool {
     match source.os {
-        super::Os::All => true,
         super::Os::MacOs => cfg!(target_os = "macos"),
     }
 }
@@ -498,284 +317,7 @@ pub fn import_ledger_only(
 mod tests {
     use super::*;
     use rusqlite::Connection;
-    use std::cell::RefCell;
     use tempfile::TempDir;
-
-    const OLD: &str = "fake.old.app";
-    const DATE: &str = "2026-10-18";
-
-    fn mkdir_with(root: &Path, files: &[(&str, &str)]) -> PathBuf {
-        let d = root.join(OLD);
-        for (n, c) in files {
-            let p = d.join(n);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, c).unwrap();
-        }
-        d
-    }
-
-    /// Records calls; can fail the rename like a directory that is in use.
-    struct Fake {
-        fail_rename: bool,
-        fail_link: RefCell<bool>,
-        calls: RefCell<Vec<&'static str>>,
-    }
-    impl Fake {
-        fn new(fail_rename: bool, fail_link: bool) -> Self {
-            Fake {
-                fail_rename,
-                fail_link: RefCell::new(fail_link),
-                calls: RefCell::new(vec![]),
-            }
-        }
-    }
-    impl Ops for Fake {
-        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-            self.calls.borrow_mut().push("rename");
-            if self.fail_rename {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "in use"));
-            }
-            std::fs::rename(from, to)
-        }
-        fn link_dir(&self, link: &Path, target: &Path) -> io::Result<()> {
-            self.calls.borrow_mut().push("link");
-            if *self.fail_link.borrow() {
-                return Err(io::Error::other("no link"));
-            }
-            Native.link_dir(link, target)
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rename_then_link_resolves_to_the_backup() {
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(
-            root.path(),
-            &[("lumen.db", "ledger"), ("bin/lumen-mcp", "x")],
-        );
-        let b = backup_path(root.path(), OLD, DATE);
-        assert_eq!(
-            b.file_name().unwrap(),
-            format!("{OLD}.{DATE}.migrated").as_str()
-        );
-        assert_eq!(retire(&old, &b, &Native), Retired::Done);
-        assert!(
-            std::fs::symlink_metadata(&old)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(
-            std::fs::read_to_string(old.join("lumen.db")).unwrap(),
-            "ledger"
-        );
-        assert_eq!(
-            std::fs::read_to_string(b.join("bin/lumen-mcp")).unwrap(),
-            "x"
-        );
-        assert_eq!(
-            std::fs::canonicalize(&old).unwrap(),
-            std::fs::canonicalize(&b).unwrap()
-        );
-    }
-
-    #[test]
-    fn a_taken_name_gets_a_suffix() {
-        let root = TempDir::new().unwrap();
-        let first = backup_path(root.path(), OLD, DATE);
-        std::fs::create_dir_all(&first).unwrap();
-        let second = backup_path(root.path(), OLD, DATE);
-        assert_eq!(
-            second.file_name().unwrap(),
-            format!("{OLD}.{DATE}.migrated-2").as_str()
-        );
-        std::fs::create_dir_all(&second).unwrap();
-        assert!(backup_path(root.path(), OLD, DATE).ends_with(format!("{OLD}.{DATE}.migrated-3")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_rerun_with_the_link_in_place_does_nothing() {
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(root.path(), &[("lumen.db", "l")]);
-        let b = backup_path(root.path(), OLD, DATE);
-        assert_eq!(retire(&old, &b, &Native), Retired::Done);
-        let ops = Fake::new(false, false);
-        assert_eq!(retire(&old, &b, &ops), Retired::AlreadyDone);
-        assert!(ops.calls.borrow().is_empty(), "no rename, no link");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_missing_link_is_recreated_next_start() {
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(root.path(), &[("lumen.db", "l")]);
-        let b = backup_path(root.path(), OLD, DATE);
-        // First run: rename works, link fails (killed or refused).
-        let r = retire(&old, &b, &Fake::new(false, true));
-        assert!(matches!(r, Retired::LinkPending(_)), "{r:?}");
-        assert!(!old.exists() && b.join("lumen.db").is_file());
-        // Next start.
-        assert_eq!(retire(&old, &b, &Native), Retired::Done);
-        assert_eq!(std::fs::read_to_string(old.join("lumen.db")).unwrap(), "l");
-    }
-
-    #[test]
-    fn a_directory_in_use_defers_and_keeps_everything_where_it_was() {
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(root.path(), &[("lumen.db", "l")]);
-        let b = backup_path(root.path(), OLD, DATE);
-        let ops = Fake::new(true, false);
-        let r = retire(&old, &b, &ops);
-        assert!(matches!(r, Retired::Deferred(_)), "{r:?}");
-        assert_eq!(
-            *ops.calls.borrow(),
-            vec!["rename"],
-            "no link after a failed rename"
-        );
-        assert!(old.join("lumen.db").is_file() && !b.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_deferred_retire_completes_once_the_directory_is_free() {
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(root.path(), &[("lumen.db", "l")]);
-        let b = backup_path(root.path(), OLD, DATE);
-        assert!(matches!(
-            retire(&old, &b, &Fake::new(true, false)),
-            Retired::Deferred(_)
-        ));
-        assert_eq!(retire(&old, &b, &Native), Retired::Done);
-        assert!(b.join("lumen.db").is_file());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_real_refused_rename_defers() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(root.path(), &[("lumen.db", "l")]);
-        let b = backup_path(root.path(), OLD, DATE);
-        let ro = std::fs::Permissions::from_mode(0o555);
-        std::fs::set_permissions(root.path(), ro).unwrap();
-        let r = retire(&old, &b, &Native);
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Root ignores the mode; only assert when the rename was really refused.
-        if matches!(r, Retired::Deferred(_)) {
-            assert!(old.join("lumen.db").is_file());
-        }
-    }
-
-    #[test]
-    fn a_recreated_old_directory_is_not_renamed_over_the_backup() {
-        let root = TempDir::new().unwrap();
-        let old = mkdir_with(root.path(), &[("lumen.db", "late")]);
-        let b = root.path().join("b.migrated");
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(b.join("lumen.db"), "first").unwrap();
-        let ops = Fake::new(false, false);
-        assert!(matches!(retire(&old, &b, &ops), Retired::Deferred(_)));
-        assert!(ops.calls.borrow().is_empty());
-        assert_eq!(
-            std::fs::read_to_string(old.join("lumen.db")).unwrap(),
-            "late"
-        );
-        assert_eq!(
-            std::fs::read_to_string(b.join("lumen.db")).unwrap(),
-            "first"
-        );
-    }
-
-    #[test]
-    fn nothing_to_retire_when_neither_exists() {
-        let root = TempDir::new().unwrap();
-        let ops = Fake::new(false, false);
-        assert_eq!(
-            retire(&root.path().join(OLD), &root.path().join("b"), &ops),
-            Retired::Nothing
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn nothing_is_ever_deleted() {
-        let root = TempDir::new().unwrap();
-        let files = [
-            ("lumen.db", "a"),
-            ("lumen.db-wal", "w"),
-            ("bin/x", "b"),
-            ("logs/l.log", "c"),
-        ];
-        let old = mkdir_with(root.path(), &files);
-        let b = backup_path(root.path(), OLD, DATE);
-        let ops = Fake::new(false, true);
-        retire(&old, &b, &ops);
-        retire(&old, &b, &Native);
-        retire(&old, &b, &Native);
-        for (n, c) in files {
-            assert_eq!(std::fs::read_to_string(b.join(n)).unwrap(), c, "{n}");
-            assert_eq!(
-                std::fs::read_to_string(old.join(n)).unwrap(),
-                c,
-                "{n} via the link"
-            );
-        }
-    }
-
-    #[test]
-    fn logs_are_copied_and_the_old_directory_renamed() {
-        let root = TempDir::new().unwrap();
-        let old = root.path().join("Logs").join(OLD);
-        std::fs::create_dir_all(old.join("sub")).unwrap();
-        std::fs::write(old.join("a.log"), "one").unwrap();
-        std::fs::write(old.join("sub/b.log"), "two").unwrap();
-        let new = root.path().join("Logs").join("fake.new.app");
-        std::fs::create_dir_all(&new).unwrap();
-        std::fs::write(new.join("a.log"), "already new").unwrap();
-
-        let r = migrate_logs(&old, &new, DATE, &Native);
-        assert_eq!((r.copied, r.skipped_existing), (1, 1));
-        assert!(r.error.is_none() && r.not_renamed.is_none(), "{r:?}");
-        assert_eq!(
-            std::fs::read_to_string(new.join("a.log")).unwrap(),
-            "already new"
-        );
-        assert_eq!(
-            std::fs::read_to_string(new.join("sub/b.log")).unwrap(),
-            "two"
-        );
-        assert!(!old.exists());
-        let kept = root
-            .path()
-            .join("Logs")
-            .join(format!("{OLD}.{DATE}.migrated"));
-        assert_eq!(std::fs::read_to_string(kept.join("a.log")).unwrap(), "one");
-    }
-
-    #[test]
-    fn a_log_failure_is_reported_not_fatal() {
-        let root = TempDir::new().unwrap();
-        let old = root.path().join("logs");
-        std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("a.log"), "x").unwrap();
-        let new = root.path().join("new");
-        // Rename refused: copied, kept in place, reported.
-        let r = migrate_logs(&old, &new, DATE, &Fake::new(true, false));
-        assert_eq!(r.copied, 1);
-        assert!(r.not_renamed.is_some() && old.join("a.log").is_file());
-        // Copy impossible (the destination's parent is a file): reported, old untouched.
-        let blocker = root.path().join("blocker");
-        std::fs::write(&blocker, "f").unwrap();
-        let r = migrate_logs(&old, &blocker.join("x"), DATE, &Native);
-        assert!(r.error.is_some() && old.join("a.log").is_file());
-        // No old directory: nothing to say.
-        assert_eq!(
-            migrate_logs(&root.path().join("none"), &new, DATE, &Native),
-            LogReport::default()
-        );
-    }
 
     fn ledger_with_wal_rows(dir: &Path) -> (Connection, PathBuf) {
         std::fs::create_dir_all(dir).unwrap();
@@ -947,43 +489,11 @@ mod tests {
         assert!(!tmp.exists());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_dangling_or_misdirected_link_is_not_success() {
-        let root = TempDir::new().unwrap();
-        let b = root.path().join("b.migrated");
-        std::fs::create_dir_all(&b).unwrap();
-        let old = root.path().join(OLD);
-        // Dangling.
-        std::os::unix::fs::symlink(root.path().join("gone"), &old).unwrap();
-        assert!(matches!(retire(&old, &b, &Native), Retired::Deferred(_)));
-        std::fs::remove_file(&old).unwrap();
-        // Somewhere else.
-        let other = root.path().join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        std::os::unix::fs::symlink(&other, &old).unwrap();
-        assert!(matches!(retire(&old, &b, &Native), Retired::Deferred(_)));
-        // Untouched.
-        assert_eq!(std::fs::read_link(&old).unwrap(), other);
-    }
-
     #[test]
     fn sources_apply_by_system() {
         for s in super::super::SOURCES.iter() {
-            let expect = s.os == super::super::Os::All || cfg!(target_os = "macos");
+            let expect = cfg!(target_os = "macos");
             assert_eq!(applies(s), expect, "{}", s.id);
-        }
-    }
-
-    #[test]
-    fn log_dirs_follow_tauri() {
-        let p = log_dir("x.y");
-        if cfg!(target_os = "macos") {
-            assert!(p.unwrap().ends_with("Library/Logs/x.y"));
-        } else if cfg!(windows) {
-            assert!(p.unwrap().ends_with("x.y\\logs"));
-        } else {
-            assert!(p.is_none());
         }
     }
 }
