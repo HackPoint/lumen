@@ -60,6 +60,9 @@ pub struct Ctx<'a> {
     pub ops: &'a dyn Ops,
     /// This build's `lumen-mcp`, looked up only when something has to be re-pointed.
     pub mcp_bin: &'a dyn Fn() -> Option<String>,
+    /// Copies the previous app's menu-bar position into this app's preferences, given the previous
+    /// folder's name (its bundle id); a note per key carried. Real only in the app, on macOS.
+    pub status_item_carry: &'a dyn Fn(&str) -> Vec<String>,
     /// The `lumen` link and the `lumen-cli` it should name.
     pub cli_link: Option<PathBuf>,
     pub cli_bin: Option<PathBuf>,
@@ -112,6 +115,7 @@ impl<'a> Ctx<'a> {
             plugin_name: "Lumen".into(),
             ops: &Native,
             mcp_bin,
+            status_item_carry: &crate::health::carry_status_item_position,
             cli_link: Some(setup::cli_symlink_path()),
             cli_bin: setup::find_binary("lumen-cli"),
         })
@@ -377,6 +381,9 @@ fn committed(ctx: &Ctx, lock: &commit::Lock, m: &MarkerV2, moved: Option<Moved>,
     repoint_entries(ctx, m, mcp.as_deref(), r);
 
     if data.is_dir() || frozen {
+        // First: the previous app's preferences file is one of the satellites, and the menu-bar
+        // position is read out of its domain before it moves into the backup.
+        r.notes.extend((ctx.status_item_carry)(&m.source));
         move_satellites(ctx, m, &b, r);
         settle_login_entries(ctx, &b, r);
         recreated_folder(ctx, m, &b, r);

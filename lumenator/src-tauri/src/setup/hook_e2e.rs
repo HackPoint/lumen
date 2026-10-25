@@ -2777,6 +2777,7 @@ fn upgrade_from(version: &str, login_on: bool) {
         .to_path_buf();
     let item = LoginItem(Cell::new(login_on));
     let find_mcp = || Some(real.to_string_lossy().into_owned());
+    let no_carry = |_: &str| Vec::<String>::new();
     let ctx = Ctx {
         n: root.join(UPGRADE_NEW_ID),
         new_id: UPGRADE_NEW_ID.into(),
@@ -2793,6 +2794,7 @@ fn upgrade_from(version: &str, login_on: bool) {
         plugin_name: "Lumen".into(),
         ops: &Native,
         mcp_bin: &find_mcp,
+        status_item_carry: &no_carry,
         cli_link: None,
         cli_bin: None,
         commit: lumen_core::legacy::commit::CommitOptions::new("2026-10-18T08:00:00Z"),

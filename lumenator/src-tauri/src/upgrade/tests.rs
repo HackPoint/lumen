@@ -57,6 +57,10 @@ fn mcp() -> Option<String> {
     Some("/opt/lumen/lumen-mcp".into())
 }
 
+fn no_carry(_: &str) -> Vec<String> {
+    Vec::new()
+}
+
 fn ctx<'a>(root: &Path, login: &'a Login, ops: &'a dyn Ops) -> Ctx<'a> {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -81,6 +85,7 @@ fn ctx<'a>(root: &Path, login: &'a Login, ops: &'a dyn Ops) -> Ctx<'a> {
         plugin_name: "Lumen".into(),
         ops,
         mcp_bin: &mcp,
+        status_item_carry: &no_carry,
         cli_link: None,
         cli_bin: None,
         commit,
@@ -216,6 +221,43 @@ fn a_start_finds_the_previous_install_by_content_and_leaves_no_folder_named_like
     // Nothing at the data root carries the previous name any more.
     assert_eq!(names(t.path()), ["fake.new.app", "home"]);
     assert!(!names(&c.n).iter().any(|n| n.contains("previous")));
+}
+
+/// The previous app's menu-bar place is asked for by that app's name, while its preferences
+/// file is still where it left it: the same start then moves the file into the backup.
+#[test]
+fn the_menu_bar_position_is_carried_before_the_previous_preferences_move() {
+    let t = TempDir::new().unwrap();
+    let (login, ops) = (Login(Cell::new(true)), Native);
+    let mut c = ctx(t.path(), &login, &ops);
+    let library = t.path().join("Library");
+    let prefs = library.join("Preferences").join(format!("{PREV}.plist"));
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(&prefs, b"bplist00").unwrap();
+    c.platform = Platform::MacOs;
+    c.satellite_roots = Roots {
+        library: Some(library),
+        ..Roots::default()
+    };
+    let asked = std::cell::RefCell::new(Vec::new());
+    let carry = |id: &str| {
+        asked.borrow_mut().push((id.to_string(), prefs.is_file()));
+        vec![format!("carried from {id}")]
+    };
+    c.status_item_carry = &carry;
+    seed_prev(t.path(), 1);
+
+    let r = at_start(&c);
+    assert_eq!(
+        asked.borrow().first(),
+        Some(&(PREV.to_string(), true)),
+        "asked by the previous name, before its preferences moved"
+    );
+    assert!(
+        !prefs.exists(),
+        "the preferences file moved into the backup"
+    );
+    assert!(r.notes.contains(&format!("carried from {PREV}")), "{r:?}");
 }
 
 #[test]
