@@ -189,20 +189,36 @@ pub fn run() {
             }
             WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "main" {
-                    // Hiding is right only while there is a tray to re-open from. With the
-                    // icon unavailable, hiding this window puts the app back exactly where
-                    // issue #5 found it — running, with nothing to click. Quit instead.
-                    let reachable = window
+                    // Closing never quits (`health::close_action`). With the icon unavailable,
+                    // a plain hide would put the app back where issue #5 found it, running with
+                    // nothing to click, so the way back is kept: the Dock icon or the taskbar entry.
+                    let tray = window
                         .app_handle()
                         .try_state::<StartupHealth>()
-                        .map(|h| !health::needs_fallback(&h.tray()))
-                        .unwrap_or(true);
-                    if reachable {
-                        api.prevent_close();
-                        let _ = window.hide();
-                    } else {
-                        log::warn!("CLOSE: no reachable tray — quitting rather than hiding");
-                        window.app_handle().exit(0);
+                        .map(|h| h.tray())
+                        .unwrap_or_default();
+                    api.prevent_close();
+                    match health::close_action(&tray, cfg!(target_os = "macos")) {
+                        health::CloseAction::Hide => {
+                            let _ = window.hide();
+                        }
+                        health::CloseAction::HideKeepDock => {
+                            // The fallback that opened this window switched to Regular; it is
+                            // made sure of here, since a hidden window with no Dock icon is #5.
+                            #[cfg(target_os = "macos")]
+                            if let Err(e) = window
+                                .app_handle()
+                                .set_activation_policy(tauri::ActivationPolicy::Regular)
+                            {
+                                log::warn!("CLOSE: could not keep the Dock icon: {e}");
+                            }
+                            log::warn!("CLOSE: no reachable menu-bar icon — hidden; the Dock icon re-opens it");
+                            let _ = window.hide();
+                        }
+                        health::CloseAction::Minimize => {
+                            log::warn!("CLOSE: no reachable tray — minimized; the taskbar entry re-opens it");
+                            let _ = window.minimize();
+                        }
                     }
                 }
             }

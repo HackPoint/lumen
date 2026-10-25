@@ -217,6 +217,35 @@ pub fn needs_fallback(tray: &TrayState) -> bool {
     matches!(tray, TrayState::Absent(_) | TrayState::Failed(_))
 }
 
+/// What closing the main window does. It never quits.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CloseAction {
+    /// The tray is there to re-open from: hide the window.
+    Hide,
+    /// macOS with no reachable menu-bar icon: hide the window and keep the Dock icon, whose click
+    /// re-opens it (`RunEvent::Reopen`).
+    HideKeepDock,
+    /// Elsewhere with no reachable tray: minimize, so the taskbar entry is the way back.
+    Minimize,
+}
+
+/// [`CloseAction`] for the tray's state.
+///
+/// Closing used to quit while the icon was unavailable, since a hidden window with nothing to
+/// click is where issue #5 left people. But the icon is most often merely crowded out by a full
+/// menu bar or the notch, and a user who closed the window that the fallback opened found Lumen
+/// gone and took it for an app that does not run. The way back is now the Dock icon or the
+/// taskbar entry, which the fallback keeps.
+pub fn close_action(tray: &TrayState, macos: bool) -> CloseAction {
+    if !needs_fallback(tray) {
+        CloseAction::Hide
+    } else if macos {
+        CloseAction::HideKeepDock
+    } else {
+        CloseAction::Minimize
+    }
+}
+
 /// Everything that went wrong during startup, and the tray's verified state.
 ///
 /// Managed as Tauri state so the frontend banner, the fault reporter and the later tray
@@ -611,6 +640,20 @@ mod tests {
 
     fn pref(k: &str, v: Option<bool>) -> (String, Option<bool>) {
         (k.to_string(), v)
+    }
+
+    #[test]
+    fn closing_the_window_never_quits() {
+        let absent = TrayState::Absent("the menu bar has no room for it".into());
+        let failed = TrayState::Failed("simulated".into());
+        for macos in [true, false] {
+            assert_eq!(close_action(&TrayState::Present, macos), CloseAction::Hide);
+            assert_eq!(close_action(&TrayState::Unknown, macos), CloseAction::Hide);
+        }
+        assert_eq!(close_action(&absent, true), CloseAction::HideKeepDock);
+        assert_eq!(close_action(&failed, true), CloseAction::HideKeepDock);
+        assert_eq!(close_action(&absent, false), CloseAction::Minimize);
+        assert_eq!(close_action(&failed, false), CloseAction::Minimize);
     }
 
     #[test]
