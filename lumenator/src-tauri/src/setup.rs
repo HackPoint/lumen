@@ -5660,4 +5660,46 @@ mod tests {
             "the cask must quit the app by its current bundle id"
         );
     }
+
+    /// Zap removes what this identifier leaves, by exact path, and nothing by pattern: a glob
+    /// like `io.<anything>.lumen` can match another vendor's app, and the dated backup a
+    /// `.migrated` glob once matched no longer exists (it lives inside the data folder now).
+    #[test]
+    fn the_cask_zaps_the_new_paths_and_no_migrated_glob() {
+        let cask = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("Casks/lumen-app.rb");
+        let text = match std::fs::read_to_string(&cask) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let zap = text
+            .split("zap trash:")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the cask has a zap stanza");
+
+        assert!(!zap.contains('*'), "zap names exact paths only:{zap}");
+        assert!(
+            !zap.contains("migrated"),
+            "no backup sits beside the folder:{zap}"
+        );
+        for path in [
+            format!("~/Library/Application Support/{APP_ID}"),
+            format!("~/Library/Caches/{APP_ID}"),
+            format!("~/Library/Logs/{APP_ID}"),
+            format!("~/Library/WebKit/{APP_ID}"),
+            format!("~/Library/HTTPStorages/{APP_ID}"),
+            format!("~/Library/HTTPStorages/{APP_ID}.binarycookies"),
+            format!("~/Library/Cookies/{APP_ID}.binarycookies"),
+            format!("~/Library/Preferences/{APP_ID}.plist"),
+            format!("~/Library/Saved Application State/{APP_ID}.savedState"),
+            "~/Library/LaunchAgents/Lumen.plist".to_string(),
+        ] {
+            assert!(zap.contains(&format!("\"{path}\"")), "zap misses {path}");
+        }
+    }
 }

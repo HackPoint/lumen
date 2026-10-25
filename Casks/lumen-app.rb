@@ -49,19 +49,18 @@ cask "lumen-app" do
             launchctl:  "Lumen"
 
   zap trash: [
-    # `io.*.lumen` takes the identifier this app had before 1.10.0 as well as today's, and
-    # `io.*.lumen.*.migrated*` the dated backup the 1.10.0 migration leaves, so no old name is
-    # spelled here. Neither matches another app's `io.<vendor>.lumen-notes` or `.lumens`.
-    "~/Library/Application Support/io.*.lumen",
-    "~/Library/Application Support/io.*.lumen.*.migrated*",
-    "~/Library/Caches/io.*.lumen",
-    "~/Library/Logs/io.*.lumen",
-    "~/Library/Logs/io.*.lumen.*.migrated*",
-    "~/Library/WebKit/io.*.lumen",
-    # The login item the app registers on first run.
-    # The file the plugin actually writes. The bundle-id name below is kept for
-    # installs made before the agent was renamed, since zap should clean those too.
+    # Exact paths of this identifier only. The data folder holds the backup the 1.10.0
+    # migration keeps of the previous install, so zapping it removes that backup too.
+    "~/Library/Application Support/io.hackpoint.lumen",
+    "~/Library/Caches/io.hackpoint.lumen",
+    "~/Library/Logs/io.hackpoint.lumen",
+    "~/Library/WebKit/io.hackpoint.lumen",
+    "~/Library/HTTPStorages/io.hackpoint.lumen",
+    "~/Library/HTTPStorages/io.hackpoint.lumen.binarycookies",
+    "~/Library/Cookies/io.hackpoint.lumen.binarycookies",
+    "~/Library/Preferences/io.hackpoint.lumen.plist",
+    "~/Library/Saved Application State/io.hackpoint.lumen.savedState",
+    # The login item the autostart plugin writes, under the product name.
     "~/Library/LaunchAgents/Lumen.plist",
-    "~/Library/LaunchAgents/io.*.lumen.plist",
   ]
 end
