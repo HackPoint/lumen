@@ -1171,7 +1171,9 @@ fn locked_by_another(path: &Path, start: i64, len: i64) -> io::Result<bool> {
     if r == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(i32::from(fl.l_type) != i32::from(libc::F_UNLCK))
+    // A cast to `l_type`'s own alias: F_UNLCK is a c_short on macOS and a c_int on Linux, where
+    // `i32::from(libc::F_UNLCK)` is a useless conversion.
+    Ok(fl.l_type != libc::F_UNLCK as libc::c_short)
 }
 
 /// Whether two files hold the same bytes.
@@ -5064,7 +5066,12 @@ mod tests {
                         0 => {
                             merge_backup(&i.n_db(), &i.b, &marker_of(&i)).unwrap();
                         }
-                        1 => assert!(matches!(freeze(&i), Freeze::Frozen(_)), "{ord:?}"),
+                        1 => {
+                            // The outcome in the message, not only the order: a failure that
+                            // printed the order alone could not say which gate refused.
+                            let f = freeze(&i);
+                            assert!(matches!(f, Freeze::Frozen(_)), "{ord:?}: {f:?}");
+                        }
                         2 => {
                             i.import(&c1).unwrap();
                         }

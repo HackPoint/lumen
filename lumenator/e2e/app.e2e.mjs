@@ -85,10 +85,11 @@ function sandbox() {
   };
   delete env.LUMEN_DB;
   delete env.LUMEN_SIMULATE_TRAY;
-  // Where Tauri's app_data_dir puts the ledger, and app_log_dir the log, for the app's identifier.
-  const appData = path.join(env.XDG_DATA_HOME, APP_ID);
+  // Where the app keeps the ledger: the home-based folder (setup::app_support_dir_in), which
+  // does not follow XDG_DATA_HOME. Tauri's app_log_dir still does, so the log stays under it.
+  const appData = path.join(home, '.local', 'share', APP_ID);
   fs.mkdirSync(appData, { recursive: true });
-  return { env, db: path.join(appData, 'lumen.db'), logs: path.join(appData, 'logs') };
+  return { env, db: path.join(appData, 'lumen.db'), logs: path.join(env.XDG_DATA_HOME, APP_ID, 'logs') };
 }
 
 /**

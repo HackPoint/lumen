@@ -882,6 +882,26 @@ mod v2 {
         migrated(commit::migrate(&l, &n, &copts(), &Real));
     }
 
+    /// A holder that lets go within the wait, as a spawned child's copy of the descriptor does
+    /// once its exec closes it, is waited for: it is no migration.
+    #[test]
+    fn a_lock_held_for_a_moment_is_waited_for() {
+        let root = TempDir::new().unwrap();
+        let (_, n) = dirs(root.path());
+        std::fs::create_dir_all(&n).unwrap();
+        let f = std::fs::File::create(n.join(LOCK_NAME)).unwrap();
+        f.lock().unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(f);
+        });
+        assert!(
+            commit::take_lock(&n).is_ok(),
+            "a lock released in 100 ms was reported held"
+        );
+        holder.join().unwrap();
+    }
+
     #[test]
     fn the_ledger_is_a_snapshot_taken_through_the_held_connection() {
         let root = TempDir::new().unwrap();

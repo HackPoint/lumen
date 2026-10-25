@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The commit intent, inside the stage.
 pub const INTENT_NAME: &str = ".commit";
@@ -134,6 +134,20 @@ pub enum LockError {
     Io(io::Error),
 }
 
+/// How long [`take_lock`] keeps trying a lock that is held, counted from its first attempt.
+///
+/// A lock can be held for a moment by no migration at all. Spawning a process copies the
+/// spawner's descriptors, the lock's among them, and they close only once the exec is under
+/// way; `flock` belongs to the open file, so until then a lock just released by its owner is
+/// still held. Any thread of the app that starts a process can do that. In the test binaries
+/// the tests that spawn children made a sibling test's drop-and-retake fail about one run in
+/// seven on macOS.
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The wait after the first refusal; it doubles up to [`LOCK_LONGEST_PAUSE`].
+const LOCK_FIRST_PAUSE: Duration = Duration::from_millis(5);
+const LOCK_LONGEST_PAUSE: Duration = Duration::from_millis(25);
+
 /// M1: create N and take the lock. The OS drops it when the process dies.
 pub fn take_lock(n: &Path) -> Result<Lock, LockError> {
     fs::create_dir_all(n).map_err(LockError::Io)?;
@@ -143,10 +157,18 @@ pub fn take_lock(n: &Path) -> Result<Lock, LockError> {
         .write(true)
         .open(n.join(LOCK_NAME))
         .map_err(LockError::Io)?;
-    match f.try_lock() {
-        Ok(()) => Ok(Lock(f)),
-        Err(TryLockError::WouldBlock) => Err(LockError::Held),
-        Err(TryLockError::Error(e)) => Err(LockError::Io(e)),
+    let started = Instant::now();
+    let mut pause = LOCK_FIRST_PAUSE;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(Lock(f)),
+            Err(TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(LOCK_LONGEST_PAUSE);
+            }
+            Err(TryLockError::WouldBlock) => return Err(LockError::Held),
+            Err(TryLockError::Error(e)) => return Err(LockError::Io(e)),
+        }
     }
 }
 
