@@ -433,6 +433,51 @@ CLAUDE_CONFIG_DIR="$SCRATCH/cfg" claude -p "Call the lumen smart_read tool with 
 
 ---
 
+## TEST 7 — 1.10.0 upgrade (data folder move)
+
+For each upgrade path, record `lumen report` (all-time savings) and the app's all-time
+savings before and after; they must be equal.
+
+### 7.1 Fresh install
+
+- [ ] No previous folder: Lumen starts, creates `io.hackpoint.lumen`, no `legacy-backup-*`
+
+### 7.2 Upgrade from 1.8.0, and from 1.9.0 (original and re-published 2026-10-20)
+
+- [ ] Start 1.10.0; history is back, and `lumen report` and the app's all-time savings equal
+      what they were before
+- [ ] `legacy-backup-<date>` is inside the new data folder
+- [ ] Settings and the login-item choice carried over; macOS asks for notification permission
+      again and may list a new login item
+- [ ] Run Setup, restart Claude Code; after Setup the backup is read-only
+- [ ] Re-published 1.9.0 only: `lumen.db.pre-legacy` is in the new folder and the start message
+      names it; `lumen import-ledger --dry-run <it>` then `lumen import-ledger <it>` add rows
+      once, and a second run adds none
+- [ ] Re-create the previous folder with an old ledger: Lumen reports it and merges nothing;
+      `lumen import-ledger <dir>` brings it in
+- [ ] Delete the backup as described in `docs/troubleshooting-the-tray.md`; Lumen is unaffected
+
+### 7.3 Window and icon
+
+- [ ] The menu-bar icon keeps its place across the upgrade (macOS)
+- [ ] With the icon hidden (Cmd-drag it off or fill the bar), close the window: Lumen keeps
+      running with its Dock icon, which re-opens it; `lumen show` opens it too
+- [ ] Cmd-Q, the tray menu and the Dock menu quit
+
+### 7.4 Windows
+
+- [ ] One "Lumen" entry in Apps & features, publisher HackPoint
+- [ ] No second entry, and no previous-manufacturer install-location key in the registry
+
+### 7.5 Homebrew re-tap
+
+- [ ] On a tap cloned before 2026-10-20, `brew update` fails; `brew untap --force
+      hackpoint/tap && brew tap hackpoint/tap` fixes it, Lumen stays installed, and
+      `brew upgrade --cask lumen-app` and `brew upgrade lumen-cli` reach 1.10.0
+- [ ] `brew uninstall --zap --cask lumen-app` removes `io.hackpoint.lumen` paths, backup included
+
+---
+
 ## Checklist summary
 
 | # | Test | Status |
@@ -443,5 +488,6 @@ CLAUDE_CONFIG_DIR="$SCRATCH/cfg" claude -p "Call the lumen smart_read tool with 
 | 4 | Soak 3–4h — max(ts) advances, daemon stays alive | [ ] PASS / [ ] FAIL |
 | 5 | Uninstall — lumen gone, unrelated preserved, re-install works | [ ] PASS / [ ] FAIL |
 | 6 | Identity — full after `/clear` and `/resume`, stub on a repeat, subagent told apart | [ ] PASS / [ ] FAIL |
+| 7 | 1.10.0 upgrade — data moved, history and savings equal, backup, icon and window, Windows entry, brew re-tap | [ ] PASS / [ ] FAIL |
 
 **Do not publish the release until TEST 4 (soak) is complete.**
