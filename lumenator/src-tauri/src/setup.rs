@@ -5661,6 +5661,33 @@ mod tests {
         );
     }
 
+    /// The Windows installer runs Lumen's post-install hook, and the hook spells no vendor and no
+    /// identifier: it finds the entries it removes by what they hold, against this build's own
+    /// `${MANUFACTURER}` and `$INSTDIR`. What it does is proven on a Windows runner by the upgrade
+    /// workflow.
+    #[test]
+    fn the_nsis_hooks_are_wired_and_name_no_vendor() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        let hooks = conf["bundle"]["windows"]["nsis"]["installerHooks"]
+            .as_str()
+            .expect("bundle.windows.nsis.installerHooks is set");
+        let text = std::fs::read_to_string(dir.join(hooks)).unwrap();
+
+        assert!(text.contains("!macro NSIS_HOOK_POSTINSTALL"), "{text}");
+        assert!(text.contains("${MANUFACTURER}") && text.contains("$INSTDIR"));
+        let lower = text.to_ascii_lowercase();
+        let publisher = conf["bundle"]["publisher"].as_str().unwrap();
+        for name in [publisher, APP_ID, conf["identifier"].as_str().unwrap()] {
+            assert!(
+                !lower.contains(&name.to_ascii_lowercase()),
+                "the hook spells {name}"
+            );
+        }
+    }
+
     /// Zap removes what this identifier leaves, by exact path, and nothing by pattern: a glob
     /// like `io.<anything>.lumen` can match another vendor's app, and the dated backup a
     /// `.migrated` glob once matched no longer exists (it lives inside the data folder now).
