@@ -192,11 +192,8 @@ pub fn run() {
                     // Closing never quits (`health::close_action`). With the icon unavailable,
                     // a plain hide would put the app back where issue #5 found it, running with
                     // nothing to click, so the way back is kept: the Dock icon or the taskbar entry.
-                    let tray = window
-                        .app_handle()
-                        .try_state::<StartupHealth>()
-                        .map(|h| h.tray())
-                        .unwrap_or_default();
+                    // Managed on the builder below, before any window exists.
+                    let tray = window.app_handle().state::<StartupHealth>().tray();
                     api.prevent_close();
                     match health::close_action(&tray, cfg!(target_os = "macos")) {
                         health::CloseAction::Hide => {
