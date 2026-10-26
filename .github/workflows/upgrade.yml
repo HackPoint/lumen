@@ -120,6 +120,8 @@ jobs:
         run: |
           bin=$(cargo test -p Lumen --lib --no-run --message-format=json \
             | jq -r 'select(.reason=="compiler-artifact" and .profile.test and .executable != null) | .executable' | tail -1)
+          # cargo names it in the platform's own form; these steps run it from Git Bash on Windows.
+          if [ "$RUNNER_OS" = Windows ]; then bin=$(cygpath -u "$bin"); fi
           [ -x "$bin" ] || { echo "no helper binary ($bin)"; exit 1; }
           echo "HELPERS=$bin" >> "$GITHUB_ENV"
           echo "helpers: $bin"
