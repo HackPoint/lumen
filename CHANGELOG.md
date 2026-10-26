@@ -24,6 +24,10 @@ The icon's position is carried over with the rest of the data, so it stays where
 
 While the menu-bar icon is hidden, crowded out by a full menu bar or the notch, closing the window used to be the end of the app. Now the window closes and Lumen keeps running with its Dock icon on macOS, which opens it again; on other systems it minimizes. `lumen show` opens the window from a terminal. Quit from the tray menu, the Dock menu or Cmd-Q.
 
+### The macOS app is signed as a whole
+
+Until now only the app's executable carried a signature (the linker's, ad hoc), and the bundle around it none, so `codesign --verify` failed and a copy downloaded with a browser was called damaged on first launch. The bundle is now signed ad hoc as a whole: Gatekeeper treats a downloaded copy as an app from an unidentified developer, which System Settings > Privacy & Security can open. Homebrew installs were not affected.
+
 ### The Windows installer removes the previous install's leftovers
 
 After an install, the installer removes a second "Lumen" entry in Apps & features and the previous manufacturer's install-location key. Both are found by what they hold, not by name. The publisher is HackPoint.

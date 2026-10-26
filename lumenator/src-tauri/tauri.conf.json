@@ -48,6 +48,9 @@
         "installerHooks": "./windows/hooks.nsh"
       }
     },
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "externalBin": [
       "binaries/lumen-daemon",
       "binaries/lumen-mcp",

@@ -5688,6 +5688,18 @@ mod tests {
         }
     }
 
+    /// The macOS bundle is signed as a whole (ad hoc), not only its executable by the linker. A
+    /// bundle whose resources no signature seals fails `codesign --verify`, and a downloaded copy
+    /// is then called damaged on first launch instead of unverified.
+    #[test]
+    fn the_macos_bundle_is_signed_as_a_whole() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        assert_eq!(conf["bundle"]["macOS"]["signingIdentity"], "-");
+    }
+
     /// Zap removes what this identifier leaves, by exact path, and nothing by pattern: a glob
     /// like `io.<anything>.lumen` can match another vendor's app, and the dated backup a
     /// `.migrated` glob once matched no longer exists (it lives inside the data folder now).
