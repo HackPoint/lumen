@@ -1,0 +1,1351 @@
+{
+  "schema": 1,
+  "label": "pre-release-48dbf977a38a",
+  "pre_release": true,
+  "tokenizer": {
+    "name": "cl100k_base",
+    "implementation": "lumen_core::tokenizer::count_tokens, the function the meter uses",
+    "is_proxy_for_claude": true,
+    "caveat": "cl100k_base is not Claude's tokenizer. Counts compare modes with one another; they are not a bill and not the number of tokens Claude would charge.",
+    "counted": "the reply text of a tool call. The JSON-RPC envelope and `_meta` are not counted, exactly as the meter does not count them.",
+    "line_endings": "files are read byte for byte from the git object database; no line-ending conversion happens anywhere"
+  },
+  "corpus": [
+    {
+      "name": "lumen",
+      "url": "https://github.com/HackPoint/lumen",
+      "license": "MIT",
+      "sha": "3b951e93dbe55e46dc0e15951666b303110861e7",
+      "note": "this repository (Rust, plus the app's TypeScript), main before the benchmarks landed",
+      "fingerprint": "af5b4e4b39109fd8ba053bd3a0464d8aeb2dbc5af11eab6bdad46a55d5829f91",
+      "candidate_files": 96,
+      "measured_files": 96,
+      "skipped_files": 0,
+      "files_by_bucket": {
+        "1000-2999": 11,
+        "300-999": 31,
+        "3000+": 1,
+        "<300": 53
+      }
+    }
+  ],
+  "builds": [
+    {
+      "label": "v1.9.0",
+      "role": "baseline",
+      "sha": "cbb8d0fe9d18acb9d7ca1b839dab528fbcb522e7",
+      "dirty": false,
+      "profile": "release",
+      "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
+      "source": "git archive of cbb8d0fe9d18acb9d7ca1b839dab528fbcb522e7",
+      "identity": "hook",
+      "identity_note": "a hook record per call (PreToolUse on the Lumen tool), claimed by the server through _meta claudecode/toolUseId",
+      "reported_version": "1.9.0",
+      "tokens": null
+    },
+    {
+      "label": "pre-48dbf97",
+      "role": "candidate",
+      "sha": "48dbf977a38a42d7f5e9eae8780a04ff72070a6c",
+      "dirty": false,
+      "profile": "release",
+      "profile_note": "release, cargo's default: the root Cargo.toml has no [profile.release]",
+      "source": "the checkout this harness was run from, built in its own target directory",
+      "identity": "hook",
+      "identity_note": "a hook record per call (PreToolUse on the Lumen tool), claimed by the server through _meta claudecode/toolUseId",
+      "reported_version": "1.10.0",
+      "tokens": null
+    }
+  ],
+  "latency": {
+    "runs": 200,
+    "passes": 5,
+    "runs_per_pass": 40,
+    "warmup_runs": 20,
+    "minimum_runs": 100,
+    "clock": "std::time::Instant, a monotonic clock, nanosecond resolution",
+    "warmup_note": "per series per pass, run the same way as the recorded runs, so caches, page tables and the ledger file are warm; hook spawns are warm-start, not first launch after boot",
+    "percentile_method": "nearest-rank: the percentile p of n runs is the run at rank ceil(p x n / 100) of the sorted runs, fastest first, with no interpolation. With n = 200 the median is run 100 (of the two middle runs of an even count, the faster), p90 is run 180, and p99 is run 198, which leaves the slowest 2 runs above it.",
+    "samples_note": "not written. Each series carries `pass_medians_ns`, the median of each pass on its own, in pass order: how far they sit from one another is how much the machine moved while the run was going on.",
+    "subjects": [
+      {
+        "bucket": "<300",
+        "rel": "crates/lumen-core/tests/ranked_coverage.rs",
+        "lines": 122,
+        "bytes": 3754,
+        "recall_item": "walk"
+      },
+      {
+        "bucket": "300-999",
+        "rel": "crates/lumen-mcp/tests/protocol.rs",
+        "lines": 532,
+        "bytes": 17672,
+        "recall_item": "initialize_returns_a_well_formed_jsonrpc_response"
+      },
+      {
+        "bucket": "1000-2999",
+        "rel": "crates/lumen-core/tests/silent_fallbacks.rs",
+        "lines": 1472,
+        "bytes": 52110,
+        "recall_item": "rust_statement"
+      }
+    ],
+    "builds": [
+      {
+        "label": "v1.9.0",
+        "reported_version": "1.9.0",
+        "load_before": "load average 3.57 1.78 0.70 (1, 5, 15 min)",
+        "load_after": "load average 1.56 1.57 0.74 (1, 5, 15 min)",
+        "series": [
+          {
+            "id": "hook.floor",
+            "what": "process floor: spawn, stdin, exit, for a hook subcommand that does no work",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 681732,
+              "median_ns": 716203,
+              "p90_ns": 786569,
+              "p99_ns": 839939,
+              "max_ns": 888392
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              719729,
+              700100,
+              735643,
+              708913,
+              714762
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.spawn",
+            "what": "PreToolUse Read of a file under the 300-line threshold: not intercepted (exit 0)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 719179,
+              "median_ns": 770946,
+              "p90_ns": 867601,
+              "p99_ns": 1552418,
+              "max_ns": 2133650
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              764166,
+              730896,
+              791436,
+              753509,
+              781192
+            ]
+          },
+          {
+            "id": "hook.intercept_block.spawn",
+            "what": "PreToolUse Read of a file over the threshold, first Read of the session: blocked (exit 2)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1127651,
+              "median_ns": 1181901,
+              "p90_ns": 1254021,
+              "p99_ns": 1306660,
+              "max_ns": 1356275
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              1167792,
+              1142553,
+              1219278,
+              1181140,
+              1183515
+            ]
+          },
+          {
+            "id": "hook.meter_read.spawn",
+            "what": "PostToolUse Read: count the file's tokens, write one ledger row (exit 0)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 28554751,
+              "median_ns": 31779738,
+              "p90_ns": 36135538,
+              "p99_ns": 44172794,
+              "max_ns": 54368445
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              35056049,
+              29879938,
+              30820215,
+              31420941,
+              33779286
+            ]
+          },
+          {
+            "id": "hook.meter_bash.spawn",
+            "what": "PostToolUse Bash: count the output's tokens, write one ledger row (exit 0); output is the first 40 lines of the subject",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 27786074,
+              "median_ns": 31086301,
+              "p90_ns": 35214687,
+              "p99_ns": 44498742,
+              "max_ns": 45997349
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              33919925,
+              29010268,
+              29225635,
+              30554043,
+              33542718
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.inproc",
+            "what": "run_with, warm: PreToolUse Read under the threshold",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.intercept_block.inproc",
+            "what": "run_with, warm: PreToolUse Read over the threshold, blocked",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.meter_read.inproc",
+            "what": "run_with, warm: PostToolUse Read, one ledger row",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.meter_bash.inproc",
+            "what": "run_with, warm: PostToolUse Bash, one ledger row",
+            "subject": null,
+            "status": "n/a: the harness links this checkout's hook library, so it can time in-process only a binary built from the checkout; the comparable figure for any other build is spawn minus floor",
+            "lat": null,
+            "routes": {},
+            "pass_medians_ns": []
+          },
+          {
+            "id": "hook.per_call_identity",
+            "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 766237,
+              "median_ns": 818134,
+              "p90_ns": 1256804,
+              "p99_ns": 2182201,
+              "max_ns": 4087669
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              846039,
+              787339,
+              1237355,
+              805988,
+              800638
+            ]
+          },
+          {
+            "id": "server.start",
+            "what": "spawn lumen-mcp and answer `initialize`",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 611917,
+              "median_ns": 657494,
+              "p90_ns": 707501,
+              "p99_ns": 748039,
+              "max_ns": 889575
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              650235,
+              642693,
+              656254,
+              666429,
+              663994
+            ]
+          },
+          {
+            "id": "server.ping",
+            "what": "JSON-RPC round trip with no work: the floor under every server series",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 21192,
+              "median_ns": 22694,
+              "p90_ns": 24156,
+              "p99_ns": 33921,
+              "max_ns": 39545
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              22183,
+              22764,
+              22314,
+              23324,
+              22724
+            ]
+          },
+          {
+            "id": "server.smart_read.<300",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 704413,
+              "median_ns": 747781,
+              "p90_ns": 806129,
+              "p99_ns": 1372706,
+              "max_ns": 1523224
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              797707,
+              746598,
+              741441,
+              735303,
+              747879
+            ]
+          },
+          {
+            "id": "server.recall_file.<300",
+            "what": "recall_file for one item (`walk`)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 729592,
+              "median_ns": 788633,
+              "p90_ns": 855113,
+              "p99_ns": 943092,
+              "max_ns": 1802970
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              842694,
+              753528,
+              785578,
+              810696,
+              772606
+            ]
+          },
+          {
+            "id": "server.smart_read.300-999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2681721,
+              "median_ns": 2797945,
+              "p90_ns": 3131657,
+              "p99_ns": 7545337,
+              "max_ns": 7903915
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              3098638,
+              2827784,
+              2716763,
+              2807650,
+              2738618
+            ]
+          },
+          {
+            "id": "server.recall_file.300-999",
+            "what": "recall_file for one item (`initialize_returns_a_well_formed_jsonrpc_response`)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2581823,
+              "median_ns": 2700773,
+              "p90_ns": 3045267,
+              "p99_ns": 3213470,
+              "max_ns": 3326419
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              3045267,
+              2682812,
+              2666608,
+              2756483,
+              2616294
+            ]
+          },
+          {
+            "id": "server.smart_read.1000-2999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6184081,
+              "median_ns": 6658188,
+              "p90_ns": 7592548,
+              "p99_ns": 7882632,
+              "max_ns": 7958296
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              7592437,
+              6560506,
+              6454046,
+              6731543,
+              6684121
+            ]
+          },
+          {
+            "id": "server.recall_file.1000-2999",
+            "what": "recall_file for one item (`rust_statement`)",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6079374,
+              "median_ns": 6569751,
+              "p90_ns": 7563784,
+              "p99_ns": 7869563,
+              "max_ns": 8229663
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              7563784,
+              6219164,
+              6792804,
+              6578634,
+              6391418
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.<300",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1011157,
+              "median_ns": 1065608,
+              "p90_ns": 1166629,
+              "p99_ns": 1246688,
+              "max_ns": 1270665
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              1159569,
+              1054251,
+              1096344,
+              1031026,
+              1050644
+            ]
+          },
+          {
+            "id": "server.repeat_changed.<300",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1039258,
+              "median_ns": 1112698,
+              "p90_ns": 1342183,
+              "p99_ns": 1602243,
+              "max_ns": 1706790
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              1342183,
+              1105738,
+              1183745,
+              1086679,
+              1070845
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.300-999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3091546,
+              "median_ns": 3212598,
+              "p90_ns": 3626269,
+              "p99_ns": 4102533,
+              "max_ns": 6095012
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              3626269,
+              3139016,
+              3325375,
+              3185006,
+              3166024
+            ]
+          },
+          {
+            "id": "server.repeat_changed.300-999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3118315,
+              "median_ns": 3317534,
+              "p90_ns": 3743582,
+              "p99_ns": 4217353,
+              "max_ns": 4707267
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              3548392,
+              3295811,
+              3666306,
+              3209452,
+              3179505
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.1000-2999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6982930,
+              "median_ns": 7312824,
+              "p90_ns": 7944701,
+              "p99_ns": 20069296,
+              "max_ns": 22459728
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              7596981,
+              7357781,
+              7507986,
+              7142800,
+              7129183
+            ]
+          },
+          {
+            "id": "server.repeat_changed.1000-2999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 7119799,
+              "median_ns": 7552000,
+              "p90_ns": 7937281,
+              "p99_ns": 8519564,
+              "max_ns": 8625464
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              7786195,
+              7590020,
+              7473042,
+              7519124,
+              7362544
+            ]
+          },
+          {
+            "id": "server.identity.placed",
+            "what": "smart_read, repeat reads off, with the hook's record in place and the _meta id that names it: the server claims it",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2654910,
+              "median_ns": 2781972,
+              "p90_ns": 2884465,
+              "p99_ns": 3211346,
+              "max_ns": 3815881
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2840860,
+              2766568,
+              2781972,
+              2769362,
+              2723221
+            ]
+          },
+          {
+            "id": "server.identity.unplaced",
+            "what": "smart_read, repeat reads off, with no record and no _meta id: nothing to claim",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2590724,
+              "median_ns": 2724747,
+              "p90_ns": 2821831,
+              "p99_ns": 3052716,
+              "max_ns": 3474429
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2802973,
+              2733529,
+              2722975,
+              2698826,
+              2666376
+            ]
+          }
+        ],
+        "derived": [
+          {
+            "id": "hook.intercept_pass.spawn_minus_floor",
+            "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
+            "median_ns": 54743
+          },
+          {
+            "id": "hook.intercept_block.spawn_minus_floor",
+            "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
+            "median_ns": 465698
+          },
+          {
+            "id": "hook.meter_read.spawn_minus_floor",
+            "what": "median(hook.meter_read.spawn) - median(hook.floor)",
+            "median_ns": 31063535
+          },
+          {
+            "id": "hook.meter_bash.spawn_minus_floor",
+            "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
+            "median_ns": 30370098
+          },
+          {
+            "id": "hook.per_call_identity.spawn_minus_floor",
+            "what": "median(hook.per_call_identity) - median(hook.floor)",
+            "median_ns": 101931
+          },
+          {
+            "id": "hook.per_call_identity.server_claim",
+            "what": "median(server.identity.placed) - median(server.identity.unplaced)",
+            "median_ns": 57225
+          }
+        ]
+      },
+      {
+        "label": "pre-48dbf97",
+        "reported_version": "1.10.0",
+        "load_before": "load average 3.57 1.78 0.70 (1, 5, 15 min)",
+        "load_after": "load average 1.56 1.57 0.74 (1, 5, 15 min)",
+        "series": [
+          {
+            "id": "hook.floor",
+            "what": "process floor: spawn, stdin, exit, for a hook subcommand that does no work",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 692848,
+              "median_ns": 720039,
+              "p90_ns": 781972,
+              "p99_ns": 858207,
+              "max_ns": 907871
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              748372,
+              719689,
+              721380,
+              707640,
+              714650
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.spawn",
+            "what": "PreToolUse Read of a file under the 300-line threshold: not intercepted (exit 0)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 727341,
+              "median_ns": 759446,
+              "p90_ns": 869341,
+              "p99_ns": 1783431,
+              "max_ns": 2065824
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              803155,
+              747360,
+              758505,
+              765026,
+              756373
+            ]
+          },
+          {
+            "id": "hook.intercept_block.spawn",
+            "what": "PreToolUse Read of a file over the threshold, first Read of the session: blocked (exit 2)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1162462,
+              "median_ns": 1208821,
+              "p90_ns": 1294111,
+              "p99_ns": 1368883,
+              "max_ns": 1389073
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              1287641,
+              1188733,
+              1207907,
+              1211124,
+              1176873
+            ]
+          },
+          {
+            "id": "hook.meter_read.spawn",
+            "what": "PostToolUse Read: count the file's tokens, write one ledger row (exit 0)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 29668006,
+              "median_ns": 33168660,
+              "p90_ns": 36895834,
+              "p99_ns": 51911960,
+              "max_ns": 61360415
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              34832459,
+              31401215,
+              33843520,
+              33473341,
+              32696807
+            ]
+          },
+          {
+            "id": "hook.meter_bash.spawn",
+            "what": "PostToolUse Bash: count the output's tokens, write one ledger row (exit 0); output is the first 40 lines of the subject",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 28559634,
+              "median_ns": 31915486,
+              "p90_ns": 33830727,
+              "p99_ns": 38428516,
+              "max_ns": 62716560
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              31452272,
+              30423408,
+              32247901,
+              32637568,
+              31756729
+            ]
+          },
+          {
+            "id": "hook.intercept_pass.inproc",
+            "what": "run_with, warm: PreToolUse Read under the threshold",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 8442,
+              "median_ns": 8723,
+              "p90_ns": 8993,
+              "p99_ns": 16595,
+              "max_ns": 112448
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              8723,
+              8983,
+              8683,
+              8843,
+              8493
+            ]
+          },
+          {
+            "id": "hook.intercept_block.inproc",
+            "what": "run_with, warm: PreToolUse Read over the threshold, blocked",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 218477,
+              "median_ns": 235131,
+              "p90_ns": 261441,
+              "p99_ns": 283203,
+              "max_ns": 638135
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              230115,
+              241682,
+              232699,
+              238658,
+              227161
+            ]
+          },
+          {
+            "id": "hook.meter_read.inproc",
+            "what": "run_with, warm: PostToolUse Read, one ledger row",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2131365,
+              "median_ns": 2246696,
+              "p90_ns": 2415070,
+              "p99_ns": 3099868,
+              "max_ns": 5120932
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              2229353,
+              2235905,
+              2270904,
+              2282742,
+              2212726
+            ]
+          },
+          {
+            "id": "hook.meter_bash.inproc",
+            "what": "run_with, warm: PostToolUse Bash, one ledger row",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1311657,
+              "median_ns": 1438126,
+              "p90_ns": 1653554,
+              "p99_ns": 3516378,
+              "max_ns": 6592367
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              1417065,
+              1469098,
+              1419017,
+              1464224,
+              1435881
+            ]
+          },
+          {
+            "id": "hook.per_call_identity",
+            "what": "per-call identity hook: PreToolUse `hook intercept` on a call of a Lumen MCP tool, which writes the record the server claims; spawn to exit",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 800458,
+              "median_ns": 842283,
+              "p90_ns": 2386225,
+              "p99_ns": 2992844,
+              "max_ns": 3140836
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              831556,
+              816822,
+              842624,
+              848492,
+              2386225
+            ]
+          },
+          {
+            "id": "server.start",
+            "what": "spawn lumen-mcp and answer `initialize`",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 640490,
+              "median_ns": 674350,
+              "p90_ns": 730155,
+              "p99_ns": 981420,
+              "max_ns": 1438485
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              666540,
+              675831,
+              674461,
+              676884,
+              674090
+            ]
+          },
+          {
+            "id": "server.ping",
+            "what": "JSON-RPC round trip with no work: the floor under every server series",
+            "subject": null,
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 21292,
+              "median_ns": 22904,
+              "p90_ns": 25098,
+              "p99_ns": 44186,
+              "max_ns": 53931
+            },
+            "routes": {},
+            "pass_medians_ns": [
+              23535,
+              23305,
+              22454,
+              23735,
+              22083
+            ]
+          },
+          {
+            "id": "server.smart_read.<300",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 704526,
+              "median_ns": 738535,
+              "p90_ns": 774258,
+              "p99_ns": 1046656,
+              "max_ns": 2198905
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              762844,
+              746868,
+              734702,
+              723825,
+              749573
+            ]
+          },
+          {
+            "id": "server.recall_file.<300",
+            "what": "recall_file for one item (`walk`)",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 723964,
+              "median_ns": 751737,
+              "p90_ns": 780357,
+              "p99_ns": 828962,
+              "max_ns": 1034911
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              748582,
+              745455,
+              769033,
+              765868,
+              744596
+            ]
+          },
+          {
+            "id": "server.smart_read.300-999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2604472,
+              "median_ns": 2705418,
+              "p90_ns": 2831978,
+              "p99_ns": 4037470,
+              "max_ns": 6655969
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2795512,
+              2670616,
+              2706517,
+              2694193,
+              2676690
+            ]
+          },
+          {
+            "id": "server.recall_file.300-999",
+            "what": "recall_file for one item (`initialize_returns_a_well_formed_jsonrpc_response`)",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2528498,
+              "median_ns": 2641069,
+              "p90_ns": 2839277,
+              "p99_ns": 5023436,
+              "max_ns": 5113000
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              2725456,
+              2596344,
+              2639096,
+              2658228,
+              2572244
+            ]
+          },
+          {
+            "id": "server.smart_read.1000-2999",
+            "what": "smart_read, repeat reads off: the outline",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6111006,
+              "median_ns": 6479708,
+              "p90_ns": 6805873,
+              "p99_ns": 7980447,
+              "max_ns": 18124806
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              6646697,
+              6439135,
+              6703859,
+              6506247,
+              6274590
+            ]
+          },
+          {
+            "id": "server.recall_file.1000-2999",
+            "what": "recall_file for one item (`rust_statement`)",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6101459,
+              "median_ns": 6368880,
+              "p90_ns": 6642167,
+              "p99_ns": 6872937,
+              "max_ns": 6907529
+            },
+            "routes": {
+              "recall_file": 300
+            },
+            "pass_medians_ns": [
+              6246291,
+              6198334,
+              6581676,
+              6388130,
+              6403384
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.<300",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1009964,
+              "median_ns": 1052646,
+              "p90_ns": 1084979,
+              "p99_ns": 2883340,
+              "max_ns": 3144441
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              1044517,
+              1050882,
+              1049163,
+              1057252,
+              1059788
+            ]
+          },
+          {
+            "id": "server.repeat_changed.<300",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/ranked_coverage.rs (122 lines, bucket <300)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 1024033,
+              "median_ns": 1083004,
+              "p90_ns": 1114889,
+              "p99_ns": 1198014,
+              "max_ns": 1381422
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              1084982,
+              1074958,
+              1097214,
+              1054067,
+              1081470
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.300-999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3091086,
+              "median_ns": 3163389,
+              "p90_ns": 3255896,
+              "p99_ns": 3532006,
+              "max_ns": 3960869
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              3201380,
+              3150575,
+              3146352,
+              3163389,
+              3187706
+            ]
+          },
+          {
+            "id": "server.repeat_changed.300-999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 3110044,
+              "median_ns": 3225917,
+              "p90_ns": 3327233,
+              "p99_ns": 3854489,
+              "max_ns": 5042351
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              3241160,
+              3165587,
+              3299302,
+              3215812,
+              3179834
+            ]
+          },
+          {
+            "id": "server.repeat_unchanged.1000-2999",
+            "what": "smart_read, repeat reads on, file unchanged since the last read: the stub",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6845615,
+              "median_ns": 7174936,
+              "p90_ns": 7623487,
+              "p99_ns": 14490548,
+              "max_ns": 23234119
+            },
+            "routes": {
+              "smart_read_unchanged": 300
+            },
+            "pass_medians_ns": [
+              7090011,
+              6981790,
+              7332672,
+              7489920,
+              7068801
+            ]
+          },
+          {
+            "id": "server.repeat_changed.1000-2999",
+            "what": "smart_read, repeat reads on, one item changed since the last read: the delta",
+            "subject": "crates/lumen-core/tests/silent_fallbacks.rs (1472 lines, bucket 1000-2999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 6867088,
+              "median_ns": 7338515,
+              "p90_ns": 7624719,
+              "p99_ns": 7870637,
+              "max_ns": 8123011
+            },
+            "routes": {
+              "smart_read_delta": 300
+            },
+            "pass_medians_ns": [
+              7420057,
+              7061530,
+              7409346,
+              7406801,
+              7260588
+            ]
+          },
+          {
+            "id": "server.identity.placed",
+            "what": "smart_read, repeat reads off, with the hook's record in place and the _meta id that names it: the server claims it",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2618313,
+              "median_ns": 2698072,
+              "p90_ns": 2830372,
+              "p99_ns": 3387073,
+              "max_ns": 3781561
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2799528,
+              2729173,
+              2658561,
+              2721970,
+              2683701
+            ]
+          },
+          {
+            "id": "server.identity.unplaced",
+            "what": "smart_read, repeat reads off, with no record and no _meta id: nothing to claim",
+            "subject": "crates/lumen-mcp/tests/protocol.rs (532 lines, bucket 300-999)",
+            "status": "measured",
+            "lat": {
+              "n": 200,
+              "min_ns": 2566336,
+              "median_ns": 2642162,
+              "p90_ns": 2775466,
+              "p99_ns": 3037673,
+              "max_ns": 3162379
+            },
+            "routes": {
+              "smart_read": 300
+            },
+            "pass_medians_ns": [
+              2737154,
+              2675612,
+              2602438,
+              2688539,
+              2625734
+            ]
+          }
+        ],
+        "derived": [
+          {
+            "id": "hook.intercept_pass.spawn_minus_floor",
+            "what": "median(hook.intercept_pass.spawn) - median(hook.floor)",
+            "median_ns": 39407
+          },
+          {
+            "id": "hook.intercept_block.spawn_minus_floor",
+            "what": "median(hook.intercept_block.spawn) - median(hook.floor)",
+            "median_ns": 488782
+          },
+          {
+            "id": "hook.meter_read.spawn_minus_floor",
+            "what": "median(hook.meter_read.spawn) - median(hook.floor)",
+            "median_ns": 32448621
+          },
+          {
+            "id": "hook.meter_bash.spawn_minus_floor",
+            "what": "median(hook.meter_bash.spawn) - median(hook.floor)",
+            "median_ns": 31195447
+          },
+          {
+            "id": "hook.per_call_identity.spawn_minus_floor",
+            "what": "median(hook.per_call_identity) - median(hook.floor)",
+            "median_ns": 122244
+          },
+          {
+            "id": "hook.per_call_identity.server_claim",
+            "what": "median(server.identity.placed) - median(server.identity.unplaced)",
+            "median_ns": 55910
+          }
+        ]
+      }
+    ]
+  },
+  "savings": {
+    "dollars": "none",
+    "engine": "lumen_core::savings (crates/lumen-core/src/savings)",
+    "reason": "A saving's dollar value is priced at the model of the turn that read the call's result, over the rounds that followed it, and less the extra round the call cost: the savings engine derives these from a ledger's turns. A corpus run has no turns, so this document gives tokens only.",
+    "calibrated": true,
+    "calibration_note": "Token figures are Claude's tokens, estimated from the cl100k_base counts Lumen records (OpenAI's tokenizer: Claude's is not available offline), by the calibration of 2026-10-14, measured through Claude Code 2.1.296 against Claude's own usage data on 60 samples of raw file text. Each count is converted by its file's type and the model of the turn that read it, at the median ratio for them, with the smallest to the largest ratio any sample came out at as its band (not the 10th to 90th percentile: the floor is the band's low end, and must hold call by call); a row with no measured model takes the type's ratio over both tokenizers, weighted alike, with a band that spans them. The ratios are of raw file text: an answer Lumen makes from a file (an outline, a slice, a stub), a Read's line numbers and the tool-result wrapper around any answer, a Read's or Lumen's, are in no row. So an answer Lumen made takes the file's median, with the smallest to the largest ratio of any sample the model was sent as its band (of any sample at all where the model is not known). The dollar floor takes the low end of each saving: the file at its smallest ratio less Lumen's answer at its largest."
+  },
+  "environment": {
+    "os": "linux",
+    "arch": "x86_64",
+    "os_version": "Ubuntu 24.04.5 LTS",
+    "kernel": "6.17.0-1022-azure",
+    "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+    "cpu_logical_cores": 4,
+    "cpu_physical_cores": null,
+    "cpu_core_layout": null,
+    "ram_bytes": 16766414848,
+    "power": null,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "host_triple": "x86_64-unknown-linux-gnu",
+    "rustflags": null,
+    "started_utc": "2026-10-26T11:40:02Z",
+    "load_at_start": "load average 3.57 1.78 0.70 (1, 5, 15 min)",
+    "load_at_end": "load average 1.56 1.57 0.74 (1, 5, 15 min)",
+    "probe_errors": []
+  }
+}
