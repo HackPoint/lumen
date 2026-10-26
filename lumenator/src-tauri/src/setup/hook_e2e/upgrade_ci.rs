@@ -417,32 +417,32 @@ fn seed_platform(job: &Job) {
     }
 }
 
-/// Whether the first start also ran Setup.
+/// Whether Setup has run for the new folder: `.setup_done` names it.
 ///
 /// The Setup page runs Setup as it loads, and Home sends the window there while Setup is
-/// needed. On Windows and Linux the hidden main window loads its page at the start, so the
-/// first start runs Setup, which then freezes the backup. On macOS a hidden window loads
-/// nothing until it is first opened, and Setup waits for the user.
-const FIRST_START_RUNS_SETUP: bool = !cfg!(target_os = "macos");
+/// needed, so Setup runs at a start whenever the main window's page loads: on Windows and Linux
+/// the hidden window loads at once; on macOS when the window is first shown, which a start that
+/// opens it (a degraded one, the fallback) does too. So which start runs Setup is not fixed by
+/// the platform, and the checks ask instead: if Setup ran, the backup must be frozen.
+fn setup_ran(job: &Job) -> bool {
+    !setup_needed_with(&job.home, &job.n, &marker::read(&job.n))
+}
 
-/// Step 6: the launched app moves the previous install. Wait for its committed marker and,
-/// where the first start runs Setup, for Setup and the freeze too, so the quit cannot cut them
-/// short.
+/// Step 6: the launched app moves the previous install. Wait for its committed marker and the
+/// moved folder; then, if Setup runs at this start, for Setup and the freeze too, so the quit
+/// cannot cut them short. A start that has not run Setup 20 s after the move is not going to.
 #[test]
 #[ignore = "upgrade workflow only: reads the real home"]
 fn wait_for_the_move() {
     let job = job();
     let deadline = std::time::Instant::now() + Duration::from_secs(180);
-    loop {
+    let backup = loop {
         match marker::read(&job.n) {
-            Seen::Migrated(m)
-                if backup_dir(&job.n, &m).is_some_and(|b| {
-                    b.join("data").is_dir()
-                        && (!FIRST_START_RUNS_SETUP || is_frozen(&job.n.join("lumen.db"), &b))
-                }) =>
-            {
-                println!("moved: {m:?}");
-                return;
+            Seen::Migrated(m) => {
+                if let Some(b) = backup_dir(&job.n, &m).filter(|b| b.join("data").is_dir()) {
+                    println!("moved: {m:?}");
+                    break b;
+                }
             }
             other if std::time::Instant::now() > deadline => {
                 let listing: Vec<String> = match std::fs::read_dir(job.n.parent().unwrap()) {
@@ -452,17 +452,30 @@ fn wait_for_the_move() {
                         .collect(),
                     Err(e) => vec![format!("(unreadable: {e})")],
                 };
-                panic!(
-                    "no move{} within 180 s: marker {other:?}; data root holds {listing:?}",
-                    if FIRST_START_RUNS_SETUP {
-                        " and freeze"
-                    } else {
-                        ""
-                    }
-                );
+                panic!("no move within 180 s: marker {other:?}; data root holds {listing:?}");
             }
-            _ => std::thread::sleep(Duration::from_secs(2)),
+            _ => {}
         }
+        std::thread::sleep(Duration::from_secs(2));
+    };
+    let settle = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if setup_ran(&job) {
+            while !is_frozen(&job.n.join("lumen.db"), &backup) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Setup ran but the backup was not frozen within 180 s"
+                );
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            println!("Setup ran at this start, and the backup is frozen");
+            return;
+        }
+        if std::time::Instant::now() > settle {
+            println!("Setup did not run at this start");
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
 
@@ -522,17 +535,14 @@ fn verify_after_start() {
         &rig.claude_env(READ_SESSION),
     );
     assert_eq!(digest(&new_db)["read_events"], expected.len() as i64 + 1);
-    // Setup and the freeze: still to come on macOS, done by the first start elsewhere.
-    assert_eq!(
-        !setup_needed_with(&job.home, &job.n, &Seen::Migrated(m.clone())),
-        FIRST_START_RUNS_SETUP,
-        "Setup ran at the first start"
-    );
+    // The freeze follows Setup and nothing else: frozen exactly when Setup ran at a start.
+    let ran = setup_ran(&job);
     assert_eq!(
         is_frozen(&new_db, &backup),
-        FIRST_START_RUNS_SETUP,
-        "the backup is frozen"
+        ran,
+        "frozen exactly when Setup has run (Setup ran: {ran})"
     );
+    println!("Setup ran at a start: {ran}");
 
     verify_platform(&job, &backup);
     println!("verified: {}", digest(&new_db));
