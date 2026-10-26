@@ -154,6 +154,13 @@ if [ -z "$WID" ]; then
   fail "lumen show did not bring the main window on screen"
 else
   sleep 3
+  # A fresh install opens on Setup, which runs as it loads: keep that screen, then Open Lumen,
+  # as a user does.
+  osascript -l JavaScript "$WORK/texts.js" "$PID" >"$OUT/first-screen-text-$LABEL.txt" 2>&1
+  if grep -q 'Lumen Setup' "$OUT/first-screen-text-$LABEL.txt"; then
+    screencapture -x -o -l "$WID" "$OUT/setup-$LABEL.png"
+    if osascript -l JavaScript "$WORK/press.js" "$PID" "Open Lumen" >>"$NOTES" 2>&1; then sleep 3; else fail "could not press Open Lumen on the Setup screen"; fi
+  fi
   screencapture -x -o -l "$WID" "$OUT/home-$LABEL.png"
   osascript -l JavaScript "$WORK/texts.js" "$PID" >"$OUT/home-text-$LABEL.txt" 2>&1
   for TAB in Optimizer Details Settings; do
@@ -176,8 +183,10 @@ if osascript -l JavaScript "$WORK/menu.js" "$PID" >"$OUT/tray-menu-text-$LABEL.t
   osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1
   if grep -q "$VERSION" "$OUT/tray-menu-text-$LABEL.txt"; then note "the menu-bar menu shows $VERSION"; else fail "the menu-bar menu does not show $VERSION"; fi
 else
-  cannot "the menu-bar menu: the status item could not be opened through the accessibility API ($(tail -n1 "$OUT/tray-menu-text-$LABEL.txt"))"
+  cannot "the menu-bar menu: this runner's accessibility tree does not expose Lumen's status item ($(tail -n1 "$OUT/tray-menu-text-$LABEL.txt")); menubar-$LABEL.png shows the icon in the menu bar"
 fi
+# The menu bar itself, with Lumen's icon in it.
+screencapture -x -R 0,0,1920,40 "$OUT/menubar-$LABEL.png"
 
 # ── 8. The CLI, in Terminal and as raw text ─────────────────────────────────────────────────
 lumen --version >"$OUT/cli-version-$LABEL.txt" 2>&1

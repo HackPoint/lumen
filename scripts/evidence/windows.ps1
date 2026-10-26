@@ -1,10 +1,10 @@
 # A published release's evidence on Windows, installed the way users install it: setup.exe and
 # the CLI zip from the GitHub release. Keeps the installer's publisher, the app's tabs (through
-# WebDriver, lumenator/e2e/evidence.mjs), the CLI in PowerShell and in cmd (PNG and raw text), and
+# the DevTools protocol, lumenator/e2e/evidence.mjs), the CLI in PowerShell and in cmd (PNG and raw text), and
 # for an upgrade the all-time savings before and after, which must match.
 #
 # Environment: VERSION, SCENARIO (fresh | from-1.9.0 | from-1.8.0), OUT, HELPERS (the app crate's
-# test binary), LUMEN_E2E_NATIVE_DRIVER (msedgedriver). Installs into the real profile:
+# test binary). Installs into the real profile:
 # GitHub-hosted runners only.
 $ErrorActionPreference = 'Continue'
 foreach ($v in 'VERSION', 'SCENARIO', 'OUT') {
@@ -81,7 +81,8 @@ $App = Join-Path $env:LOCALAPPDATA 'Lumen\Lumen.exe'
 if (-not (Test-Path $App)) { Fail "no app at $App after the install" }
 $pub = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Lumen' -ErrorAction SilentlyContinue).Publisher
 Note "Apps & features: Lumen, publisher '$pub'"
-if ($pub -ne 'HackPoint') { Fail "the Apps & features publisher is '$pub', not HackPoint" }
+# -cne: PowerShell's -ne ignores case, and 1.9.0's lowercase 'hackpoint' passed it.
+if ($pub -cne 'HackPoint') { Fail "the Apps & features publisher is '$pub', not HackPoint" }
 $got = (& $Lumen --version) 2>&1
 Note "lumen --version: $got"
 if ("$got" -notmatch [regex]::Escape($Version)) { Fail "the CLI zip holds '$got', not $Version" }

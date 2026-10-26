@@ -98,32 +98,10 @@ jobs:
           workspaces: ". -> target"
           cache-on-failure: true
 
+      # WebDriver is Linux's way in; Windows is driven over the DevTools protocol (evidence.mjs).
       - name: Install tauri-driver
-        if: runner.os != 'macOS' && steps.which.outputs.run == 'true'
+        if: runner.os == 'Linux' && steps.which.outputs.run == 'true'
         run: cargo install tauri-driver --version 2.1.0 --locked
-
-      - name: Fetch the msedgedriver of the WebView2 runtime
-        if: runner.os == 'Windows' && steps.which.outputs.run == 'true'
-        shell: pwsh
-        run: |
-          . ./scripts/ci-download.ps1
-          $client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-          $v = $null
-          foreach ($key in "HKLM:\SOFTWARE\WOW6432Node\$client", "HKLM:\SOFTWARE\$client", "HKCU:\Software\$client") {
-            $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
-            if ($pv) { $v = $pv; break }
-          }
-          $dir = Join-Path $env:RUNNER_TEMP 'msedgedriver'
-          $driver = Join-Path $dir 'msedgedriver.exe'
-          try {
-            if (-not $v) { throw 'no WebView2 runtime version in the registry' }
-            Get-WithRetry "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" "$dir.zip" "msedgedriver $v"
-            Expand-Archive "$dir.zip" -DestinationPath $dir -Force
-          } catch {
-            Write-Output "no msedgedriver $v to download ($_); using the runner image's"
-            $driver = Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe'
-          }
-          "LUMEN_E2E_NATIVE_DRIVER=$driver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # The helpers that simulate a previous install and wait for its move are the app crate's
       # test binary, built from this commit.
