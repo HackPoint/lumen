@@ -122,10 +122,53 @@ fn compute_data_roots(home: Option<&Path>) -> Vec<PathBuf> {
     {
         v.push(p.to_path_buf());
     }
-    if let Some(d) = dirs::data_dir()
+    if let Some(d) = platform_data_dir()
         && !v.contains(&d)
     {
         v.push(d);
     }
     v
+}
+
+/// The platform's data directory, as `dirs::data_dir` names it, without what that costs on
+/// Windows. There `dirs` asks the shell (`SHGetKnownFolderPath`), which loads shell32 and COM
+/// into the process, and every hook process computes the data roots: the 1.10.0 benchmark caught
+/// a hook that does no work going from 5.7 to 10.4 ms on a Windows runner. `%APPDATA%` names the
+/// same folder, a redirected Roaming AppData included. Elsewhere `dirs` reads only the
+/// environment, and is used as it is.
+fn platform_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(p) = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Some(p);
+    }
+    dirs::data_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On Windows the platform's data root comes from `%APPDATA%`, never from the shell, which
+    /// costs every hook process milliseconds (see [`platform_data_dir`]).
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_data_root_is_read_from_appdata() {
+        let appdata = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .expect("APPDATA");
+        assert_eq!(platform_data_dir(), Some(appdata));
+    }
+
+    #[test]
+    fn the_home_based_data_root_comes_first() {
+        let home = Path::new("/home/someone");
+        let roots = compute_data_roots(Some(home));
+        let first = crate::meter::app_data_dir_in(home)
+            .parent()
+            .map(Path::to_path_buf);
+        assert_eq!(roots.first(), first.as_ref());
+    }
 }
