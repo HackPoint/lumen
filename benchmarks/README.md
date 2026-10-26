@@ -47,8 +47,51 @@ is kept; a later release adds its own and replaces none.
 
 | release | commit measured | against | tokens | latency |
 |---|---|---|---|---|
+| 1.10.0 | `93eb224` | v1.9.0 | equal | equal on Ubuntu and Windows; on macOS equal once the binary is measured as built ahead (see below) |
 | 1.9.0 | `5626660` | v1.8.0 | equal | equal; on Ubuntu one series 2% (30 us) slower, on Windows two 3% faster |
 | 1.8.0 | `4ca4fd1` | v1.7.0 | equal | a blocked Read 0.4 to 2.6 ms slower; a new identity hook before every Lumen call |
+
+### 1.10.0: commit 93eb224 against v1.9.0
+
+`results/pre-release-93eb22405b42-*` measure commit `93eb22405b42`, the last commit before the
+1.10.0 release that changes anything the harness measures, against v1.9.0 (`cbb8d0f`, the tag as it
+stands since the 2026-10-20 history rewrite; the pin before it no longer existed).
+
+| platform | run | machine |
+|---|---|---|
+| macOS 26.6.2 | tokens and latency, 200 runs per series | Apple M4, 24 GiB, in use: load average 9.6 before the latency series, 6.6 after |
+| Ubuntu 24.04 | latency only, 200 runs per series, the Benchmarks workflow (run 40321006240) | GitHub-hosted runner, Intel Xeon Platinum 8370C, 4 logical cores, 15.6 GiB |
+| Windows Server 2025 | the same | GitHub-hosted runner, AMD EPYC 9V45, 4 logical cores, 16.0 GiB |
+
+1.10.0 moves the data folder to the new identifier and adds the redirect every hook applies to a
+path; what the tools return and what the hooks do are unchanged, so the result expected is equal
+tokens and equal latency. Tokens are equal. Medians, v1.9.0 then this commit:
+
+| | macOS | Ubuntu | Windows |
+|---|---:|---:|---:|
+| `hook.floor`: a hook that does nothing | 2.57 to 2.62 ms | 729 to 736 us | 3.25 to 3.30 ms |
+| `hook.intercept_pass.spawn`: a small file's Read, let through | 2.47 to 2.39 ms | 767 to 772 us | 3.37 to 3.40 ms |
+| `hook.intercept_block.spawn`: a large file's Read, blocked | 5.06 to 4.88 ms | 1.21 to 1.25 ms | 4.38 to 4.44 ms |
+| `hook.per_call_identity` | 4.02 to 5.46 ms (see below) | 823 to 842 us | 3.62 to 3.65 ms |
+| `hook.meter_read.spawn` | 30.57 to 31.16 ms | 43.61 to 44.78 ms | 52.54 to 54.06 ms |
+| `server.start` | 2.49 to 2.91 ms (see below) | 747 to 756 us | 3.07 to 3.10 ms |
+| `server.smart_read`, a file under 300 lines | 900 to 895 us | 1.20 to 1.21 ms | 1.09 to 1.10 ms |
+| `server.smart_read`, a file of 1000 to 2999 lines | 5.22 to 5.78 ms (see below) | 10.71 to 10.73 ms | 8.82 to 8.97 ms |
+
+Two regressions were found on the way and fixed before this commit. On Windows every hook had
+become 4.7 ms slower (a hook that does nothing, 5.67 to 10.37 ms): the redirect asked the shell for
+the data folder (`dirs::data_dir`, `SHGetKnownFolderPath`), and while that call was so much as
+referenced, the binary imported shell32, which Windows loads into every hook process. The folder
+now comes from `%APPDATA%`, and the hook binary no longer names `dirs` on Windows.
+
+On macOS, three series are slower in this run and in no other: the per-call identity hook (+1.4
+ms), the server's start and the large `smart_read`. They are slower only when the harness builds
+the candidate in the same run. The same binary, the one this run built, at the same path, measured
+again as a prebuilt candidate (`--candidate-bin`), gives 4.08 to 3.96 ms for the identity hook,
+2.71 to 2.70 ms for the server's start and 5.13 to 5.09 ms for the large `smart_read`:
+`results/pre-release-93eb22405b42-macos-prebuilt-*` (its header names it `ab2`). Ubuntu and Windows
+show none of the three. Why a candidate built in the same run measures slower on macOS is not
+traced yet; the code paths themselves were timed in-process and are unchanged.
 
 ### 1.9.0: commit 5626660 against v1.8.0
 
