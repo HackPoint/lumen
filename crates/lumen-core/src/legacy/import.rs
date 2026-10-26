@@ -3253,12 +3253,43 @@ mod tests {
         }
     }
 
+    mod first_faults_table {
+        use super::*;
+        const V150: &str = include_str!("../../tests/fixtures/ledger_schema_v1.5.0.sql");
+
+        /// 1.5.0 shipped the first faults table, before `agent_id` was added to it: its faults
+        /// are taken with its read events, and none is refused for a missing column.
+        #[test]
+        fn a_1_5_0_ledger_imports_with_its_faults() {
+            let i = install();
+            let d = i.root.join("home").join("old-150");
+            fs::create_dir_all(&d).unwrap();
+            let c = Connection::open(d.join("lumen.db")).unwrap();
+            c.execute_batch(V150).unwrap();
+            c.execute_batch(
+                "INSERT INTO read_events (ts, tool, path, tokens_returned, full_tokens, saved_tokens, \
+                   routed_via) VALUES ('t-150', 'Read', '/150', 1, 2, 1, 'builtin_read'); \
+                 INSERT INTO faults (ts, kind, session_id) VALUES ('t-150', 'row-150', 's');",
+            )
+            .unwrap();
+            drop(c);
+            let before = counts(&i.n_db());
+            let r = i.import(&d).unwrap();
+            assert_eq!(r.faults_refused, None, "{r:?}");
+            assert_eq!(r.rows.get("read_events"), Some(&1), "{r:?}");
+            assert_eq!(r.rows.get("faults"), Some(&1), "{r:?}");
+            let after = counts(&i.n_db());
+            assert_eq!(after["read_events"], before["read_events"] + 1);
+            assert_eq!(after["faults"], before["faults"] + 1);
+        }
+    }
+
     mod review_attacks {
         use super::*;
         /// The core sets are in every released schema, and none of the columns that came or went.
         #[test]
         fn core_columns_are_in_every_released_schema() {
-            for ddl in [V140, V180, V190] {
+            for ddl in [V140, V150, V180, V190] {
                 let c = Connection::open_in_memory().unwrap();
                 c.execute_batch(ddl).unwrap();
                 for t in POSITIONAL_TABLES {
@@ -3292,6 +3323,7 @@ mod tests {
         }
 
         const V180: &str = include_str!("../../tests/fixtures/ledger_schema_v1.8.0.sql");
+        const V150: &str = include_str!("../../tests/fixtures/ledger_schema_v1.5.0.sql");
         const V140: &str = include_str!("../../tests/fixtures/ledger_schema_v1.4.0.sql");
 
         fn in_place(i: &Install, d: &Path) -> ImportReport {
