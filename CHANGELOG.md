@@ -2,7 +2,7 @@
 
 ## [1.10.0] — unreleased
 
-**Lumen's data moves to a new folder named after the new identifier, `io.hackpoint.lumen`, the first time 1.10.0 starts, and your history, settings, login-item choice and menu-bar icon position come with it.** The previous folder is kept, read-only, inside the new one as `legacy-backup-<date>` (its files are under `data`). What resets: macOS asks again for notification permission, and may list Lumen as a new login item to approve under System Settings > General > Login Items. Run Setup when Lumen asks, then restart Claude Code: a session left open keeps the old MCP server, which can no longer record.
+**Lumen's data moves to a new folder named after the new identifier, `io.hackpoint.lumen`, the first time 1.10.0 starts, and your history, settings, login-item choice and menu-bar icon position come with it.** The previous folder is kept, read-only, inside the new one as `legacy-backup-<date>` (its files are under `data`). What resets: macOS asks again for notification permission, and may list Lumen as a new login item to approve under System Settings > General > Login Items. Setup runs when Lumen's window first opens after the upgrade, which on Windows and Linux is the first start; then restart Claude Code: a session left open keeps the old MCP server, which can no longer record.
 
 ### The data folder moves, and the previous one is kept as a backup
 

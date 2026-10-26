@@ -417,7 +417,17 @@ fn seed_platform(job: &Job) {
     }
 }
 
-/// 6. The launched app moves the previous install; wait for its committed marker.
+/// Whether the first start also ran Setup.
+///
+/// The Setup page runs Setup as it loads, and Home sends the window there while Setup is
+/// needed. On Windows and Linux the hidden main window loads its page at the start, so the
+/// first start runs Setup, which then freezes the backup. On macOS a hidden window loads
+/// nothing until it is first opened, and Setup waits for the user.
+const FIRST_START_RUNS_SETUP: bool = !cfg!(target_os = "macos");
+
+/// Step 6: the launched app moves the previous install. Wait for its committed marker and,
+/// where the first start runs Setup, for Setup and the freeze too, so the quit cannot cut them
+/// short.
 #[test]
 #[ignore = "upgrade workflow only: reads the real home"]
 fn wait_for_the_move() {
@@ -426,7 +436,10 @@ fn wait_for_the_move() {
     loop {
         match marker::read(&job.n) {
             Seen::Migrated(m)
-                if backup_dir(&job.n, &m).is_some_and(|b| b.join("data").is_dir()) =>
+                if backup_dir(&job.n, &m).is_some_and(|b| {
+                    b.join("data").is_dir()
+                        && (!FIRST_START_RUNS_SETUP || is_frozen(&job.n.join("lumen.db"), &b))
+                }) =>
             {
                 println!("moved: {m:?}");
                 return;
@@ -439,7 +452,14 @@ fn wait_for_the_move() {
                         .collect(),
                     Err(e) => vec![format!("(unreadable: {e})")],
                 };
-                panic!("no move within 180 s: marker {other:?}; data root holds {listing:?}");
+                panic!(
+                    "no move{} within 180 s: marker {other:?}; data root holds {listing:?}",
+                    if FIRST_START_RUNS_SETUP {
+                        " and freeze"
+                    } else {
+                        ""
+                    }
+                );
             }
             _ => std::thread::sleep(Duration::from_secs(2)),
         }
@@ -504,12 +524,17 @@ fn verify_after_start() {
         digest(&new_db)["read_events"],
         before["read_events"].as_i64().unwrap() + 1
     );
-    assert!(setup_needed_with(
-        &job.home,
-        &job.n,
-        &Seen::Migrated(m.clone())
-    ));
-    assert!(!is_frozen(&new_db, &backup));
+    // Setup and the freeze: still to come on macOS, done by the first start elsewhere.
+    assert_eq!(
+        !setup_needed_with(&job.home, &job.n, &Seen::Migrated(m.clone())),
+        FIRST_START_RUNS_SETUP,
+        "Setup ran at the first start"
+    );
+    assert_eq!(
+        is_frozen(&new_db, &backup),
+        FIRST_START_RUNS_SETUP,
+        "the backup is frozen"
+    );
 
     verify_platform(&job, &backup);
     println!("verified: {}", digest(&new_db));

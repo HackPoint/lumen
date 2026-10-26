@@ -120,7 +120,8 @@ approve (System Settings > General > Login Items). The previous folder is kept, 
 once frozen, inside the new one as `legacy-backup-<date>`; it can be deleted (see
 [docs/troubleshooting-the-tray.md](docs/troubleshooting-the-tray.md)).
 
-Run Setup when Lumen asks, then restart Claude Code. A session left open keeps the old MCP
+Setup runs when Lumen's window first opens after the upgrade (on Windows and Linux, at the first
+start); then restart Claude Code. A session left open keeps the old MCP
 server, which can no longer record.
 
 If Lumen reports a ledger it set aside (`lumen.db.pre-legacy`, from a 1.9.0 build that had
