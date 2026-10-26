@@ -131,19 +131,28 @@ fn compute_data_roots(home: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// The platform's data directory, as `dirs::data_dir` names it, without what that costs on
-/// Windows. There `dirs` asks the shell (`SHGetKnownFolderPath`), which loads shell32 and COM
-/// into the process, and every hook process computes the data roots: the 1.10.0 benchmark caught
-/// a hook that does no work going from 5.7 to 10.4 ms on a Windows runner. `%APPDATA%` names the
-/// same folder, a redirected Roaming AppData included. Elsewhere `dirs` reads only the
-/// environment, and is used as it is.
+/// Windows. There `dirs` asks the shell (`SHGetKnownFolderPath`), and every hook process computes
+/// the data roots: the 1.10.0 benchmark caught a hook that does no work going from 5.7 to 10.4 ms
+/// on a Windows runner. Not calling it was not enough: while `dirs::data_dir` is referenced at
+/// all, the binary imports shell32, and Windows loads it into every hook process at start (a hook
+/// that does no work still took 6.6 ms against 1.9.0's 3.9). So on Windows `dirs` is not named
+/// here: `%APPDATA%` is the same folder, a redirected Roaming AppData included, and the profile's
+/// `AppData\Roaming` stands in when it is unset. Elsewhere `dirs` reads only the environment.
+#[cfg(windows)]
 fn platform_data_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    if let Some(p) = std::env::var_os("APPDATA")
+    std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-    {
-        return Some(p);
-    }
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|h| h.join("AppData").join("Roaming"))
+        })
+}
+
+#[cfg(not(windows))]
+fn platform_data_dir() -> Option<PathBuf> {
     dirs::data_dir()
 }
 
