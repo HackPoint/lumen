@@ -81,8 +81,13 @@ $App = Join-Path $env:LOCALAPPDATA 'Lumen\Lumen.exe'
 if (-not (Test-Path $App)) { Fail "no app at $App after the install" }
 $pub = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Lumen' -ErrorAction SilentlyContinue).Publisher
 Note "Apps & features: Lumen, publisher '$pub'"
-# -cne: PowerShell's -ne ignores case, and 1.9.0's lowercase 'hackpoint' passed it.
-if ($pub -cne 'HackPoint') { Fail "the Apps & features publisher is '$pub', not HackPoint" }
+# -cne: PowerShell's -ne ignores case, and 1.9.0's lowercase 'hackpoint' passed it. The publisher
+# is set from 1.10.0 on; before it the bundler derived it from the identifier, and that is said.
+if ([version]$Version -ge [version]'1.10.0') {
+  if ($pub -cne 'HackPoint') { Fail "the Apps & features publisher is '$pub', not HackPoint" }
+} else {
+  Note "before 1.10.0 the publisher was derived from the identifier: '$pub'"
+}
 $got = (& $Lumen --version) 2>&1
 Note "lumen --version: $got"
 if ("$got" -notmatch [regex]::Escape($Version)) { Fail "the CLI zip holds '$got', not $Version" }
@@ -109,8 +114,16 @@ if ($Scenario -ne 'fresh') {
 }
 
 # ── 4. The app's tabs ───────────────────────────────────────────────────────────────────────
+# WebView2's own processes outlive the app; a relaunch would join them, and they were started
+# without the debugging port evidence.mjs opens.
+Get-Process | Where-Object { $_.Name -match '^(Lumen|lumen-daemon|msedgewebview2)$' } | Stop-Process -Force
+Start-Sleep -Seconds 3
 node (Join-Path $Root 'lumenator\e2e\evidence.mjs') $App $Out $Label *>> $Notes
-if ($LASTEXITCODE -ne 0) { Fail "the app's tabs could not be captured" }
+if ($LASTEXITCODE -eq 3) {
+  Cannot "the app's tabs on Windows: the published build opens no DevTools port to drive its window through, and a runner has no one to click the tray icon"
+} elseif ($LASTEXITCODE -ne 0) {
+  Fail "the app's tabs could not be captured"
+}
 Get-Process | Where-Object { $_.Name -match '^(Lumen|lumen-daemon)$' } | Stop-Process -Force
 Cannot "the tray menu: the notification area's menus cannot be opened reliably on a runner"
 

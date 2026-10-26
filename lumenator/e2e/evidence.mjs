@@ -26,6 +26,8 @@ if (!(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT ==
   process.exit(2);
 }
 fs.mkdirSync(out, { recursive: true });
+/** The exit code for "this build cannot be driven at all", which the platform scripts report as such. */
+const CANNOT_ATTACH = 3;
 
 /**
  * One way to drive the page: `run(js, ...args)` evaluates a function body in the main window's
@@ -63,7 +65,13 @@ async function devtools() {
   let target = null;
   const deadline = Date.now() + 60_000;
   while (!target) {
-    if (Date.now() > deadline) throw new Error(`no page on the DevTools port ${port} within 60 s`);
+    if (Date.now() > deadline) {
+      child.kill();
+      // The build may have its developer tools turned off, which closes the port as well: there
+      // is then no way into this build's window, and the caller says so.
+      console.error(`cannot attach: no page on the DevTools port ${port} within 60 s`);
+      process.exit(CANNOT_ATTACH);
+    }
     try {
       const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
       target = list.find(t => t.type === 'page' && new URL(t.url).pathname === '/') ?? null;
