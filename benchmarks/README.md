@@ -1,11 +1,11 @@
 # Lumen benchmarks
 
 Per-call token and latency figures for Lumen's read tools and hooks, measured through the real
-`lumen-mcp` binary on a pinned corpus, for two builds side by side: the last release (v1.8.0)
+`lumen-mcp` binary on a pinned corpus, for two builds side by side: the last release (v1.9.0)
 and the checkout you run it from. Everything is reproduced by one command.
 
 ```sh
-benchmarks/run.sh                 # macOS / Linux: tokens and latency, v1.8.0 against this checkout
+benchmarks/run.sh                 # macOS / Linux: tokens and latency, v1.9.0 against this checkout
 benchmarks/run.sh compare benchmarks/results/<label>-<os>.json   # latency again, against a committed run
 benchmarks\run.ps1 --latency-only # Windows (PowerShell)
 cargo run --release --locked -p lumen-bench -- --help
@@ -18,7 +18,7 @@ run, and it is not part of the app bundle. Its fast smoke test (a four-file fixt
 a few seconds) runs with the rest of `cargo test --workspace`; the corpus run does not.
 
 A run needs `git`, a Rust toolchain, network access to fetch the corpus (or a local mirror, see
-below), about 1 GiB of disk for the cache (the corpus plus the v1.8.0 build) and another GiB or
+below), about 1 GiB of disk for the cache (the corpus plus the v1.9.0 build) and another GiB or
 so for this checkout's release build, and a clean checkout: the
 candidate build refuses uncommitted changes outside `benchmarks/results` (override with
 `--allow-dirty` for a throwaway run, which the output then marks as a dirty tree). With the
