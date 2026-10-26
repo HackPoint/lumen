@@ -478,12 +478,13 @@ fn verify_after_start() {
     };
     let backup = backup_dir(&job.n, &m).expect("the marker names a backup");
 
-    // The ledger: every row came, the backup holds the previous ledger whole.
-    assert_eq!(digest(&new_db)["rows"], before["rows"]);
-    assert_eq!(digest(&new_db)["read_events"], before["read_events"]);
+    // The ledger: every row came, the backup holds the previous ledger whole. The rows an old
+    // writer added while the start deferred (step 3) or after its commit (step 8) are included.
+    let expected = expected_rows(&job, &before);
+    assert_eq!(digest(&new_db)["rows"], json!(expected));
     assert_eq!(
         digest(&backup.join("data").join("lumen.db"))["rows"],
-        before["rows"]
+        json!(expected)
     );
     assert!(
         !job.previous.exists(),
@@ -520,10 +521,7 @@ fn verify_after_start() {
         &rig.captured("read_post.json", Some(&file)),
         &rig.claude_env(READ_SESSION),
     );
-    assert_eq!(
-        digest(&new_db)["read_events"],
-        before["read_events"].as_i64().unwrap() + 1
-    );
+    assert_eq!(digest(&new_db)["read_events"], expected.len() as i64 + 1);
     // Setup and the freeze: still to come on macOS, done by the first start elsewhere.
     assert_eq!(
         !setup_needed_with(&job.home, &job.n, &Seen::Migrated(m.clone())),
@@ -792,4 +790,185 @@ fn report_and_import() {
     );
     let (_, again) = run(&cli.to_string_lossy(), &["import-ledger", &dir]);
     println!("first import: {out}\nrerun: {again}");
+}
+
+/// The read events the new ledger and the backup must hold: what the seed left, and what an old
+/// writer added later in the job (`held.json`, `late.json`), sorted as [`digest`] sorts them.
+fn expected_rows(job: &Job, before: &Value) -> Vec<String> {
+    let mut rows: Vec<String> = serde_json::from_value(before["rows"].clone()).unwrap();
+    for extra in ["held.json", "late.json"] {
+        if job.state.join(extra).is_file() {
+            let more: Vec<String> =
+                serde_json::from_value(load(job, extra)["rows"].clone()).unwrap();
+            rows.extend(more);
+        }
+    }
+    rows.sort();
+    rows
+}
+
+/// Step 4, red then green: a start killed while the move was staged (the debug app, paused by
+/// `LUMEN_TEST_MIGRATE_PAUSE=staged`) committed nothing, and the previous install is whole.
+#[test]
+#[ignore = "upgrade workflow only: reads the real home"]
+fn killed_mid_copy_lost_nothing() {
+    let job = job();
+    assert!(
+        job.state.join("paused").is_file(),
+        "the debug app never reached the staged phase"
+    );
+    assert!(
+        !matches!(marker::read(&job.n), Seen::Migrated(_)),
+        "a start killed before its commit wrote no marker"
+    );
+    let old_db = job.previous.join("lumen.db");
+    assert_eq!(digest(&old_db)["rows"], load(&job, "before.json")["rows"]);
+    let pointer = std::fs::read_to_string(job.home.join(".lumen_db_path")).unwrap();
+    assert_eq!(
+        Path::new(pointer.trim()),
+        old_db.as_path(),
+        "the pointer still names it"
+    );
+}
+
+/// Step 3: an old app keeps the previous ledger open in WAL mode and writes to it every 5 ms
+/// until `release` appears in the state folder; then it records what it wrote. Run in the
+/// background; `holding` appears once it holds the ledger.
+#[test]
+#[ignore = "upgrade workflow only: writes the real home"]
+fn hold() {
+    let job = job();
+    let c = Connection::open(job.previous.join("lumen.db")).unwrap();
+    c.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+        .unwrap();
+    let mut written = Vec::new();
+    let mut i = 0;
+    while !job.state.join("release").exists() {
+        let path = format!("/held/{i}");
+        c.execute(
+            "INSERT INTO read_events(ts,tool,path,tokens_returned,full_tokens,saved_tokens,routed_via) \
+             VALUES ('2026-10-02T00:00:00Z','smart_read',?1,10,100,90,'smart_read')",
+            [&path],
+        )
+        .unwrap();
+        written.push(format!("2026-10-02T00:00:00Z|smart_read|{path}|90"));
+        if i == 0 {
+            std::fs::write(job.state.join("holding"), "").unwrap();
+        }
+        i += 1;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(c);
+    save(&job, "held.json", &json!({ "rows": written }));
+    println!("held the previous ledger for {i} writes");
+}
+
+/// Step 3, green: while the previous ledger was held, the start deferred. Nothing was copied,
+/// the pointer still names the previous ledger, and the log says why.
+#[test]
+#[ignore = "upgrade workflow only: reads the real home"]
+fn deferred_while_held() {
+    let job = job();
+    assert!(
+        !matches!(marker::read(&job.n), Seen::Migrated(_)),
+        "no commit while the ledger was held"
+    );
+    assert!(
+        !job.n.join("lumen.db").exists(),
+        "nothing was copied into the new folder"
+    );
+    let pointer = std::fs::read_to_string(job.home.join(".lumen_db_path")).unwrap();
+    assert_eq!(
+        Path::new(pointer.trim()),
+        job.previous.join("lumen.db").as_path()
+    );
+    assert!(
+        app_logs(&job)
+            .iter()
+            .any(|t| t.to_ascii_lowercase().contains("defer")),
+        "the log says the move was deferred"
+    );
+}
+
+/// The app's log files, read whole.
+fn app_logs(job: &Job) -> Vec<String> {
+    let mut dirs = vec![
+        job.home
+            .join("Library/Logs")
+            .join(lumen_core::meter::APP_ID),
+        job.n.join("logs"),
+    ];
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        dirs.push(
+            PathBuf::from(local)
+                .join(lumen_core::meter::APP_ID)
+                .join("logs"),
+        );
+    }
+    dirs.iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .collect()
+}
+
+/// Step 8 (Windows): an old app keeps a file inside the previous folder open without
+/// FILE_SHARE_DELETE, so the start can commit but not move the folder, until `release-file`
+/// appears in the state folder. Run in the background; `file-held` appears once it holds it.
+#[cfg(windows)]
+#[test]
+#[ignore = "upgrade workflow only: holds a file in the real home"]
+fn hold_file() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let job = job();
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(job.previous.join("lumen_settings.json"))
+        .unwrap();
+    std::fs::write(job.state.join("file-held"), "").unwrap();
+    while !job.state.join("release-file").exists() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(f);
+}
+
+/// Step 8 (Windows): the start committed while the folder could not move. Wait for that.
+#[cfg(windows)]
+#[test]
+#[ignore = "upgrade workflow only: reads the real home"]
+fn wait_for_the_commit() {
+    let job = job();
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    while !matches!(marker::read(&job.n), Seen::Migrated(_)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no commit within 180 s: {:?}",
+            marker::read(&job.n)
+        );
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    assert!(job.previous.is_dir(), "the held folder did not move");
+}
+
+/// Step 8 (Windows): an old app writes a row to the previous folder after the commit, as it
+/// would until it is quit. The next start that moves the folder merges it in, once.
+#[cfg(windows)]
+#[test]
+#[ignore = "upgrade workflow only: writes the real home"]
+fn write_old() {
+    let job = job();
+    let c = Connection::open(job.previous.join("lumen.db")).unwrap();
+    c.execute(
+        "INSERT INTO read_events(ts,tool,path,tokens_returned,full_tokens,saved_tokens,routed_via) \
+         VALUES ('2026-10-03T00:00:00Z','smart_read','/late/0',10,100,90,'smart_read')",
+        [],
+    )
+    .unwrap();
+    save(
+        &job,
+        "late.json",
+        &json!({ "rows": ["2026-10-03T00:00:00Z|smart_read|/late/0|90"] }),
+    );
 }

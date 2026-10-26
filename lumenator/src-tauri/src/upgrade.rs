@@ -97,7 +97,15 @@ impl<'a> Ctx<'a> {
             new_id: lumen_core::meter::APP_ID.into(),
             roots: legacy::data_roots(Some(&home)),
             home,
-            commit: CommitOptions::new(&now),
+            commit: {
+                #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+                let mut commit = CommitOptions::new(&now);
+                #[cfg(debug_assertions)]
+                {
+                    commit.hook = Some(pause_at_requested_phase);
+                }
+                commit
+            },
             platform,
             satellite_roots: Roots::current(),
             ledger_only: ledger_only_sources(),
@@ -693,6 +701,30 @@ pub fn freeze_after_setup(home: &Path, n: &Path) -> Report {
         Freeze::NotReady(_) | Freeze::Already { changed: false } => {}
     }
     r
+}
+
+/// Debug builds only: with `LUMEN_TEST_MIGRATE_PAUSE` set to a phase's name
+/// ([`lumen_core::legacy::migrate::Phase::name`]), the start stops at that phase of the move. It
+/// writes the file `LUMEN_TEST_MIGRATE_PAUSE_FILE` names, then sleeps until it is killed. The
+/// upgrade workflow kills it there and checks that nothing was lost and that the next start
+/// finishes the move.
+#[cfg(debug_assertions)]
+fn pause_at_requested_phase(phase: &lumen_core::legacy::migrate::Phase<'_>) {
+    if std::env::var("LUMEN_TEST_MIGRATE_PAUSE").as_deref() != Ok(phase.name()) {
+        return;
+    }
+    if let Ok(file) = std::env::var("LUMEN_TEST_MIGRATE_PAUSE_FILE") {
+        if let Err(e) = std::fs::write(&file, phase.name()) {
+            log::error!("PAUSE: could not write {file}: {e}");
+        }
+    }
+    log::warn!(
+        "PAUSE: stopped at the {} phase of the move until killed",
+        phase.name()
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 /// Now, UTC, as `YYYY-MM-DDTHH:MM:SSZ`.

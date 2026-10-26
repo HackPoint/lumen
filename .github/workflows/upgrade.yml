@@ -107,12 +107,49 @@ jobs:
         working-directory: lumenator
         run: pnpm tauri build --bundles deb
 
+      # The debug app, whose start can be paused mid-move (LUMEN_TEST_MIGRATE_PAUSE), for step 4.
+      - name: Build the debug app (1.8.0 legs)
+        if: matrix.from == '1.8.0'
+        working-directory: lumenator
+        run: pnpm tauri build --debug --no-bundle
+
+      # The helpers are run as the test binary itself, not through cargo: some run in the
+      # background while others run, and cargo would make them wait on its build lock.
       - name: Build the helpers
-        run: cargo test -p Lumen --lib --no-run
+        shell: bash
+        run: |
+          bin=$(cargo test -p Lumen --lib --no-run --message-format=json \
+            | jq -r 'select(.reason=="compiler-artifact" and .profile.test and .executable != null) | .executable' | tail -1)
+          [ -x "$bin" ] || { echo "no helper binary ($bin)"; exit 1; }
+          echo "HELPERS=$bin" >> "$GITHUB_ENV"
+          echo "helpers: $bin"
 
       # 1–2. What the previous release left, and its hooks firing before this build ever ran.
       - name: Seed the previous install
-        run: cargo test -p Lumen --lib -- --ignored --exact setup::hook_e2e::upgrade_ci::seed --nocapture
+        shell: bash
+        run: |
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::seed --nocapture
+
+      # 4. A start killed mid-copy (1.8.0 legs): the debug app stops once the move is staged and
+      # is killed there. Nothing may be committed, and the previous install must be whole.
+      - name: Kill a start mid-copy (1.8.0 legs)
+        if: matrix.from == '1.8.0'
+        shell: bash
+        run: |
+          export LUMEN_TEST_MIGRATE_PAUSE=staged
+          export LUMEN_TEST_MIGRATE_PAUSE_FILE="$LUMEN_UPGRADE_STATE/paused"
+          case "$RUNNER_OS" in
+            Windows) target/debug/Lumen.exe > "$RUNNER_TEMP/debug-app.out" 2>&1 & ;;
+            Linux) xvfb-run -a dbus-launch target/debug/Lumen > "$RUNNER_TEMP/debug-app.out" 2>&1 & ;;
+            *) target/debug/Lumen > "$RUNNER_TEMP/debug-app.out" 2>&1 & ;;
+          esac
+          for _ in $(seq 180); do [ -f "$LUMEN_TEST_MIGRATE_PAUSE_FILE" ] && break; sleep 1; done
+          case "$RUNNER_OS" in
+            Windows) taskkill //F //IM Lumen.exe || true ;;
+            *) pkill -9 -f 'target/debug/Lumen' || true ;;
+          esac
+          sleep 3
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::killed_mid_copy_lost_nothing --nocapture
 
       # 5. This build over it, the way users install it.
       - name: Install (macOS, Finder Replace semantics)
@@ -131,64 +168,84 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo dpkg -i target/release/bundle/deb/*.deb
 
-      # 6. Launch it, let the start move the previous install, then quit.
-      - name: Launch (macOS)
-        if: runner.os == 'macOS'
-        run: open -g -a /Applications/Lumen.app
-      - name: Launch (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Start-Process -FilePath "$env:LOCALAPPDATA\Lumen\Lumen.exe"
-      - name: Launch (Linux)
-        if: runner.os == 'Linux'
+      # 3. A split ledger (1.9.0 legs): an old app holds the previous ledger and keeps writing.
+      # The start must defer, copy nothing and leave the pointer alone; once the holder lets go,
+      # the next start moves everything it wrote.
+      - name: Hold the previous ledger; the start defers (1.9.0 legs)
+        if: matrix.from == '1.9.0'
+        shell: bash
         run: |
-          app=$(dpkg -L lumen | grep -E '^/usr/bin/' | grep -v -E 'lumen-(daemon|mcp|tok|cli)$' | head -1)
-          echo "launching $app"
-          nohup xvfb-run -a dbus-launch "$app" > "$RUNNER_TEMP/app.out" 2>&1 &
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::hold --nocapture > "$RUNNER_TEMP/hold.out" 2>&1 &
+          holder=$!
+          for _ in $(seq 120); do [ -f "$LUMEN_UPGRADE_STATE/holding" ] && break; sleep 1; done
+          [ -f "$LUMEN_UPGRADE_STATE/holding" ] || { cat "$RUNNER_TEMP/hold.out"; exit 1; }
+          bash .github/scripts/upgrade-app.sh launch
+          sleep 25
+          bash .github/scripts/upgrade-app.sh quit
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::deferred_while_held --nocapture
+          touch "$LUMEN_UPGRADE_STATE/release"
+          wait $holder
+          cat "$RUNNER_TEMP/hold.out"
+
+      # 8. A held file (Windows): an old app holds a file in the previous folder without
+      # FILE_SHARE_DELETE. The start commits but cannot move the folder; the old app then writes
+      # one more row. Once it lets go, the next start moves the folder and merges that row once.
+      - name: Hold a file in the previous folder; the start commits but cannot move (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::hold_file --nocapture > "$RUNNER_TEMP/hold-file.out" 2>&1 &
+          holder=$!
+          for _ in $(seq 120); do [ -f "$LUMEN_UPGRADE_STATE/file-held" ] && break; sleep 1; done
+          [ -f "$LUMEN_UPGRADE_STATE/file-held" ] || { cat "$RUNNER_TEMP/hold-file.out"; exit 1; }
+          bash .github/scripts/upgrade-app.sh launch
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::wait_for_the_commit --nocapture
+          sleep 10
+          bash .github/scripts/upgrade-app.sh quit
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::write_old --nocapture
+          touch "$LUMEN_UPGRADE_STATE/release-file"
+          wait $holder
+
+      # 6. Launch it, let the start move the previous install, then quit.
+      - name: Launch
+        shell: bash
+        run: bash .github/scripts/upgrade-app.sh launch
       - name: Wait for the move
-        run: cargo test -p Lumen --lib -- --ignored --exact setup::hook_e2e::upgrade_ci::wait_for_the_move --nocapture
+        shell: bash
+        run: |
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::wait_for_the_move --nocapture
       - name: Quit
         if: always()
         shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            macOS) osascript -e 'tell application id "io.hackpoint.lumen" to quit' || true ;;
-            Windows) powershell -Command "Get-Process | Where-Object { \$_.Name -match '^(Lumen|lumen-daemon)$' } | Stop-Process -Force" || true ;;
-            Linux) pkill -f -x '.*/usr/bin/Lumen' || pkill -f 'lumen-daemon' || true ;;
-          esac
-          sleep 5
+        run: bash .github/scripts/upgrade-app.sh quit
 
       # 7. Everything the start was to do, and one installed app.
       - name: Verify after the first start
-        run: cargo test -p Lumen --lib -- --ignored --exact setup::hook_e2e::upgrade_ci::verify_after_start --nocapture
+        shell: bash
+        run: |
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::verify_after_start --nocapture
 
       # 9. Setup, then the freeze, and the hooks after both.
       - name: Setup, then the freeze
-        run: cargo test -p Lumen --lib -- --ignored --exact setup::hook_e2e::upgrade_ci::setup_then_freeze --nocapture
+        shell: bash
+        run: |
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::setup_then_freeze --nocapture
 
       # 10. A previous folder re-created later is reported, never merged, and imported by hand.
       - name: Re-create the previous folder
-        run: cargo test -p Lumen --lib -- --ignored --exact setup::hook_e2e::upgrade_ci::recreate --nocapture
-      - name: Relaunch (macOS)
-        if: runner.os == 'macOS'
-        run: open -g -a /Applications/Lumen.app && sleep 25 && (osascript -e 'tell application id "io.hackpoint.lumen" to quit' || true) && sleep 5
-      - name: Relaunch (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         run: |
-          Start-Process -FilePath "$env:LOCALAPPDATA\Lumen\Lumen.exe"
-          Start-Sleep -Seconds 25
-          Get-Process | Where-Object { $_.Name -match '^(Lumen|lumen-daemon)$' } | Stop-Process -Force
-          Start-Sleep -Seconds 5
-      - name: Relaunch (Linux)
-        if: runner.os == 'Linux'
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::recreate --nocapture
+      - name: Relaunch
+        shell: bash
         run: |
-          app=$(dpkg -L lumen | grep -E '^/usr/bin/' | grep -v -E 'lumen-(daemon|mcp|tok|cli)$' | head -1)
-          timeout 25 xvfb-run -a dbus-launch "$app" > "$RUNNER_TEMP/app2.out" 2>&1 || true
-          pkill -f 'lumen-daemon' || true
-          sleep 3
+          bash .github/scripts/upgrade-app.sh launch
+          sleep 25
+          bash .github/scripts/upgrade-app.sh quit
       - name: Report and import the re-created folder
-        run: cargo test -p Lumen --lib -- --ignored --exact setup::hook_e2e::upgrade_ci::report_and_import --nocapture
+        shell: bash
+        run: |
+          "$HELPERS" --ignored --exact setup::hook_e2e::upgrade_ci::report_and_import --nocapture
 
       - name: Keep the evidence
         if: always()
@@ -197,7 +254,7 @@ jobs:
           name: upgrade-${{ matrix.os }}-from-${{ matrix.from }}
           path: |
             upgrade-state
-            ${{ runner.temp }}/app*.out
+            ${{ runner.temp }}/*.out
           if-no-files-found: warn
 
   # 11. A ledger over 1 GiB crosses SQLite's PENDING_BYTE; the copy and the move must survive it
