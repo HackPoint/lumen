@@ -2991,3 +2991,7 @@ fn an_upgrade_from_1_8_0_keeps_the_hooks_firing_and_the_login_item_off() {
 fn an_upgrade_from_1_8_0_keeps_the_login_item_on() {
     upgrade_from("1.8.0", true);
 }
+
+/// The upgrade workflow's steps on a runner's real profile.
+#[cfg(test)]
+mod upgrade_ci;
