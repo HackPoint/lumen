@@ -2,8 +2,8 @@
 //! project or person.
 //!
 //! The words are written nowhere in the repository, not even in pieces: this file holds only
-//! their SHA-256. Every tracked file, text or binary, is lowercased and every run of letters
-//! long enough is searched window by window, so a word inside a longer one
+//! their SHA-256. Every tracked file, text or binary, and its path are lowercased and every run
+//! of letters long enough is searched window by window, so a word inside a longer one
 //! (`io.<word>.lumen`, `<word>-ws`, `/Users/<word>/`) is found as well as a bare one.
 //!
 //! The scan is a function over `(path, bytes)` pairs so the tests can plant a made-up word and
@@ -99,14 +99,19 @@ fn found_in(bytes: &[u8], needles: &[Needle]) -> Vec<String> {
     hits
 }
 
-/// Every occurrence in `files`, as `path: what`.
+/// Every occurrence in `files`, in a file's path or in its bytes, as `path: what`.
 fn scan(files: &[(String, Vec<u8>)], needles: &[Needle]) -> Vec<String> {
     files
         .iter()
         .flat_map(|(path, bytes)| {
-            found_in(bytes, needles)
+            // The path too: a fixture named after a word publishes it as surely as one holding it.
+            let named = found_in(path.as_bytes(), needles)
                 .into_iter()
-                .map(move |what| format!("{path}: {what}"))
+                .map(move |what| format!("{path} (its path): {what}"));
+            let held = found_in(bytes, needles)
+                .into_iter()
+                .map(move |what| format!("{path}: {what}"));
+            named.chain(held)
         })
         .collect()
 }
@@ -232,6 +237,30 @@ fn a_word_split_by_anything_but_a_letter_is_not_the_word() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn a_word_in_a_file_path_is_caught() {
+    assert_eq!(
+        plants("tests/fixtures/AcmeCorp-1.9.0/README.md", b"nothing here"),
+        vec!["tests/fixtures/AcmeCorp-1.9.0/README.md (its path): the word acmecorp".to_string()]
+    );
+}
+
+/// No file is exempt: not the migration module, which once had to name the previous
+/// identifier, and not the CHANGELOG block that describes the move.
+#[test]
+fn a_word_in_the_migration_module_or_the_changelog_is_caught() {
+    let module = plants(
+        "crates/lumen-core/src/legacy.rs",
+        b"pub const OLD: &str = \"io.acmecorp.lumen\";",
+    );
+    assert_eq!(module.len(), 1, "{module:?}");
+    let changelog = plants(
+        "CHANGELOG.md",
+        b"## 1.10.0\n\nThe data moves out of the AcmeCorp folder.",
+    );
+    assert_eq!(changelog.len(), 1, "{changelog:?}");
 }
 
 #[test]

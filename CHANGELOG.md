@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.10.0] — 2026-10-26
+
+**Lumen's data moves to a new folder named after the new identifier, `io.hackpoint.lumen`, the first time 1.10.0 starts, and your history, settings, login-item choice and menu-bar icon position come with it.** The previous folder is kept, read-only, inside the new one as `legacy-backup-<date>` (its files are under `data`). What resets: macOS asks again for notification permission, and may list Lumen as a new login item to approve under System Settings > General > Login Items. Setup runs when Lumen's window first opens after the upgrade, which on Windows and Linux is the first start; then restart Claude Code: a session left open keeps the old MCP server, which can no longer record.
+
+### The data folder moves, and the previous one is kept as a backup
+
+The new folders are `~/Library/Application Support/io.hackpoint.lumen` on macOS, `%USERPROFILE%\AppData\Roaming\io.hackpoint.lumen` on Windows and `~/.local/share/io.hackpoint.lumen` on Linux. Lumen finds the previous install by what a folder holds, never by its name. Its ledger and Lumen's own small files are copied and checked, and then the previous folder is renamed whole to `legacy-backup-<date>` inside the new one (`-2`, `-3` if the name is taken). Nothing is deleted.
+
+If an old app wrote to the previous folder during the move, those rows are merged at every start until Setup has run. Then the backup is frozen: its files are made read-only, and it is never read for merging again. A frozen backup holds nothing Lumen still uses, so you can delete it (see `docs/troubleshooting-the-tray.md`).
+
+### History comes back for people on the re-published 1.9.0, and `lumen import-ledger` brings in the rest
+
+The 1.9.0 build re-published on 2026-10-20 already wrote a ledger in the new folder. 1.10.0 still finds the previous folder and migrates it, so that history comes back. The ledger that was in the new folder is set aside as `lumen.db.pre-legacy` (with a number after it if one is there already), and Lumen says so at start. Bring its rows in with `lumen import-ledger "<path>"`; add `--dry-run` to see what would be added without changing anything. Rows already in the ledger are not added twice.
+
+A previous folder that is re-created later, by an old app started again after the move or by a restored copy, is never merged on its own. Lumen reports it ("An older Lumen wrote to <folder> after the move. Nothing from it was merged. Quit it, then run: lumen import-ledger ..."). Quit that app and run the command it prints; the folder then moves into `legacy-imports` beside the ledger.
+
+### The menu-bar icon keeps its place across the move
+
+The icon's position is carried over with the rest of the data, so it stays where you put it.
+
+### Closing the main window never quits Lumen
+
+While the menu-bar icon is hidden, crowded out by a full menu bar or the notch, closing the window used to be the end of the app. Now the window closes and Lumen keeps running with its Dock icon on macOS, which opens it again; on other systems it minimizes. `lumen show` opens the window from a terminal. Quit from the tray menu, the Dock menu or Cmd-Q.
+
+### The macOS app is signed as a whole
+
+Until now only the app's executable carried a signature (the linker's, ad hoc), and the bundle around it none, so `codesign --verify` failed and a copy downloaded with a browser was called damaged on first launch. The bundle is now signed ad hoc as a whole: Gatekeeper treats a downloaded copy as an app from an unidentified developer, which System Settings > Privacy & Security can open. Homebrew installs were not affected.
+
+### The Windows installer removes the previous install's leftovers
+
+After an install, the installer removes a second "Lumen" entry in Apps & features and the previous manufacturer's install-location key. Both are found by what they hold, not by name. The publisher is HackPoint.
+
+### The Homebrew cask's zap removes only the new identifier's paths
+
+`brew uninstall --zap --cask lumen-app` removes the exact paths of the new identifier, with no glob. That includes the backup inside the data folder.
+
+### Homebrew: re-tap if `brew update` stops mid-rebase
+
+The tap's git history was rewritten on 2026-10-20. A tap cloned before that date cannot `brew update`: it stops with "interactive rebase in progress" and unrelated histories, stays on an old formula, and an install from it can fail with a SHA256 mismatch for the 1.9.0 assets. Untapping does not uninstall Lumen:
+
+```bash
+brew untap --force hackpoint/tap && brew tap hackpoint/tap
+brew upgrade --cask lumen-app
+brew upgrade lumen-cli
+```
+
+(`brew reinstall` works in place of the upgrades.)
+
+### Linux with `XDG_DATA_HOME` and Windows with a redirected Roaming AppData
+
+1.9.0 put the data where `XDG_DATA_HOME` or the redirect pointed. 1.10.0 keeps it in the home-based folder listed above, and the migration moves what was there.
+
 ## [1.9.0] — 2026-10-18
 
 **Home now says in bold what Lumen saved: tokens and dollars, net, this week and all time.** The tokens are Claude's, estimated from Lumen's `cl100k_base` counts by a calibration against Claude's own usage data, so they read "≈". The dollars are a signed floor, the net on record: "at least $0.20 saved, net", or "net loss of at most $0.42". What may be worth more (modelled) and the calls with no price are tags beside the figure, never in it. One engine works the figures out per call from your own ledger, and bare `lumen` and the tray say the same figures in the same words. Every dollar figure in Lumen is now priced at the list price of the model that consumed the tokens, where 1.8.0 priced every model at Opus-class rates, and a figure that could not be priced in full says "at least", and why. How this build compares with 1.8.0 is under "Benchmarks against 1.8.0", at the end of this entry.

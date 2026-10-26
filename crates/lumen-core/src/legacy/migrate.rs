@@ -41,6 +41,19 @@ pub enum Phase<'a> {
     Moved { dir: &'a Path },
 }
 
+impl Phase<'_> {
+    /// The phase's name, as `LUMEN_TEST_MIGRATE_PAUSE` gives it in the app's debug builds.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Phase::Copied { .. } => "copied",
+            Phase::Staged { .. } => "staged",
+            Phase::Commit { .. } => "commit",
+            Phase::Committed => "committed",
+            Phase::Moved { .. } => "moved",
+        }
+    }
+}
+
 pub(super) fn is_full(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::StorageFull || matches!(e.raw_os_error(), Some(28 | 39 | 112))
 }
@@ -241,6 +254,24 @@ pub(super) fn aside(p: &Path, ledger: bool) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names the app's debug-build pause reads from its environment: one per phase, all
+    /// distinct, so the upgrade workflow can stop the start at any of them.
+    #[test]
+    fn every_phase_has_its_own_name() {
+        let p = Path::new("x");
+        let names: Vec<&str> = [
+            Phase::Copied { rel: p },
+            Phase::Staged { dir: p },
+            Phase::Commit { rel: p },
+            Phase::Committed,
+            Phase::Moved { dir: p },
+        ]
+        .iter()
+        .map(Phase::name)
+        .collect();
+        assert_eq!(names, ["copied", "staged", "commit", "committed", "moved"]);
+    }
     use tempfile::TempDir;
 
     /// A ledger in WAL mode whose last row is only in the WAL; the connection stays open so the

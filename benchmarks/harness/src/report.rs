@@ -623,10 +623,13 @@ pub fn summary(r: &Results) -> String {
     if r.pre_release {
         let cand = r.builds.iter().find(|b| b.role == "candidate");
         let at = cand.map_or("unknown".to_string(), |b| b.sha.chars().take(12).collect());
+        // The release this measures is the one the candidate says it is; the text named 1.8.0
+        // for every run since that release.
+        let version = cand.map_or("unknown", |b| b.reported_version.as_str());
         let _ = writeln!(
             s,
             "> **Pre-release measurement.** This is the harness run on commit `{at}`, before the \
-             1.8.0 release. It is not a 1.8.0 result and must not be quoted as one.\n"
+             {version} release. It is not a {version} result and must not be quoted as one.\n"
         );
     }
     s.push_str(
@@ -955,6 +958,20 @@ mod tests {
             savings: savings(),
             environment: crate::env::probe(),
         }
+    }
+
+    #[test]
+    fn a_pre_release_summary_names_the_release_its_candidate_reports() {
+        let mut r = two_builds(1, 1);
+        for b in r.builds.iter_mut().filter(|b| b.role == "candidate") {
+            b.reported_version = "9.9.9".to_string();
+        }
+        let s = summary(&r);
+        assert!(
+            s.contains("before the 9.9.9 release. It is not a 9.9.9 result"),
+            "{s}"
+        );
+        assert!(!s.contains("1.8.0"), "{s}");
     }
 
     #[test]

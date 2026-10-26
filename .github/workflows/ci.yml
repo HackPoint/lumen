@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # A release is built on its own release/<version> branch, one PR at the end; its fixes are
+    # checked on the branch, a batch at a time, before that PR exists.
+    branches: [main, 'release/**']
   pull_request:
     branches: [main]
 

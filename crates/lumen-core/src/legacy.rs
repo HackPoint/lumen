@@ -22,11 +22,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 pub mod merge;
 
-/// A placeholder until F53 v2 T8 deletes it. Nothing at runtime reads it: the previous install is
-/// found by what it holds (`discover`), never by its folder's name, and no file in the repository
-/// names it. The identifier guard, the bench sandbox and the app e2e still read it until then.
-pub const LEGACY_APP_ID: &str = "io.previous.lumen";
-
 /// Written into the new directory as the migration's commit point.
 pub const MARKER_NAME: &str = ".legacy-migration.json";
 
@@ -127,10 +122,62 @@ fn compute_data_roots(home: Option<&Path>) -> Vec<PathBuf> {
     {
         v.push(p.to_path_buf());
     }
-    if let Some(d) = dirs::data_dir()
+    if let Some(d) = platform_data_dir()
         && !v.contains(&d)
     {
         v.push(d);
     }
     v
+}
+
+/// The platform's data directory, as `dirs::data_dir` names it, without what that costs on
+/// Windows. There `dirs` asks the shell (`SHGetKnownFolderPath`), and every hook process computes
+/// the data roots: the 1.10.0 benchmark caught a hook that does no work going from 5.7 to 10.4 ms
+/// on a Windows runner. Not calling it was not enough: while `dirs::data_dir` is referenced at
+/// all, the binary imports shell32, and Windows loads it into every hook process at start (a hook
+/// that does no work still took 6.6 ms against 1.9.0's 3.9). So on Windows `dirs` is not named
+/// here: `%APPDATA%` is the same folder, a redirected Roaming AppData included, and the profile's
+/// `AppData\Roaming` stands in when it is unset. Elsewhere `dirs` reads only the environment.
+#[cfg(windows)]
+fn platform_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|h| h.join("AppData").join("Roaming"))
+        })
+}
+
+#[cfg(not(windows))]
+fn platform_data_dir() -> Option<PathBuf> {
+    dirs::data_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On Windows the platform's data root comes from `%APPDATA%`, never from the shell, which
+    /// costs every hook process milliseconds (see [`platform_data_dir`]).
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_data_root_is_read_from_appdata() {
+        let appdata = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .expect("APPDATA");
+        assert_eq!(platform_data_dir(), Some(appdata));
+    }
+
+    #[test]
+    fn the_home_based_data_root_comes_first() {
+        let home = Path::new("/home/someone");
+        let roots = compute_data_roots(Some(home));
+        let first = crate::meter::app_data_dir_in(home)
+            .parent()
+            .map(Path::to_path_buf);
+        assert_eq!(roots.first(), first.as_ref());
+    }
 }

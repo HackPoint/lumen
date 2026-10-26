@@ -5660,4 +5660,85 @@ mod tests {
             "the cask must quit the app by its current bundle id"
         );
     }
+
+    /// The Windows installer runs Lumen's post-install hook, and the hook spells no vendor and no
+    /// identifier: it finds the entries it removes by what they hold, against this build's own
+    /// `${MANUFACTURER}` and `$INSTDIR`. What it does is proven on a Windows runner by the upgrade
+    /// workflow.
+    #[test]
+    fn the_nsis_hooks_are_wired_and_name_no_vendor() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        let hooks = conf["bundle"]["windows"]["nsis"]["installerHooks"]
+            .as_str()
+            .expect("bundle.windows.nsis.installerHooks is set");
+        let text = std::fs::read_to_string(dir.join(hooks)).unwrap();
+
+        assert!(text.contains("!macro NSIS_HOOK_POSTINSTALL"), "{text}");
+        assert!(text.contains("${MANUFACTURER}") && text.contains("$INSTDIR"));
+        let lower = text.to_ascii_lowercase();
+        let publisher = conf["bundle"]["publisher"].as_str().unwrap();
+        for name in [publisher, APP_ID, conf["identifier"].as_str().unwrap()] {
+            assert!(
+                !lower.contains(&name.to_ascii_lowercase()),
+                "the hook spells {name}"
+            );
+        }
+    }
+
+    /// The macOS bundle is signed as a whole (ad hoc), not only its executable by the linker. A
+    /// bundle whose resources no signature seals fails `codesign --verify`, and a downloaded copy
+    /// is then called damaged on first launch instead of unverified.
+    #[test]
+    fn the_macos_bundle_is_signed_as_a_whole() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        assert_eq!(conf["bundle"]["macOS"]["signingIdentity"], "-");
+    }
+
+    /// Zap removes what this identifier leaves, by exact path, and nothing by pattern: a glob
+    /// like `io.<anything>.lumen` can match another vendor's app, and the dated backup a
+    /// `.migrated` glob once matched no longer exists (it lives inside the data folder now).
+    #[test]
+    fn the_cask_zaps_the_new_paths_and_no_migrated_glob() {
+        let cask = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("Casks/lumen-app.rb");
+        let text = match std::fs::read_to_string(&cask) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let zap = text
+            .split("zap trash:")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the cask has a zap stanza");
+
+        assert!(!zap.contains('*'), "zap names exact paths only:{zap}");
+        assert!(
+            !zap.contains("migrated"),
+            "no backup sits beside the folder:{zap}"
+        );
+        for path in [
+            format!("~/Library/Application Support/{APP_ID}"),
+            format!("~/Library/Caches/{APP_ID}"),
+            format!("~/Library/Logs/{APP_ID}"),
+            format!("~/Library/WebKit/{APP_ID}"),
+            format!("~/Library/HTTPStorages/{APP_ID}"),
+            format!("~/Library/HTTPStorages/{APP_ID}.binarycookies"),
+            format!("~/Library/Cookies/{APP_ID}.binarycookies"),
+            format!("~/Library/Preferences/{APP_ID}.plist"),
+            format!("~/Library/Saved Application State/{APP_ID}.savedState"),
+            "~/Library/LaunchAgents/Lumen.plist".to_string(),
+        ] {
+            assert!(zap.contains(&format!("\"{path}\"")), "zap misses {path}");
+        }
+    }
 }

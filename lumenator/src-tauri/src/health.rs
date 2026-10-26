@@ -105,6 +105,31 @@ fn is_visibility_key(key: &str) -> bool {
     key.starts_with("NSStatusItem Visible")
 }
 
+/// The menu-bar positions to carry over from the app this one replaces: its
+/// `NSStatusItem Preferred Position …` entries, and none at all when this app holds one already.
+///
+/// macOS keeps a status item's place per bundle id. Under the new id an upgraded Lumen had no
+/// place, so AppKit put the icon leftmost, the first one a full menu bar or the notch hides, and
+/// the app looked as if it had not started. A place this app already holds is the user's newer
+/// choice. Visibility flags are not carried: [`clear_hidden_status_item_prefs`] clears a hidden
+/// one before the tray is built anyway.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn positions_to_carry(previous: &[(String, f64)], own_keys: &[String]) -> Vec<(String, f64)> {
+    if own_keys.iter().any(|k| is_position_key(k)) {
+        return Vec::new();
+    }
+    previous
+        .iter()
+        .filter(|(k, _)| is_position_key(k))
+        .cloned()
+        .collect()
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_position_key(key: &str) -> bool {
+    key.starts_with("NSStatusItem Preferred Position ")
+}
+
 /// A monitor's physical bounds: `(x, y, width, height)`.
 pub type MonitorBounds = (f64, f64, f64, f64);
 
@@ -190,6 +215,35 @@ impl TrayState {
 /// on every healthy launch.
 pub fn needs_fallback(tray: &TrayState) -> bool {
     matches!(tray, TrayState::Absent(_) | TrayState::Failed(_))
+}
+
+/// What closing the main window does. It never quits.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CloseAction {
+    /// The tray is there to re-open from: hide the window.
+    Hide,
+    /// macOS with no reachable menu-bar icon: hide the window and keep the Dock icon, whose click
+    /// re-opens it (`RunEvent::Reopen`).
+    HideKeepDock,
+    /// Elsewhere with no reachable tray: minimize, so the taskbar entry is the way back.
+    Minimize,
+}
+
+/// [`CloseAction`] for the tray's state.
+///
+/// Closing used to quit while the icon was unavailable, since a hidden window with nothing to
+/// click is where issue #5 left people. But the icon is most often merely crowded out by a full
+/// menu bar or the notch, and a user who closed the window that the fallback opened found Lumen
+/// gone and took it for an app that does not run. The way back is now the Dock icon or the
+/// taskbar entry, which the fallback keeps.
+pub fn close_action(tray: &TrayState, macos: bool) -> CloseAction {
+    if !needs_fallback(tray) {
+        CloseAction::Hide
+    } else if macos {
+        CloseAction::HideKeepDock
+    } else {
+        CloseAction::Minimize
+    }
 }
 
 /// Everything that went wrong during startup, and the tray's verified state.
@@ -368,6 +422,53 @@ pub fn clear_hidden_status_item_prefs() -> Vec<String> {
     Vec::new()
 }
 
+/// Copy the previous app's menu-bar position into this app's preferences ([`positions_to_carry`]).
+///
+/// `previous_id` is the previous data folder's name, which is that app's bundle id. Called by the
+/// start before it moves the previous app's preferences file into the backup, and before the tray
+/// is built, so the icon is created in its old place. Returns a note per key carried.
+#[cfg(target_os = "macos")]
+pub fn carry_status_item_position(previous_id: &str) -> Vec<String> {
+    use objc2_foundation::{NSNumber, NSString, NSUserDefaults};
+
+    let defaults = NSUserDefaults::standardUserDefaults();
+    // Read only: this hands back a copy of the other app's domain, and nothing is written to it.
+    let Some(domain) = defaults.persistentDomainForName(&NSString::from_str(previous_id)) else {
+        return Vec::new();
+    };
+    let mut previous: Vec<(String, f64)> = Vec::new();
+    for key in domain.keys() {
+        let k = key.to_string();
+        if !is_position_key(&k) {
+            continue;
+        }
+        if let Some(n) = domain
+            .objectForKey(&key)
+            .and_then(|v| v.downcast::<NSNumber>().ok())
+        {
+            previous.push((k, n.doubleValue()));
+        }
+    }
+    let own: Vec<String> = defaults
+        .dictionaryRepresentation()
+        .keys()
+        .map(|k| k.to_string())
+        .collect();
+    positions_to_carry(&previous, &own)
+        .into_iter()
+        .map(|(k, v)| {
+            defaults.setDouble_forKey(v, &NSString::from_str(&k));
+            format!("carried the menu-bar position {k} = {v} from {previous_id}")
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn carry_status_item_position(_previous_id: &str) -> Vec<String> {
+    // A menu-bar place is AppKit's. Nothing to carry elsewhere.
+    Vec::new()
+}
+
 /// Build the tray menu items.
 ///
 /// Extracted so the caller can degrade instead of propagating. As three `?` in `setup()` these
@@ -539,6 +640,43 @@ mod tests {
 
     fn pref(k: &str, v: Option<bool>) -> (String, Option<bool>) {
         (k.to_string(), v)
+    }
+
+    #[test]
+    fn closing_the_window_never_quits() {
+        let absent = TrayState::Absent("the menu bar has no room for it".into());
+        let failed = TrayState::Failed("simulated".into());
+        for macos in [true, false] {
+            assert_eq!(close_action(&TrayState::Present, macos), CloseAction::Hide);
+            assert_eq!(close_action(&TrayState::Unknown, macos), CloseAction::Hide);
+        }
+        assert_eq!(close_action(&absent, true), CloseAction::HideKeepDock);
+        assert_eq!(close_action(&failed, true), CloseAction::HideKeepDock);
+        assert_eq!(close_action(&absent, false), CloseAction::Minimize);
+        assert_eq!(close_action(&failed, false), CloseAction::Minimize);
+    }
+
+    #[test]
+    fn the_previous_menu_bar_position_is_carried_only_when_this_app_has_none() {
+        let previous = vec![
+            ("NSStatusItem Preferred Position Item-0".to_string(), 612.0),
+            ("NSStatusItem Visible Item-0".to_string(), 0.0),
+            ("SomethingElse".to_string(), 1.0),
+        ];
+        assert_eq!(
+            positions_to_carry(&previous, &["AppleLanguages".to_string()]),
+            vec![("NSStatusItem Preferred Position Item-0".to_string(), 612.0)],
+            "only the position, and only while this app has placed nothing"
+        );
+        assert_eq!(
+            positions_to_carry(
+                &previous,
+                &["NSStatusItem Preferred Position Item-0".to_string()]
+            ),
+            Vec::new(),
+            "a place the new icon already has is the user's newer choice"
+        );
+        assert_eq!(positions_to_carry(&[], &[]), Vec::new());
     }
 
     #[test]

@@ -86,11 +86,47 @@ untrusted tap"*. That applies to every third-party cask, not just this one.
 >
 > Your data in the Lumen data directory is untouched.
 
+**If `brew update` or `brew upgrade` fails.** The tap's git history was rewritten on
+2026-10-20. A tap cloned before that stops mid-rebase ("interactive rebase in progress",
+unrelated histories), stays on an old formula, and an install from it can fail with a SHA256
+mismatch for the 1.9.0 assets. Re-tap; this does not uninstall Lumen:
+
+```bash
+brew untap --force hackpoint/tap && brew tap hackpoint/tap
+brew upgrade --cask lumen-app
+brew upgrade lumen-cli      # or: brew reinstall
+```
+
 Homebrew clears the quarantine flag automatically. Lumen opens normally with no
 "damaged" dialog. The app is still un-notarized (proper Apple Developer ID signing
 is planned); Homebrew handles the flag for you.
 
 After install, launch Lumen from Spotlight or `/Applications/Lumen.app`.
+
+### Upgrading to 1.10.0
+
+The first start of 1.10.0 moves Lumen's data to a folder named after the new identifier,
+`io.hackpoint.lumen`:
+
+| OS | New data folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/io.hackpoint.lumen` |
+| Windows | `%USERPROFILE%\AppData\Roaming\io.hackpoint.lumen` |
+| Linux | `~/.local/share/io.hackpoint.lumen` |
+
+History, settings, the login-item choice and the menu-bar icon's position carry over.
+macOS asks again for notification permission and may list Lumen as a new login item to
+approve (System Settings > General > Login Items). The previous folder is kept, read-only
+once frozen, inside the new one as `legacy-backup-<date>`; it can be deleted (see
+[docs/troubleshooting-the-tray.md](docs/troubleshooting-the-tray.md)).
+
+Setup runs when Lumen's window first opens after the upgrade (on Windows and Linux, at the first
+start); then restart Claude Code. A session left open keeps the old MCP
+server, which can no longer record.
+
+If Lumen reports a ledger it set aside (`lumen.db.pre-legacy`, from a 1.9.0 build that had
+already written a ledger in the new folder) or a re-created previous folder, bring its rows
+in with `lumen import-ledger "<path>"`; `--dry-run` shows what would be added first.
 
 ### Via .dmg (manual — Gatekeeper workaround required)
 

@@ -40,14 +40,10 @@ const CLI = process.env.LUMEN_E2E_CLI ?? path.join(ROOT, 'target', 'release', `l
 const ARTIFACTS = process.env.LUMEN_E2E_ARTIFACTS ?? path.join(os.tmpdir(), 'lumen-e2e-artifacts');
 const SETUP_RS = path.join(ROOT, 'lumenator', 'src-tauri', 'src', 'setup.rs');
 const LIB_RS = path.join(ROOT, 'lumenator', 'src-tauri', 'src', 'lib.rs');
-// The identifiers come from where they are defined, so nothing here holds one as a literal:
-// the app's from tauri.conf.json, and the one it replaced from the migration module.
+// The app's identifier comes from where it is defined, so nothing here holds it as a literal.
 const APP_ID = JSON.parse(
   fs.readFileSync(path.join(ROOT, 'lumenator', 'src-tauri', 'tauri.conf.json'), 'utf8'),
 ).identifier;
-const LEGACY_APP_ID = /LEGACY_APP_ID: &str = "([^"]+)"/.exec(
-  fs.readFileSync(path.join(ROOT, 'crates', 'lumen-core', 'src', 'legacy.rs'), 'utf8'),
-)[1];
 
 // How long `verify_tray_presence` in lib.rs takes to give up on the tray: 500 + 1,500 + 4,000 ms
 // after RunEvent::Ready.
@@ -117,10 +113,6 @@ function runnerProfile() {
   // The settings file too: a billing choice one test made would keep the next one's question away.
   const settings = path.join(appData, 'lumen_settings.json');
   for (const f of [db, `${db}-wal`, `${db}-shm`, logs, settings]) fs.rmSync(f, gone);
-  // A directory of the one the app replaced would be migrated at start, which is not under test here.
-  for (const d of [path.join(process.env.APPDATA, LEGACY_APP_ID), path.join(process.env.LOCALAPPDATA, LEGACY_APP_ID)]) {
-    fs.rmSync(d, gone);
-  }
   fs.mkdirSync(appData, { recursive: true });
   const marker = path.join(os.homedir(), '.claude', 'lumen', '.setup_done');
   fs.mkdirSync(path.dirname(marker), { recursive: true });

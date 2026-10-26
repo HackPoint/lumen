@@ -560,10 +560,8 @@ pub struct Outcome {
 pub fn scan(env: &Env) -> Result<Vec<Entry>, String> {
     match env.platform {
         Platform::Windows => match env.run_key {
-            Some(k) => match scan_registry(k, &env.exe, env.plugin_name) {
-                Ok(found) => Ok(found),
-                Err(e) => Err(e),
-            },
+            // Returned as it is: `adopt_other_entries`, the one caller, reports the error.
+            Some(k) => scan_registry(k, &env.exe, env.plugin_name),
             None => Ok(Vec::new()),
         },
         p => match env.dir {
@@ -851,6 +849,7 @@ mod tests {
         values: RefCell<Vec<RunValue>>,
         enables: Cell<u32>,
         fail_enable: Cell<bool>,
+        fail_values: Cell<bool>,
     }
 
     impl Machine {
@@ -861,6 +860,7 @@ mod tests {
                 values: RefCell::new(Vec::new()),
                 enables: Cell::new(0),
                 fail_enable: Cell::new(false),
+                fail_values: Cell::new(false),
             }
         }
 
@@ -951,6 +951,9 @@ mod tests {
 
     impl RunKey for Machine {
         fn values(&self) -> Result<Vec<RunValue>, String> {
+            if self.fail_values.get() {
+                return Err("registry unreadable".into());
+            }
             Ok(self.values.borrow().clone())
         }
         fn delete_entry(&self, name: &str) -> Result<(), String> {
@@ -1346,6 +1349,26 @@ mod tests {
         assert_eq!(out.moved.len(), 1, "{out:?}");
         assert!(!m.dir.path().join("com.old.login.plist").exists());
         assert!(backup.join("autostart/login.plist").exists());
+    }
+
+    #[test]
+    fn a_login_entry_list_that_cannot_be_read_is_reported_not_dropped() {
+        let m = Machine::new(Platform::Windows);
+        let t = TempDir::new().unwrap();
+        m.seed_old(true);
+        m.fail_values.set(true);
+        let out = run(&m, t.path());
+        assert!(out.moved.is_empty(), "{out:?}");
+        assert_eq!(out.problems.len(), 1, "{out:?}");
+        assert!(
+            out.problems[0].contains("could not read the login entries")
+                && out.problems[0].contains("registry unreadable"),
+            "{out:?}"
+        );
+        // Readable again: the entry that stayed is settled.
+        m.fail_values.set(false);
+        let out = run(&m, t.path());
+        assert_eq!(out.moved.len(), 1, "{out:?}");
     }
 
     #[test]

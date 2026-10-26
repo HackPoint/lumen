@@ -1,0 +1,154 @@
+name: Evidence
+
+# A release's evidence, from what was published, installed the way users install it: the
+# Homebrew formula and cask on macOS, setup.exe and the CLI zip on Windows, the .deb, the AppImage
+# and the CLI tarball on Ubuntu. Fresh, and as an upgrade from 1.9.0 and from 1.8.0 (simulated:
+# their binaries are no longer published). Screenshots of the app's tabs and of the CLI, the CLI's
+# raw text, the installer's publisher, Gatekeeper's verdict, and the all-time savings before and
+# after an upgrade, which must match. scripts/evidence/<os> do the work; the artifacts feed the
+# release's evidence doc.
+#
+# On a push to a release branch it installs the latest published release, fresh only: that
+# proves this workflow before the release it is for exists. Upgrades need 1.10.0 or later.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release to install, e.g. 1.10.0 (empty: the latest)'
+        required: false
+        default: ''
+  push:
+    branches: ['release/**']
+
+concurrency:
+  group: evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PNPM_VERSION: '10'
+  NODE_VERSION: '24'
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  evidence:
+    name: Evidence (${{ matrix.os }}, ${{ matrix.scenario }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-22.04]
+        scenario: [fresh, from-1.9.0, from-1.8.0]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SCENARIO: ${{ matrix.scenario }}
+      OUT: ${{ github.workspace }}/evidence
+      LUMEN_UPGRADE_JOB: '1'
+      LUMEN_UPGRADE_STATE: ${{ github.workspace }}/evidence-state
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Which release
+        id: which
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            release) v="${{ github.event.release.tag_name }}" ;;
+            workflow_dispatch) v="${{ inputs.version }}" ;;
+            *) v="" ;;
+          esac
+          [ -n "$v" ] || v=$(gh release view -R HackPoint/lumen --json tagName -q .tagName)
+          v="${v#v}"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          # Upgrades are 1.10.0's: a release before it cannot move a previous install.
+          if [ "$(printf '%s\n%s\n' "1.10.0" "$v" | sort -V | head -n1)" = "1.10.0" ]; then can=true; else can=false; fi
+          run=true
+          if [ "$SCENARIO" != fresh ] && [ "$can" != true ]; then run=false; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "release v$v, scenario $SCENARIO, run: $run"
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && steps.which.outputs.run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            patchelf file build-essential webkit2gtk-driver xvfb xauth dbus-x11 xterm imagemagick \
+            libfuse2 fonts-dejavu-core
+
+      - uses: actions/setup-node@v7
+        if: steps.which.outputs.run == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: pnpm/action-setup@v6
+        if: steps.which.outputs.run == 'true'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.which.outputs.run == 'true'
+      - uses: swatinem/rust-cache@v2
+        if: steps.which.outputs.run == 'true'
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      # WebDriver is Linux's way in; Windows is driven over the DevTools protocol (evidence.mjs).
+      - name: Install tauri-driver
+        if: runner.os == 'Linux' && steps.which.outputs.run == 'true'
+        run: cargo install tauri-driver --version 2.1.0 --locked
+
+      # The helpers that simulate a previous install and wait for its move are the app crate's
+      # test binary, built from this commit.
+      - name: Build the helpers
+        if: steps.which.outputs.run == 'true'
+        run: |
+          (cd lumenator && pnpm install --frozen-lockfile && pnpm build)
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo build -p lumen-daemon -p lumen-mcp -p lumen-cli --release
+            dest=lumenator/src-tauri/binaries; mkdir -p "$dest"
+            for pair in lumen-daemon:lumen-daemon lumen-mcp:lumen-mcp lumen-tok:lumen-tok lumen:lumen-cli; do
+              cp "target/release/${pair%%:*}.exe" "$dest/${pair##*:}-x86_64-pc-windows-msvc.exe"
+            done
+          else
+            (cd lumenator && bash ./build-sidecar.sh)
+          fi
+          bin=$(cargo test -p Lumen --lib --no-run --message-format=json \
+            | jq -r 'select(.reason=="compiler-artifact" and .profile.test and .executable != null) | .executable' | tail -1)
+          # Checked from Git Bash in its form; kept in the platform's own for the PowerShell step.
+          check="$bin"
+          if [ "$RUNNER_OS" = Windows ]; then check=$(cygpath -u "$bin"); fi
+          [ -x "$check" ] || { echo "no helper binary ($bin)"; exit 1; }
+          echo "HELPERS=$bin" >> "$GITHUB_ENV"
+
+      - name: Evidence (macOS)
+        if: runner.os == 'macOS' && steps.which.outputs.run == 'true'
+        run: bash scripts/evidence/macos.sh
+
+      - name: Evidence (Windows)
+        if: runner.os == 'Windows' && steps.which.outputs.run == 'true'
+        shell: pwsh
+        run: ./scripts/evidence/windows.ps1
+
+      - name: Evidence (Ubuntu)
+        if: runner.os == 'Linux' && steps.which.outputs.run == 'true'
+        run: |
+          Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
+          export DISPLAY=:99
+          eval "$(dbus-launch --sh-syntax)"
+          bash scripts/evidence/linux.sh
+
+      - name: Keep the evidence
+        if: always() && steps.which.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-${{ matrix.os }}-${{ matrix.scenario }}
+          path: |
+            evidence
+            evidence-state
+          if-no-files-found: warn

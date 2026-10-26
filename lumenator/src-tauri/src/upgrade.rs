@@ -60,6 +60,9 @@ pub struct Ctx<'a> {
     pub ops: &'a dyn Ops,
     /// This build's `lumen-mcp`, looked up only when something has to be re-pointed.
     pub mcp_bin: &'a dyn Fn() -> Option<String>,
+    /// Copies the previous app's menu-bar position into this app's preferences, given the previous
+    /// folder's name (its bundle id); a note per key carried. Real only in the app, on macOS.
+    pub status_item_carry: &'a dyn Fn(&str) -> Vec<String>,
     /// The `lumen` link and the `lumen-cli` it should name.
     pub cli_link: Option<PathBuf>,
     pub cli_bin: Option<PathBuf>,
@@ -94,7 +97,15 @@ impl<'a> Ctx<'a> {
             new_id: lumen_core::meter::APP_ID.into(),
             roots: legacy::data_roots(Some(&home)),
             home,
-            commit: CommitOptions::new(&now),
+            commit: {
+                #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+                let mut commit = CommitOptions::new(&now);
+                #[cfg(debug_assertions)]
+                {
+                    commit.hook = Some(pause_at_requested_phase);
+                }
+                commit
+            },
             platform,
             satellite_roots: Roots::current(),
             ledger_only: ledger_only_sources(),
@@ -112,6 +123,7 @@ impl<'a> Ctx<'a> {
             plugin_name: "Lumen".into(),
             ops: &Native,
             mcp_bin,
+            status_item_carry: &crate::health::carry_status_item_position,
             cli_link: Some(setup::cli_symlink_path()),
             cli_bin: setup::find_binary("lumen-cli"),
         })
@@ -377,6 +389,9 @@ fn committed(ctx: &Ctx, lock: &commit::Lock, m: &MarkerV2, moved: Option<Moved>,
     repoint_entries(ctx, m, mcp.as_deref(), r);
 
     if data.is_dir() || frozen {
+        // First: the previous app's preferences file is one of the satellites, and the menu-bar
+        // position is read out of its domain before it moves into the backup.
+        r.notes.extend((ctx.status_item_carry)(&m.source));
         move_satellites(ctx, m, &b, r);
         settle_login_entries(ctx, &b, r);
         recreated_folder(ctx, m, &b, r);
@@ -686,6 +701,30 @@ pub fn freeze_after_setup(home: &Path, n: &Path) -> Report {
         Freeze::NotReady(_) | Freeze::Already { changed: false } => {}
     }
     r
+}
+
+/// Debug builds only: with `LUMEN_TEST_MIGRATE_PAUSE` set to a phase's name
+/// ([`lumen_core::legacy::migrate::Phase::name`]), the start stops at that phase of the move. It
+/// writes the file `LUMEN_TEST_MIGRATE_PAUSE_FILE` names, then sleeps until it is killed. The
+/// upgrade workflow kills it there and checks that nothing was lost and that the next start
+/// finishes the move.
+#[cfg(debug_assertions)]
+fn pause_at_requested_phase(phase: &lumen_core::legacy::migrate::Phase<'_>) {
+    if std::env::var("LUMEN_TEST_MIGRATE_PAUSE").as_deref() != Ok(phase.name()) {
+        return;
+    }
+    if let Ok(file) = std::env::var("LUMEN_TEST_MIGRATE_PAUSE_FILE") {
+        if let Err(e) = std::fs::write(&file, phase.name()) {
+            log::error!("PAUSE: could not write {file}: {e}");
+        }
+    }
+    log::warn!(
+        "PAUSE: stopped at the {} phase of the move until killed",
+        phase.name()
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 /// Now, UTC, as `YYYY-MM-DDTHH:MM:SSZ`.

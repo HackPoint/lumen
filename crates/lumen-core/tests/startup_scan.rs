@@ -663,6 +663,10 @@ enum Handled {
     /// can turn into an error that aborts startup (the closure's `?` would not compile on it).
     /// Any caller may use it. The scan checks the return type.
     Option,
+    /// The caller returns the call's result as it is, in a match arm with no adapter and no `?`,
+    /// and the named function is the only one that calls the caller: it matches the result and
+    /// records the `Err` as a problem. The scan checks both ends.
+    Passed(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -740,8 +744,8 @@ const EXEMPT: [Exempt; 15] = [
         name: "scan_registry",
         file: "upgrade/autostart.rs",
         caller: Some("scan"),
-        handled: Handled::ByMatch,
-        why: "scan passes the error on, and adopt_other_entries reports it as a problem",
+        handled: Handled::Passed("adopt_other_entries"),
+        why: "scan returns the error as it is, and adopt_other_entries reports it as a problem",
     },
     Exempt {
         name: "tail_inside",
@@ -848,6 +852,16 @@ fn unhandled(code: &[u8], at: usize, end: usize, body: &Body, how: &Handled) -> 
             }
         }
         Handled::Forwarded | Handled::Option => None,
+        Handled::Passed(_) => {
+            let args_end = matching(code, skip_ws(code, end)).unwrap_or(end);
+            if prev_non_space(code, at) != Some(b'>') {
+                Some("its result is not the value of a match arm, returned as it is".into())
+            } else if !matches!(next_non_space(code, args_end + 1), Some(b',' | b'}')) {
+                Some("its result is changed before it is returned".into())
+            } else {
+                None
+            }
+        }
         Handled::By(adapter) => {
             let stmt = &code[at..statement_end(code, end, body.close)];
             if !has_word(stmt, adapter) {
@@ -880,6 +894,73 @@ fn forwarded(code: &[u8], at: usize, body: &Body, exempt: &[Exempt]) -> Option<S
     } else {
         None
     }
+}
+
+/// `None` when `next` is the only body that calls `callee`, and it matches the result with an
+/// `Err` arm that records a problem and does not `?`.
+fn reported(files: &[Source], scanned: &[&Body], callee: &str, next: &str) -> Option<String> {
+    let mut matched = false;
+    for body in scanned {
+        let code = &files[body.file].code;
+        for (s, e) in idents(code, body.open, body.close) {
+            if &code[s..e] != callee.as_bytes()
+                || next_non_space(code, e) != Some(b'(')
+                || body.name == callee
+            {
+                continue;
+            }
+            if body.name != next {
+                return Some(format!(
+                    "`{callee}` is also called from `{}`, not only from `{next}`",
+                    body.name
+                ));
+            }
+            let start = statement_start(code, s, body.open + 1);
+            let arms = matching(code, skip_ws(code, e))
+                .map(|a| skip_ws(code, a + 1))
+                .filter(|&b| code.get(b) == Some(&b'{'))
+                .and_then(|b| matching(code, b).map(|c| &code[b..c]));
+            let ok = has_word(&code[start..s], "match")
+                && arms.is_some_and(|a| {
+                    has_word(a, "Err") && has_word(a, "problems") && tries(a, 0, a.len()).is_empty()
+                });
+            if !ok {
+                return Some(format!(
+                    "`{next}` does not match the result of `{callee}` with an `Err` arm that \
+                     records a problem"
+                ));
+            }
+            matched = true;
+        }
+    }
+    (!matched).then(|| format!("`{next}` never calls `{callee}`"))
+}
+
+/// Every `macro_rules!` in `files` whose body returns early, by `return` or `?`, as
+/// `(file:line, name)`. A call of one is a `?` the scan cannot see.
+fn early_return_macros(files: &[Source]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for f in files {
+        let code = &f.code;
+        let mut from = 0;
+        while let Some(m) = find_word(code, "macro_rules", from) {
+            from = m + 1;
+            let bang = skip_ws(code, m + "macro_rules".len());
+            if code.get(bang) != Some(&b'!') {
+                continue;
+            }
+            let ns = skip_ws(code, bang + 1);
+            let ne = ident_end(code, ns);
+            let open = skip_ws(code, ne);
+            let Some(close) = matching(code, open) else {
+                continue;
+            };
+            if has_word(&code[open..close], "return") || !tries(code, open, close).is_empty() {
+                out.push((f.at(m), text_of(code, ns, ne)));
+            }
+        }
+    }
+    out
 }
 
 /// The last place `needle` occurs in `b`, or 0.
@@ -925,6 +1006,16 @@ fn startup(files: &[Source], exempt: &[Exempt]) -> Report {
     let closure = &closures[0];
     let code = &files[closure.file].code;
     r.closure_lines = line_of(code, closure.close) - line_of(code, closure.open) + 1;
+
+    // A macro that returns early hides a `?` from the scan unless it is one the scan reads as such.
+    for (at, name) in early_return_macros(files) {
+        if !TRY_MACROS.contains(&name.as_str()) {
+            r.violations.push(format!(
+                "{at}: `macro_rules! {name}` returns early, so a call of it is a `?` the scan \
+                 does not see. Add it to TRY_MACROS, or write it without an early return."
+            ));
+        }
+    }
 
     // Everything startup can reach by naming it, breadth first.
     let mut scanned: Vec<&Body> = vec![closure];
@@ -1034,6 +1125,13 @@ fn startup(files: &[Source], exempt: &[Exempt]) -> Report {
                 }
             }
             continue;
+        }
+        if let Handled::Passed(next) = x.handled {
+            let caller = x.caller.unwrap_or(CLOSURE);
+            if let Some(p) = reported(files, &scanned, caller, next) {
+                r.violations
+                    .push(format!("`{}` is exempt because {}, but {p}", x.name, x.why));
+            }
         }
         // The calls are checked once per name, against whichever entry names the caller.
         if exempt[..xi].iter().any(|y| y.name == x.name) {
@@ -2092,6 +2190,42 @@ fn startup_seeds() -> Vec<Seed> {
             says: "it no longer does",
         },
         Seed {
+            what: "an early-return macro under another name, used in a function startup reaches",
+            file: "setup.rs",
+            edit: |s| {
+                appended(
+                    &in_fn(s, "stamp_line", " let _seed = attempt!(g()); "),
+                    "macro_rules! attempt { ($e:expr) => { match $e { Ok(v) => v, \
+                     Err(e) => return Err(e), } }; }",
+                )
+            },
+            says: "`macro_rules! attempt` returns early",
+        },
+        Seed {
+            what: "scan_registry's result changed on its way to adopt_other_entries",
+            file: "upgrade/autostart.rs",
+            edit: |s| {
+                once(
+                    s,
+                    "Some(k) => scan_registry(k, &env.exe, env.plugin_name),",
+                    "Some(k) => scan_registry(k, &env.exe, env.plugin_name).map(|v| v),",
+                )
+            },
+            says: "its result is changed before it is returned",
+        },
+        Seed {
+            what: "adopt_other_entries drops the scan error",
+            file: "upgrade/autostart.rs",
+            edit: |s| before(s, "login entries: {e}", "problems", "moved"),
+            says: "does not match the result of `scan` with an `Err` arm that records a problem",
+        },
+        Seed {
+            what: "scan called from the closure too, where nothing reports its error",
+            file: "lib.rs",
+            edit: |s| in_closure(s, " let _ = scan(e); "),
+            says: "`scan` is also called from `the .setup closure`",
+        },
+        Seed {
             what: "stable_binary unwrapped where baked_paths defaults it",
             file: "setup.rs",
             edit: |s| {
@@ -2230,6 +2364,23 @@ fn a_change_to_startup_that_breaks_a_claim_is_caught() {
 fn a_change_to_the_log_registration_that_breaks_its_claim_is_caught() {
     let (_, files) = real();
     must_say(logging_seeds(), &files, logging);
+}
+
+#[test]
+fn a_macro_that_returns_early_is_refused_unless_it_is_one_the_scan_reads_as_a_try() {
+    let v = |items: &str| violations(&app("", "second();", "lookup()", items), &[]);
+    let plain = "macro_rules! twice { ($e:expr) => { $e + $e }; }";
+    let early =
+        "macro_rules! {N} { ($e:expr) => { match $e { Some(v) => v, None => return None, } }; }";
+    let questioned = "macro_rules! hop { ($e:expr) => { $e? }; }";
+    assert!(v(plain).is_empty());
+    assert!(v(&early.replace("{N}", "some")).is_empty());
+    assert!(v(&early.replace("{N}", "tried")).is_empty());
+    assert!(mentions(
+        &v(&early.replace("{N}", "attempt")),
+        "`macro_rules! attempt` returns early"
+    ));
+    assert!(mentions(&v(questioned), "`macro_rules! hop` returns early"));
 }
 
 #[test]
